@@ -1,0 +1,89 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                String               @id @default(cuid())
+  email             String               @unique
+  name              String
+  passwordHash      String
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  ownedDocuments    Document[]           @relation("DocumentOwner")
+  memberships       DocumentMembership[]
+  comments          Comment[]
+  createdShareLinks ShareLink[]
+  createdThreads    CommentThread[]
+}
+
+model Document {
+  id           String               @id @default(cuid())
+  title        String
+  content      String
+  ownerId      String
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+  owner        User                 @relation("DocumentOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  memberships  DocumentMembership[]
+  threads      CommentThread[]
+  shareLinks   ShareLink[]
+}
+
+model DocumentMembership {
+  id         String          @id @default(cuid())
+  documentId String
+  userId     String
+  permission String
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+  document   Document        @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, userId])
+}
+
+model CommentThread {
+  id            String       @id @default(cuid())
+  documentId    String
+  createdById   String
+  anchorText    String
+  anchorContext String?
+  fromPos       Int?
+  toPos         Int?
+  status        String       @default("OPEN")
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  document      Document     @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  createdBy     User         @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  comments      Comment[]
+}
+
+model Comment {
+  id         String        @id @default(cuid())
+  threadId    String
+  authorId    String?
+  body        String
+  aiModel     String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  thread      CommentThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  author      User?         @relation(fields: [authorId], references: [id], onDelete: SetNull)
+}
+
+model ShareLink {
+  id          String          @id @default(cuid())
+  token       String          @unique
+  documentId  String
+  createdById String
+  permission  String
+  revokedAt   DateTime?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  document    Document        @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  createdBy   User            @relation(fields: [createdById], references: [id], onDelete: Cascade)
+}
