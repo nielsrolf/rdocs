@@ -12,7 +12,9 @@ CACHE_HOME.mkdir(parents=True, exist_ok=True)
 os.environ["HOME"] = str(PYTHON_HOME)
 os.environ["XDG_CACHE_HOME"] = str(CACHE_HOME)
 
-from localrouter import ChatMessage, ImageBlock, MessageRole, TextBlock, get_response
+from localrouter import ImageBlock, TextBlock
+
+from agentic_web import run_agentic_response
 
 
 def build_user_prompt(payload: dict) -> str:
@@ -71,26 +73,15 @@ async def main() -> None:
     payload = json.load(sys.stdin)
     model = os.getenv("AI_COMMENT_MODEL", "gpt-5.4")
 
-    response = await asyncio.wait_for(
-        get_response(
-            model=model,
-            messages=[
-                ChatMessage(
-                    role=MessageRole.system,
-                    content=[
-                        TextBlock(
-                            text="Rewrite the selected text according to the instruction. Return only replacement text."
-                        )
-                    ],
-                ),
-                ChatMessage(
-                    role=MessageRole.user,
-                    content=build_document_blocks(payload),
-                ),
-            ],
-            max_tokens=600,
+    response = await run_agentic_response(
+        model=model,
+        system_prompt=(
+            "Rewrite the selected text according to the instruction. Return only replacement text. "
+            "Use the available web tools when external research would materially improve factual accuracy, freshness, or specificity. "
+            "If no external research is needed, do the edit directly."
         ),
-        timeout=70,
+        user_content=build_document_blocks(payload),
+        max_tokens=600,
     )
 
     text_parts = []

@@ -118,8 +118,8 @@ export async function runClaudeCommentReply(
       return await runPythonJsonScript(
         "claude_comment_reply.py",
         input,
-        75_000,
-        "AI helper timed out after 75 seconds."
+        180_000,
+        "AI helper timed out after 180 seconds."
       );
     } catch (error) {
       lastError = error;
@@ -141,7 +141,7 @@ export async function runAiSelectionEdit(
   return runPythonJsonScript(
     "ai_edit_selection.py",
     input,
-    75_000,
-    "AI edit helper timed out after 75 seconds."
+    180_000,
+    "AI edit helper timed out after 180 seconds."
   );
 }

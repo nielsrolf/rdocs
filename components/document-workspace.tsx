@@ -394,6 +394,24 @@ export function DocumentWorkspace({
           top: event.clientY
         });
         return true;
+      },
+      handleClick(_view, _pos, event) {
+        const target = event.target;
+        if (!(target instanceof Element)) {
+          return false;
+        }
+
+        const anchor = target.closest("a[href]");
+        if (!(anchor instanceof HTMLAnchorElement) || !anchor.href) {
+          return false;
+        }
+
+        if (!canWriteDocument || event.metaKey || event.ctrlKey) {
+          window.open(anchor.href, "_blank", "noopener,noreferrer");
+          return true;
+        }
+
+        return false;
       }
     },
     onSelectionUpdate: ({ editor }) => {

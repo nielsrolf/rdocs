@@ -12,7 +12,9 @@ CACHE_HOME.mkdir(parents=True, exist_ok=True)
 os.environ["HOME"] = str(PYTHON_HOME)
 os.environ["XDG_CACHE_HOME"] = str(CACHE_HOME)
 
-from localrouter import ChatMessage, ImageBlock, MessageRole, ReasoningConfig, TextBlock, get_response
+from localrouter import ImageBlock, ReasoningConfig, TextBlock
+
+from agentic_web import run_agentic_response
 
 
 SYSTEM_PROMPT = """You are assisting inside a collaborative document comment thread.
@@ -89,33 +91,22 @@ def build_document_blocks(payload: dict) -> list:
     return content_blocks
 
 
-async def request_reply(model: str, content_blocks: list):
-    return await asyncio.wait_for(
-        get_response(
-            model=model,
-            messages=[
-                ChatMessage(
-                    role=MessageRole.system,
-                    content=[TextBlock(text=SYSTEM_PROMPT)],
-                ),
-                ChatMessage(
-                    role=MessageRole.user,
-                    content=content_blocks,
-                ),
-            ],
-            reasoning=ReasoningConfig(effort="none"),
-            max_tokens=64_000,
-        ),
-        timeout=70,
-    )
-
-
 async def main() -> None:
     payload = json.load(sys.stdin)
     raw_model = os.getenv("AI_COMMENT_MODEL", "claude-opus-4-6")
     model = MODEL_ALIASES.get(raw_model, raw_model)
 
-    response = await request_reply(model, build_document_blocks(payload))
+    response = await run_agentic_response(
+        model=model,
+        system_prompt=(
+            f"{SYSTEM_PROMPT}\n"
+            "Use the available web tools when external research would materially improve factual accuracy, freshness, specificity, or source checking. "
+            "If no external research is needed, answer directly. Then return the final reply directly to the thread."
+        ),
+        user_content=build_document_blocks(payload),
+        reasoning=ReasoningConfig(effort="none"),
+        max_tokens=64_000,
+    )
 
     text_parts = []
     for block in response.content:
