@@ -14,11 +14,11 @@ export default async function HomePage() {
     <main className="marketing-shell">
       <section className="hero-card">
         <div className="hero-copy">
-          <span className="eyebrow">Collaborative writing with AI in the loop</span>
-          <h1>Write together, comment together, ask Claude inside every thread.</h1>
+          <span className="eyebrow">AI-assisted research workspace</span>
+          <h1>Supervise research in a document with a linked repo beside it.</h1>
           <p>
-            This MVP gives you a Google Docs-style editor, threaded comments, permissioned share
-            links, and an AI button in each thread so Claude can jump into the discussion.
+            Draft, comment, ask Claude to investigate, and keep the resulting code or experiment
+            artifacts committed back to the repository attached to the document.
           </p>
           <div className="hero-actions">
             <Link href="/sign-up" className="primary-button">
@@ -33,17 +33,18 @@ export default async function HomePage() {
           <div className="feature-card">
             <h2>Included now</h2>
             <ul>
-              <li>Rich text document editor</li>
+              <li>Rich text research document editor</li>
               <li>Threaded comments with anchored selections</li>
-              <li>Share links with view, comment, and edit permissions</li>
-              <li>Claude-powered comment replies via `localrouter`</li>
+              <li>GitHub repo linkage with checked-out AI workspaces</li>
+              <li>Claude Agent SDK runs with automatic commit links</li>
+              <li>Interactive embedded widgets for experiment explorers</li>
             </ul>
           </div>
           <div className="feature-card muted">
-            <h2>Prepared next</h2>
+            <h2>Research loop</h2>
             <p>
-              The codebase is structured so you can add AI rewrite-on-selection flows without
-              reworking auth, permissions, or document persistence.
+              Parallel agents run in isolated Git worktrees, with progress visible from the
+              document while each run works.
             </p>
           </div>
         </div>

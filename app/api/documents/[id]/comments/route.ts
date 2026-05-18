@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getCurrentUser } from "@/lib/auth";
+import { serializeThread } from "@/lib/document-data";
 import { db } from "@/lib/db";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 
@@ -87,5 +88,5 @@ export async function POST(request: Request, { params }: RouteContext) {
     }
   });
 
-  return NextResponse.json({ thread });
+  return NextResponse.json({ thread: serializeThread(thread) });
 }

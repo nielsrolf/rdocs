@@ -22,68 +22,147 @@ model User {
 }
 
 model Document {
-  id           String               @id @default(cuid())
-  title        String
-  content      String
-  ownerId      String
-  createdAt    DateTime             @default(now())
-  updatedAt    DateTime             @updatedAt
-  owner        User                 @relation("DocumentOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  memberships  DocumentMembership[]
-  threads      CommentThread[]
-  shareLinks   ShareLink[]
+  id              String               @id @default(cuid())
+  title           String
+  content         String
+  ownerId         String
+  repoUrl         String?
+  repoBranch      String?
+  repoWorkspace   String?
+  activeAiRunId   String?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  owner           User                 @relation("DocumentOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  memberships     DocumentMembership[]
+  threads         CommentThread[]
+  shareLinks      ShareLink[]
+  versions        DocumentVersion[]
+  aiRuns          AiRun[]
+  embeddedWidgets EmbeddedWidget[]
 }
 
 model DocumentMembership {
-  id         String          @id @default(cuid())
+  id         String   @id @default(cuid())
   documentId String
   userId     String
   permission String
-  createdAt  DateTime        @default(now())
-  updatedAt  DateTime        @updatedAt
-  document   Document        @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([documentId, userId])
 }
 
 model CommentThread {
-  id            String       @id @default(cuid())
+  id            String    @id @default(cuid())
   documentId    String
   createdById   String
   anchorText    String
   anchorContext String?
   fromPos       Int?
   toPos         Int?
-  status        String       @default("OPEN")
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
-  document      Document     @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  createdBy     User         @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  status        String    @default("OPEN")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  document      Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  createdBy     User      @relation(fields: [createdById], references: [id], onDelete: Cascade)
   comments      Comment[]
 }
 
 model Comment {
-  id         String        @id @default(cuid())
+  id          String        @id @default(cuid())
   threadId    String
   authorId    String?
   body        String
   aiModel     String?
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  sourceLinks String?
+  commitSha   String?
+  commitUrl   String?
+  aiRunId     String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
   thread      CommentThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
   author      User?         @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  aiRun       AiRun?        @relation(fields: [aiRunId], references: [id], onDelete: SetNull)
+}
+
+model DocumentVersion {
+  id          String   @id @default(cuid())
+  documentId  String
+  title       String
+  content     String
+  sourceLinks String?
+  commitSha   String?
+  commitUrl   String?
+  aiRunId     String?
+  createdAt   DateTime @default(now())
+  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  aiRun       AiRun?   @relation(fields: [aiRunId], references: [id], onDelete: SetNull)
+
+  @@index([documentId, createdAt])
+}
+
+model AiRun {
+  id            String            @id @default(cuid())
+  documentId    String
+  triggerType   String
+  triggerId     String?
+  instruction   String
+  status        String            @default("RUNNING")
+  progress      String?
+  model         String?
+  workspacePath String?
+  branchName    String?
+  commitSha     String?
+  commitUrl     String?
+  error         String?
+  startedAt     DateTime          @default(now())
+  finishedAt    DateTime?
+  document      Document          @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  comments      Comment[]
+  versions      DocumentVersion[]
+  events        AiRunEvent[]
+
+  @@index([documentId, startedAt])
+  @@index([documentId, status])
+}
+
+model AiRunEvent {
+  id        String   @id @default(cuid())
+  aiRunId   String
+  role      String
+  message   String
+  createdAt DateTime @default(now())
+  aiRun     AiRun    @relation(fields: [aiRunId], references: [id], onDelete: Cascade)
+
+  @@index([aiRunId, createdAt])
+}
+
+model EmbeddedWidget {
+  id          String    @id @default(cuid())
+  documentId  String
+  label       String
+  buildCmd    String
+  embedSource String
+  lastBuiltAt DateTime?
+  lastError   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  document    Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId, createdAt])
 }
 
 model ShareLink {
-  id          String          @id @default(cuid())
-  token       String          @unique
+  id          String    @id @default(cuid())
+  token       String    @unique
   documentId  String
   createdById String
   permission  String
   revokedAt   DateTime?
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  document    Document        @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  createdBy   User            @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  document    Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  createdBy   User      @relation(fields: [createdById], references: [id], onDelete: Cascade)
 }

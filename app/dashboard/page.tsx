@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { NewDocumentButton } from "@/components/new-document-button";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { permissionLabel, truncate } from "@/lib/utils";
+import { formatDateTime, permissionLabel, truncate } from "@/lib/utils";
 
 export default async function DashboardPage() {
   const user = await getCurrentUser();
@@ -70,7 +70,7 @@ export default async function DashboardPage() {
                 <Link className="doc-row" href={`/documents/${document.id}`} key={document.id}>
                   <div>
                     <strong>{truncate(document.title, 60)}</strong>
-                    <span>Updated {document.updatedAt.toLocaleString()}</span>
+                    <span>Updated {formatDateTime(document.updatedAt)}</span>
                   </div>
                   <span className="permission-pill">Owner</span>
                 </Link>
@@ -94,7 +94,7 @@ export default async function DashboardPage() {
                   <div>
                     <strong>{truncate(document.title, 60)}</strong>
                     <span>
-                      Shared by {document.owner.name} • Updated {document.updatedAt.toLocaleString()}
+                      Shared by {document.owner.name} • Updated {formatDateTime(document.updatedAt)}
                     </span>
                   </div>
                   <span className="permission-pill">{permissionLabel(permission)}</span>

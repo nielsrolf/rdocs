@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Python helper runtime for GDocs AI"
 requires-python = ">=3.11"
 dependencies = [
+  "claude-agent-sdk",
   "localrouter",
   "mcp",
 ]

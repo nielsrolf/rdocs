@@ -1,5 +1,13 @@
 import { PermissionLevelValue } from "@/lib/contracts";
 
+const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: "UTC",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit"
+});
+
 export function cn(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
 }
@@ -30,4 +38,8 @@ export function truncate(value: string, length = 140) {
   }
 
   return `${value.slice(0, length - 1)}…`;
+}
+
+export function formatDateTime(value: string | Date) {
+  return dateTimeFormatter.format(new Date(value));
 }

@@ -3,10 +3,12 @@ import json
 import os
 import pathlib
 import sys
+from urllib.parse import urlparse
 
 WORKSPACE_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PYTHON_HOME = WORKSPACE_ROOT / ".python-home"
 CACHE_HOME = WORKSPACE_ROOT / ".cache"
+DEFAULT_MAX_TOKENS = 8192
 PYTHON_HOME.mkdir(parents=True, exist_ok=True)
 CACHE_HOME.mkdir(parents=True, exist_ok=True)
 os.environ["HOME"] = str(PYTHON_HOME)
@@ -15,6 +17,31 @@ os.environ["XDG_CACHE_HOME"] = str(CACHE_HOME)
 from localrouter import ImageBlock, TextBlock
 
 from agentic_web import run_agentic_response
+
+
+def extract_visited_sources(response) -> list[str]:
+    trace = response.meta.get("agentic_trace", []) if getattr(response, "meta", None) else []
+    visited: list[str] = []
+
+    def add_url(candidate: str | None) -> None:
+        if not candidate or not isinstance(candidate, str):
+            return
+
+        parsed = urlparse(candidate)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return
+
+        if candidate not in visited:
+            visited.append(candidate)
+
+    for step in trace:
+        tool_name = step.get("tool") or ""
+        tool_input = step.get("input") or {}
+
+        if "browse" in tool_name or "fetch" in tool_name:
+            add_url(tool_input.get("url"))
+
+    return visited
 
 
 def build_user_prompt(payload: dict) -> str:
@@ -36,6 +63,8 @@ Instruction:
 {payload['instruction']}
 
 Return only the new text that should replace the selected text.
+Use standard Markdown syntax when formatting is helpful, such as headings, bold, italics,
+bulleted lists, ordered lists, blockquotes, and links.
 Do not include quotes, markdown fences, commentary, or explanations.
 """
 
@@ -77,11 +106,12 @@ async def main() -> None:
         model=model,
         system_prompt=(
             "Rewrite the selected text according to the instruction. Return only replacement text. "
+            "You may use standard Markdown syntax for document formatting when appropriate, but never wrap the answer in code fences. "
             "Use the available web tools when external research would materially improve factual accuracy, freshness, or specificity. "
             "If no external research is needed, do the edit directly."
         ),
         user_content=build_document_blocks(payload),
-        max_tokens=600,
+        max_tokens=int(os.getenv("AI_EDIT_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
     )
 
     text_parts = []
@@ -90,7 +120,15 @@ async def main() -> None:
             text_parts.append(block.text)
 
     replacement = "\n".join(part.strip() for part in text_parts if part.strip()).strip()
-    print(json.dumps({"replacementText": replacement, "model": model}))
+    print(
+        json.dumps(
+            {
+                "replacementText": replacement,
+                "model": model,
+                "visitedSources": extract_visited_sources(response),
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -63,6 +63,18 @@ function extractTextFromNode(node: unknown): string {
     return typedNode.text;
   }
 
+  if (typedNode.type === "embeddedWidget") {
+    const attrs = (typedNode as { attrs?: { label?: unknown; buildCmd?: unknown; embedSource?: unknown } }).attrs;
+    return `[Interactive widget: ${typeof attrs?.label === "string" ? attrs.label : "Untitled"}]\n\n`;
+  }
+
+  if (typedNode.type === "repoImage") {
+    const attrs = (typedNode as { attrs?: { alt?: unknown; caption?: unknown; path?: unknown } }).attrs;
+    const alt = typeof attrs?.alt === "string" ? attrs.alt : "Repository image";
+    const caption = typeof attrs?.caption === "string" ? attrs.caption : "";
+    return `[Repository image: ${alt}${caption ? `; ${caption}` : ""}]\n\n`;
+  }
+
   const childText = Array.isArray(typedNode.content)
     ? typedNode.content.map((child) => extractTextFromNode(child)).join("")
     : "";
@@ -191,6 +203,36 @@ function visitNodeForAiBlocks(node: unknown, blocks: AiDocumentBlock[]) {
       });
       appendTextBlock(blocks, "\n");
     }
+    return;
+  }
+
+  if (nodeType === "embeddedWidget") {
+    const attrs = getNodeAttrs(node) as {
+      label?: unknown;
+      buildCmd?: unknown;
+      embedSource?: unknown;
+    } | null;
+    appendTextBlock(
+      blocks,
+      `\n[Interactive widget: ${typeof attrs?.label === "string" ? attrs.label : "Untitled"}; build_cmd=${
+        typeof attrs?.buildCmd === "string" ? attrs.buildCmd : "n/a"
+      }; embed_source=${typeof attrs?.embedSource === "string" ? attrs.embedSource : "n/a"}]\n`
+    );
+    return;
+  }
+
+  if (nodeType === "repoImage") {
+    const attrs = getNodeAttrs(node) as {
+      alt?: unknown;
+      caption?: unknown;
+      path?: unknown;
+    } | null;
+    appendTextBlock(
+      blocks,
+      `\n[Repository image: ${typeof attrs?.alt === "string" ? attrs.alt : "Untitled"}; caption=${
+        typeof attrs?.caption === "string" ? attrs.caption : "n/a"
+      }; path=${typeof attrs?.path === "string" ? attrs.path : "n/a"}]\n`
+    );
     return;
   }
 

@@ -17,9 +17,36 @@ type ClaudeCommentReplyInput = {
   }>;
 };
 
+type ClaudeResearchAgentInput = {
+  mode: "comment_reply" | "edit_selection" | "conversation";
+  documentTitle: string;
+  documentText: string;
+  unresolvedThreads: Array<{
+    id: string;
+    anchorText: string;
+    anchorContext: string | null;
+    comments: Array<{
+      author: string;
+      body: string;
+    }>;
+  }>;
+  workspacePath: string | null;
+  workspaceOverview: string;
+  instruction: string;
+  anchorText?: string;
+  anchorContext?: string | null;
+  comments?: Array<{
+    author: string;
+    body: string;
+  }>;
+  selectedText?: string;
+  selectedContext?: string | null;
+};
+
 type ClaudeCommentReplyOutput = {
   reply: string;
   model: string;
+  visitedSources: string[];
 };
 
 type AiSelectionEditInput = {
@@ -34,6 +61,31 @@ type AiSelectionEditInput = {
 type AiSelectionEditOutput = {
   replacementText: string;
   model: string;
+  visitedSources: string[];
+};
+
+type ClaudeResearchAgentOutput = {
+  reply?: string;
+  replacementText?: string;
+  images?: Array<{
+    path: string;
+    alt?: string;
+    caption?: string;
+  }>;
+  widgets?: Array<{
+    label: string;
+    build_cmd?: string;
+    buildCmd?: string;
+    embed_source?: string;
+    embedSource?: string;
+  }>;
+  summary?: string;
+  model: string;
+};
+
+export type ClaudeAgentProgressEvent = {
+  role?: "agent" | "tool" | "tool_result" | "system" | "error";
+  message: string;
 };
 
 function getPythonEnv() {
@@ -53,19 +105,24 @@ function runPythonJsonScript<TInput, TOutput>(
   scriptName: string,
   input: TInput,
   timeoutMs: number,
-  timeoutMessage: string
+  timeoutMessage: string,
+  onProgress?: (event: ClaudeAgentProgressEvent) => void | Promise<void>
 ): Promise<TOutput> {
-  const pythonBin = process.env.PYTHON_BIN || "python3";
   const scriptPath = path.join(process.cwd(), "scripts", scriptName);
   const { pythonHome, cacheHome } = getPythonEnv();
+  const command = process.env.PYTHON_BIN || "uv";
+  const args = process.env.PYTHON_BIN
+    ? [scriptPath]
+    : ["run", "python", scriptPath];
 
   return new Promise((resolve, reject) => {
-    const child = spawn(pythonBin, [scriptPath], {
+    const child = spawn(command, args, {
       cwd: process.cwd(),
       env: {
         ...process.env,
         HOME: pythonHome,
-        XDG_CACHE_HOME: cacheHome
+        XDG_CACHE_HOME: cacheHome,
+        UV_NO_PROGRESS: "1"
       }
     });
 
@@ -80,8 +137,39 @@ function runPythonJsonScript<TInput, TOutput>(
       stdout += chunk.toString();
     });
 
+    let stderrRemainder = "";
+
     child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+      const text = chunk.toString();
+      stderr += text;
+      stderrRemainder += text;
+
+      const lines = stderrRemainder.split(/\r?\n/);
+      stderrRemainder = lines.pop() ?? "";
+      lines.forEach((line) => {
+        if (!line.trim()) {
+          return;
+        }
+
+        try {
+          const parsed = JSON.parse(line) as { type?: unknown; role?: unknown; message?: unknown };
+          if (parsed.type === "progress" && typeof parsed.message === "string") {
+            void onProgress?.({
+              role:
+                parsed.role === "agent" ||
+                parsed.role === "tool" ||
+                parsed.role === "tool_result" ||
+                parsed.role === "system" ||
+                parsed.role === "error"
+                  ? parsed.role
+                  : undefined,
+              message: parsed.message
+            });
+          }
+        } catch {
+          // Keep stderr intact for failures; non-JSON lines are normal diagnostics.
+        }
+      });
     });
 
     child.on("error", (error) => {
@@ -143,5 +231,18 @@ export async function runAiSelectionEdit(
     input,
     180_000,
     "AI edit helper timed out after 180 seconds."
+  );
+}
+
+export async function runClaudeResearchAgent(
+  input: ClaudeResearchAgentInput,
+  onProgress?: (event: ClaudeAgentProgressEvent) => void | Promise<void>
+): Promise<ClaudeResearchAgentOutput> {
+  return runPythonJsonScript(
+    "claude_research_agent.py",
+    input,
+    600_000,
+    "Claude research agent timed out after 600 seconds.",
+    onProgress
   );
 }

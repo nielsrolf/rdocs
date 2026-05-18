@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import sys
+from urllib.parse import urlparse
 
 WORKSPACE_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PYTHON_HOME = WORKSPACE_ROOT / ".python-home"
@@ -30,6 +31,31 @@ MODEL_ALIASES = {
     "claude-sonnet-4.6": "claude-sonnet-4-6",
     "claude-sonnet-4.5": "claude-sonnet-4-5-20250929",
 }
+
+
+def extract_visited_sources(response) -> list[str]:
+    trace = response.meta.get("agentic_trace", []) if getattr(response, "meta", None) else []
+    visited: list[str] = []
+
+    def add_url(candidate: str | None) -> None:
+        if not candidate or not isinstance(candidate, str):
+            return
+
+        parsed = urlparse(candidate)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return
+
+        if candidate not in visited:
+            visited.append(candidate)
+
+    for step in trace:
+        tool_name = step.get("tool") or ""
+        tool_input = step.get("input") or {}
+
+        if "browse" in tool_name or "fetch" in tool_name:
+            add_url(tool_input.get("url"))
+
+    return visited
 
 
 def build_user_prompt(payload: dict) -> str:
@@ -114,7 +140,15 @@ async def main() -> None:
             text_parts.append(block.text)
 
     reply = "\n".join(part.strip() for part in text_parts if part.strip()).strip()
-    print(json.dumps({"reply": reply, "model": model}))
+    print(
+        json.dumps(
+            {
+                "reply": reply,
+                "model": model,
+                "visitedSources": extract_visited_sources(response),
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

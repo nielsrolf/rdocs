@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getCurrentUser } from "@/lib/auth";
+import { serializeComment } from "@/lib/document-data";
 import { db } from "@/lib/db";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 
@@ -72,5 +73,5 @@ export async function POST(request: Request, { params }: RouteContext) {
     }
   });
 
-  return NextResponse.json({ comment });
+  return NextResponse.json({ comment: serializeComment(comment) });
 }

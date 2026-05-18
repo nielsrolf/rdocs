@@ -7,6 +7,10 @@ type AccessResult = {
     title: string;
     content: string;
     ownerId: string;
+    repoUrl: string | null;
+    repoBranch: string | null;
+    repoWorkspace: string | null;
+    activeAiRunId: string | null;
     updatedAt: Date;
   };
   permission: PermissionLevelValue;
@@ -26,6 +30,10 @@ export async function resolveDocumentAccess(
       title: true,
       content: true,
       ownerId: true,
+      repoUrl: true,
+      repoBranch: true,
+      repoWorkspace: true,
+      activeAiRunId: true,
       updatedAt: true
     }
   });

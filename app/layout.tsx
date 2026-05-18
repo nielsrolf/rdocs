@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import "@/app/globals.css";
+import "katex/dist/katex.min.css";
 import { getCurrentUser } from "@/lib/auth";
 
 export const metadata: Metadata = {

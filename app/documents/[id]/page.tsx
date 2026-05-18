@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 
 import { DocumentWorkspace } from "@/components/document-workspace";
 import { getCurrentUser } from "@/lib/auth";
+import { listDocumentThreads } from "@/lib/document-data";
 import { parseDocumentContent } from "@/lib/content";
 import { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
 import { db } from "@/lib/db";
@@ -32,40 +33,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
   }
 
   const [threads, shareLinks, members] = await Promise.all([
-    db.commentThread.findMany({
-      where: { documentId: id },
-      orderBy: { updatedAt: "desc" },
-      select: {
-        id: true,
-        anchorText: true,
-        anchorContext: true,
-        fromPos: true,
-        toPos: true,
-        status: true,
-        createdAt: true,
-        createdBy: {
-          select: {
-            id: true,
-            name: true
-          }
-        },
-        comments: {
-          orderBy: { createdAt: "asc" },
-          select: {
-            id: true,
-            body: true,
-            aiModel: true,
-            createdAt: true,
-            author: {
-              select: {
-                id: true,
-                name: true
-              }
-            }
-          }
-        }
-      }
-    }),
+    listDocumentThreads(id),
     user && access.document.ownerId === user.id
       ? db.shareLink.findMany({
           where: {
@@ -124,9 +92,12 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         currentUserName={user?.name ?? "Guest"}
         documentId={access.document.id}
         initialContent={parseDocumentContent(access.document.content)}
+        initialDocumentUpdatedAt={access.document.updatedAt.toISOString()}
         initialPermission={access.permission}
         initialShareLinks={normalizedShareLinks}
         initialMembers={normalizedMembers}
+        initialRepoBranch={access.document.repoBranch}
+        initialRepoUrl={access.document.repoUrl}
         initialThreads={normalizedThreads}
         initialTitle={access.document.title}
         isAuthenticated={Boolean(user)}
