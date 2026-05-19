@@ -4,7 +4,7 @@ import { z } from "zod";
 import { recordAiRunEvent, serializeAiRun } from "@/lib/ai-runs";
 import { runClaudeResearchAgent } from "@/lib/ai";
 import { getCurrentUser } from "@/lib/auth";
-import { getDocumentPlainText, parseDocumentContent } from "@/lib/content";
+import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 import { commitWorkspaceChanges, ensureLinkedRepositoryWorktree, getWorkspaceOverview } from "@/lib/research-workspace";
@@ -122,6 +122,7 @@ export async function POST(request: Request, { params }: RouteContext) {
 
     const documentContent = parseDocumentContent(access.document.content);
     const documentText = getDocumentPlainText(documentContent);
+    const documentBlocks = getDocumentAiBlocks(documentContent);
     const unresolvedThreads = await db.commentThread.findMany({
       where: {
         documentId: id,
@@ -149,6 +150,7 @@ export async function POST(request: Request, { params }: RouteContext) {
       mode: "conversation",
       documentTitle: access.document.title,
       documentText,
+      documentBlocks,
       unresolvedThreads: unresolvedThreads.map((thread) => ({
         id: thread.id,
         anchorText: thread.anchorText,

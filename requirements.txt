@@ -1,3 +1,0 @@
-claude-agent-sdk
-localrouter
-mcp

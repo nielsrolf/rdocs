@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getCurrentUser } from "@/lib/auth";
-import { parseDocumentContent, serializeDocumentContent, stripCommentAnchorMarks } from "@/lib/content";
+import { addCommentAnchorToContent, differsOnlyByCommentAnchors } from "@/lib/comment-anchors";
+import { parseDocumentContent, serializeDocumentContent } from "@/lib/content";
 import { serializeThread } from "@/lib/document-data";
 import { db } from "@/lib/db";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
@@ -42,17 +43,33 @@ export async function POST(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
   }
 
-  const nextContent =
-    parsed.data.content === undefined ? null : serializeDocumentContent(parsed.data.content);
+  const currentContent = parseDocumentContent(access.document.content);
+  let nextContent: string | null = null;
+  if (
+    typeof parsed.data.fromPos === "number" &&
+    typeof parsed.data.toPos === "number" &&
+    parsed.data.threadId
+  ) {
+    const anchoredContent = addCommentAnchorToContent(
+      currentContent,
+      parsed.data.fromPos,
+      parsed.data.toPos,
+      parsed.data.threadId
+    );
+    nextContent = anchoredContent ? serializeDocumentContent(anchoredContent) : null;
+  }
 
-  if (nextContent != null) {
-    const currentContent = parseDocumentContent(access.document.content);
-    const currentWithoutCommentAnchors = JSON.stringify(stripCommentAnchorMarks(currentContent));
-    const nextWithoutCommentAnchors = JSON.stringify(stripCommentAnchorMarks(parsed.data.content));
-
-    if (currentWithoutCommentAnchors !== nextWithoutCommentAnchors) {
-      return NextResponse.json({ error: "Comment anchors cannot change document content." }, { status: 400 });
+  if (nextContent == null && parsed.data.content !== undefined) {
+    if (!differsOnlyByCommentAnchors(currentContent, parsed.data.content)) {
+      return NextResponse.json(
+        {
+          error:
+            "Comment anchor positions no longer match the saved document. Save or refresh the document and try again."
+        },
+        { status: 409 }
+      );
     }
+    nextContent = serializeDocumentContent(parsed.data.content);
   }
 
   const thread = await db.$transaction(async (tx) => {

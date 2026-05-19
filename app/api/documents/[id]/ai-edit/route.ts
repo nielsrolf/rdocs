@@ -4,10 +4,11 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getDocumentPlainText, parseDocumentContent } from "@/lib/content";
+import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { getCurrentUser } from "@/lib/auth";
 import { recordAiRunEvent } from "@/lib/ai-runs";
 import { runClaudeResearchAgent } from "@/lib/ai";
+import { detectEditAssetIntent } from "@/lib/ai-asset-intent";
 import { db } from "@/lib/db";
 import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
 import { commitWorkspaceChanges, ensureLinkedRepositoryWorktree, getWorkspaceOverview, runWidgetBuild } from "@/lib/research-workspace";
@@ -59,11 +60,15 @@ function normalizeAgentImages(images: unknown, documentId: string, shareToken: s
 }
 
 function wantsPlots(instruction: string) {
-  return /\b(plot|plots|figure|figures|chart|charts|image|images|visual|visuals)\b/i.test(instruction);
+  return detectEditAssetIntent(instruction).wantsImage;
 }
 
 function wantsWidget(instruction: string) {
-  return /\b(widget|explorer|interactive|rollout|rollouts|trajectory|trajectories)\b/i.test(instruction);
+  return detectEditAssetIntent(instruction).wantsWidget;
+}
+
+function hasMarkdownImage(text: string) {
+  return /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/.test(text);
 }
 
 async function listRepoImages(root: string, dir = ""): Promise<string[]> {
@@ -89,6 +94,75 @@ async function listRepoImages(root: string, dir = ""): Promise<string[]> {
   }
 
   return images;
+}
+
+async function listRepoHtmlAssets(root: string, dir = "assets"): Promise<Array<{ path: string; mtimeMs: number }>> {
+  const absoluteDir = path.join(root, dir);
+  const entries = await fs.readdir(absoluteDir, { withFileTypes: true }).catch(() => []);
+  const assets: Array<{ path: string; mtimeMs: number }> = [];
+
+  for (const entry of entries) {
+    if (entry.name.startsWith(".") || entry.name === "__pycache__") {
+      continue;
+    }
+
+    const relativePath = path.posix.join(dir.split(path.sep).join(path.posix.sep), entry.name);
+    const absolutePath = path.join(root, relativePath);
+    if (entry.isDirectory()) {
+      assets.push(...(await listRepoHtmlAssets(root, relativePath)));
+      continue;
+    }
+
+    if (entry.isFile() && /\.html?$/i.test(entry.name)) {
+      const stat = await fs.stat(absolutePath).catch(() => null);
+      assets.push({ path: relativePath, mtimeMs: stat?.mtimeMs ?? 0 });
+    }
+  }
+
+  return assets;
+}
+
+async function findWidgetBuildScript(root: string, embedSource: string) {
+  const assetBaseName = path.basename(embedSource).replace(/\.html?$/i, "");
+  const candidates = [
+    `widgets/build_${assetBaseName}.py`,
+    `widgets/${assetBaseName}.py`,
+    `widgets/build_${assetBaseName}.js`,
+    `widgets/${assetBaseName}.js`,
+    `widgets/build_${assetBaseName}.mjs`,
+    `widgets/${assetBaseName}.mjs`,
+    `widgets/build_${assetBaseName}.sh`,
+    `widgets/${assetBaseName}.sh`
+  ];
+
+  for (const candidate of candidates) {
+    const exists = await fs
+      .stat(path.join(root, candidate))
+      .then((stat) => stat.isFile())
+      .catch(() => false);
+    if (!exists) {
+      continue;
+    }
+
+    if (candidate.endsWith(".py")) {
+      return `python ${candidate}`;
+    }
+    if (candidate.endsWith(".js") || candidate.endsWith(".mjs")) {
+      return `node ${candidate}`;
+    }
+    return `sh ${candidate}`;
+  }
+
+  return null;
+}
+
+function labelFromAssetPath(assetPath: string) {
+  const baseName = path.basename(assetPath).replace(/\.html?$/i, "");
+  return baseName
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(" ") || "Interactive widget";
 }
 
 function scoreInferredImage(filePath: string) {
@@ -221,9 +295,53 @@ async function inferAgentWidgets(input: {
   shareToken: string | null;
   instruction: string;
   aiRunId: string | null;
+  runStartedAt: Date;
 }) {
   if (!input.workspace || !wantsWidget(input.instruction)) {
     return { created: [] as Array<Record<string, unknown>>, buildErrors: [] as string[] };
+  }
+
+  const recentHtmlAssets = (await listRepoHtmlAssets(input.workspace))
+    .filter((asset) => asset.mtimeMs >= input.runStartedAt.getTime() - 5_000)
+    .sort((left, right) => right.mtimeMs - left.mtimeMs || left.path.localeCompare(right.path));
+
+  for (const asset of recentHtmlAssets) {
+    const buildCmd = await findWidgetBuildScript(input.workspace, asset.path);
+    if (!buildCmd) {
+      continue;
+    }
+
+    const buildResult = await runWidgetBuild(buildCmd, input.workspace);
+    const lastError = buildResult.ok ? null : buildResult.error.slice(0, 6000);
+    const buildErrors = buildResult.ok ? [] : [`Inferred widget failed to build: ${lastError}`];
+    const record = await db.embeddedWidget.create({
+      data: {
+        documentId: input.documentId,
+        label: labelFromAssetPath(asset.path),
+        buildCmd,
+        embedSource: asset.path,
+        createdByRunId: input.aiRunId,
+        workspacePath: input.workspace,
+        lastBuiltAt: buildResult.ok ? new Date() : null,
+        lastError
+      }
+    });
+
+    return {
+      created: [
+        {
+          id: record.id,
+          label: record.label,
+          buildCmd: record.buildCmd,
+          embedSource: record.embedSource,
+          lastError: record.lastError,
+          src: `/api/documents/${input.documentId}/widgets/${record.id}/source${
+            input.shareToken ? `?share=${encodeURIComponent(input.shareToken)}` : ""
+          }`
+        }
+      ],
+      buildErrors
+    };
   }
 
   const buildScript = path.join(input.workspace, "widgets", "build_rollout_explorer.py");
@@ -318,6 +436,7 @@ export async function POST(request: Request, { params }: RouteContext) {
 
     const documentContent = parseDocumentContent(access.document.content);
     const documentText = getDocumentPlainText(documentContent);
+    const documentBlocks = getDocumentAiBlocks(documentContent);
     const unresolvedThreads = await db.commentThread.findMany({
       where: {
         documentId: id,
@@ -366,6 +485,7 @@ export async function POST(request: Request, { params }: RouteContext) {
       mode: "edit_selection",
       documentTitle: access.document.title,
       documentText,
+      documentBlocks,
       unresolvedThreads: unresolvedThreads.map((thread) => ({
         id: thread.id,
         anchorText: thread.anchorText,
@@ -419,11 +539,24 @@ export async function POST(request: Request, { params }: RouteContext) {
             documentId: id,
             shareToken: parsed.data.shareToken ?? null,
             instruction: parsed.data.instruction,
-            aiRunId: aiRun.id
+            aiRunId: aiRun.id,
+            runStartedAt: aiRun.startedAt
           });
     const widgets = widgetOutput.created;
     for (const buildError of widgetOutput.buildErrors) {
       await recordAiRunEvent({ aiRunId: aiRun.id, role: "error", message: buildError });
+    }
+    const assetIntent = detectEditAssetIntent(parsed.data.instruction);
+    const returnedImage = images.length > 0 || hasMarkdownImage(result.replacementText ?? "");
+    const returnedWidget = widgets.length > 0;
+    if (assetIntent.requiresAnyAsset && !returnedImage && !returnedWidget) {
+      throw new Error("The edit request asked for a figure or widget, but the agent did not return either asset.");
+    }
+    if (assetIntent.requiresImage && !returnedImage) {
+      throw new Error("The edit request asked for a figure or visual, but the agent did not return a repo image.");
+    }
+    if (assetIntent.requiresWidget && !returnedWidget) {
+      throw new Error("The edit request asked for an interactive widget, but the agent did not return a valid widget.");
     }
     const commit = linkedRepo
       ? await commitWorkspaceChanges({

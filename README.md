@@ -9,7 +9,7 @@ A Google Docs-style MVP with:
 - direct collaborator sharing by email
 - permissioned share links for `view`, `comment`, and `edit`
 
-The app is built as a Next.js frontend/server app with Prisma + SQLite for persistence. The Claude reply path uses a small Python helper with `localrouter`, which keeps the AI integration provider-agnostic and ready for later multi-model work.
+The app is built as a Next.js frontend/server app with Prisma + SQLite for persistence. Claude agent work runs through the TypeScript `@anthropic-ai/claude-agent-sdk` package.
 
 ## Stack
 
@@ -18,7 +18,7 @@ The app is built as a Next.js frontend/server app with Prisma + SQLite for persi
 - Prisma + SQLite
 - TipTap editor
 - Custom cookie auth with signed JWT sessions
-- Python `localrouter` helper for Claude comment replies
+- Claude Agent SDK for document edits, comment replies, and repository work
 
 ## Setup
 
@@ -28,33 +28,26 @@ The app is built as a Next.js frontend/server app with Prisma + SQLite for persi
 npm install
 ```
 
-2. Create the dedicated `uv` environment and sync Python dependencies:
-
-```bash
-uv venv
-uv sync
-```
-
-3. Create your environment file:
+2. Create your environment file:
 
 ```bash
 cp .env.example .env
 ```
 
-4. Set at least:
+3. Set at least:
 
 - `SESSION_SECRET`
 - `ANTHROPIC_API_KEY`
-- optionally `AI_COMMENT_MODEL` if your Anthropic/localrouter model id differs from the default
+- optionally `CLAUDE_AGENT_MODEL` if you want a model other than the SDK default alias
 
-5. Initialize the database:
+4. Initialize the database:
 
 ```bash
 npx prisma generate
 npx prisma db push
 ```
 
-6. Start the app:
+5. Start the app:
 
 ```bash
 npm run dev
@@ -71,4 +64,4 @@ npm run dev
 - `app/documents/[id]/page.tsx`: document workspace page
 - `components/document-workspace.tsx`: editor, comments, share links, Ask AI UI
 - `app/api/comments/[threadId]/ask-ai/route.ts`: Claude reply endpoint
-- `scripts/claude_comment_reply.py`: `localrouter` helper that talks to Claude
+- `lib/ai.ts`: Claude Agent SDK runner and document-output parsing

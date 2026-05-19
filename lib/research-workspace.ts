@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { query } from "@anthropic-ai/claude-agent-sdk";
+
 import { db } from "@/lib/db";
 
 export type LinkedRepository = {
@@ -29,6 +31,18 @@ export type CommitResult = {
 
 const WORKSPACE_ROOT = path.join(process.cwd(), ".research-workspaces");
 const MAX_OVERVIEW_FILES = 240;
+const CLAUDE_AGENT_TOOLS = [
+  "Read",
+  "Write",
+  "Edit",
+  "MultiEdit",
+  "Grep",
+  "Glob",
+  "LS",
+  "Bash",
+  "WebSearch",
+  "WebFetch"
+];
 
 function runCommand(
   command: string,
@@ -71,59 +85,6 @@ function runCommand(
 
 function windowlessTimeout(callback: () => void, ms: number) {
   return setTimeout(callback, ms);
-}
-
-function runPythonJsonScript<TInput, TOutput>(
-  scriptName: string,
-  input: TInput,
-  options: { timeoutMs: number; cwd?: string }
-): Promise<TOutput> {
-  const scriptPath = path.join(process.cwd(), "scripts", scriptName);
-  const command = process.env.PYTHON_BIN || "uv";
-  const args = process.env.PYTHON_BIN ? [scriptPath] : ["run", "python", scriptPath];
-
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: options.cwd ?? process.cwd(),
-      env: {
-        ...process.env,
-        UV_NO_PROGRESS: "1"
-      }
-    });
-
-    let stdout = "";
-    let stderr = "";
-    const timeout = windowlessTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error(`${scriptName} timed out.`));
-    }, options.timeoutMs);
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timeout);
-      if (code !== 0) {
-        reject(new Error(stderr || stdout || `${scriptName} exited with code ${code}`));
-        return;
-      }
-      try {
-        resolve(JSON.parse(stdout) as TOutput);
-      } catch {
-        reject(new Error(`Failed to parse ${scriptName} response: ${stdout || stderr}`));
-      }
-    });
-
-    child.stdin.write(JSON.stringify(input));
-    child.stdin.end();
-  });
 }
 
 function getRepoName(repoUrl: string) {
@@ -359,19 +320,52 @@ async function syncBranchToBaseWorkspace(baseWorkspace: string, commitSha: strin
 }
 
 async function resolveMergeConflictsWithClaude(baseWorkspace: string, commitSha: string) {
-  await runPythonJsonScript<
-    { workspace: string; commitSha: string },
-    { ok?: boolean; output?: string }
-  >(
-    "claude_merge_conflicts.py",
-    {
-      workspace: baseWorkspace,
-      commitSha
-    },
-    {
-      timeoutMs: 300_000
+  const model = process.env.CLAUDE_AGENT_MODEL || "sonnet";
+  const abortController = new AbortController();
+  const timeout = windowlessTimeout(() => abortController.abort(), 300_000);
+  const prompt = `A git merge is currently in progress in this repository.
+
+The commit being merged is ${commitSha}.
+
+Resolve all merge conflicts in the working tree. Preserve both the base branch intent and the incoming AI agent changes whenever they are compatible. If a real semantic conflict exists, make the smallest coherent implementation that keeps the repository buildable.
+
+Do not commit. After editing, run \`git status --porcelain\` and report whether any unmerged paths remain.
+
+Return only JSON:
+{"summary":"what you resolved","unresolved":false}
+`;
+
+  const mergeQuery = query({
+    prompt,
+    options: {
+      cwd: baseWorkspace,
+      systemPrompt:
+        "You are resolving git merge conflicts for a collaborative document app. Edit files directly, remove conflict markers, and keep the result coherent. Do not run background processes and do not commit.",
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+      allowedTools: CLAUDE_AGENT_TOOLS,
+      maxTurns: Number.parseInt(process.env.CLAUDE_MERGE_MAX_TURNS || "8", 10),
+      model,
+      abortController
     }
-  );
+  });
+
+  try {
+    for await (const message of mergeQuery) {
+      if (message.type === "result" && message.is_error) {
+        const errors = "errors" in message ? message.errors : ["Claude merge conflict resolution failed."];
+        throw new Error(errors.join("\n"));
+      }
+    }
+  } catch (error) {
+    if (abortController.signal.aborted) {
+      throw new Error("Claude merge conflict resolution timed out after 300 seconds.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    mergeQuery.close();
+  }
 }
 
 export async function commitWorkspaceChanges(input: {

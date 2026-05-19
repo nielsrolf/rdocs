@@ -7,6 +7,7 @@ import { serializeComment } from "@/lib/document-data";
 import { runClaudeResearchAgent } from "@/lib/ai";
 import {
   getContextAroundMatch,
+  getDocumentAiBlocks,
   getDocumentPlainText,
   parseDocumentContent
 } from "@/lib/content";
@@ -107,6 +108,7 @@ export async function POST(request: Request, { params }: RouteContext) {
 
     const documentContent = parseDocumentContent(thread.document.content);
     const documentText = getDocumentPlainText(documentContent);
+    const documentBlocks = getDocumentAiBlocks(documentContent);
     const derivedAnchorContext =
       thread.anchorContext || getContextAroundMatch(documentText, thread.anchorText);
     const unresolvedThreads = await db.commentThread.findMany({
@@ -158,6 +160,7 @@ export async function POST(request: Request, { params }: RouteContext) {
       mode: "comment_reply",
       documentTitle: thread.document.title,
       documentText,
+      documentBlocks,
       unresolvedThreads: unresolvedThreads.map((candidate) => ({
         id: candidate.id,
         anchorText: candidate.anchorText,
