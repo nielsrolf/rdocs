@@ -17,6 +17,21 @@ export type AiDocumentBlock =
       type: "image";
       src: string;
       alt: string | null;
+    }
+  | {
+      type: "repoImage";
+      src: string | null;
+      path: string | null;
+      alt: string | null;
+      caption: string | null;
+    }
+  | {
+      type: "widget";
+      widgetId: string | null;
+      label: string;
+      buildCmd: string | null;
+      embedSource: string | null;
+      src: string | null;
     };
 
 export const defaultDocumentContent: DocumentContent = {
@@ -41,7 +56,11 @@ export function serializeDocumentContent(content: unknown) {
 export function parseDocumentContent(raw: string): DocumentContent {
   try {
     return JSON.parse(raw) as DocumentContent;
-  } catch {
+  } catch (error) {
+    console.error("parseDocumentContent: failed to parse stored document JSON", {
+      error: error instanceof Error ? error.message : error,
+      preview: raw.slice(0, 200)
+    });
     return defaultDocumentContent;
   }
 }
@@ -273,31 +292,39 @@ function visitNodeForAiBlocks(node: unknown, blocks: AiDocumentBlock[]) {
 
   if (nodeType === "embeddedWidget") {
     const attrs = getNodeAttrs(node) as {
+      widgetId?: unknown;
       label?: unknown;
       buildCmd?: unknown;
       embedSource?: unknown;
+      src?: unknown;
     } | null;
-    appendTextBlock(
-      blocks,
-      `\n[Interactive widget: ${typeof attrs?.label === "string" ? attrs.label : "Untitled"}; build_cmd=${
-        typeof attrs?.buildCmd === "string" ? attrs.buildCmd : "n/a"
-      }; embed_source=${typeof attrs?.embedSource === "string" ? attrs.embedSource : "n/a"}]\n`
-    );
+    blocks.push({
+      type: "widget",
+      widgetId: typeof attrs?.widgetId === "string" ? attrs.widgetId : null,
+      label: typeof attrs?.label === "string" ? attrs.label : "Untitled",
+      buildCmd: typeof attrs?.buildCmd === "string" ? attrs.buildCmd : null,
+      embedSource: typeof attrs?.embedSource === "string" ? attrs.embedSource : null,
+      src: typeof attrs?.src === "string" ? attrs.src : null
+    });
+    appendTextBlock(blocks, "\n");
     return;
   }
 
   if (nodeType === "repoImage") {
     const attrs = getNodeAttrs(node) as {
+      src?: unknown;
       alt?: unknown;
       caption?: unknown;
       path?: unknown;
     } | null;
-    appendTextBlock(
-      blocks,
-      `\n[Repository image: ${typeof attrs?.alt === "string" ? attrs.alt : "Untitled"}; caption=${
-        typeof attrs?.caption === "string" ? attrs.caption : "n/a"
-      }; path=${typeof attrs?.path === "string" ? attrs.path : "n/a"}]\n`
-    );
+    blocks.push({
+      type: "repoImage",
+      src: typeof attrs?.src === "string" ? attrs.src : null,
+      path: typeof attrs?.path === "string" ? attrs.path : null,
+      alt: typeof attrs?.alt === "string" ? attrs.alt : null,
+      caption: typeof attrs?.caption === "string" ? attrs.caption : null
+    });
+    appendTextBlock(blocks, "\n");
     return;
   }
 
@@ -326,6 +353,176 @@ function visitNodeForAiBlocks(node: unknown, blocks: AiDocumentBlock[]) {
   }
 }
 
+type MarkdownContext = {
+  listStack: Array<{ ordered: boolean; index: number }>;
+  inCodeBlock: boolean;
+};
+
+function escapeMarkdown(text: string) {
+  return text.replace(/([\\`*_{}\[\]()#+\-.!>])/g, "\\$1");
+}
+
+function applyMarks(text: string, marks: unknown): string {
+  if (!Array.isArray(marks)) {
+    return text;
+  }
+
+  let result = text;
+  let href: string | null = null;
+  let hasCode = false;
+  let hasBold = false;
+  let hasItalic = false;
+  let hasStrike = false;
+
+  for (const mark of marks) {
+    if (!mark || typeof mark !== "object") continue;
+    const markType = (mark as { type?: unknown }).type;
+    if (markType === "link") {
+      const attrs = (mark as { attrs?: { href?: unknown } }).attrs;
+      if (typeof attrs?.href === "string") {
+        href = attrs.href;
+      }
+    } else if (markType === "code") {
+      hasCode = true;
+    } else if (markType === "bold") {
+      hasBold = true;
+    } else if (markType === "italic") {
+      hasItalic = true;
+    } else if (markType === "strike") {
+      hasStrike = true;
+    }
+  }
+
+  if (hasCode) {
+    result = `\`${result}\``;
+  } else {
+    if (hasStrike) result = `~~${result}~~`;
+    if (hasItalic) result = `*${result}*`;
+    if (hasBold) result = `**${result}**`;
+  }
+  if (href) {
+    result = `[${result}](${href})`;
+  }
+
+  return result;
+}
+
+function serializeChildrenToMarkdown(node: unknown, context: MarkdownContext): string {
+  const children = getNodeContent(node);
+  return children.map((child) => serializeNodeToMarkdown(child, context)).join("");
+}
+
+function serializeNodeToMarkdown(node: unknown, context: MarkdownContext): string {
+  const nodeType = getNodeType(node);
+
+  if (nodeType === "text") {
+    const text = (node as { text?: unknown }).text;
+    const raw = typeof text === "string" ? text : "";
+    if (context.inCodeBlock) {
+      return raw;
+    }
+    return applyMarks(escapeMarkdown(raw), (node as { marks?: unknown }).marks);
+  }
+
+  if (nodeType === "hardBreak") {
+    return "  \n";
+  }
+
+  if (nodeType === "image") {
+    const attrs = getNodeAttrs(node) as { src?: unknown; alt?: unknown } | null;
+    const src = typeof attrs?.src === "string" ? attrs.src : "";
+    const alt = typeof attrs?.alt === "string" ? attrs.alt : "";
+    return src ? `![${alt}](${src})\n\n` : "";
+  }
+
+  if (nodeType === "repoImage") {
+    const attrs = getNodeAttrs(node) as { src?: unknown; alt?: unknown; caption?: unknown; path?: unknown } | null;
+    const path = typeof attrs?.path === "string" && attrs.path
+      ? attrs.path
+      : typeof attrs?.src === "string" ? attrs.src : "";
+    const alt = typeof attrs?.alt === "string" ? attrs.alt : "";
+    const caption = typeof attrs?.caption === "string" ? attrs.caption : "";
+    const title = caption ? ` "${caption.replace(/"/g, '\\"')}"` : "";
+    return path ? `![${alt}](${path}${title})\n\n` : "";
+  }
+
+  if (nodeType === "embeddedWidget") {
+    const attrs = getNodeAttrs(node) as { label?: unknown; embedSource?: unknown; buildCmd?: unknown } | null;
+    const label = typeof attrs?.label === "string" ? attrs.label : "Interactive widget";
+    const source = typeof attrs?.embedSource === "string" ? attrs.embedSource : "";
+    const buildCmd = typeof attrs?.buildCmd === "string" ? attrs.buildCmd : "";
+    return `[Interactive widget: ${label}](${source})${buildCmd ? ` <!-- build: ${buildCmd} -->` : ""}\n\n`;
+  }
+
+  if (nodeType === "heading") {
+    const attrs = getNodeAttrs(node) as { level?: unknown } | null;
+    const level = typeof attrs?.level === "number" ? Math.min(6, Math.max(1, attrs.level)) : 2;
+    return `${"#".repeat(level)} ${serializeChildrenToMarkdown(node, context).trim()}\n\n`;
+  }
+
+  if (nodeType === "paragraph") {
+    const body = serializeChildrenToMarkdown(node, context).trim();
+    return body ? `${body}\n\n` : "\n";
+  }
+
+  if (nodeType === "blockquote") {
+    const body = serializeChildrenToMarkdown(node, context).trim();
+    return body
+      ? `${body.split("\n").map((line) => `> ${line}`).join("\n")}\n\n`
+      : "";
+  }
+
+  if (nodeType === "codeBlock") {
+    const attrs = getNodeAttrs(node) as { language?: unknown } | null;
+    const language = typeof attrs?.language === "string" ? attrs.language : "";
+    const innerContext: MarkdownContext = { ...context, inCodeBlock: true };
+    const body = serializeChildrenToMarkdown(node, innerContext);
+    return `\`\`\`${language}\n${body.replace(/\n$/, "")}\n\`\`\`\n\n`;
+  }
+
+  if (nodeType === "bulletList" || nodeType === "orderedList") {
+    const ordered = nodeType === "orderedList";
+    context.listStack.push({ ordered, index: 1 });
+    const body = serializeChildrenToMarkdown(node, context);
+    context.listStack.pop();
+    return `${body}\n`;
+  }
+
+  if (nodeType === "listItem") {
+    const stack = context.listStack;
+    const current = stack[stack.length - 1] ?? { ordered: false, index: 1 };
+    const marker = current.ordered ? `${current.index}.` : "-";
+    if (current.ordered) current.index += 1;
+    const indent = "  ".repeat(Math.max(0, stack.length - 1));
+    const body = serializeChildrenToMarkdown(node, context).trim();
+    const lines = body.split("\n");
+    const first = lines.shift() ?? "";
+    const rest = lines
+      .map((line) => (line ? `${indent}${" ".repeat(marker.length + 1)}${line}` : ""))
+      .join("\n");
+    return `${indent}${marker} ${first}${rest ? `\n${rest}` : ""}\n`;
+  }
+
+  if (nodeType === "table") {
+    return `${serializeChildrenToMarkdown(node, context)}\n`;
+  }
+
+  if (nodeType === "tableRow") {
+    const cells = getNodeContent(node).map((cell) => serializeChildrenToMarkdown(cell, context).replace(/\s+/g, " ").trim());
+    return `| ${cells.join(" | ")} |\n`;
+  }
+
+  return serializeChildrenToMarkdown(node, context);
+}
+
+export function getDocumentMarkdown(content: unknown): string {
+  const context: MarkdownContext = { listStack: [], inCodeBlock: false };
+  const text = serializeNodeToMarkdown(content, context)
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return text;
+}
+
 export function getDocumentAiBlocks(content: unknown): AiDocumentBlock[] {
   const blocks: AiDocumentBlock[] = [];
   visitNodeForAiBlocks(content, blocks);
@@ -339,7 +536,7 @@ export function getDocumentAiBlocks(content: unknown): AiDocumentBlock[] {
           }
         : block
     )
-    .filter((block) => block.type === "image" || block.text);
+    .filter((block) => block.type !== "text" || block.text);
 
   return normalized.length > 0
     ? normalized

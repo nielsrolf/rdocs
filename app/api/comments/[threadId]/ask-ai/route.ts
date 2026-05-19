@@ -13,7 +13,7 @@ import {
 } from "@/lib/content";
 import { db } from "@/lib/db";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
-import { serializeSourceLinks } from "@/lib/sources";
+import { normalizeSourceLinks, serializeSourceLinks } from "@/lib/sources";
 import { commitWorkspaceChanges, ensureLinkedRepositoryWorktree, getWorkspaceOverview } from "@/lib/research-workspace";
 
 export const runtime = "nodejs";
@@ -201,13 +201,17 @@ export async function POST(request: Request, { params }: RouteContext) {
           push: true
         })
       : { commitSha: null, commitUrl: null, pushed: false };
+    const sourceLinks = normalizeSourceLinks([
+      ...(Array.isArray(aiReply.sources) ? aiReply.sources : []),
+      ...(Array.isArray(aiReply.sourceLinks) ? aiReply.sourceLinks : [])
+    ]);
 
     const comment = await db.comment.create({
       data: {
         threadId: thread.id,
         body: aiReply.reply ?? aiReply.summary ?? "The research agent finished without a reply.",
         aiModel: aiReply.model,
-        sourceLinks: serializeSourceLinks([]),
+        sourceLinks: serializeSourceLinks(sourceLinks),
         commitSha: commit.commitSha,
         commitUrl: commit.commitUrl,
         aiRunId: aiRun.id

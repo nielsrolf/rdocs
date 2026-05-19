@@ -572,9 +572,69 @@ select:focus {
 
 .agent-bubble-body {
   margin: 0;
-  white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.55;
+}
+
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body p {
+  margin: 0.45rem 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0.45rem 0;
+  padding-left: 1.25rem;
+}
+
+.markdown-body li + li {
+  margin-top: 0.25rem;
+}
+
+.markdown-body code {
+  border: 1px solid rgba(60, 64, 67, 0.14);
+  border-radius: 6px;
+  background: rgba(60, 64, 67, 0.07);
+  padding: 0.08rem 0.28rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.92em;
+  word-break: break-word;
+}
+
+.markdown-body pre {
+  margin: 0.55rem 0;
+  overflow-x: auto;
+  border: 1px solid rgba(60, 64, 67, 0.14);
+  border-radius: 8px;
+  background: rgba(60, 64, 67, 0.07);
+  padding: 0.65rem 0.75rem;
+}
+
+.markdown-body pre code {
+  display: block;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  white-space: pre;
+}
+
+.markdown-body blockquote {
+  margin: 0.55rem 0;
+  border-left: 3px solid var(--border);
+  padding-left: 0.75rem;
+  color: var(--muted);
+}
+
+.markdown-body a {
+  color: var(--accent-strong);
+  text-decoration: underline;
 }
 
 .agent-bubble-user .agent-bubble-body {
@@ -1583,6 +1643,21 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   font-weight: 700;
 }
 
+.comment-tag-add-input {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+  font-size: 0.78rem;
+  background: white;
+  outline: none;
+  width: 96px;
+}
+
+.comment-tag-add-input:focus {
+  border-color: rgba(26, 115, 232, 0.55);
+  box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.15);
+}
+
 .embedded-widget-node {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1755,6 +1830,14 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   white-space: pre-wrap;
 }
 
+.comment-bubble-body {
+  margin-top: 0.45rem;
+}
+
+.comment-bubble .markdown-body p {
+  white-space: normal;
+}
+
 .comment-ai-meta {
   display: grid;
   gap: 0.55rem;
@@ -1901,6 +1984,33 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   padding: 1.25rem;
 }
 
+.widget-config-modal {
+  width: min(100%, 620px);
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+  border-radius: 24px;
+  background: white;
+  border: 1px solid var(--border);
+  box-shadow: 0 20px 50px rgba(32, 33, 36, 0.28);
+  padding: 1.25rem;
+}
+
+.widget-config-fields {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.widget-config-fields label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.widget-config-fields span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
 .version-history-layout {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
@@ -2007,6 +2117,7 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   .hero-card,
   .editor-page,
   .share-modal,
+  .widget-config-modal,
   .version-history-modal {
     padding: 1.25rem;
   }

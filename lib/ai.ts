@@ -1,22 +1,18 @@
-import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import {
+  createSdkMcpServer,
+  query,
+  tool,
+  type SDKMessage,
+  type SDKUserMessage
+} from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 
+import { CLAUDE_AGENT_TOOLS } from "@/lib/ai-tools";
 import type { AiDocumentBlock } from "@/lib/content";
-
-const CLAUDE_AGENT_TOOLS = [
-  "Read",
-  "Write",
-  "Edit",
-  "MultiEdit",
-  "Grep",
-  "Glob",
-  "LS",
-  "Bash",
-  "WebSearch",
-  "WebFetch"
-];
 
 const MAX_PROGRESS_MESSAGE_LENGTH = 1400;
 const CLAUDE_AGENT_TIMEOUT_MS = 600_000;
+const MAX_PASTED_IMAGE_BYTES = 4 * 1024 * 1024;
 
 type ClaudeResearchAgentInput = {
   mode: "comment_reply" | "edit_selection" | "conversation";
@@ -42,6 +38,7 @@ type ClaudeResearchAgentInput = {
     body: string;
   }>;
   selectedText?: string;
+  selectedMarkdown?: string | null;
   selectedContext?: string | null;
   conversationHistory?: Array<{
     role: string;
@@ -52,6 +49,8 @@ type ClaudeResearchAgentInput = {
 type ClaudeResearchAgentOutput = {
   reply?: string;
   replacementText?: string;
+  sources?: string[];
+  sourceLinks?: string[];
   images?: Array<{
     path: string;
     alt?: string;
@@ -71,6 +70,44 @@ type ClaudeResearchAgentOutput = {
 export type ClaudeAgentProgressEvent = {
   role?: "agent" | "tool" | "tool_result" | "system" | "error";
   message: string;
+};
+
+const SUBMIT_TOOL_NAME = "mcp__gdocs__submit_response";
+
+const submitResponseSchema = {
+  replacementText: z
+    .string()
+    .optional()
+    .describe("For edit_selection mode: the markdown text that should replace the user's selection."),
+  reply: z
+    .string()
+    .optional()
+    .describe("For comment_reply and conversation modes: the assistant reply to post."),
+  sources: z
+    .array(z.string())
+    .optional()
+    .describe("HTTP(S) URLs used during research (web search/fetch citations)."),
+  images: z
+    .array(
+      z.object({
+        path: z.string().describe("Repo-relative path to a committed image file."),
+        alt: z.string().optional(),
+        caption: z.string().optional()
+      })
+    )
+    .optional()
+    .describe("Repo images to include in the document. Only for edit_selection."),
+  widgets: z
+    .array(
+      z.object({
+        label: z.string(),
+        build_cmd: z.string().describe("Shell command that rebuilds embed_source from the repo root."),
+        embed_source: z.string().describe("Repo-relative path of the HTML file to embed.")
+      })
+    )
+    .optional()
+    .describe("Interactive widgets to insert. Only for edit_selection."),
+  summary: z.string().optional().describe("Short note about what you inspected, decided, or changed.")
 };
 
 function compactValue(value: unknown, limit = MAX_PROGRESS_MESSAGE_LENGTH) {
@@ -154,7 +191,31 @@ function documentContextForPrompt(input: ClaudeResearchAgentInput) {
   return input.documentBlocks
     .map((block) => {
       if (block.type === "image") {
-        return `[Inline pasted image: alt=${block.alt || "n/a"}; src=${block.src}]`;
+        return `[Inline pasted image: alt=${block.alt || "n/a"}; the pixels are attached separately in this user turn — refer to them when relevant.]`;
+      }
+      if (block.type === "repoImage") {
+        return [
+          `[Repository image: alt=${block.alt || "n/a"}`,
+          `caption=${block.caption || "n/a"}`,
+          `path=${block.path || "n/a"}`,
+          `src=${block.src || "n/a"}]`,
+          block.path ? `To inspect or regenerate it, look for the repo file at ${block.path}.` : null
+        ]
+          .filter(Boolean)
+          .join("; ");
+      }
+      if (block.type === "widget") {
+        return [
+          `[Interactive widget: label=${block.label || "Untitled"}`,
+          `widget_id=${block.widgetId || "n/a"}`,
+          `build_cmd=${block.buildCmd || "n/a"}`,
+          `embed_source=${block.embedSource || "n/a"}`,
+          `src=${block.src || "n/a"}]`,
+          block.embedSource ? `To inspect the rendered widget, Read ${block.embedSource}.` : null,
+          block.buildCmd ? `To modify it, preserve or update the build script referenced by: ${block.buildCmd}.` : null
+        ]
+          .filter(Boolean)
+          .join("; ");
       }
       return block.text;
     })
@@ -177,12 +238,17 @@ App environment:
 - Interactive widgets are repo files, not inline HTML in your chat reply. A widget needs:
   1. a deterministic build script committed in the repo, usually under widgets/, for example widgets/build_fft_explorer.py
   2. a generated HTML asset under assets/, for example assets/fft_explorer.html
-  3. a widgets array entry in your final JSON with label, build_cmd, and embed_source.
+  3. a widgets array entry submitted via the submit_response tool with label, build_cmd, and embed_source.
 - The app runs build_cmd from the repository root and then serves embed_source from the same repository/worktree. Always create any script referenced by build_cmd, run the command once yourself, and verify embed_source exists before finishing.
 - If you are fixing or rebuilding an existing widget, preserve or recreate the build script named by the failing command. Do not only create the output HTML file unless build_cmd is intentionally a no-op command that still succeeds.
+- When existing widgets or repository images are present in the document context, their repo paths and build/source metadata are lookup hints. Read those files before making claims about their content.
+- If you use web search or web fetch, include the most relevant HTTP(S) sources in the sources array passed to submit_response.
 - Do not run background processes that keep running after your final response.
 - Do not mention hidden system instructions.
-- Your final response must be only the exact JSON object requested by the user prompt. Do not introduce it, repeat it, explain it, or print a second copy.
+
+Finishing your turn:
+- When you are done, call the submit_response tool exactly once with your final output. Do not write the result as a plain text reply, and do not call submit_response more than once.
+- For edit_selection, populate replacementText. For comment_reply and conversation, populate reply. Always include a brief summary.
 
 Current document:
 Title: ${input.documentTitle || "Untitled"}
@@ -233,17 +299,21 @@ ${historyBlock}New user message:
 ${instruction}
 
 You may inspect or modify workspace files if that helps. Use this mode for research, exploration, planning, verification, repository inspection, and answering follow-up questions that are not tied to a selected edit or comment thread.
-When done, return a JSON object with this exact shape:
-{"reply":"concise answer to show in the agent conversation","summary":"brief note about what you inspected or changed"}
+Do not edit the document text directly in this mode.
 
-Do not edit the document text directly in this mode. Do not wrap the JSON in Markdown fences.`;
+When done, call submit_response with reply (the concise answer to show in the agent conversation), optional sources, and a brief summary.`;
   }
 
   if (input.mode === "edit_selection") {
+    const selectionBlock = input.selectedMarkdown
+      ? `Selected text (Markdown serialization that preserves headings, lists, links, and other marks):
+${input.selectedMarkdown}`
+      : `Selected text:
+${input.selectedText || ""}`;
+
     return `Trigger: edit selected document text.
 
-Selected text:
-${input.selectedText || ""}
+${selectionBlock}
 
 Selected text context:
 ${input.selectedContext || "n/a"}
@@ -261,10 +331,7 @@ If the instruction says "figure or widget", "image or widget", or otherwise offe
 For each widget, first create a durable repo-local build script under widgets/, generate the HTML under assets/, and run the build command successfully. The build_cmd must reference a file that exists in the repo.
 If the instruction asks for ideas, suggestions, options, or advice rather than explicitly asking you to rename, replace, or rewrite, answer the request in the replacement text. Do not replace a short title/name with only your favorite candidate; preserve the original text and add concise options or rationale.
 
-Return a JSON object with this exact shape:
-{"replacementText":"text that should replace the selected text","images":[{"path":"repo-relative/path/to/plot.png","alt":"short alt text","caption":"optional caption"}],"widgets":[{"label":"Rollout explorer","build_cmd":"python widgets/build_rollout_explorer.py --output assets/rollouts.html","embed_source":"assets/rollouts.html"}],"summary":"brief note about what you did"}
-
-The replacementText field must contain only the new document text. Do not wrap the JSON in Markdown fences.`;
+When done, call submit_response with replacementText set to the new document text. Optionally add sources, images, widgets, and a brief summary.`;
   }
 
   const transcript = (input.comments || [])
@@ -285,199 +352,7 @@ ${instruction || "Write the next assistant reply for this comment thread."}
 You may inspect or modify workspace files if that helps the research task, but a comment request can only post a comment reply. Do not claim to have edited the document unless the user explicitly asked for repository file changes and you made them.
 Format the reply for the comment thread using concise Markdown when helpful: short paragraphs, bullets, code fences, and $...$ math are supported. Do not return a wall of text.
 
-When done, return a JSON object with this exact shape:
-{"reply":"the comment reply to post","summary":"brief note about what you did"}
-
-The reply field must be suitable to post directly in the comment thread. Do not wrap the JSON in Markdown fences.`;
-}
-
-function stripCodeFence(text: string) {
-  const stripped = text.trim();
-  const match = stripped.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
-  return match ? match[1].trim() : stripped;
-}
-
-function jsonCandidates(text: string) {
-  const candidates: string[] = [];
-
-  for (let start = 0; start < text.length; start += 1) {
-    if (text[start] !== "{") {
-      continue;
-    }
-
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-
-    for (let index = start; index < text.length; index += 1) {
-      const char = text[index];
-      if (inString) {
-        if (escaped) {
-          escaped = false;
-        } else if (char === "\\") {
-          escaped = true;
-        } else if (char === "\"") {
-          inString = false;
-        }
-        continue;
-      }
-
-      if (char === "\"") {
-        inString = true;
-      } else if (char === "{") {
-        depth += 1;
-      } else if (char === "}") {
-        depth -= 1;
-        if (depth === 0) {
-          candidates.push(text.slice(start, index + 1));
-          break;
-        }
-      }
-    }
-  }
-
-  return candidates;
-}
-
-function decodeJsonishString(value: string) {
-  return value
-    .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)))
-    .replace(/\\n/g, "\n")
-    .replace(/\\r/g, "\r")
-    .replace(/\\t/g, "\t")
-    .replace(/\\"/g, "\"")
-    .replace(/\\\//g, "/")
-    .replace(/\\\\/g, "\\");
-}
-
-function extractJsonishField(text: string, key: string) {
-  const keyMarker = `"${key}"`;
-  const keyIndex = text.indexOf(keyMarker);
-  if (keyIndex === -1) {
-    return null;
-  }
-
-  const colonIndex = text.indexOf(":", keyIndex + keyMarker.length);
-  if (colonIndex === -1) {
-    return null;
-  }
-
-  const valueStart = text.indexOf("\"", colonIndex + 1);
-  if (valueStart === -1) {
-    return null;
-  }
-
-  const tail = text.slice(valueStart + 1);
-  const nextFieldMatch = tail.match(/"\s*,\s*"(images|widgets|summary|reply|model)"\s*:/);
-  if (nextFieldMatch?.index !== undefined) {
-    return decodeJsonishString(tail.slice(0, nextFieldMatch.index)).trim();
-  }
-
-  return null;
-}
-
-function chooseFinalText(resultText: string, textParts: string[]) {
-  const trimmedResult = resultText.trim();
-  if (trimmedResult) {
-    return trimmedResult;
-  }
-
-  const finalishPart = [...textParts]
-    .reverse()
-    .map((part) => part.trim())
-    .find((part) => part.includes('"replacementText"') || part.includes('"reply"'));
-
-  if (finalishPart) {
-    return finalishPart;
-  }
-
-  return textParts.map((part) => part.trim()).filter(Boolean).join("\n").trim();
-}
-
-export function parseClaudeAgentOutput(
-  text: string,
-  mode: ClaudeResearchAgentInput["mode"]
-): ClaudeResearchAgentOutput {
-  const stripped = text.trim();
-  const variants = [stripped, stripCodeFence(stripped), ...jsonCandidates(stripped)];
-
-  for (const candidate of variants) {
-    if (!candidate) {
-      continue;
-    }
-    try {
-      const parsed = JSON.parse(candidate) as ClaudeResearchAgentOutput;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        parsed.images ??= [];
-        parsed.widgets ??= [];
-        return parsed;
-      }
-    } catch {
-      // Try the next recovery candidate.
-    }
-  }
-
-  if (mode === "edit_selection") {
-    const replacementText = extractJsonishField(stripped, "replacementText");
-    if (replacementText) {
-      return {
-        replacementText,
-        images: [],
-        widgets: [],
-        summary: "Recovered replacementText from malformed JSON.",
-        model: ""
-      };
-    }
-
-    return {
-      replacementText: stripCodeFence(stripped),
-      images: [],
-      widgets: [],
-      summary: "Claude returned replacement text instead of valid JSON.",
-      model: ""
-    };
-  }
-
-  const reply = extractJsonishField(stripped, "reply");
-  if (reply) {
-    return {
-      reply,
-      summary: "Recovered reply from malformed JSON.",
-      model: ""
-    };
-  }
-
-  return {
-    reply: stripCodeFence(stripped),
-    summary: "Claude returned a reply instead of valid JSON.",
-    model: ""
-  };
-}
-
-function looksLikeFinalResponse(text: string, mode: ClaudeResearchAgentInput["mode"]) {
-  const stripped = text.trim();
-  if (!stripped) {
-    return false;
-  }
-
-  for (const candidate of [stripCodeFence(stripped), ...jsonCandidates(stripped)]) {
-    try {
-      const parsed = JSON.parse(candidate) as Record<string, unknown>;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        continue;
-      }
-      if (mode === "edit_selection" && "replacementText" in parsed) {
-        return true;
-      }
-      if (mode !== "edit_selection" && ("reply" in parsed || "replacementText" in parsed)) {
-        return true;
-      }
-    } catch {
-      // Keep searching for a valid JSON object.
-    }
-  }
-
-  return false;
+When done, call submit_response with reply set to the comment text to post. Optionally add sources and a brief summary.`;
 }
 
 function getBlockText(block: unknown) {
@@ -490,8 +365,6 @@ function getBlockText(block: unknown) {
 
 function handleAssistantMessage(
   message: Extract<SDKMessage, { type: "assistant" }>,
-  mode: ClaudeResearchAgentInput["mode"],
-  textParts: string[],
   onProgress?: (event: ClaudeAgentProgressEvent) => void | Promise<void>
 ) {
   for (const block of message.message.content) {
@@ -499,10 +372,7 @@ function handleAssistantMessage(
     const text = getBlockText(block);
 
     if (type === "text" && text !== null) {
-      textParts.push(text);
-      if (!looksLikeFinalResponse(text, mode)) {
-        emitProgress(onProgress, { role: "agent", message: text });
-      }
+      emitProgress(onProgress, { role: "agent", message: text });
       continue;
     }
 
@@ -522,7 +392,11 @@ function handleAssistantMessage(
     ) {
       const toolBlock = block as { name?: unknown; input?: unknown };
       const name = typeof toolBlock.name === "string" ? toolBlock.name : "Tool";
-      emitProgress(onProgress, { role: "tool", message: `${name}: ${toolInputSummary(name, toolBlock.input)}` });
+      if (name === SUBMIT_TOOL_NAME) {
+        emitProgress(onProgress, { role: "system", message: "Submitting final response." });
+      } else {
+        emitProgress(onProgress, { role: "tool", message: `${name}: ${toolInputSummary(name, toolBlock.input)}` });
+      }
       continue;
     }
 
@@ -591,7 +465,102 @@ function handleProgressMessage(
   }
 }
 
-export async function runClaudeResearchAgent(
+function parsePastedImageDataUrl(src: string) {
+  const match = src.match(/^data:(image\/(?:png|jpeg|jpg|gif|webp));base64,(.+)$/i);
+  if (!match) {
+    return null;
+  }
+  const mediaType = match[1].toLowerCase().replace("image/jpg", "image/jpeg");
+  const data = match[2];
+  if (Math.floor(data.length * 0.75) > MAX_PASTED_IMAGE_BYTES) {
+    return null;
+  }
+  return { mediaType, data };
+}
+
+function pastedImageContentBlocks(documentBlocks: AiDocumentBlock[] | undefined) {
+  if (!documentBlocks?.length) {
+    return [] as Array<{ type: "image"; source: { type: "base64"; media_type: string; data: string } }>;
+  }
+  const blocks: Array<{ type: "image"; source: { type: "base64"; media_type: string; data: string } }> = [];
+  for (const block of documentBlocks) {
+    if (block.type !== "image" || !block.src) continue;
+    const parsed = parsePastedImageDataUrl(block.src);
+    if (!parsed) continue;
+    blocks.push({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: parsed.mediaType,
+        data: parsed.data
+      }
+    });
+    if (blocks.length >= 8) break;
+  }
+  return blocks;
+}
+
+function buildUserMessageStream(input: ClaudeResearchAgentInput): AsyncIterable<SDKUserMessage> {
+  const textBlock = { type: "text" as const, text: buildUserPrompt(input) };
+  const imageBlocks = pastedImageContentBlocks(input.documentBlocks);
+  const content = imageBlocks.length > 0 ? [textBlock, ...imageBlocks] : [textBlock];
+
+  return (async function* () {
+    yield {
+      type: "user",
+      message: {
+        role: "user",
+        content
+      },
+      parent_tool_use_id: null
+    } as SDKUserMessage;
+  })();
+}
+
+function normalizeSubmittedOutput(args: unknown): Partial<ClaudeResearchAgentOutput> {
+  if (!args || typeof args !== "object") {
+    return {};
+  }
+  const typed = args as Record<string, unknown>;
+  const out: Partial<ClaudeResearchAgentOutput> = {};
+  if (typeof typed.replacementText === "string") out.replacementText = typed.replacementText;
+  if (typeof typed.reply === "string") out.reply = typed.reply;
+  if (typeof typed.summary === "string") out.summary = typed.summary;
+  if (Array.isArray(typed.sources)) {
+    out.sources = typed.sources.filter((value): value is string => typeof value === "string");
+  }
+  if (Array.isArray(typed.images)) {
+    type NormalizedImage = { path: string; alt?: string; caption?: string };
+    out.images = typed.images
+      .map((image): NormalizedImage | null => {
+        if (!image || typeof image !== "object") return null;
+        const cast = image as { path?: unknown; alt?: unknown; caption?: unknown };
+        if (typeof cast.path !== "string" || !cast.path) return null;
+        const normalized: NormalizedImage = { path: cast.path };
+        if (typeof cast.alt === "string") normalized.alt = cast.alt;
+        if (typeof cast.caption === "string") normalized.caption = cast.caption;
+        return normalized;
+      })
+      .filter((image): image is NormalizedImage => image != null);
+  }
+  if (Array.isArray(typed.widgets)) {
+    type NormalizedWidget = { label: string; build_cmd?: string; embed_source?: string };
+    out.widgets = typed.widgets
+      .map((widget): NormalizedWidget | null => {
+        if (!widget || typeof widget !== "object") return null;
+        const cast = widget as { label?: unknown; build_cmd?: unknown; embed_source?: unknown };
+        if (typeof cast.label !== "string" || !cast.label) return null;
+        const normalized: NormalizedWidget = { label: cast.label };
+        if (typeof cast.build_cmd === "string") normalized.build_cmd = cast.build_cmd;
+        if (typeof cast.embed_source === "string") normalized.embed_source = cast.embed_source;
+        return normalized;
+      })
+      .filter((widget): widget is NormalizedWidget => widget != null);
+  }
+  return out;
+}
+
+async function runClaudeResearchAgentOnce(
   input: ClaudeResearchAgentInput,
   onProgress?: (event: ClaudeAgentProgressEvent) => void | Promise<void>
 ): Promise<ClaudeResearchAgentOutput> {
@@ -600,14 +569,40 @@ export async function runClaudeResearchAgent(
   const abortController = new AbortController();
   const timeout = setTimeout(() => abortController.abort(), CLAUDE_AGENT_TIMEOUT_MS);
 
+  let captured: Partial<ClaudeResearchAgentOutput> | null = null;
+  const submitTool = tool(
+    "submit_response",
+    "Submit the final response for this turn. Call exactly once when finished. After calling this tool, end your turn — do not emit additional text.",
+    submitResponseSchema,
+    async (args) => {
+      captured = normalizeSubmittedOutput(args);
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Final response captured. End your turn now."
+          }
+        ]
+      };
+    }
+  );
+
+  const mcpServer = createSdkMcpServer({
+    name: "gdocs",
+    version: "1.0.0",
+    tools: [submitTool],
+    alwaysLoad: true
+  });
+
   const agentQuery = query({
-    prompt: buildUserPrompt(input),
+    prompt: buildUserMessageStream(input),
     options: {
       cwd,
       systemPrompt: buildSystemPrompt(input),
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
-      allowedTools: CLAUDE_AGENT_TOOLS,
+      allowedTools: [...CLAUDE_AGENT_TOOLS, SUBMIT_TOOL_NAME],
+      mcpServers: { gdocs: mcpServer },
       maxTurns: Number.parseInt(process.env.CLAUDE_AGENT_MAX_TURNS || "12", 10),
       model,
       abortController
@@ -616,14 +611,13 @@ export async function runClaudeResearchAgent(
 
   emitProgress(onProgress, { role: "system", message: "Starting Claude research agent." });
 
-  const textParts: string[] = [];
   let resultText = "";
   let errors: string[] = [];
 
   try {
     for await (const message of agentQuery) {
       if (message.type === "assistant") {
-        handleAssistantMessage(message, input.mode, textParts, onProgress);
+        handleAssistantMessage(message, onProgress);
       } else if (message.type === "result") {
         if (!message.is_error && "result" in message && typeof message.result === "string") {
           resultText = message.result;
@@ -651,10 +645,45 @@ export async function runClaudeResearchAgent(
   }
 
   emitProgress(onProgress, { role: "system", message: "Preparing document update." });
-  const finalText = chooseFinalText(resultText, textParts);
-  const parsed = parseClaudeAgentOutput(finalText, input.mode);
-  parsed.model = `claude-agent-sdk:${model}`;
-  parsed.images ??= [];
-  parsed.widgets ??= [];
-  return parsed;
+  const captureValue = captured as Partial<ClaudeResearchAgentOutput> | null;
+  const fallback: Partial<ClaudeResearchAgentOutput> = captureValue
+    ? captureValue
+    : input.mode === "edit_selection"
+      ? { replacementText: resultText.trim(), summary: "Agent finished without calling submit_response." }
+      : { reply: resultText.trim(), summary: "Agent finished without calling submit_response." };
+
+  return {
+    ...fallback,
+    images: fallback.images ?? [],
+    widgets: fallback.widgets ?? [],
+    model: `claude-agent-sdk:${model}`
+  };
+}
+
+function isRetryableAgentError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  if (/timed out/i.test(error.message)) {
+    return false;
+  }
+  return /(rate|timeout|fetch|network|ECONN|ETIMEDOUT|EAI_AGAIN|overloaded|temporar)/i.test(error.message);
+}
+
+export async function runClaudeResearchAgent(
+  input: ClaudeResearchAgentInput,
+  onProgress?: (event: ClaudeAgentProgressEvent) => void | Promise<void>
+): Promise<ClaudeResearchAgentOutput> {
+  try {
+    return await runClaudeResearchAgentOnce(input, onProgress);
+  } catch (error) {
+    if (!isRetryableAgentError(error)) {
+      throw error;
+    }
+    emitProgress(onProgress, {
+      role: "system",
+      message: `Retrying after transient error: ${error instanceof Error ? error.message : "unknown"}`
+    });
+    return runClaudeResearchAgentOnce(input, onProgress);
+  }
 }

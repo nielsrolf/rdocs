@@ -80,7 +80,7 @@ export async function POST(request: Request, { params }: RouteContext) {
   let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
 
   try {
-    const { history: conversationHistory, rootRunId } = await buildConversationHistory(
+    const { history: conversationHistory } = await buildConversationHistory(
       id,
       parsed.data.previousRunId ?? null
     );
@@ -95,9 +95,6 @@ export async function POST(request: Request, { params }: RouteContext) {
       }
     });
     aiRunId = aiRun.id;
-    if (rootRunId && parsed.data.previousRunId) {
-      // No-op for now; chain is reconstructed via parentRunId. rootRunId is informational.
-    }
     await recordAiRunEvent({
       aiRunId: aiRun.id,
       role: "user",

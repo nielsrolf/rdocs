@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
+import { CLAUDE_AGENT_TOOLS } from "@/lib/ai-tools";
 import { db } from "@/lib/db";
 
 export type LinkedRepository = {
@@ -31,18 +32,6 @@ export type CommitResult = {
 
 const WORKSPACE_ROOT = path.join(process.cwd(), ".research-workspaces");
 const MAX_OVERVIEW_FILES = 240;
-const CLAUDE_AGENT_TOOLS = [
-  "Read",
-  "Write",
-  "Edit",
-  "MultiEdit",
-  "Grep",
-  "Glob",
-  "LS",
-  "Bash",
-  "WebSearch",
-  "WebFetch"
-];
 
 function runCommand(
   command: string,
@@ -57,7 +46,7 @@ function runCommand(
 
     let stdout = "";
     let stderr = "";
-    const timeout = windowlessTimeout(() => {
+    const timeout = setTimeout(() => {
       child.kill("SIGTERM");
       reject(new Error(`${command} ${args.join(" ")} timed out.`));
     }, options.timeoutMs ?? 120_000);
@@ -81,10 +70,6 @@ function runCommand(
       resolve({ stdout, stderr });
     });
   });
-}
-
-function windowlessTimeout(callback: () => void, ms: number) {
-  return setTimeout(callback, ms);
 }
 
 function getRepoName(repoUrl: string) {
@@ -246,16 +231,104 @@ export async function getWorkspaceOverview(workspace: string | null) {
   }
 }
 
+export function parseBuildCommand(buildCmd: string): string[] | null {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "\"" | "'" | null = null;
+  let escaped = false;
+
+  for (const char of buildCmd.trim()) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+    if (char === "\"" || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += char;
+  }
+
+  if (escaped || quote) {
+    return null;
+  }
+  if (current) {
+    tokens.push(current);
+  }
+  return tokens.length > 0 ? tokens : null;
+}
+
+export function validateWidgetBuildCommand(tokens: string[], cwd: string) {
+  const executable = tokens[0];
+  if (!executable || executable.includes("/") || executable.includes("\\")) {
+    return "Widget build command must start with an executable name such as python, node, sh, bash, npm, or npx.";
+  }
+
+  const allowedExecutables = new Set(["python", "python3", "node", "sh", "bash", "npm", "npx"]);
+  if (!allowedExecutables.has(executable)) {
+    return `Widget build executable "${executable}" is not allowed.`;
+  }
+
+  const workspaceRoot = path.resolve(cwd);
+  for (const token of tokens.slice(1)) {
+    if (!token || token.startsWith("-") || /^[A-Za-z0-9_./:=,@+-]+$/.test(token)) {
+      continue;
+    }
+    return `Widget build argument contains unsupported characters: ${token}`;
+  }
+
+  const scriptToken = tokens.find((token) => /(^|\/)widgets\/.+\.(py|js|mjs|cjs|sh)$/i.test(token));
+  if (scriptToken) {
+    const scriptPath = path.resolve(cwd, scriptToken);
+    if (!scriptPath.startsWith(`${workspaceRoot}${path.sep}`)) {
+      return "Widget build script must be inside the repository workspace.";
+    }
+  }
+
+  return null;
+}
+
 export async function runWidgetBuild(buildCmd: string, cwd: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  const tokens = parseBuildCommand(buildCmd);
+  if (!tokens) {
+    return { ok: false, error: "Widget build command could not be parsed." };
+  }
+
+  const validationError = validateWidgetBuildCommand(tokens, cwd);
+  if (validationError) {
+    return { ok: false, error: validationError };
+  }
+
   return new Promise((resolve) => {
-    const child = spawn(buildCmd, {
+    const [command, ...args] = tokens;
+    const child = spawn(command, args, {
       cwd,
-      shell: true,
+      shell: false,
       env: process.env
     });
     let stderr = "";
     let stdout = "";
-    const timeout = windowlessTimeout(() => {
+    const timeout = setTimeout(() => {
       child.kill("SIGTERM");
       resolve({ ok: false, error: "Widget build timed out after 120 seconds." });
     }, 120_000);
@@ -322,7 +395,7 @@ async function syncBranchToBaseWorkspace(baseWorkspace: string, commitSha: strin
 async function resolveMergeConflictsWithClaude(baseWorkspace: string, commitSha: string) {
   const model = process.env.CLAUDE_AGENT_MODEL || "sonnet";
   const abortController = new AbortController();
-  const timeout = windowlessTimeout(() => abortController.abort(), 300_000);
+  const timeout = setTimeout(() => abortController.abort(), 300_000);
   const prompt = `A git merge is currently in progress in this repository.
 
 The commit being merged is ${commitSha}.

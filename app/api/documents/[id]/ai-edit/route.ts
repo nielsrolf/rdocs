@@ -1,6 +1,3 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -12,9 +9,11 @@ import { detectEditAssetIntent } from "@/lib/ai-asset-intent";
 import { db } from "@/lib/db";
 import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
 import { commitWorkspaceChanges, ensureLinkedRepositoryWorktree, getWorkspaceOverview, runWidgetBuild } from "@/lib/research-workspace";
+import { normalizeSourceLinks } from "@/lib/sources";
 
 const aiEditSchema = z.object({
   selectedText: z.string().min(1).max(200000),
+  selectedMarkdown: z.string().max(400000).optional().nullable(),
   selectedContext: z.string().max(50000).optional().nullable(),
   instruction: z.string().min(1).max(4000),
   fromPos: z.number().int().nonnegative().optional(),
@@ -59,151 +58,8 @@ function normalizeAgentImages(images: unknown, documentId: string, shareToken: s
     .filter((image): image is NonNullable<typeof image> => image != null);
 }
 
-function wantsPlots(instruction: string) {
-  return detectEditAssetIntent(instruction).wantsImage;
-}
-
-function wantsWidget(instruction: string) {
-  return detectEditAssetIntent(instruction).wantsWidget;
-}
-
 function hasMarkdownImage(text: string) {
   return /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/.test(text);
-}
-
-async function listRepoImages(root: string, dir = ""): Promise<string[]> {
-  const absoluteDir = path.join(root, dir);
-  const entries = await fs.readdir(absoluteDir, { withFileTypes: true }).catch(() => []);
-  const images: string[] = [];
-
-  for (const entry of entries) {
-    if (entry.name.startsWith(".") || entry.name === "__pycache__") {
-      continue;
-    }
-
-    const relativePath = path.posix.join(dir.split(path.sep).join(path.posix.sep), entry.name);
-    const absolutePath = path.join(root, relativePath);
-    if (entry.isDirectory()) {
-      images.push(...(await listRepoImages(root, relativePath)));
-      continue;
-    }
-
-    if (entry.isFile() && /\.(png|jpe?g|webp|gif|svg)$/i.test(entry.name)) {
-      images.push(relativePath);
-    }
-  }
-
-  return images;
-}
-
-async function listRepoHtmlAssets(root: string, dir = "assets"): Promise<Array<{ path: string; mtimeMs: number }>> {
-  const absoluteDir = path.join(root, dir);
-  const entries = await fs.readdir(absoluteDir, { withFileTypes: true }).catch(() => []);
-  const assets: Array<{ path: string; mtimeMs: number }> = [];
-
-  for (const entry of entries) {
-    if (entry.name.startsWith(".") || entry.name === "__pycache__") {
-      continue;
-    }
-
-    const relativePath = path.posix.join(dir.split(path.sep).join(path.posix.sep), entry.name);
-    const absolutePath = path.join(root, relativePath);
-    if (entry.isDirectory()) {
-      assets.push(...(await listRepoHtmlAssets(root, relativePath)));
-      continue;
-    }
-
-    if (entry.isFile() && /\.html?$/i.test(entry.name)) {
-      const stat = await fs.stat(absolutePath).catch(() => null);
-      assets.push({ path: relativePath, mtimeMs: stat?.mtimeMs ?? 0 });
-    }
-  }
-
-  return assets;
-}
-
-async function findWidgetBuildScript(root: string, embedSource: string) {
-  const assetBaseName = path.basename(embedSource).replace(/\.html?$/i, "");
-  const candidates = [
-    `widgets/build_${assetBaseName}.py`,
-    `widgets/${assetBaseName}.py`,
-    `widgets/build_${assetBaseName}.js`,
-    `widgets/${assetBaseName}.js`,
-    `widgets/build_${assetBaseName}.mjs`,
-    `widgets/${assetBaseName}.mjs`,
-    `widgets/build_${assetBaseName}.sh`,
-    `widgets/${assetBaseName}.sh`
-  ];
-
-  for (const candidate of candidates) {
-    const exists = await fs
-      .stat(path.join(root, candidate))
-      .then((stat) => stat.isFile())
-      .catch(() => false);
-    if (!exists) {
-      continue;
-    }
-
-    if (candidate.endsWith(".py")) {
-      return `python ${candidate}`;
-    }
-    if (candidate.endsWith(".js") || candidate.endsWith(".mjs")) {
-      return `node ${candidate}`;
-    }
-    return `sh ${candidate}`;
-  }
-
-  return null;
-}
-
-function labelFromAssetPath(assetPath: string) {
-  const baseName = path.basename(assetPath).replace(/\.html?$/i, "");
-  return baseName
-    .split(/[_-]+/)
-    .filter(Boolean)
-    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
-    .join(" ") || "Interactive widget";
-}
-
-function scoreInferredImage(filePath: string) {
-  const lower = filePath.toLowerCase();
-  let score = 0;
-  if (lower.includes("claude-opus-4-7")) score += 20;
-  if (lower.includes("correlations/grid")) score += 18;
-  if (lower.includes("agentic/ranking")) score += 18;
-  if (lower.includes("number/ranking")) score += 14;
-  if (lower.includes("fermi/ranking")) score += 14;
-  if (lower.includes("elo/ranking")) score += 12;
-  if (lower.includes("liking/ranking")) score += 10;
-  if (lower.includes("legacy")) score -= 12;
-  if (lower.includes("ranking.png")) score += 6;
-  if (lower.includes("correlations")) score += 5;
-  return score;
-}
-
-async function inferPlotImages(input: {
-  workspace: string | null;
-  documentId: string;
-  shareToken: string | null;
-  aiRunId: string | null;
-  instruction: string;
-}) {
-  if (!input.workspace || !wantsPlots(input.instruction)) {
-    return [];
-  }
-
-  const candidates = await listRepoImages(input.workspace);
-  return candidates
-    .map((candidate) => ({ candidate, score: scoreInferredImage(candidate) }))
-    .filter((item) => item.score > 0)
-    .sort((left, right) => right.score - left.score || left.candidate.localeCompare(right.candidate))
-    .slice(0, 5)
-    .map((item) => ({
-      path: item.candidate,
-      src: buildRepoFileUrl(input.documentId, item.candidate, input.shareToken, input.aiRunId),
-      alt: item.candidate.split("/").slice(-3).join(" / "),
-      caption: item.candidate
-    }));
 }
 
 async function createAgentWidgets(input: {
@@ -287,107 +143,6 @@ async function createAgentWidgets(input: {
   }
 
   return { created, buildErrors };
-}
-
-async function inferAgentWidgets(input: {
-  workspace: string | null;
-  documentId: string;
-  shareToken: string | null;
-  instruction: string;
-  aiRunId: string | null;
-  runStartedAt: Date;
-}) {
-  if (!input.workspace || !wantsWidget(input.instruction)) {
-    return { created: [] as Array<Record<string, unknown>>, buildErrors: [] as string[] };
-  }
-
-  const recentHtmlAssets = (await listRepoHtmlAssets(input.workspace))
-    .filter((asset) => asset.mtimeMs >= input.runStartedAt.getTime() - 5_000)
-    .sort((left, right) => right.mtimeMs - left.mtimeMs || left.path.localeCompare(right.path));
-
-  for (const asset of recentHtmlAssets) {
-    const buildCmd = await findWidgetBuildScript(input.workspace, asset.path);
-    if (!buildCmd) {
-      continue;
-    }
-
-    const buildResult = await runWidgetBuild(buildCmd, input.workspace);
-    const lastError = buildResult.ok ? null : buildResult.error.slice(0, 6000);
-    const buildErrors = buildResult.ok ? [] : [`Inferred widget failed to build: ${lastError}`];
-    const record = await db.embeddedWidget.create({
-      data: {
-        documentId: input.documentId,
-        label: labelFromAssetPath(asset.path),
-        buildCmd,
-        embedSource: asset.path,
-        createdByRunId: input.aiRunId,
-        workspacePath: input.workspace,
-        lastBuiltAt: buildResult.ok ? new Date() : null,
-        lastError
-      }
-    });
-
-    return {
-      created: [
-        {
-          id: record.id,
-          label: record.label,
-          buildCmd: record.buildCmd,
-          embedSource: record.embedSource,
-          lastError: record.lastError,
-          src: `/api/documents/${input.documentId}/widgets/${record.id}/source${
-            input.shareToken ? `?share=${encodeURIComponent(input.shareToken)}` : ""
-          }`
-        }
-      ],
-      buildErrors
-    };
-  }
-
-  const buildScript = path.join(input.workspace, "widgets", "build_rollout_explorer.py");
-  const embedSource = "assets/rollouts.html";
-  const hasBuildScript = await fs
-    .stat(buildScript)
-    .then((stat) => stat.isFile())
-    .catch(() => false);
-
-  if (!hasBuildScript) {
-    return { created: [], buildErrors: [] };
-  }
-
-  const buildCmd = `python widgets/build_rollout_explorer.py --output ${embedSource}`;
-  const buildResult = await runWidgetBuild(buildCmd, input.workspace);
-  const lastError = buildResult.ok ? null : buildResult.error.slice(0, 6000);
-  const buildErrors = buildResult.ok ? [] : [`Inferred widget failed to build: ${lastError}`];
-
-  const record = await db.embeddedWidget.create({
-    data: {
-      documentId: input.documentId,
-      label: "Agentic trajectory explorer",
-      buildCmd,
-      embedSource,
-      createdByRunId: input.aiRunId,
-      workspacePath: input.workspace,
-      lastBuiltAt: buildResult.ok ? new Date() : null,
-      lastError
-    }
-  });
-
-  return {
-    created: [
-      {
-        id: record.id,
-        label: record.label,
-        buildCmd: record.buildCmd,
-        embedSource: record.embedSource,
-        lastError: record.lastError,
-        src: `/api/documents/${input.documentId}/widgets/${record.id}/source${
-          input.shareToken ? `?share=${encodeURIComponent(input.shareToken)}` : ""
-        }`
-      }
-    ],
-    buildErrors
-  };
 }
 
 type RouteContext = {
@@ -498,6 +253,7 @@ export async function POST(request: Request, { params }: RouteContext) {
       workspacePath: linkedRepo?.workspace ?? null,
       workspaceOverview,
       selectedText: parsed.data.selectedText,
+      selectedMarkdown: parsed.data.selectedMarkdown ?? null,
       selectedContext: parsed.data.selectedContext ?? null,
       instruction: parsed.data.instruction.trim()
     }, async (event) => {
@@ -513,17 +269,11 @@ export async function POST(request: Request, { params }: RouteContext) {
         })
       ]).catch(() => null);
     });
-    const normalizedImages = normalizeAgentImages(result.images, id, parsed.data.shareToken ?? null, aiRun.id);
-    const images =
-      normalizedImages.length > 0
-        ? normalizedImages
-        : await inferPlotImages({
-            workspace: linkedRepo?.workspace ?? null,
-            documentId: id,
-            shareToken: parsed.data.shareToken ?? null,
-            aiRunId: aiRun.id,
-            instruction: parsed.data.instruction
-          });
+    const sourceLinks = normalizeSourceLinks([
+      ...(Array.isArray(result.sources) ? result.sources : []),
+      ...(Array.isArray(result.sourceLinks) ? result.sourceLinks : [])
+    ]);
+    const images = normalizeAgentImages(result.images, id, parsed.data.shareToken ?? null, aiRun.id);
     const widgetResult = await createAgentWidgets({
       widgets: result.widgets,
       documentId: id,
@@ -531,19 +281,8 @@ export async function POST(request: Request, { params }: RouteContext) {
       workspace: linkedRepo?.workspace ?? null,
       aiRunId: aiRun.id
     });
-    const widgetOutput =
-      widgetResult.created.length > 0
-        ? widgetResult
-        : await inferAgentWidgets({
-            workspace: linkedRepo?.workspace ?? null,
-            documentId: id,
-            shareToken: parsed.data.shareToken ?? null,
-            instruction: parsed.data.instruction,
-            aiRunId: aiRun.id,
-            runStartedAt: aiRun.startedAt
-          });
-    const widgets = widgetOutput.created;
-    for (const buildError of widgetOutput.buildErrors) {
+    const widgets = widgetResult.created;
+    for (const buildError of widgetResult.buildErrors) {
       await recordAiRunEvent({ aiRunId: aiRun.id, role: "error", message: buildError });
     }
     const assetIntent = detectEditAssetIntent(parsed.data.instruction);
@@ -590,7 +329,7 @@ export async function POST(request: Request, { params }: RouteContext) {
           ? result.replacementText
           : result.summary || parsed.data.selectedText,
       model: result.model,
-      visitedSources: [],
+      visitedSources: sourceLinks,
       images,
       widgets,
       commitSha: commit.commitSha,

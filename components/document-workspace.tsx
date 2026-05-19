@@ -8,7 +8,7 @@ import TableCell from "@tiptap/extension-table-cell";
 import TableHeader from "@tiptap/extension-table-header";
 import TableRow from "@tiptap/extension-table-row";
 import Underline from "@tiptap/extension-underline";
-import { Fragment } from "@tiptap/pm/model";
+import { Fragment, Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { EditorContent, JSONContent, NodeViewProps, NodeViewWrapper, ReactNodeViewRenderer, useEditor } from "@tiptap/react";
@@ -18,6 +18,7 @@ import MarkdownIt from "markdown-it";
 import { MutableRefObject, useEffect, useMemo, useRef, useState } from "react";
 
 import { PermissionLevelValue, ThreadStatusValue, permissionLevels } from "@/lib/contracts";
+import { getDocumentMarkdown } from "@/lib/content";
 import { getSourceLabel } from "@/lib/sources";
 import { cn, formatDateTime, permissionLabel, truncate } from "@/lib/utils";
 
@@ -182,6 +183,16 @@ type CommentAnchorRange = {
   toPos: number;
 };
 
+type ProseMirrorDocWithDescendants = {
+  descendants: ProseMirrorNode["descendants"];
+};
+
+type WidgetDraft = {
+  label: string;
+  buildCmd: string;
+  embedSource: string;
+};
+
 type ToolbarButtonProps = {
   active?: boolean;
   disabled?: boolean;
@@ -251,6 +262,23 @@ function getSelectionContextFromEditor(editor: NonNullable<ReturnType<typeof use
   return editor.state.doc.textBetween(start, end, " ").replace(/\s+/g, " ").trim();
 }
 
+function getSelectionMarkdownFromEditor(
+  editor: NonNullable<ReturnType<typeof useEditor>>,
+  from: number,
+  to: number
+): string {
+  const slice = editor.state.doc.slice(from, to);
+  const fragment = slice.content.toJSON();
+  if (!Array.isArray(fragment) || fragment.length === 0) {
+    return editor.state.doc.textBetween(from, to, " ").trim();
+  }
+  const markdown = getDocumentMarkdown({ type: "doc", content: fragment }).trim();
+  if (markdown) {
+    return markdown;
+  }
+  return editor.state.doc.textBetween(from, to, " ").trim();
+}
+
 function describeNodeSelection(node: { type?: { name?: string }; attrs?: Record<string, unknown> }) {
   if (node.type?.name === "image") {
     const alt = typeof node.attrs?.alt === "string" ? node.attrs.alt : "Image";
@@ -316,7 +344,25 @@ const aiEditMarkdown = new MarkdownIt({
   linkify: true,
   breaks: true
 });
+
+const defaultLinkOpenRenderer =
+  aiEditMarkdown.renderer.rules.link_open ??
+  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+
+aiEditMarkdown.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+  const token = tokens[idx];
+  token.attrSet("target", "_blank");
+  token.attrSet("rel", "noopener noreferrer");
+  return defaultLinkOpenRenderer(tokens, idx, options, env, self);
+};
+
 const DEFAULT_COMMENT_TAGS = ["Resolved", "Footnote"];
+
+function MarkdownBody({ body, className }: { body: string; className: string }) {
+  const renderedHtml = useMemo(() => aiEditMarkdown.render(body.trim() || ""), [body]);
+
+  return <div className={className} dangerouslySetInnerHTML={{ __html: renderedHtml }} />;
+}
 
 function getThreadTags(thread: Pick<ThreadView, "tags" | "status">) {
   const tags = Array.isArray(thread.tags) ? thread.tags : [];
@@ -619,7 +665,7 @@ const CommentAnchor = Mark.create({
   }
 });
 
-function collectCommentAnchorRanges(doc: { descendants: (callback: (node: any, pos: number) => void) => void }) {
+function collectCommentAnchorRanges(doc: ProseMirrorDocWithDescendants) {
   const ranges = new Map<string, CommentAnchorRange>();
 
   doc.descendants((node, pos) => {
@@ -648,7 +694,7 @@ function collectCommentAnchorRanges(doc: { descendants: (callback: (node: any, p
 }
 
 function resolveCommentAnchorRange(
-  doc: { descendants: (callback: (node: any, pos: number) => void) => void },
+  doc: ProseMirrorDocWithDescendants,
   thread: HighlightThread
 ) {
   return collectCommentAnchorRanges(doc).get(thread.id) ?? null;
@@ -1416,7 +1462,7 @@ function AgentTimeline({
                   <span>{formatRelativeTime(event.createdAt)}</span>
                 </div>
               ) : null}
-              <div className="agent-bubble-body">{event.message}</div>
+              <MarkdownBody body={event.message} className="agent-bubble-body markdown-body" />
             </div>
           );
         }
@@ -1432,7 +1478,7 @@ function AgentTimeline({
                   <span>{formatRelativeTime(event.createdAt)}</span>
                 </div>
               ) : null}
-              <div className="agent-bubble-body">{event.message}</div>
+              <MarkdownBody body={event.message} className="agent-bubble-body markdown-body" />
             </div>
           );
         }
@@ -1509,7 +1555,7 @@ export function DocumentWorkspace({
   const [activeAiRun, setActiveAiRun] = useState<ActiveAiRunView | null>(null);
   const [activeAiRuns, setActiveAiRuns] = useState<ActiveAiRunView[]>([]);
   const [aiRuns, setAiRuns] = useState<ActiveAiRunView[]>([]);
-  const [activeAiTarget, setActiveAiTarget] = useState<ActiveAiTarget | null>(null);
+  const [, setActiveAiTarget] = useState<ActiveAiTarget | null>(null);
   const [agentPanelOpen, setAgentPanelOpen] = useState(false);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [composeMode, setComposeMode] = useState<"selected" | "new">("selected");
@@ -1525,9 +1571,18 @@ export function DocumentWorkspace({
   const [historyVersions, setHistoryVersions] = useState<VersionView[]>([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
+  const [widgetDialogOpen, setWidgetDialogOpen] = useState(false);
+  const [widgetDraft, setWidgetDraft] = useState<WidgetDraft>({
+    label: "",
+    buildCmd: "",
+    embedSource: ""
+  });
+  const [widgetBusy, setWidgetBusy] = useState(false);
   const [remoteNotice, setRemoteNotice] = useState<string | null>(null);
   const [threadOffsets, setThreadOffsets] = useState<Record<string, number>>({});
   const [railHeight, setRailHeight] = useState(640);
+  const [newTagThreadId, setNewTagThreadId] = useState<string | null>(null);
+  const [newTagDraft, setNewTagDraft] = useState("");
   const saveTimerRef = useRef<number | null>(null);
   const isApplyingRemoteUpdateRef = useRef(false);
   const hasUnsavedChangesRef = useRef(false);
@@ -1547,6 +1602,7 @@ export function DocumentWorkspace({
   const activeThreadIdRef = useRef<string | null>(initialThreads[0]?.id ?? null);
   const previousAiRunsRef = useRef<Record<string, string>>({});
   const notifiedAgentRunsRef = useRef<Set<string>>(new Set());
+  const notificationPermissionPromiseRef = useRef<Promise<boolean> | null>(null);
   const canWriteComments = isAuthenticated && initialPermission !== "VIEW";
   const canWriteDocument = initialPermission === "EDIT";
 
@@ -1573,19 +1629,27 @@ export function DocumentWorkspace({
       return false;
     }
 
-    if (Notification.permission === "default") {
-      await Notification.requestPermission();
+    if (notificationPermissionPromiseRef.current) {
+      return notificationPermissionPromiseRef.current;
     }
 
-    if (Notification.permission !== "granted") {
-      return false;
-    }
+    notificationPermissionPromiseRef.current = (async () => {
+      if (Notification.permission === "default") {
+        await Notification.requestPermission();
+      }
 
-    if ("serviceWorker" in navigator) {
-      await navigator.serviceWorker.register("/agent-notifications-sw.js").catch(() => null);
-    }
+      if (Notification.permission !== "granted") {
+        return false;
+      }
 
-    return true;
+      if ("serviceWorker" in navigator) {
+        await navigator.serviceWorker.register("/agent-notifications-sw.js").catch(() => null);
+      }
+
+      return true;
+    })();
+
+    return notificationPermissionPromiseRef.current;
   }
 
   async function showAgentSystemNotification(title: string, body: string) {
@@ -2122,40 +2186,26 @@ export function DocumentWorkspace({
       return;
     }
 
-    const raw = window.prompt(
-      "Widget JSON",
-      '{"label":"Rollout explorer","build_cmd":"python widgets/build_rollout_explorer.py --output assets/rollouts.html","embed_source":"assets/rollouts.html"}'
-    );
-    if (!raw) {
+    setGlobalError(null);
+    setWidgetDialogOpen(true);
+  }
+
+  async function handleCreateWidget() {
+    if (!editor || !canWriteDocument || widgetBusy) {
       return;
     }
 
-    let parsed: { label?: unknown; build_cmd?: unknown; buildCmd?: unknown; embed_source?: unknown; embedSource?: unknown };
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      setGlobalError("Widget config must be valid JSON.");
-      return;
-    }
-
-    const label = typeof parsed.label === "string" ? parsed.label : "Interactive widget";
-    const buildCmd =
-      typeof parsed.build_cmd === "string"
-        ? parsed.build_cmd
-        : typeof parsed.buildCmd === "string"
-          ? parsed.buildCmd
-          : "";
-    const embedSource =
-      typeof parsed.embed_source === "string"
-        ? parsed.embed_source
-        : typeof parsed.embedSource === "string"
-          ? parsed.embedSource
-          : "";
+    const label = widgetDraft.label.trim() || "Interactive widget";
+    const buildCmd = widgetDraft.buildCmd.trim();
+    const embedSource = widgetDraft.embedSource.trim();
 
     if (!buildCmd || !embedSource) {
-      setGlobalError("Widget config needs build_cmd and embed_source.");
+      setGlobalError("Widget config needs build command and embed source.");
       return;
     }
+
+    setWidgetBusy(true);
+    setGlobalError(null);
 
     const response = await fetch(`/api/documents/${documentId}/widgets`, {
       method: "POST",
@@ -2165,12 +2215,14 @@ export function DocumentWorkspace({
       body: JSON.stringify({
         label,
         buildCmd,
-        embedSource
+        embedSource,
+        shareToken
       })
     });
     const data = await response.json().catch(() => null);
     if (!response.ok || !data?.widget) {
       setGlobalError(data?.error ?? "Unable to create widget.");
+      setWidgetBusy(false);
       return;
     }
 
@@ -2194,6 +2246,8 @@ export function DocumentWorkspace({
       })
       .run();
     normalizeCurrentEditorWidgets();
+    setWidgetDialogOpen(false);
+    setWidgetBusy(false);
   }
 
   async function handleCreateComment() {
@@ -2304,6 +2358,7 @@ export function DocumentWorkspace({
     const editSelection = selection;
     const instruction = editInstruction.trim();
     const aiTarget = getSelectionEditTarget(selection);
+    const selectedMarkdown = getSelectionMarkdownFromEditor(editor, editSelection.from, editSelection.to);
     setGlobalError(null);
     await ensureAgentNotificationPermission();
     setActiveAiTarget(aiTarget);
@@ -2326,6 +2381,7 @@ export function DocumentWorkspace({
       },
       body: JSON.stringify({
         selectedText: editSelection.text,
+        selectedMarkdown,
         selectedContext: editSelection.context,
         instruction,
         fromPos: editSelection.from,
@@ -2536,14 +2592,14 @@ export function DocumentWorkspace({
     void updateThreadTags(thread, tags, tag === "Resolved" && !hasTag ? "RESOLVED" : undefined);
   }
 
-  function handleAddThreadTag(thread: ThreadView) {
-    const raw = window.prompt("Tag name", "");
-    const tag = raw?.trim();
+  function commitNewThreadTag(thread: ThreadView) {
+    const tag = newTagDraft.trim().slice(0, 48);
+    setNewTagThreadId(null);
+    setNewTagDraft("");
     if (!tag) {
       return;
     }
-
-    toggleThreadTag(thread, tag.slice(0, 48));
+    toggleThreadTag(thread, tag);
   }
 
   async function handleAgentConversation(options?: { previousRunId?: string | null; rootId?: string | null }) {
@@ -2863,7 +2919,6 @@ export function DocumentWorkspace({
       }
     }
     return out;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeAiRuns, editor]);
 
   const commentThreadRunsByThread = useMemo(() => {
@@ -3048,6 +3103,18 @@ export function DocumentWorkspace({
           </details>
 
           <div className="document-topbar-actions">
+            <button
+              className="ghost-button"
+              onClick={() => setAgentPanelOpen((open) => !open)}
+              type="button"
+            >
+              Agents{activeAiRuns.length > 0 ? ` (${activeAiRuns.length})` : ""}
+            </button>
+            {isOwner ? (
+              <button className="primary-button" onClick={() => setShareModalOpen(true)} type="button">
+                Share
+              </button>
+            ) : null}
             <details className="header-menu header-menu-right">
               <summary>More</summary>
               <div className="header-menu-panel header-actions-panel">
@@ -3066,18 +3133,6 @@ export function DocumentWorkspace({
                 >
                   Version history
                 </button>
-                <button
-                  className="ghost-button"
-                  onClick={() => setAgentPanelOpen((open) => !open)}
-                  type="button"
-                >
-                  Agents{activeAiRuns.length > 0 ? ` (${activeAiRuns.length})` : ""}
-                </button>
-                {isOwner ? (
-                  <button className="primary-button" onClick={() => setShareModalOpen(true)} type="button">
-                    Share
-                  </button>
-                ) : null}
               </div>
             </details>
           </div>
@@ -3276,16 +3331,41 @@ export function DocumentWorkspace({
                       }
                     )}
                     {canWriteComments ? (
-                      <button
-                        className="comment-tag-add"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          handleAddThreadTag(thread);
-                        }}
-                        type="button"
-                      >
-                        +
-                      </button>
+                      newTagThreadId === thread.id ? (
+                        <input
+                          autoFocus
+                          className="comment-tag-add-input"
+                          maxLength={48}
+                          onBlur={() => commitNewThreadTag(thread)}
+                          onChange={(event) => setNewTagDraft(event.target.value)}
+                          onClick={(event) => event.stopPropagation()}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              commitNewThreadTag(thread);
+                            } else if (event.key === "Escape") {
+                              event.preventDefault();
+                              setNewTagThreadId(null);
+                              setNewTagDraft("");
+                            }
+                          }}
+                          onMouseDown={(event) => event.stopPropagation()}
+                          placeholder="New tag"
+                          value={newTagDraft}
+                        />
+                      ) : (
+                        <button
+                          className="comment-tag-add"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setNewTagThreadId(thread.id);
+                            setNewTagDraft("");
+                          }}
+                          type="button"
+                        >
+                          +
+                        </button>
+                      )
                     ) : null}
                   </div>
 
@@ -3333,7 +3413,7 @@ export function DocumentWorkspace({
                                 ) : null}
                               </div>
                             </div>
-                            <p>{comment.body}</p>
+                            <MarkdownBody body={comment.body} className="comment-bubble-body markdown-body" />
                             {comment.aiModel ? (
                               <div className="comment-ai-meta">
                                 <span className="subtle-pill">{comment.aiModel}</span>
@@ -3684,6 +3764,90 @@ export function DocumentWorkspace({
               </div>
             )}
           </div>
+        </div>
+      ) : null}
+
+      {widgetDialogOpen ? (
+        <div
+          className="share-modal-backdrop"
+          onClick={() => {
+            if (!widgetBusy) {
+              setWidgetDialogOpen(false);
+            }
+          }}
+          role="presentation"
+        >
+          <form
+            aria-modal="true"
+            className="widget-config-modal"
+            onClick={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleCreateWidget();
+            }}
+            role="dialog"
+          >
+            <div className="share-modal-header">
+              <div>
+                <h2>Insert widget</h2>
+                <p>Create an embedded widget from a build command and generated HTML file.</p>
+              </div>
+              <button
+                className="ghost-button"
+                disabled={widgetBusy}
+                onClick={() => setWidgetDialogOpen(false)}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="widget-config-fields">
+              <label>
+                <span>Label</span>
+                <input
+                  onChange={(event) => setWidgetDraft((draft) => ({ ...draft, label: event.target.value }))}
+                  placeholder="Short name shown above the widget"
+                  value={widgetDraft.label}
+                />
+              </label>
+              <label>
+                <span>Build command</span>
+                <textarea
+                  onChange={(event) => setWidgetDraft((draft) => ({ ...draft, buildCmd: event.target.value }))}
+                  placeholder="e.g. python widgets/build_<name>.py --output assets/<name>.html"
+                  rows={3}
+                  value={widgetDraft.buildCmd}
+                />
+              </label>
+              <label>
+                <span>Embed source</span>
+                <input
+                  onChange={(event) => setWidgetDraft((draft) => ({ ...draft, embedSource: event.target.value }))}
+                  placeholder="e.g. assets/<name>.html"
+                  value={widgetDraft.embedSource}
+                />
+              </label>
+            </div>
+
+            <div className="comment-composer-actions">
+              <button
+                className="ghost-button"
+                disabled={widgetBusy}
+                onClick={() => setWidgetDialogOpen(false)}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="primary-button"
+                disabled={widgetBusy || !widgetDraft.buildCmd.trim() || !widgetDraft.embedSource.trim()}
+                type="submit"
+              >
+                {widgetBusy ? "Creating..." : "Insert widget"}
+              </button>
+            </div>
+          </form>
         </div>
       ) : null}
 

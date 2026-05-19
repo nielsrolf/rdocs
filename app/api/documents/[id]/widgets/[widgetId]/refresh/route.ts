@@ -105,6 +105,8 @@ export async function POST(request: Request, { params }: RouteContext) {
 
   return NextResponse.json({
     widget: refreshed,
-    embedUrl: `/api/documents/${id}/widgets/${widget.id}/source?share=${encodeURIComponent(shareToken ?? "")}`
+    embedUrl: `/api/documents/${id}/widgets/${widget.id}/source${
+      shareToken ? `?share=${encodeURIComponent(shareToken)}` : ""
+    }`
   });
 }
