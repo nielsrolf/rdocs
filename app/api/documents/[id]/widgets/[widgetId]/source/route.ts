@@ -17,6 +17,19 @@ type RouteContext = {
   }>;
 };
 
+async function tryReadInside(workspace: string, embedSource: string) {
+  const sourcePath = path.resolve(workspace, embedSource);
+  const workspaceRoot = path.resolve(workspace);
+  if (!sourcePath.startsWith(`${workspaceRoot}${path.sep}`)) {
+    return null;
+  }
+  try {
+    return await fs.readFile(sourcePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
 export async function GET(request: Request, { params }: RouteContext) {
   const { id, widgetId } = await params;
   const user = await getCurrentUser();
@@ -43,21 +56,45 @@ export async function GET(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Repository is not linked." }, { status: 400 });
   }
 
-  const sourcePath = path.resolve(linkedRepo.workspace, widget.embedSource);
-  const workspaceRoot = path.resolve(linkedRepo.workspace);
-  if (!sourcePath.startsWith(`${workspaceRoot}${path.sep}`)) {
-    return NextResponse.json({ error: "Widget source must be inside the linked repository." }, { status: 400 });
+  const candidates = [linkedRepo.workspace];
+  if (widget.workspacePath && !candidates.includes(widget.workspacePath)) {
+    candidates.push(widget.workspacePath);
   }
 
-  try {
-    const html = await fs.readFile(sourcePath, "utf8");
-    return new NextResponse(html, {
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-        "Content-Security-Policy": "default-src 'self' 'unsafe-inline' data: blob:; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';"
-      }
-    });
-  } catch {
-    return NextResponse.json({ error: "Widget source file was not found." }, { status: 404 });
+  for (const candidate of candidates) {
+    const html = await tryReadInside(candidate, widget.embedSource);
+    if (html !== null) {
+      return new NextResponse(html, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Content-Security-Policy": "default-src 'self' 'unsafe-inline' data: blob:; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';"
+        }
+      });
+    }
   }
+
+  const escapedSource = widget.embedSource.replace(/[&<>"']/g, (ch) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch] ?? ch)
+  );
+  const escapedError = (widget.lastError ?? "").replace(/[&<>"']/g, (ch) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch] ?? ch)
+  );
+  const errorHtml = `<!doctype html><html><head><meta charset="utf-8"><style>
+    body{margin:0;padding:1.25rem;font:14px -apple-system,BlinkMacSystemFont,Arial,sans-serif;color:#202124;background:#fdecea;}
+    h1{margin:0 0 .5rem;font-size:1rem;color:#c5221f;}
+    p{margin:.25rem 0;}
+    code{background:rgba(0,0,0,.06);padding:.1rem .3rem;border-radius:4px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.85rem;}
+    pre{margin:.5rem 0 0;padding:.6rem .75rem;background:#fff5f4;border:1px solid rgba(197,34,31,.2);border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.78rem;white-space:pre-wrap;max-height:14rem;overflow:auto;}
+  </style></head><body>
+    <h1>Widget source not found</h1>
+    <p>Expected to find <code>${escapedSource}</code> in the linked repository.</p>
+    <p>Try <strong>Refresh</strong> on the widget, or ask Claude to regenerate it.</p>
+    ${escapedError ? `<pre>${escapedError}</pre>` : ""}
+  </body></html>`;
+  return new NextResponse(errorHtml, {
+    status: 404,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8"
+    }
+  });
 }

@@ -63,6 +63,7 @@ model CommentThread {
   fromPos       Int?
   toPos         Int?
   status        String    @default("OPEN")
+  tags          String    @default("[]")
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   document      Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
@@ -108,6 +109,7 @@ model AiRun {
   documentId    String
   triggerType   String
   triggerId     String?
+  parentRunId   String?
   instruction   String
   status        String            @default("RUNNING")
   progress      String?
@@ -120,12 +122,15 @@ model AiRun {
   startedAt     DateTime          @default(now())
   finishedAt    DateTime?
   document      Document          @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  parentRun     AiRun?            @relation("AiRunFollowUps", fields: [parentRunId], references: [id], onDelete: SetNull)
+  followUps     AiRun[]           @relation("AiRunFollowUps")
   comments      Comment[]
   versions      DocumentVersion[]
   events        AiRunEvent[]
 
   @@index([documentId, startedAt])
   @@index([documentId, status])
+  @@index([parentRunId])
 }
 
 model AiRunEvent {
@@ -140,16 +145,18 @@ model AiRunEvent {
 }
 
 model EmbeddedWidget {
-  id          String    @id @default(cuid())
-  documentId  String
-  label       String
-  buildCmd    String
-  embedSource String
-  lastBuiltAt DateTime?
-  lastError   String?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  document    Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  id            String    @id @default(cuid())
+  documentId    String
+  label         String
+  buildCmd      String
+  embedSource   String
+  createdByRunId String?
+  workspacePath String?
+  lastBuiltAt   DateTime?
+  lastError     String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  document      Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@index([documentId, createdAt])
 }

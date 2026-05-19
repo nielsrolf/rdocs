@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
 
 import { AiDocumentBlock } from "@/lib/content";
@@ -41,6 +40,10 @@ type ClaudeResearchAgentInput = {
   }>;
   selectedText?: string;
   selectedContext?: string | null;
+  conversationHistory?: Array<{
+    role: string;
+    message: string;
+  }>;
 };
 
 type ClaudeCommentReplyOutput = {
@@ -88,19 +91,6 @@ export type ClaudeAgentProgressEvent = {
   message: string;
 };
 
-function getPythonEnv() {
-  const pythonHome = path.join(process.cwd(), ".python-home");
-  const cacheHome = path.join(process.cwd(), ".cache");
-
-  fs.mkdirSync(pythonHome, { recursive: true });
-  fs.mkdirSync(cacheHome, { recursive: true });
-
-  return {
-    pythonHome,
-    cacheHome
-  };
-}
-
 function runPythonJsonScript<TInput, TOutput>(
   scriptName: string,
   input: TInput,
@@ -109,7 +99,6 @@ function runPythonJsonScript<TInput, TOutput>(
   onProgress?: (event: ClaudeAgentProgressEvent) => void | Promise<void>
 ): Promise<TOutput> {
   const scriptPath = path.join(process.cwd(), "scripts", scriptName);
-  const { pythonHome, cacheHome } = getPythonEnv();
   const command = process.env.PYTHON_BIN || "uv";
   const args = process.env.PYTHON_BIN
     ? [scriptPath]
@@ -120,8 +109,6 @@ function runPythonJsonScript<TInput, TOutput>(
       cwd: process.cwd(),
       env: {
         ...process.env,
-        HOME: pythonHome,
-        XDG_CACHE_HOME: cacheHome,
         UV_NO_PROGRESS: "1"
       }
     });

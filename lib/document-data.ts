@@ -3,6 +3,51 @@ import { db } from "@/lib/db";
 import { parseSourceLinks, serializeSourceLinks } from "@/lib/sources";
 
 const VERSION_SNAPSHOT_COOLDOWN_MS = 45_000;
+const DEFAULT_THREAD_TAGS = ["Resolved", "Footnote"];
+
+export function normalizeThreadTags(tags: unknown) {
+  if (!Array.isArray(tags)) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  return tags
+    .map((tag) => (typeof tag === "string" ? tag.trim() : ""))
+    .filter((tag) => tag.length > 0 && tag.length <= 48)
+    .filter((tag) => {
+      const key = tag.toLowerCase();
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 20);
+}
+
+export function parseThreadTags(tags: string | null | undefined, status?: string | null) {
+  const parsed = (() => {
+    if (!tags) {
+      return [];
+    }
+
+    try {
+      return normalizeThreadTags(JSON.parse(tags));
+    } catch {
+      return [];
+    }
+  })();
+
+  if (status === "RESOLVED" && !parsed.some((tag) => tag.toLowerCase() === "resolved")) {
+    return ["Resolved", ...parsed];
+  }
+
+  return parsed;
+}
+
+export function getDefaultThreadTags() {
+  return DEFAULT_THREAD_TAGS;
+}
 
 export function serializeComment(comment: {
   id: string;
@@ -11,6 +56,7 @@ export function serializeComment(comment: {
   sourceLinks?: string | null;
   commitSha?: string | null;
   commitUrl?: string | null;
+  aiRunId?: string | null;
   createdAt: Date;
   author: {
     id: string;
@@ -24,6 +70,7 @@ export function serializeComment(comment: {
     sourceLinks: parseSourceLinks(comment.sourceLinks),
     commitSha: comment.commitSha ?? null,
     commitUrl: comment.commitUrl ?? null,
+    aiRunId: comment.aiRunId ?? null,
     createdAt: comment.createdAt,
     author: comment.author
   };
@@ -36,6 +83,7 @@ export function serializeThread(thread: {
   fromPos: number | null;
   toPos: number | null;
   status: string;
+  tags?: string | null;
   createdAt: Date;
   createdBy: {
     id: string;
@@ -48,6 +96,7 @@ export function serializeThread(thread: {
     sourceLinks?: string | null;
     commitSha?: string | null;
     commitUrl?: string | null;
+    aiRunId?: string | null;
     createdAt: Date;
     author: {
       id: string;
@@ -62,6 +111,7 @@ export function serializeThread(thread: {
     fromPos: thread.fromPos,
     toPos: thread.toPos,
     status: thread.status,
+    tags: parseThreadTags(thread.tags, thread.status),
     createdAt: thread.createdAt,
     createdBy: thread.createdBy,
     comments: thread.comments.map(serializeComment)
@@ -102,6 +152,7 @@ export async function listDocumentThreads(documentId: string) {
       fromPos: true,
       toPos: true,
       status: true,
+      tags: true,
       createdAt: true,
       createdBy: {
         select: {
@@ -118,6 +169,7 @@ export async function listDocumentThreads(documentId: string) {
           sourceLinks: true,
           commitSha: true,
           commitUrl: true,
+          aiRunId: true,
           createdAt: true,
           author: {
             select: {

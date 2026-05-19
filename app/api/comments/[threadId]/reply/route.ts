@@ -56,6 +56,10 @@ export async function POST(request: Request, { params }: RouteContext) {
       id: true,
       body: true,
       aiModel: true,
+      sourceLinks: true,
+      commitSha: true,
+      commitUrl: true,
+      aiRunId: true,
       createdAt: true,
       author: {
         select: {

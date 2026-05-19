@@ -1,10 +1,12 @@
-import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
+
 import { NextResponse } from "next/server";
 
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
-import { commitWorkspaceChanges, ensureLinkedRepository } from "@/lib/research-workspace";
+import { commitWorkspaceChanges, ensureLinkedRepository, runWidgetBuild } from "@/lib/research-workspace";
 
 export const runtime = "nodejs";
 
@@ -15,36 +17,14 @@ type RouteContext = {
   }>;
 };
 
-function runBuildCommand(command: string, cwd: string) {
-  return new Promise<void>((resolve, reject) => {
-    const child = spawn(command, {
-      cwd,
-      shell: true,
-      env: process.env
-    });
-
-    let stderr = "";
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error("Widget build timed out after 120 seconds."));
-    }, 120_000);
-
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timeout);
-      if (code !== 0) {
-        reject(new Error(stderr || `Widget build exited with code ${code}`));
-        return;
-      }
-      resolve();
-    });
-  });
+async function workspaceHasFile(workspace: string | null, relPath: string) {
+  if (!workspace) return false;
+  try {
+    const stat = await fs.stat(path.resolve(workspace, relPath));
+    return stat.isFile();
+  } catch {
+    return false;
+  }
 }
 
 export async function POST(request: Request, { params }: RouteContext) {
@@ -73,35 +53,58 @@ export async function POST(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Link a repository before refreshing widgets." }, { status: 400 });
   }
 
-  try {
-    await runBuildCommand(widget.buildCmd, linkedRepo.workspace);
+  // Detect the first token of the build command — usually the script path — so we
+  // can pick the workspace that actually has it.
+  const buildHints = widget.buildCmd
+    .split(/\s+/)
+    .map((token) => token.replace(/^["']|["']$/g, ""))
+    .filter((token) => /(^|\/)widgets\/|\.(py|js|mjs|cjs|ts|tsx|sh)$/i.test(token) && !token.startsWith("-"));
+
+  const candidates = [linkedRepo.workspace];
+  if (widget.workspacePath && !candidates.includes(widget.workspacePath)) {
+    candidates.push(widget.workspacePath);
+  }
+
+  let chosen = linkedRepo.workspace;
+  for (const candidate of candidates) {
+    const hasAll = await Promise.all(
+      buildHints.map((token) => workspaceHasFile(candidate, token))
+    ).then((results) => results.every(Boolean));
+    if (hasAll) {
+      chosen = candidate;
+      break;
+    }
+  }
+
+  const buildResult = await runWidgetBuild(widget.buildCmd, chosen);
+  if (!buildResult.ok) {
+    const message = buildResult.error || "Widget build failed.";
+    await db.embeddedWidget.update({
+      where: { id: widget.id },
+      data: { lastError: message }
+    });
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+
+  if (chosen === linkedRepo.workspace) {
     await commitWorkspaceChanges({
       workspace: linkedRepo.workspace,
       repoUrl: linkedRepo.url,
       message: `Refresh widget ${widget.id}`,
       push: true
-    });
-    const refreshed = await db.embeddedWidget.update({
-      where: { id: widget.id },
-      data: {
-        lastBuiltAt: new Date(),
-        lastError: null
-      }
-    });
-
-    return NextResponse.json({
-      widget: refreshed,
-      embedUrl: `/api/documents/${id}/widgets/${widget.id}/source?share=${encodeURIComponent(shareToken ?? "")}`
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Widget build failed.";
-    await db.embeddedWidget.update({
-      where: { id: widget.id },
-      data: {
-        lastError: message
-      }
-    });
-
-    return NextResponse.json({ error: message }, { status: 500 });
+    }).catch(() => null);
   }
+
+  const refreshed = await db.embeddedWidget.update({
+    where: { id: widget.id },
+    data: {
+      lastBuiltAt: new Date(),
+      lastError: null
+    }
+  });
+
+  return NextResponse.json({
+    widget: refreshed,
+    embedUrl: `/api/documents/${id}/widgets/${widget.id}/source?share=${encodeURIComponent(shareToken ?? "")}`
+  });
 }

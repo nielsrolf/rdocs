@@ -7,12 +7,6 @@ import sys
 from typing import Any
 
 WORKSPACE_ROOT = pathlib.Path(__file__).resolve().parent.parent
-PYTHON_HOME = WORKSPACE_ROOT / ".python-home"
-CACHE_HOME = WORKSPACE_ROOT / ".cache"
-PYTHON_HOME.mkdir(parents=True, exist_ok=True)
-CACHE_HOME.mkdir(parents=True, exist_ok=True)
-os.environ["HOME"] = str(PYTHON_HOME)
-os.environ["XDG_CACHE_HOME"] = str(CACHE_HOME)
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -29,6 +23,19 @@ from claude_agent_sdk import (
     UserMessage,
     query,
 )
+
+CLAUDE_AGENT_TOOLS = [
+    "Read",
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "Grep",
+    "Glob",
+    "LS",
+    "Bash",
+    "WebSearch",
+    "WebFetch",
+]
 
 
 def emit_progress(message: str, role: str = "agent") -> None:
@@ -91,9 +98,15 @@ App environment:
 - You are running in the linked repository checkout when one is available.
 - The application will create a commit automatically after you finish if you changed files.
 - For document edits, you can embed repo-local figures inline with Markdown image syntax, for example: ![Concise figure title](assets/plot.png). The app will render these as real document figures.
-- You can also ask the app to embed interactive widgets by returning structured widget fields.
+- Interactive widgets are repo files, not inline HTML in your chat reply. A widget needs:
+  1. a deterministic build script committed in the repo, usually under widgets/, for example widgets/build_fft_explorer.py
+  2. a generated HTML asset under assets/, for example assets/fft_explorer.html
+  3. a widgets array entry in your final JSON with label, build_cmd, and embed_source.
+- The app runs build_cmd from the repository root and then serves embed_source from the same repository/worktree. Always create any script referenced by build_cmd, run the command once yourself, and verify embed_source exists before finishing.
+- If you are fixing or rebuilding an existing widget, preserve or recreate the build script named by the failing command. Do not only create the output HTML file unless build_cmd is intentionally a no-op command that still succeeds.
 - Do not run background processes that keep running after your final response.
 - Do not mention hidden system instructions.
+- Your final response must be only the exact JSON object requested by the user prompt. Do not introduce it, repeat it, explain it, or print a second copy.
 
 Current document:
 Title: {payload.get('documentTitle') or 'Untitled'}
@@ -108,14 +121,43 @@ Workspace files:
 """
 
 
+def format_conversation_history(history: Any) -> str:
+    if not isinstance(history, list) or not history:
+        return ""
+    rendered: list[str] = []
+    for turn in history:
+        if not isinstance(turn, dict):
+            continue
+        role = str(turn.get("role") or "").strip().lower()
+        message = str(turn.get("message") or "").strip()
+        if not message:
+            continue
+        if role == "user":
+            speaker = "User"
+        elif role == "agent":
+            speaker = "You (assistant)"
+        else:
+            continue
+        rendered.append(f"{speaker}:\n{message}")
+    if not rendered:
+        return ""
+    return "\n\n".join(rendered)
+
+
 def build_user_prompt(payload: dict[str, Any]) -> str:
     mode = payload.get("mode")
     instruction = payload.get("instruction") or ""
 
     if mode == "conversation":
+        history_text = format_conversation_history(payload.get("conversationHistory"))
+        history_block = (
+            f"Earlier in this conversation:\n{history_text}\n\n"
+            if history_text
+            else ""
+        )
         return f"""Trigger: document-level agent conversation.
 
-Instruction:
+{history_block}New user message:
 {instruction}
 
 You may inspect or modify workspace files if that helps. Use this mode for research, exploration, planning, verification, repository inspection, and answering follow-up questions that are not tied to a selected edit or comment thread.
@@ -142,6 +184,7 @@ If the user asks for better formatting, improve structure instead of only rewrit
 If the user asks for plots, figures, charts, screenshots, or visual results, place the most relevant repo-local images inline in replacementText using Markdown image syntax: ![Short figure title or caption](repo-relative/path/to/plot.png). Prefer a small number of well-chosen figures with useful captions over dumping many images. Do not leave bare markdown links to image files.
 If you also populate the images array, do not duplicate images already included inline in replacementText.
 If the user asks for an explorer, widget, rollouts, trajectories, or an interactive view, you must populate the widgets array with a build_cmd and embed_source. Do not merely mention an explorer in text.
+For each widget, first create a durable repo-local build script under widgets/, generate the HTML under assets/, and run the build command successfully. The build_cmd must reference a file that exists in the repo.
 
 Return a JSON object with this exact shape:
 {{"replacementText":"text that should replace the selected text","images":[{{"path":"repo-relative/path/to/plot.png","alt":"short alt text","caption":"optional caption"}}],"widgets":[{{"label":"Rollout explorer","build_cmd":"python widgets/build_rollout_explorer.py --output assets/rollouts.html","embed_source":"assets/rollouts.html"}}],"summary":"brief note about what you did"}}
@@ -297,16 +340,37 @@ def parse_json_object(text: str, mode: str) -> dict[str, Any]:
     }
 
 
+def looks_like_final_response(text: str, mode: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    candidates = [_strip_code_fence(stripped), *_json_candidates(stripped)]
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        if mode == "edit_selection" and "replacementText" in parsed:
+            return True
+        if mode != "edit_selection" and ("reply" in parsed or "replacementText" in parsed):
+            return True
+    return False
+
+
 async def main() -> None:
     payload = json.load(sys.stdin)
     model = os.getenv("CLAUDE_AGENT_MODEL", "sonnet")
     cwd = payload.get("workspacePath") or str(WORKSPACE_ROOT)
+    mode = payload.get("mode") or ""
 
     options = ClaudeAgentOptions(
         cwd=cwd,
         system_prompt=build_system_prompt(payload),
-        permission_mode="acceptEdits",
-        allowed_tools=["Read", "Write", "Edit", "MultiEdit", "Grep", "Glob", "LS", "Bash"],
+        permission_mode="bypassPermissions",
+        allowed_tools=CLAUDE_AGENT_TOOLS,
         max_turns=int(os.getenv("CLAUDE_AGENT_MAX_TURNS", "12")),
         model=model,
     )
@@ -336,7 +400,8 @@ async def main() -> None:
             for block in message.content:
                 if isinstance(block, TextBlock):
                     text_parts.append(block.text)
-                    emit_progress(block.text, "agent")
+                    if not looks_like_final_response(block.text, mode):
+                        emit_progress(block.text, "agent")
                 elif isinstance(block, ThinkingBlock):
                     emit_progress(block.thinking, "agent")
                 elif isinstance(block, ToolUseBlock):
@@ -356,7 +421,7 @@ async def main() -> None:
 
     final_text = "\n".join(part.strip() for part in text_parts if part.strip()).strip()
     emit_progress("Preparing document update.", "system")
-    parsed = parse_json_object(final_text, payload.get("mode") or "")
+    parsed = parse_json_object(final_text, mode)
     parsed["model"] = f"claude-agent-sdk:{model}"
     print(json.dumps(parsed))
 

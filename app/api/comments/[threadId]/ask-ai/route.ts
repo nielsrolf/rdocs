@@ -192,6 +192,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     const commit = linkedRepo
       ? await commitWorkspaceChanges({
           workspace: linkedRepo.workspace,
+          baseWorkspace: linkedRepo.baseWorkspace,
           repoUrl: linkedRepo.url,
           message: `AI research for document comment ${thread.id}`,
           push: true
@@ -216,6 +217,7 @@ export async function POST(request: Request, { params }: RouteContext) {
         sourceLinks: true,
         commitSha: true,
         commitUrl: true,
+        aiRunId: true,
         author: {
           select: {
             id: true,
@@ -252,6 +254,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     if (linkedRepo) {
       await commitWorkspaceChanges({
         workspace: linkedRepo.workspace,
+        baseWorkspace: linkedRepo.baseWorkspace,
         repoUrl: linkedRepo.url,
         message: `Save failed AI comment changes for ${thread.id}`,
         push: true

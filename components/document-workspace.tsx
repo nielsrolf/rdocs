@@ -1,6 +1,6 @@
 "use client";
 
-import { Extension, Node, mergeAttributes } from "@tiptap/core";
+import { Extension, Mark, Node, mergeAttributes } from "@tiptap/core";
 import Image from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
 import Table from "@tiptap/extension-table";
@@ -19,7 +19,7 @@ import { MutableRefObject, useEffect, useMemo, useRef, useState } from "react";
 
 import { PermissionLevelValue, ThreadStatusValue, permissionLevels } from "@/lib/contracts";
 import { getSourceLabel } from "@/lib/sources";
-import { formatDateTime, permissionLabel, truncate } from "@/lib/utils";
+import { cn, formatDateTime, permissionLabel, truncate } from "@/lib/utils";
 
 type CommentView = {
   id: string;
@@ -28,6 +28,7 @@ type CommentView = {
   sourceLinks: string[];
   commitSha: string | null;
   commitUrl: string | null;
+  aiRunId: string | null;
   createdAt: string | Date;
   author: {
     id: string;
@@ -42,6 +43,7 @@ type ThreadView = {
   fromPos: number | null;
   toPos: number | null;
   status: ThreadStatusValue;
+  tags: string[];
   createdAt: string | Date;
   createdBy: {
     id: string;
@@ -115,6 +117,7 @@ type ActiveAiRunView = {
   id: string;
   triggerType: string;
   triggerId?: string | null;
+  parentRunId?: string | null;
   instruction: string;
   status: string;
   progress: string | null;
@@ -165,11 +168,18 @@ type SelectionState = {
 };
 
 type SelectionPopoverMode = "menu" | "comment" | "edit";
+type CommentTagFilterValue = "yes" | "no" | "all";
 
 type HighlightThread = {
   id: string;
   fromPos: number | null;
   toPos: number | null;
+};
+
+type CommentAnchorRange = {
+  threadId: string;
+  fromPos: number;
+  toPos: number;
 };
 
 type ToolbarButtonProps = {
@@ -280,6 +290,18 @@ function getInitials(name: string) {
     .join("");
 }
 
+const CLAUDE_COMMENT_ICON_SRC = "/claude/happy_no_outline.png";
+
+function CommentAvatar({ comment }: { comment: Pick<CommentView, "aiModel" | "author"> }) {
+  const authorName = comment.author?.name ?? "Claude";
+
+  if (comment.aiModel) {
+    return <img alt="" className="avatar-dot avatar-dot-image" src={CLAUDE_COMMENT_ICON_SRC} />;
+  }
+
+  return <span className="avatar-dot">{getInitials(authorName)}</span>;
+}
+
 function escapeHtml(value: string) {
   return value
     .replaceAll("&", "&amp;")
@@ -294,6 +316,15 @@ const aiEditMarkdown = new MarkdownIt({
   linkify: true,
   breaks: true
 });
+const DEFAULT_COMMENT_TAGS = ["Resolved", "Footnote"];
+
+function getThreadTags(thread: Pick<ThreadView, "tags" | "status">) {
+  const tags = Array.isArray(thread.tags) ? thread.tags : [];
+  if (thread.status === "RESOLVED" && !tags.some((tag) => tag.toLowerCase() === "resolved")) {
+    return ["Resolved", ...tags];
+  }
+  return tags;
+}
 
 function buildAiEditHtml(replacementText: string, sourceLinks: string[]) {
   const trimmed = replacementText.trim();
@@ -565,6 +596,64 @@ async function insertImagesAtPosition(
   return true;
 }
 
+const CommentAnchor = Mark.create({
+  name: "commentAnchor",
+  inclusive: false,
+  addAttributes() {
+    return {
+      threadId: {
+        default: null,
+        parseHTML: (element) => element.getAttribute("data-comment-thread-id"),
+        renderHTML: (attributes) =>
+          typeof attributes.threadId === "string" && attributes.threadId
+            ? { "data-comment-thread-id": attributes.threadId }
+            : {}
+      }
+    };
+  },
+  parseHTML() {
+    return [{ tag: "span[data-comment-thread-id]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["span", mergeAttributes(HTMLAttributes), 0];
+  }
+});
+
+function collectCommentAnchorRanges(doc: { descendants: (callback: (node: any, pos: number) => void) => void }) {
+  const ranges = new Map<string, CommentAnchorRange>();
+
+  doc.descendants((node, pos) => {
+    if (!node.isText || !Array.isArray(node.marks)) {
+      return;
+    }
+
+    node.marks.forEach((mark: { type?: { name?: string }; attrs?: { threadId?: unknown } }) => {
+      if (mark.type?.name !== "commentAnchor" || typeof mark.attrs?.threadId !== "string") {
+        return;
+      }
+
+      const threadId = mark.attrs.threadId;
+      const fromPos = pos;
+      const toPos = pos + node.nodeSize;
+      const current = ranges.get(threadId);
+      ranges.set(threadId, {
+        threadId,
+        fromPos: current ? Math.min(current.fromPos, fromPos) : fromPos,
+        toPos: current ? Math.max(current.toPos, toPos) : toPos
+      });
+    });
+  });
+
+  return ranges;
+}
+
+function resolveCommentAnchorRange(
+  doc: { descendants: (callback: (node: any, pos: number) => void) => void },
+  thread: HighlightThread
+) {
+  return collectCommentAnchorRanges(doc).get(thread.id) ?? null;
+}
+
 function createCommentHighlightExtension(
   threadsRef: MutableRefObject<HighlightThread[]>,
   activeThreadIdRef: MutableRefObject<string | null>,
@@ -579,18 +668,14 @@ function createCommentHighlightExtension(
           props: {
             decorations(state) {
               const decorations = threadsRef.current.flatMap((thread) => {
-                if (
-                  thread.fromPos == null ||
-                  thread.toPos == null ||
-                  thread.fromPos >= thread.toPos ||
-                  thread.toPos > state.doc.content.size
-                ) {
+                const range = resolveCommentAnchorRange(state.doc, thread);
+                if (!range) {
                   return [];
                 }
 
                 const isActive = thread.id === activeThreadIdRef.current;
                 return [
-                  Decoration.inline(thread.fromPos, thread.toPos, {
+                  Decoration.inline(range.fromPos, range.toPos, {
                     class: isActive
                       ? "comment-anchor-highlight comment-anchor-highlight-active"
                       : "comment-anchor-highlight"
@@ -600,14 +685,11 @@ function createCommentHighlightExtension(
 
               return DecorationSet.create(state.doc, decorations);
             },
-            handleClick(_view, pos) {
-              const thread = threadsRef.current.find(
-                (candidate) =>
-                  candidate.fromPos != null &&
-                  candidate.toPos != null &&
-                  pos >= candidate.fromPos &&
-                  pos <= candidate.toPos
-              );
+            handleClick(view, pos) {
+              const thread = threadsRef.current.find((candidate) => {
+                const range = resolveCommentAnchorRange(view.state.doc, candidate);
+                return range && pos >= range.fromPos && pos <= range.toPos;
+              });
 
               onActivateThread(thread?.id ?? null);
               return false;
@@ -997,6 +1079,391 @@ const EmbeddedWidget = Node.create({
   }
 });
 
+type ParsedToolCall = {
+  name: string;
+  args: Record<string, unknown> | null;
+  body: string;
+};
+
+function parseToolMessage(message: string): ParsedToolCall | null {
+  const trimmed = message.trim();
+  const usingMatch = trimmed.match(/^Using\s+([A-Za-z][A-Za-z0-9_]*)\.?$/);
+  if (usingMatch) {
+    return { name: usingMatch[1], args: null, body: "" };
+  }
+  const colonIdx = trimmed.indexOf(": ");
+  if (colonIdx < 1 || colonIdx > 60) {
+    return null;
+  }
+  const name = trimmed.slice(0, colonIdx).trim();
+  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(name)) {
+    return null;
+  }
+  const body = trimmed.slice(colonIdx + 2).trim();
+  let args: Record<string, unknown> | null = null;
+  if (body.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(body);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        args = parsed as Record<string, unknown>;
+      }
+    } catch {
+      args = null;
+    }
+  }
+  return { name, args, body };
+}
+
+function isUsingProgressMessage(message: string): boolean {
+  return /^Using\s+[A-Za-z][A-Za-z0-9_]*\.?\s*$/.test(message.trim());
+}
+
+function basename(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? path;
+}
+
+function renderToolSummary(parsed: ParsedToolCall) {
+  const { name, args, body } = parsed;
+  if (!args) {
+    if (!body) {
+      return <span className="agent-tool-arg agent-tool-arg-muted">working…</span>;
+    }
+    return <code className="agent-tool-arg">{truncate(body, 80)}</code>;
+  }
+  if (name === "Bash" && typeof args.command === "string") {
+    return <code className="agent-tool-arg">{truncate(args.command, 90)}</code>;
+  }
+  if (typeof args.file_path === "string") {
+    return (
+      <code className="agent-tool-arg" title={args.file_path}>
+        {basename(args.file_path)}
+      </code>
+    );
+  }
+  if (typeof args.path === "string" && (name === "LS" || name === "Read")) {
+    return (
+      <code className="agent-tool-arg" title={args.path}>
+        {basename(args.path)}
+      </code>
+    );
+  }
+  if (typeof args.pattern === "string") {
+    const where = typeof args.path === "string" ? ` in ${basename(args.path)}` : "";
+    return (
+      <code className="agent-tool-arg">
+        {truncate(`${args.pattern}${where}`, 80)}
+      </code>
+    );
+  }
+  if (typeof args.glob === "string") {
+    return <code className="agent-tool-arg">{truncate(args.glob, 80)}</code>;
+  }
+  const firstKey = Object.keys(args)[0];
+  if (firstKey) {
+    const value = args[firstKey];
+    if (typeof value === "string") {
+      return <code className="agent-tool-arg">{truncate(value, 80)}</code>;
+    }
+  }
+  return <code className="agent-tool-arg">{truncate(JSON.stringify(args), 80)}</code>;
+}
+
+function formatToolResult(message: string): string {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        const textParts = parsed
+          .map((block) => {
+            if (block && typeof block === "object" && "text" in block && typeof (block as { text?: unknown }).text === "string") {
+              return (block as { text: string }).text;
+            }
+            return null;
+          })
+          .filter((part): part is string => Boolean(part));
+        if (textParts.length > 0) {
+          return textParts.join("\n");
+        }
+      }
+      if (typeof parsed === "string") {
+        return parsed;
+      }
+      return JSON.stringify(parsed, null, 2);
+    } catch {
+      return trimmed;
+    }
+  }
+  return trimmed;
+}
+
+function formatRelativeTime(value: string | Date): string {
+  const date = new Date(value);
+  const diff = Date.now() - date.getTime();
+  if (Number.isNaN(diff)) {
+    return "";
+  }
+  const seconds = Math.max(0, Math.floor(diff / 1000));
+  if (seconds < 5) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return formatDateTime(date);
+}
+
+function AgentToolBlock({ call, result }: { call: AiRunEventView; result: AiRunEventView | null }) {
+  const parsed = parseToolMessage(call.message);
+  const name = parsed?.name ?? "tool";
+  const summary = parsed ? renderToolSummary(parsed) : (
+    <code className="agent-tool-arg">{truncate(call.message, 120)}</code>
+  );
+  const resultText = result ? formatToolResult(result.message) : "";
+  const argsPretty = parsed?.args ? JSON.stringify(parsed.args, null, 2) : null;
+  const hasDetails = Boolean(argsPretty || resultText);
+
+  if (!hasDetails) {
+    return (
+      <div className="agent-tool">
+        <div className="agent-tool-header agent-tool-header-static">
+          <span className="agent-tool-name">{name}</span>
+          <span className="agent-tool-summary">{summary}</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <details className="agent-tool">
+      <summary className="agent-tool-header">
+        <span className="agent-tool-name">{name}</span>
+        <span className="agent-tool-summary">{summary}</span>
+        <span className="agent-tool-toggle" aria-hidden />
+
+      </summary>
+      <div className="agent-tool-body">
+        {argsPretty ? (
+          <>
+            <div className="agent-tool-label">Input</div>
+            <pre className="agent-tool-pre">{argsPretty}</pre>
+          </>
+        ) : null}
+        {resultText ? (
+          <>
+            <div className="agent-tool-label">Output</div>
+            <pre className="agent-tool-pre">{resultText}</pre>
+          </>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
+type AgentConversation = {
+  rootId: string;
+  runs: ActiveAiRunView[];
+  events: AiRunEventView[];
+  latestRun: ActiveAiRunView;
+  rootInstruction: string;
+  startedAt: string | Date;
+  lastActivityAt: string | Date;
+  status: string;
+  branchName: string | null;
+  commitSha: string | null;
+  commitUrl: string | null;
+  progress: string | null;
+};
+
+function buildConversations(runs: ActiveAiRunView[]): AgentConversation[] {
+  const byId = new Map(runs.map((run) => [run.id, run]));
+  const rootIdFor = (run: ActiveAiRunView): string => {
+    let cursor: ActiveAiRunView = run;
+    const seen = new Set<string>();
+    while (cursor.parentRunId && byId.has(cursor.parentRunId) && !seen.has(cursor.id)) {
+      seen.add(cursor.id);
+      cursor = byId.get(cursor.parentRunId)!;
+    }
+    return cursor.id;
+  };
+  const grouped = new Map<string, ActiveAiRunView[]>();
+  for (const run of runs) {
+    const rootId = rootIdFor(run);
+    if (!grouped.has(rootId)) grouped.set(rootId, []);
+    grouped.get(rootId)!.push(run);
+  }
+  const conversations: AgentConversation[] = [];
+  for (const [rootId, list] of grouped) {
+    const sorted = [...list].sort(
+      (a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime()
+    );
+    const events = sorted
+      .flatMap((run) => run.events ?? [])
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    const latest = sorted[sorted.length - 1];
+    const root = sorted[0];
+    conversations.push({
+      rootId,
+      runs: sorted,
+      events,
+      latestRun: latest,
+      rootInstruction: root.instruction,
+      startedAt: root.startedAt,
+      lastActivityAt: latest.finishedAt ?? latest.startedAt,
+      status: latest.status,
+      branchName: latest.branchName ?? null,
+      commitSha: latest.commitSha ?? null,
+      commitUrl: latest.commitUrl ?? null,
+      progress: latest.progress
+    });
+  }
+  conversations.sort(
+    (a, b) => new Date(b.lastActivityAt).getTime() - new Date(a.lastActivityAt).getTime()
+  );
+  return conversations;
+}
+
+type GroupedAgentEvent =
+  | { kind: "message"; role: "user" | "agent" | "system" | "error"; event: AiRunEventView; key: string }
+  | { kind: "tool"; call: AiRunEventView; result: AiRunEventView | null; key: string };
+
+function groupAgentEvents(events: AiRunEventView[]): GroupedAgentEvent[] {
+  const out: GroupedAgentEvent[] = [];
+  for (let i = 0; i < events.length; i++) {
+    const ev = events[i];
+    if (ev.role === "tool") {
+      // "Using Read." is a low-value progress signal — keep only when a richer
+      // "Read: {...}" event isn't right next to it.
+      if (isUsingProgressMessage(ev.message)) {
+        const neighborHasDetails = [events[i - 1], events[i + 1]].some((neighbor) => {
+          if (!neighbor || neighbor.role !== "tool") return false;
+          if (isUsingProgressMessage(neighbor.message)) return false;
+          return true;
+        });
+        if (neighborHasDetails) continue;
+      }
+      const next = events[i + 1];
+      if (next && next.role === "tool_result") {
+        out.push({ kind: "tool", call: ev, result: next, key: ev.id });
+        i++;
+      } else {
+        out.push({ kind: "tool", call: ev, result: null, key: ev.id });
+      }
+      continue;
+    }
+    // Orphan tool_results (no preceding tool event) have no context — skip.
+    if (ev.role === "tool_result") {
+      continue;
+    }
+    const role: "user" | "agent" | "system" | "error" =
+      ev.role === "user" || ev.role === "agent" || ev.role === "system" || ev.role === "error"
+        ? ev.role
+        : "agent";
+    if (!ev.message.trim()) continue;
+    out.push({ kind: "message", role, event: ev, key: ev.id });
+  }
+  return out;
+}
+
+function AgentTimeline({
+  events,
+  progress,
+  status
+}: {
+  events: AiRunEventView[];
+  progress: string | null;
+  status: string;
+}) {
+  const grouped = useMemo(() => groupAgentEvents(events), [events]);
+  const isRunning = status === "RUNNING";
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [grouped.length, isRunning, progress]);
+
+  if (grouped.length === 0 && !isRunning) {
+    return <div className="agent-timeline-empty">No events yet.</div>;
+  }
+
+  return (
+    <div className="agent-timeline" ref={scrollRef}>
+      {grouped.map((item, idx) => {
+        if (item.kind === "tool") {
+          return <AgentToolBlock call={item.call} key={item.key} result={item.result} />;
+        }
+        const { event, role } = item;
+        const prev = idx > 0 ? grouped[idx - 1] : null;
+        const isContinuation =
+          prev?.kind === "message" && prev.role === role && (role === "user" || role === "agent");
+        if (role === "user") {
+          return (
+            <div
+              className={cn("agent-bubble agent-bubble-user", isContinuation && "agent-bubble-continuation")}
+              key={item.key}
+            >
+              {!isContinuation ? (
+                <div className="agent-bubble-meta">
+                  <span>You</span>
+                  <span>{formatRelativeTime(event.createdAt)}</span>
+                </div>
+              ) : null}
+              <div className="agent-bubble-body">{event.message}</div>
+            </div>
+          );
+        }
+        if (role === "agent") {
+          return (
+            <div
+              className={cn("agent-bubble agent-bubble-agent", isContinuation && "agent-bubble-continuation")}
+              key={item.key}
+            >
+              {!isContinuation ? (
+                <div className="agent-bubble-meta">
+                  <span>Claude</span>
+                  <span>{formatRelativeTime(event.createdAt)}</span>
+                </div>
+              ) : null}
+              <div className="agent-bubble-body">{event.message}</div>
+            </div>
+          );
+        }
+        if (role === "error") {
+          return (
+            <div className="agent-note agent-note-error" key={item.key}>
+              <strong>Error</strong>
+              <span>{event.message}</span>
+            </div>
+          );
+        }
+        return (
+          <div className="agent-note" key={item.key}>
+            {event.message}
+          </div>
+        );
+      })}
+      {isRunning ? (
+        <div className="agent-thinking">
+          <span className="agent-thinking-dots" aria-hidden>
+            <span />
+            <span />
+            <span />
+          </span>
+          <span>{progress ?? "Working…"}</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function DocumentWorkspace({
   currentUserId,
   currentUserName,
@@ -1036,12 +1503,16 @@ export function DocumentWorkspace({
   const [aiBusyThreadId, setAiBusyThreadId] = useState<string | null>(null);
   const [replyBusyThreadId, setReplyBusyThreadId] = useState<string | null>(null);
   const [commentBusy, setCommentBusy] = useState(false);
+  const [commentTagFilters, setCommentTagFilters] = useState<Record<string, CommentTagFilterValue>>({
+    resolved: "no"
+  });
   const [activeAiRun, setActiveAiRun] = useState<ActiveAiRunView | null>(null);
   const [activeAiRuns, setActiveAiRuns] = useState<ActiveAiRunView[]>([]);
   const [aiRuns, setAiRuns] = useState<ActiveAiRunView[]>([]);
   const [activeAiTarget, setActiveAiTarget] = useState<ActiveAiTarget | null>(null);
   const [agentPanelOpen, setAgentPanelOpen] = useState(false);
-  const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  const [composeMode, setComposeMode] = useState<"selected" | "new">("selected");
   const [agentMessage, setAgentMessage] = useState("");
   const [agentBusy, setAgentBusy] = useState(false);
   const [agentToast, setAgentToast] = useState<AgentToast | null>(null);
@@ -1075,6 +1546,7 @@ export function DocumentWorkspace({
   const threadsRef = useRef<HighlightThread[]>(initialThreads);
   const activeThreadIdRef = useRef<string | null>(initialThreads[0]?.id ?? null);
   const previousAiRunsRef = useRef<Record<string, string>>({});
+  const notifiedAgentRunsRef = useRef<Set<string>>(new Set());
   const canWriteComments = isAuthenticated && initialPermission !== "VIEW";
   const canWriteDocument = initialPermission === "EDIT";
 
@@ -1096,17 +1568,54 @@ export function DocumentWorkspace({
     documentUpdatedAtRef.current = documentUpdatedAt;
   }, [documentUpdatedAt]);
 
-  function requestAgentNotificationPermission() {
+  async function ensureAgentNotificationPermission() {
     if (typeof window === "undefined" || !("Notification" in window)) {
-      return;
+      return false;
     }
 
     if (Notification.permission === "default") {
-      void Notification.requestPermission();
+      await Notification.requestPermission();
     }
+
+    if (Notification.permission !== "granted") {
+      return false;
+    }
+
+    if ("serviceWorker" in navigator) {
+      await navigator.serviceWorker.register("/agent-notifications-sw.js").catch(() => null);
+    }
+
+    return true;
+  }
+
+  async function showAgentSystemNotification(title: string, body: string) {
+    if (typeof window === "undefined" || !("Notification" in window) || Notification.permission !== "granted") {
+      return;
+    }
+
+    if ("serviceWorker" in navigator) {
+      const registration =
+        (await navigator.serviceWorker.getRegistration("/agent-notifications-sw.js").catch(() => null)) ??
+        (await navigator.serviceWorker.register("/agent-notifications-sw.js").catch(() => null));
+      if (registration?.showNotification) {
+        await registration.showNotification(title, {
+          body,
+          icon: "/favicon.ico",
+          tag: `agent-${Date.now()}`
+        });
+        return;
+      }
+    }
+
+    new Notification(title, { body });
   }
 
   function notifyAgentDone(run: ActiveAiRunView) {
+    if (notifiedAgentRunsRef.current.has(run.id)) {
+      return;
+    }
+    notifiedAgentRunsRef.current.add(run.id);
+
     const ok = run.status === "SUCCEEDED";
     const title = ok ? "Agent finished" : "Agent needs attention";
     const body =
@@ -1119,9 +1628,23 @@ export function DocumentWorkspace({
       setAgentToast((current) => (current?.id === run.id ? null : current));
     }, 6500);
 
-    if ("Notification" in window && Notification.permission === "granted") {
-      new Notification(title, { body });
-    }
+    void showAgentSystemNotification(title, body);
+  }
+
+  function notifyAgentCompleted(input: {
+    id: string;
+    triggerType: string;
+    triggerId?: string | null;
+    instruction: string;
+    status?: string;
+  }) {
+    notifyAgentDone({
+      ...input,
+      status: input.status ?? "SUCCEEDED",
+      progress: null,
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString()
+    });
   }
 
   function syncAiRuns(nextRuns: ActiveAiRunView[]) {
@@ -1150,8 +1673,8 @@ export function DocumentWorkspace({
     const nextOffsets = threads
       .map((thread) => {
         try {
-          const top =
-            thread.fromPos != null ? editor.view.coordsAtPos(thread.fromPos).top - pageRect.top : 0;
+          const range = resolveCommentAnchorRange(editor.state.doc, thread);
+          const top = range ? editor.view.coordsAtPos(range.fromPos).top - pageRect.top : 0;
           return { id: thread.id, top: Math.max(16, top) };
         } catch {
           return { id: thread.id, top: 16 };
@@ -1328,6 +1851,7 @@ export function DocumentWorkspace({
         allowBase64: true,
         inline: false
       }),
+      CommentAnchor,
       commentHighlightExtension,
       latexRenderExtension,
       Link.configure({
@@ -1673,12 +2197,36 @@ export function DocumentWorkspace({
   }
 
   async function handleCreateComment() {
-    if (!selection || !composerBody.trim()) {
+    if (!selection || !composerBody.trim() || !editor) {
       return;
     }
 
     setCommentBusy(true);
     setGlobalError(null);
+
+    const selectedRange = selection;
+    const threadId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `comment-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const previousContent = editor.getJSON();
+
+    isApplyingRemoteUpdateRef.current = true;
+    const marked = editor
+      .chain()
+      .setTextSelection({ from: selectedRange.from, to: selectedRange.to })
+      .setMark("commentAnchor", { threadId })
+      .setTextSelection({ from: selectedRange.to, to: selectedRange.to })
+      .run();
+    isApplyingRemoteUpdateRef.current = false;
+
+    if (!marked) {
+      setGlobalError("Unable to anchor the comment to the selected text.");
+      setCommentBusy(false);
+      return;
+    }
+
+    const nextContent = editor.getJSON();
 
     const response = await fetch(`/api/documents/${documentId}/comments`, {
       method: "POST",
@@ -1686,11 +2234,13 @@ export function DocumentWorkspace({
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
+        threadId,
         body: composerBody.trim(),
-        anchorText: selection.text,
-        anchorContext: selection.context,
-        fromPos: selection.from,
-        toPos: selection.to,
+        anchorText: selectedRange.text,
+        anchorContext: selectedRange.context,
+        fromPos: selectedRange.from,
+        toPos: selectedRange.to,
+        content: nextContent,
         shareToken
       })
     });
@@ -1698,6 +2248,9 @@ export function DocumentWorkspace({
     const data = await response.json().catch(() => null);
 
     if (!response.ok || !data?.thread) {
+      isApplyingRemoteUpdateRef.current = true;
+      editor.commands.setContent(previousContent, false);
+      isApplyingRemoteUpdateRef.current = false;
       setGlobalError(data?.error ?? "Unable to create thread.");
       setCommentBusy(false);
       return;
@@ -1705,6 +2258,9 @@ export function DocumentWorkspace({
 
     setThreads((current) => [data.thread, ...current]);
     setActiveThreadId(data.thread.id);
+    if (typeof data.updatedAt === "string") {
+      setDocumentUpdatedAt(data.updatedAt);
+    }
     setSelection(null);
     setComposerBody("");
     setSelectionPopoverMode(null);
@@ -1749,7 +2305,7 @@ export function DocumentWorkspace({
     const instruction = editInstruction.trim();
     const aiTarget = getSelectionEditTarget(selection);
     setGlobalError(null);
-    requestAgentNotificationPermission();
+    await ensureAgentNotificationPermission();
     setActiveAiTarget(aiTarget);
     setActiveAiRun({
       id: `pending-selection-edit-${Date.now()}`,
@@ -1782,6 +2338,12 @@ export function DocumentWorkspace({
 
     if (!response.ok || !data?.replacementText) {
       setGlobalError(data?.error ?? "AI edit failed.");
+      notifyAgentCompleted({
+        id: `failed-selection-edit-${Date.now()}`,
+        triggerType: "SELECTION_EDIT",
+        instruction,
+        status: "FAILED"
+      });
       setActiveAiRun(null);
       setActiveAiTarget(null);
       return;
@@ -1826,6 +2388,11 @@ export function DocumentWorkspace({
 
     setActiveAiRun(null);
     setActiveAiTarget(null);
+    notifyAgentCompleted({
+      id: aiRunId ?? `finished-selection-edit-${Date.now()}`,
+      triggerType: "SELECTION_EDIT",
+      instruction
+    });
   }
 
   async function handleReply(threadId: string) {
@@ -1873,7 +2440,7 @@ export function DocumentWorkspace({
   async function handleAskAi(threadId: string) {
     setAiBusyThreadId(threadId);
     setGlobalError(null);
-    requestAgentNotificationPermission();
+    await ensureAgentNotificationPermission();
     setActiveAiTarget({
       type: "comment-thread",
       threadId
@@ -1902,6 +2469,13 @@ export function DocumentWorkspace({
 
     if (!response.ok || !data?.comment) {
       setGlobalError(data?.error ?? "AI reply failed.");
+      notifyAgentCompleted({
+        id: `failed-comment-reply-${Date.now()}`,
+        triggerType: "COMMENT_THREAD",
+        triggerId: threadId,
+        instruction: "Write the next assistant reply for this comment thread.",
+        status: "FAILED"
+      });
       setActiveAiRun(null);
       setActiveAiTarget(null);
       setAiBusyThreadId(null);
@@ -1921,22 +2495,75 @@ export function DocumentWorkspace({
     setActiveAiRun(null);
     setActiveAiTarget(null);
     setAiBusyThreadId(null);
+    notifyAgentCompleted({
+      id: data.comment.aiRunId ?? `finished-comment-reply-${Date.now()}`,
+      triggerType: "COMMENT_THREAD",
+      triggerId: threadId,
+      instruction: "Write the next assistant reply for this comment thread."
+    });
   }
 
-  async function handleAgentConversation() {
+  async function updateThreadTags(thread: ThreadView, tags: string[], status?: ThreadStatusValue) {
+    const response = await fetch(`/api/comments/${thread.id}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        tags,
+        status,
+        shareToken
+      })
+    });
+
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data?.thread) {
+      setGlobalError(data?.error ?? "Unable to update comment tags.");
+      return;
+    }
+
+    setThreads((current) =>
+      current.map((candidate) => (candidate.id === thread.id ? data.thread : candidate))
+    );
+  }
+
+  function toggleThreadTag(thread: ThreadView, tag: string) {
+    const currentTags = getThreadTags(thread);
+    const hasTag = currentTags.some((candidate) => candidate.toLowerCase() === tag.toLowerCase());
+    const tags = hasTag
+      ? currentTags.filter((candidate) => candidate.toLowerCase() !== tag.toLowerCase())
+      : [...currentTags, tag];
+    void updateThreadTags(thread, tags, tag === "Resolved" && !hasTag ? "RESOLVED" : undefined);
+  }
+
+  function handleAddThreadTag(thread: ThreadView) {
+    const raw = window.prompt("Tag name", "");
+    const tag = raw?.trim();
+    if (!tag) {
+      return;
+    }
+
+    toggleThreadTag(thread, tag.slice(0, 48));
+  }
+
+  async function handleAgentConversation(options?: { previousRunId?: string | null; rootId?: string | null }) {
     const message = agentMessage.trim();
     if (!message) {
       return;
     }
 
+    const previousRunId = options?.previousRunId ?? null;
+    const followUpRootId = options?.rootId ?? previousRunId ?? null;
+
     setAgentBusy(true);
     setGlobalError(null);
     setAgentPanelOpen(true);
-    requestAgentNotificationPermission();
+    await ensureAgentNotificationPermission();
 
     const pendingRun: ActiveAiRunView = {
       id: `pending-conversation-${Date.now()}`,
-      triggerType: "CONVERSATION",
+      triggerType: previousRunId ? "CONVERSATION_FOLLOWUP" : "CONVERSATION",
+      parentRunId: previousRunId,
       instruction: message,
       status: "RUNNING",
       progress: "Starting Claude research agent.",
@@ -1952,6 +2579,10 @@ export function DocumentWorkspace({
     };
     syncAiRuns([pendingRun, ...aiRuns]);
     setAgentMessage("");
+    setComposeMode("selected");
+    if (followUpRootId) {
+      setSelectedConversationId(followUpRootId);
+    }
 
     const response = await fetch(`/api/documents/${documentId}/agents`, {
       method: "POST",
@@ -1960,7 +2591,8 @@ export function DocumentWorkspace({
       },
       body: JSON.stringify({
         message,
-        shareToken
+        shareToken,
+        previousRunId
       })
     });
 
@@ -1972,7 +2604,17 @@ export function DocumentWorkspace({
       return;
     }
 
-    syncAiRuns([data.aiRun, ...aiRuns.filter((run) => run.id !== pendingRun.id && run.id !== data.aiRun.id)]);
+    const nextRuns = [
+      data.aiRun,
+      ...aiRuns.filter((run) => run.id !== pendingRun.id && run.id !== data.aiRun.id)
+    ];
+    syncAiRuns(nextRuns);
+    if (!followUpRootId) {
+      const resolvedRootId = data.aiRun.parentRunId
+        ? buildConversations(nextRuns).find((c) => c.runs.some((r) => r.id === data.aiRun.id))?.rootId ?? data.aiRun.id
+        : data.aiRun.id;
+      setSelectedConversationId(resolvedRootId);
+    }
     setAgentBusy(false);
   }
 
@@ -2063,9 +2705,14 @@ export function DocumentWorkspace({
     setActiveThreadId(thread.id);
     setSelectionPopoverMode(null);
 
-    if (editor && thread.fromPos != null && thread.toPos != null) {
+    if (editor) {
       try {
-        editor.commands.setTextSelection({ from: thread.fromPos, to: thread.toPos });
+        const range = resolveCommentAnchorRange(editor.state.doc, thread);
+        if (!range) {
+          return;
+        }
+
+        editor.commands.setTextSelection({ from: range.fromPos, to: range.toPos });
         editor.commands.focus();
       } catch {
         // Ignore stale positions after content edits.
@@ -2120,33 +2767,123 @@ export function DocumentWorkspace({
     setDeleteBusyCommentId(null);
   }
 
-  const orderedThreads = useMemo(() => {
-    const inactiveThreads = threads.filter((thread) => thread.id !== activeThreadId);
-    const activeThread = threads.find((thread) => thread.id === activeThreadId);
-    return activeThread ? [...inactiveThreads, activeThread] : inactiveThreads;
-  }, [activeThreadId, threads]);
-  const selectedVersion =
-    historyVersions.find((version) => version.id === selectedVersionId) ?? historyVersions[0] ?? null;
-  const selectedAgentRun = useMemo(
-    () => aiRuns.find((run) => run.id === selectedAgentRunId) ?? aiRuns[0] ?? null,
-    [aiRuns, selectedAgentRunId]
+  const availableCommentTags = useMemo(() => {
+    const tags = new Map<string, string>();
+    DEFAULT_COMMENT_TAGS.forEach((tag) => tags.set(tag.toLowerCase(), tag));
+    threads.forEach((thread) => {
+      getThreadTags(thread).forEach((tag) => tags.set(tag.toLowerCase(), tag));
+    });
+    return Array.from(tags.values()).sort((left, right) => left.localeCompare(right));
+  }, [threads]);
+
+  function getCommentTagFilter(tag: string) {
+    return commentTagFilters[tag.toLowerCase()] ?? "all";
+  }
+
+  function setCommentTagFilter(tag: string, value: CommentTagFilterValue) {
+    setCommentTagFilters((current) => ({
+      ...current,
+      [tag.toLowerCase()]: value
+    }));
+  }
+
+  const visibleThreads = useMemo(
+    () =>
+      threads.filter((thread) => {
+        const threadTags = getThreadTags(thread);
+        for (const tag of availableCommentTags) {
+          const filter = commentTagFilters[tag.toLowerCase()] ?? "all";
+          if (filter === "all") {
+            continue;
+          }
+          const hasTag = threadTags.some((threadTag) => threadTag.toLowerCase() === tag.toLowerCase());
+          if (filter === "yes" && !hasTag) {
+            return false;
+          }
+          if (filter === "no" && hasTag) {
+            return false;
+          }
+        }
+        return true;
+      }),
+    [availableCommentTags, commentTagFilters, threads]
   );
 
+  const orderedThreads = useMemo(() => {
+    const inactiveThreads = visibleThreads.filter((thread) => thread.id !== activeThreadId);
+    const activeThread = visibleThreads.find((thread) => thread.id === activeThreadId);
+    return activeThread ? [...inactiveThreads, activeThread] : inactiveThreads;
+  }, [activeThreadId, visibleThreads]);
+  const selectedVersion =
+    historyVersions.find((version) => version.id === selectedVersionId) ?? historyVersions[0] ?? null;
+  const conversations = useMemo(() => buildConversations(aiRuns), [aiRuns]);
+  const selectedConversation = useMemo(() => {
+    if (composeMode === "new") return null;
+    if (selectedConversationId) {
+      const found = conversations.find((c) => c.rootId === selectedConversationId);
+      if (found) return found;
+    }
+    return conversations[0] ?? null;
+  }, [composeMode, conversations, selectedConversationId]);
+
   useEffect(() => {
-    if (!selectedAgentRunId && aiRuns[0]) {
-      setSelectedAgentRunId(aiRuns[0].id);
+    if (composeMode === "new") return;
+    if (!selectedConversationId && conversations[0]) {
+      setSelectedConversationId(conversations[0].rootId);
       return;
     }
-
-    if (selectedAgentRunId && aiRuns.length > 0 && !aiRuns.some((run) => run.id === selectedAgentRunId)) {
-      setSelectedAgentRunId(aiRuns[0].id);
+    if (
+      selectedConversationId &&
+      conversations.length > 0 &&
+      !conversations.some((c) => c.rootId === selectedConversationId)
+    ) {
+      setSelectedConversationId(conversations[0].rootId);
     }
-  }, [aiRuns, selectedAgentRunId]);
+  }, [composeMode, conversations, selectedConversationId]);
+
+  const selectionRunTargets = useMemo(() => {
+    if (!editor || !editorPageRef.current) return [];
+    const out: Array<{
+      runId: string;
+      run: ActiveAiRunView;
+      coords: { top: number; left: number; width: number; height: number };
+    }> = [];
+    for (const run of activeAiRuns) {
+      if (run.status !== "RUNNING") continue;
+      if (run.triggerType !== "SELECTION_EDIT") continue;
+      const range = parseAiRunSelectionRange(run.triggerId);
+      if (!range) continue;
+      const target = getRangeEditTarget(range.from, range.to);
+      if (target && target.type === "selection-edit") {
+        out.push({
+          runId: run.id,
+          run,
+          coords: { top: target.top, left: target.left, width: target.width, height: target.height }
+        });
+      }
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeAiRuns, editor]);
+
+  const commentThreadRunsByThread = useMemo(() => {
+    const map = new Map<string, ActiveAiRunView>();
+    for (const run of activeAiRuns) {
+      if (run.status !== "RUNNING") continue;
+      if (run.triggerType !== "COMMENT_THREAD" || !run.triggerId) continue;
+      if (!map.has(run.triggerId)) {
+        map.set(run.triggerId, run);
+      }
+    }
+    return map;
+  }, [activeAiRuns]);
 
   return (
     <section className="workspace-shell">
       {globalError ? <div className="error-banner">{globalError}</div> : null}
 
+      {agentPanelOpen ? null : (
+      <>
       <div className="document-chrome">
         <div className="document-topbar">
           <div className="document-topbar-left">
@@ -2242,6 +2979,32 @@ export function DocumentWorkspace({
                   onClick={handleInsertWidget}
                 />
               </div>
+            </div>
+          </details>
+
+          <details className="header-menu header-menu-comments">
+            <summary>Comments</summary>
+            <div className="header-menu-panel comment-filter-panel" aria-label="Comment filters">
+              {availableCommentTags.map((tag) => {
+                const filter = getCommentTagFilter(tag);
+                return (
+                  <div className="comment-tag-filter-row" key={tag}>
+                    <span>{tag}</span>
+                    <div className="comment-tag-filter-controls" role="group" aria-label={`${tag} filter`}>
+                      {(["yes", "no", "all"] as CommentTagFilterValue[]).map((value) => (
+                        <button
+                          className={filter === value ? "active" : ""}
+                          key={value}
+                          onClick={() => setCommentTagFilter(tag, value)}
+                          type="button"
+                        >
+                          {value === "yes" ? "Yes" : value === "no" ? "No" : "All"}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </details>
 
@@ -2440,19 +3203,20 @@ export function DocumentWorkspace({
               </div>
             ) : null}
 
-            {activeAiRun && activeAiTarget?.type === "selection-edit" ? (
+            {selectionRunTargets.map((target) => (
               <div
                 className="claude-working-selection"
+                key={target.runId}
                 style={{
-                  left: activeAiTarget.left,
-                  top: activeAiTarget.top,
-                  width: activeAiTarget.width,
-                  minHeight: activeAiTarget.height
+                  left: target.coords.left,
+                  top: target.coords.top,
+                  width: target.coords.width,
+                  minHeight: target.coords.height
                 }}
               >
-                <ClaudeWorkingInline activeAiRun={activeAiRun} />
+                <ClaudeWorkingInline activeAiRun={target.run} />
               </div>
-            ) : null}
+            ))}
 
             <EditorContent editor={editor} />
           </div>
@@ -2467,15 +3231,16 @@ export function DocumentWorkspace({
                   : "Comments will appear here when collaborators start a thread."}
               </p>
             </div>
+          ) : orderedThreads.length === 0 ? (
+            <div className="comment-rail-empty">
+              <p>No comments match this filter.</p>
+            </div>
           ) : (
             orderedThreads.map((thread) => {
               const isActive = activeThread?.id === thread.id;
               const latestComment = thread.comments[thread.comments.length - 1];
-              const isThreadAiBusy =
-                aiBusyThreadId === thread.id ||
-                (activeAiRun?.triggerType === "COMMENT_THREAD" &&
-                  activeAiTarget?.type === "comment-thread" &&
-                  activeAiTarget.threadId === thread.id);
+              const threadRun = commentThreadRunsByThread.get(thread.id) ?? null;
+              const isThreadAiBusy = aiBusyThreadId === thread.id || threadRun !== null;
 
               return (
                 <article
@@ -2490,17 +3255,48 @@ export function DocumentWorkspace({
                       {thread.comments.length} {thread.comments.length === 1 ? "comment" : "comments"}
                     </span>
                   </button>
+                  <div className="comment-tag-row" onMouseDown={(event) => event.stopPropagation()}>
+                    {[...DEFAULT_COMMENT_TAGS, ...getThreadTags(thread).filter((tag) => !DEFAULT_COMMENT_TAGS.includes(tag))].map(
+                      (tag) => {
+                        const active = getThreadTags(thread).some((candidate) => candidate.toLowerCase() === tag.toLowerCase());
+                        return (
+                          <button
+                            className={active ? "comment-tag-chip comment-tag-chip-active" : "comment-tag-chip"}
+                            disabled={!canWriteComments}
+                            key={tag}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              toggleThreadTag(thread, tag);
+                            }}
+                            type="button"
+                          >
+                            {tag}
+                          </button>
+                        );
+                      }
+                    )}
+                    {canWriteComments ? (
+                      <button
+                        className="comment-tag-add"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleAddThreadTag(thread);
+                        }}
+                        type="button"
+                      >
+                        +
+                      </button>
+                    ) : null}
+                  </div>
 
                   {!isActive ? (
                     <div className="comment-thread-preview">
                       {isThreadAiBusy ? (
-                        <ClaudeWorkingInline activeAiRun={activeAiRun} compact />
+                        <ClaudeWorkingInline activeAiRun={threadRun ?? activeAiRun} compact />
                       ) : (
                         <>
                           <div className="comment-author-chip">
-                            <span className="avatar-dot">
-                              {getInitials(latestComment?.author?.name ?? "Claude")}
-                            </span>
+                            {latestComment ? <CommentAvatar comment={latestComment} /> : null}
                             <strong>{latestComment?.author?.name ?? "Claude"}</strong>
                           </div>
                           <p>{truncate(latestComment?.body ?? "", 140)}</p>
@@ -2514,9 +3310,7 @@ export function DocumentWorkspace({
                           <div className="comment-bubble" key={comment.id}>
                             <div className="comment-bubble-header">
                               <div className="comment-author-chip">
-                                <span className="avatar-dot">
-                                  {getInitials(comment.author?.name ?? "Claude")}
-                                </span>
+                                <CommentAvatar comment={comment} />
                                 <strong>{comment.author?.name ?? "Claude"}</strong>
                               </div>
                               <div className="comment-bubble-meta">
@@ -2578,7 +3372,7 @@ export function DocumentWorkspace({
                           ))}
                       </div>
 
-                      {isThreadAiBusy ? <ClaudeWorkingInline activeAiRun={activeAiRun} /> : null}
+                      {isThreadAiBusy ? <ClaudeWorkingInline activeAiRun={threadRun ?? activeAiRun} /> : null}
 
                       {canWriteComments ? (
                         <div className="thread-actions">
@@ -2618,114 +3412,195 @@ export function DocumentWorkspace({
           )}
         </aside>
       </div>
+      </>
+      )}
 
       {agentPanelOpen ? (
-        <div className="agent-panel">
-          <div className="agent-panel-header">
-            <div>
-              <h2>Agents</h2>
-              <p>
-                {activeAiRuns.length > 0
-                  ? `${activeAiRuns.length} running`
-                  : `${aiRuns.length} conversation${aiRuns.length === 1 ? "" : "s"}`}
-              </p>
-            </div>
-            <button className="ghost-button" onClick={() => setAgentPanelOpen(false)} type="button">
-              Close
+        <div className="agent-screen" role="region" aria-label="Agents">
+          <header className="agent-screen-topbar">
+            <button
+              className="agent-back-button"
+              onClick={() => setAgentPanelOpen(false)}
+              type="button"
+            >
+              ← Back to document
             </button>
-          </div>
-
-          <div className="agent-workspace">
-            <aside className="agent-conversation-list" aria-label="Agent conversations">
-              {aiRuns.length === 0 ? (
-                <div className="empty-state">Message an agent to inspect the document or linked repo.</div>
-              ) : (
-                aiRuns.map((run) => (
-                  <button
-                    className={`agent-conversation-item ${selectedAgentRun?.id === run.id ? "agent-conversation-item-active" : ""}`}
-                    key={run.id}
-                    onClick={() => setSelectedAgentRunId(run.id)}
-                    type="button"
-                  >
-                    <div>
-                      <strong>{run.triggerType.replace("_", " ").toLowerCase()}</strong>
-                      <span>{formatDateTime(run.startedAt)}</span>
-                    </div>
-                    <span className={`agent-status agent-status-${run.status.toLowerCase()}`}>
-                      {run.status.toLowerCase()}
-                    </span>
-                    <p>{truncate(run.instruction, 120)}</p>
-                  </button>
-                ))
-              )}
-            </aside>
-
-            <section className="agent-conversation-detail" aria-label="Selected agent history">
-              {selectedAgentRun ? (
-                <>
-                  <div className="agent-detail-header">
-                    <div>
-                      <span className={`agent-status agent-status-${selectedAgentRun.status.toLowerCase()}`}>
-                        {selectedAgentRun.status.toLowerCase()}
-                      </span>
-                      <h3>{selectedAgentRun.triggerType.replace("_", " ").toLowerCase()}</h3>
-                      <p>{selectedAgentRun.instruction}</p>
-                    </div>
-                    <div className="agent-run-meta">
-                      {selectedAgentRun.branchName ? <span>{selectedAgentRun.branchName}</span> : null}
-                      {selectedAgentRun.workspacePath ? <span>{selectedAgentRun.workspacePath}</span> : null}
-                      {selectedAgentRun.commitUrl ? (
-                        <a href={selectedAgentRun.commitUrl} rel="noopener noreferrer" target="_blank">
-                          Commit {selectedAgentRun.commitSha?.slice(0, 7)}
-                        </a>
-                      ) : selectedAgentRun.commitSha ? (
-                        <span>Commit {selectedAgentRun.commitSha.slice(0, 7)}</span>
-                      ) : null}
-                    </div>
-                  </div>
-
-                  <div className="agent-event-timeline">
-                    {(selectedAgentRun.events ?? []).length === 0 ? (
-                      <div className="agent-event agent-event-agent">
-                        {selectedAgentRun.progress ?? "Waiting for progress."}
-                      </div>
-                    ) : (
-                      (selectedAgentRun.events ?? []).map((event) => (
-                        <div className={`agent-event agent-event-${event.role}`} key={event.id}>
-                          <div className="agent-event-meta">
-                            <span>{event.role.replace("_", " ")}</span>
-                            <span>{formatDateTime(event.createdAt)}</span>
-                          </div>
-                          <pre>{event.message}</pre>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </>
-              ) : (
-                <div className="empty-state">No agent conversation selected.</div>
-              )}
-            </section>
-          </div>
-
-          {canWriteComments ? (
-            <div className="agent-compose">
-              <textarea
-                onChange={(event) => setAgentMessage(event.target.value)}
-                placeholder="Message an agent about the document or linked repository"
-                rows={3}
-                value={agentMessage}
-              />
+            <div className="agent-screen-title">
+              <span className="agent-screen-title-eyebrow">Agents</span>
+              <span className="agent-screen-title-doc">{title}</span>
+            </div>
+            <span className="agent-screen-topbar-status">
+              {activeAiRuns.length > 0
+                ? `${activeAiRuns.length} running`
+                : `${conversations.length} ${conversations.length === 1 ? "thread" : "threads"}`}
+            </span>
+          </header>
+          <div className="agent-screen-body">
+          <aside className="agent-sidebar" aria-label="Agent conversations">
+            {canWriteComments ? (
               <button
-                className="primary-button"
-                disabled={agentBusy || !agentMessage.trim()}
-                onClick={handleAgentConversation}
+                className={cn("agent-new-button", composeMode === "new" && "agent-new-button-active")}
+                onClick={() => {
+                  setComposeMode("new");
+                  setSelectedConversationId(null);
+                }}
                 type="button"
               >
-                {agentBusy ? "Sending..." : "Send to agent"}
+                + New conversation
               </button>
+            ) : null}
+            <div className="agent-sidebar-list">
+              {conversations.length === 0 ? (
+                <div className="agent-sidebar-empty">No conversations yet.</div>
+              ) : (
+                conversations.map((conv) => {
+                  const firstLine =
+                    conv.rootInstruction.split("\n")[0] ||
+                    conv.latestRun.triggerType.replace(/_/g, " ").toLowerCase();
+                  const isActive = composeMode === "selected" && selectedConversation?.rootId === conv.rootId;
+                  const turnCount = conv.runs.length;
+                  return (
+                    <button
+                      aria-current={isActive ? "true" : undefined}
+                      className={cn("agent-sidebar-item", isActive && "agent-sidebar-item-active")}
+                      key={conv.rootId}
+                      onClick={() => {
+                        setComposeMode("selected");
+                        setSelectedConversationId(conv.rootId);
+                      }}
+                      type="button"
+                    >
+                      <div className="agent-sidebar-item-top">
+                        <span className={`agent-status-dot agent-status-dot-${conv.status.toLowerCase()}`} aria-hidden />
+                        <span className="agent-sidebar-item-title">{truncate(firstLine, 48)}</span>
+                        <span className="agent-sidebar-item-time">{formatRelativeTime(conv.lastActivityAt)}</span>
+                      </div>
+                      <p className="agent-sidebar-item-snippet">{truncate(conv.rootInstruction, 120)}</p>
+                      {turnCount > 1 ? (
+                        <span className="agent-sidebar-item-turns">{turnCount} turns</span>
+                      ) : null}
+                    </button>
+                  );
+                })
+              )}
             </div>
-          ) : null}
+          </aside>
+
+          <section className="agent-main" aria-label="Selected agent conversation">
+            {composeMode === "selected" && selectedConversation ? (
+              <>
+                <header className="agent-main-header">
+                  <div className="agent-main-title">
+                    <span className={`agent-status agent-status-${selectedConversation.status.toLowerCase()}`}>
+                      {selectedConversation.status.toLowerCase()}
+                    </span>
+                    <h3>{truncate(selectedConversation.rootInstruction.split("\n")[0], 120)}</h3>
+                    {selectedConversation.runs.length > 1 ? (
+                      <span className="agent-main-turns">{selectedConversation.runs.length} turns</span>
+                    ) : null}
+                  </div>
+                  <div className="agent-main-meta">
+                    {selectedConversation.branchName ? (
+                      <span><span className="agent-meta-label">branch</span> {selectedConversation.branchName}</span>
+                    ) : null}
+                    {selectedConversation.commitUrl ? (
+                      <a href={selectedConversation.commitUrl} rel="noopener noreferrer" target="_blank">
+                        commit {selectedConversation.commitSha?.slice(0, 7)}
+                      </a>
+                    ) : selectedConversation.commitSha ? (
+                      <span><span className="agent-meta-label">commit</span> {selectedConversation.commitSha.slice(0, 7)}</span>
+                    ) : null}
+                  </div>
+                </header>
+
+                <AgentTimeline
+                  events={selectedConversation.events}
+                  progress={selectedConversation.progress}
+                  status={selectedConversation.status}
+                />
+
+                {canWriteComments ? (
+                  <form
+                    className="agent-compose"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      if (!agentBusy && agentMessage.trim()) {
+                        handleAgentConversation({
+                          previousRunId: selectedConversation.latestRun.id,
+                          rootId: selectedConversation.rootId
+                        });
+                      }
+                    }}
+                  >
+                    <textarea
+                      onChange={(event) => setAgentMessage(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                          event.preventDefault();
+                          if (!agentBusy && agentMessage.trim()) {
+                            handleAgentConversation({
+                              previousRunId: selectedConversation.latestRun.id,
+                              rootId: selectedConversation.rootId
+                            });
+                          }
+                        }
+                      }}
+                      placeholder="Reply to the agent… (⌘/Ctrl + Enter to send)"
+                      rows={2}
+                      value={agentMessage}
+                    />
+                    <button
+                      className="primary-button"
+                      disabled={agentBusy || !agentMessage.trim()}
+                      type="submit"
+                    >
+                      {agentBusy ? "Sending…" : "Reply"}
+                    </button>
+                  </form>
+                ) : null}
+              </>
+            ) : (
+              <div className="agent-main-empty">
+                <h3>Start a new conversation</h3>
+                <p>Ask Claude to inspect the document, run code in the linked repo, or answer a question. Each thread keeps its own history so you can follow up.</p>
+                {canWriteComments ? (
+                  <form
+                    className="agent-compose agent-compose-standalone"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      if (!agentBusy && agentMessage.trim()) {
+                        handleAgentConversation();
+                      }
+                    }}
+                  >
+                    <textarea
+                      autoFocus
+                      onChange={(event) => setAgentMessage(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                          event.preventDefault();
+                          if (!agentBusy && agentMessage.trim()) {
+                            handleAgentConversation();
+                          }
+                        }
+                      }}
+                      placeholder="What should Claude do? (⌘/Ctrl + Enter to send)"
+                      rows={3}
+                      value={agentMessage}
+                    />
+                    <button
+                      className="primary-button"
+                      disabled={agentBusy || !agentMessage.trim()}
+                      type="submit"
+                    >
+                      {agentBusy ? "Sending…" : "Send"}
+                    </button>
+                  </form>
+                ) : null}
+              </div>
+            )}
+          </section>
+          </div>
         </div>
       ) : null}
 

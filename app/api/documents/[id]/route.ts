@@ -91,6 +91,7 @@ export async function GET(request: Request, { params }: RouteContext) {
         id: true,
         triggerType: true,
         triggerId: true,
+        parentRunId: true,
         instruction: true,
         status: true,
         progress: true,

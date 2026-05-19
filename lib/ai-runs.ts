@@ -23,6 +23,7 @@ export function serializeAiRun(run: {
   id: string;
   triggerType: string;
   triggerId: string | null;
+  parentRunId?: string | null;
   instruction: string;
   status: string;
   progress: string | null;
@@ -43,6 +44,7 @@ export function serializeAiRun(run: {
 }) {
   return {
     ...run,
+    parentRunId: run.parentRunId ?? null,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt ?? null,
     events: run.events ?? []

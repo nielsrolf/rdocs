@@ -111,6 +111,71 @@ export function getDocumentPlainText(content: unknown): string {
   return text || defaultDocumentContent.content[0]?.content?.[0]?.text || "";
 }
 
+export function stripCommentAnchorMarks(node: unknown): unknown {
+  if (Array.isArray(node)) {
+    return mergeAdjacentTextNodes(node.map((child) => stripCommentAnchorMarks(child)));
+  }
+
+  if (!node || typeof node !== "object") {
+    return node;
+  }
+
+  const input = node as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+
+  Object.entries(input).forEach(([key, value]) => {
+    if (key === "marks" && Array.isArray(value)) {
+      const marks = value
+        .filter((mark) => {
+          return !mark || typeof mark !== "object" || (mark as { type?: unknown }).type !== "commentAnchor";
+        })
+        .map((mark) => stripCommentAnchorMarks(mark));
+
+      if (marks.length > 0) {
+        output[key] = marks;
+      }
+      return;
+    }
+
+    output[key] = stripCommentAnchorMarks(value);
+  });
+
+  return output;
+}
+
+function mergeAdjacentTextNodes(nodes: unknown[]) {
+  const merged: unknown[] = [];
+
+  nodes.forEach((node) => {
+    const previous = merged[merged.length - 1];
+    if (canMergeTextNodes(previous, node)) {
+      (previous as { text: string }).text += (node as { text: string }).text;
+      return;
+    }
+
+    merged.push(node);
+  });
+
+  return merged;
+}
+
+function canMergeTextNodes(left: unknown, right: unknown) {
+  if (!isTextNode(left) || !isTextNode(right)) {
+    return false;
+  }
+
+  return JSON.stringify({ ...left, text: undefined }) === JSON.stringify({ ...right, text: undefined });
+}
+
+function isTextNode(node: unknown): node is { type: "text"; text: string } {
+  return (
+    Boolean(node) &&
+    typeof node === "object" &&
+    (node as { type?: unknown }).type === "text" &&
+    typeof (node as { text?: unknown }).text === "string"
+  );
+}
+
 export function getContextAroundMatch(
   documentText: string,
   anchorText: string,

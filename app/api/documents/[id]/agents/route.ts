@@ -13,8 +13,44 @@ export const runtime = "nodejs";
 
 const agentConversationSchema = z.object({
   message: z.string().min(1).max(6000),
-  shareToken: z.string().optional().nullable()
+  shareToken: z.string().optional().nullable(),
+  previousRunId: z.string().optional().nullable()
 });
+
+const CONVERSATION_HISTORY_ROLES = new Set(["user", "agent"]);
+const MAX_CONVERSATION_TURNS = 24;
+
+async function buildConversationHistory(documentId: string, previousRunId: string | null) {
+  if (!previousRunId) {
+    return { history: [] as Array<{ role: string; message: string }>, rootRunId: null as string | null };
+  }
+  const chain: Array<{ id: string; parentRunId: string | null }> = [];
+  let cursorId: string | null = previousRunId;
+  const visited = new Set<string>();
+  while (cursorId && !visited.has(cursorId) && chain.length < MAX_CONVERSATION_TURNS) {
+    visited.add(cursorId);
+    const run: { id: string; parentRunId: string | null; documentId: string } | null = await db.aiRun.findUnique({
+      where: { id: cursorId },
+      select: { id: true, parentRunId: true, documentId: true }
+    });
+    if (!run || run.documentId !== documentId) {
+      break;
+    }
+    chain.push({ id: run.id, parentRunId: run.parentRunId });
+    cursorId = run.parentRunId;
+  }
+  if (chain.length === 0) {
+    return { history: [], rootRunId: null };
+  }
+  chain.reverse();
+  const events = await db.aiRunEvent.findMany({
+    where: { aiRunId: { in: chain.map((entry) => entry.id) } },
+    orderBy: { createdAt: "asc" },
+    select: { role: true, message: true }
+  });
+  const history = events.filter((event) => CONVERSATION_HISTORY_ROLES.has(event.role));
+  return { history, rootRunId: chain[0]?.id ?? null };
+}
 
 type RouteContext = {
   params: Promise<{
@@ -44,15 +80,24 @@ export async function POST(request: Request, { params }: RouteContext) {
   let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
 
   try {
+    const { history: conversationHistory, rootRunId } = await buildConversationHistory(
+      id,
+      parsed.data.previousRunId ?? null
+    );
+
     const aiRun = await db.aiRun.create({
       data: {
         documentId: id,
-        triggerType: "CONVERSATION",
+        triggerType: parsed.data.previousRunId ? "CONVERSATION_FOLLOWUP" : "CONVERSATION",
+        parentRunId: parsed.data.previousRunId ?? null,
         instruction: parsed.data.message.trim(),
         progress: "Starting Claude research agent."
       }
     });
     aiRunId = aiRun.id;
+    if (rootRunId && parsed.data.previousRunId) {
+      // No-op for now; chain is reconstructed via parentRunId. rootRunId is informational.
+    }
     await recordAiRunEvent({
       aiRunId: aiRun.id,
       role: "user",
@@ -115,7 +160,8 @@ export async function POST(request: Request, { params }: RouteContext) {
       })),
       workspacePath: linkedRepo?.workspace ?? null,
       workspaceOverview,
-      instruction: parsed.data.message.trim()
+      instruction: parsed.data.message.trim(),
+      conversationHistory
     }, async (event) => {
       await Promise.all([
         db.aiRun.update({
@@ -133,6 +179,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     const commit = linkedRepo
       ? await commitWorkspaceChanges({
           workspace: linkedRepo.workspace,
+          baseWorkspace: linkedRepo.baseWorkspace,
           repoUrl: linkedRepo.url,
           message: "AI research conversation changes",
           push: true
@@ -166,6 +213,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     if (linkedRepo) {
       await commitWorkspaceChanges({
         workspace: linkedRepo.workspace,
+        baseWorkspace: linkedRepo.baseWorkspace,
         repoUrl: linkedRepo.url,
         message: "Save failed AI conversation changes",
         push: true

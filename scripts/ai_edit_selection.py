@@ -6,13 +6,7 @@ import sys
 from urllib.parse import urlparse
 
 WORKSPACE_ROOT = pathlib.Path(__file__).resolve().parent.parent
-PYTHON_HOME = WORKSPACE_ROOT / ".python-home"
-CACHE_HOME = WORKSPACE_ROOT / ".cache"
 DEFAULT_MAX_TOKENS = 8192
-PYTHON_HOME.mkdir(parents=True, exist_ok=True)
-CACHE_HOME.mkdir(parents=True, exist_ok=True)
-os.environ["HOME"] = str(PYTHON_HOME)
-os.environ["XDG_CACHE_HOME"] = str(CACHE_HOME)
 
 from localrouter import ImageBlock, TextBlock
 

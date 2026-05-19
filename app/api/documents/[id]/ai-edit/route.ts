@@ -10,7 +10,7 @@ import { recordAiRunEvent } from "@/lib/ai-runs";
 import { runClaudeResearchAgent } from "@/lib/ai";
 import { db } from "@/lib/db";
 import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
-import { commitWorkspaceChanges, ensureLinkedRepositoryWorktree, getWorkspaceOverview } from "@/lib/research-workspace";
+import { commitWorkspaceChanges, ensureLinkedRepositoryWorktree, getWorkspaceOverview, runWidgetBuild } from "@/lib/research-workspace";
 
 const aiEditSchema = z.object({
   selectedText: z.string().min(1).max(200000),
@@ -136,12 +136,15 @@ async function createAgentWidgets(input: {
   widgets: unknown;
   documentId: string;
   shareToken: string | null;
+  workspace: string | null;
+  aiRunId: string | null;
 }) {
   if (!Array.isArray(input.widgets)) {
-    return [];
+    return { created: [] as Array<Record<string, unknown>>, buildErrors: [] as string[] };
   }
 
-  const created = [];
+  const created: Array<Record<string, unknown>> = [];
+  const buildErrors: string[] = [];
   for (const widget of input.widgets) {
     if (!widget || typeof widget !== "object") {
       continue;
@@ -172,12 +175,28 @@ async function createAgentWidgets(input: {
       continue;
     }
 
+    let lastError: string | null = null;
+    let lastBuiltAt: Date | null = null;
+    if (input.workspace) {
+      const result = await runWidgetBuild(buildCmd, input.workspace);
+      if (!result.ok) {
+        lastError = result.error.slice(0, 6000);
+        buildErrors.push(`Widget "${label}" failed to build: ${lastError}`);
+      } else {
+        lastBuiltAt = new Date();
+      }
+    }
+
     const record = await db.embeddedWidget.create({
       data: {
         documentId: input.documentId,
         label,
         buildCmd,
-        embedSource
+        embedSource,
+        createdByRunId: input.aiRunId,
+        workspacePath: input.workspace,
+        lastBuiltAt,
+        lastError
       }
     });
 
@@ -186,13 +205,14 @@ async function createAgentWidgets(input: {
       label: record.label,
       buildCmd: record.buildCmd,
       embedSource: record.embedSource,
+      lastError: record.lastError,
       src: `/api/documents/${input.documentId}/widgets/${record.id}/source${
         input.shareToken ? `?share=${encodeURIComponent(input.shareToken)}` : ""
       }`
     });
   }
 
-  return created;
+  return { created, buildErrors };
 }
 
 async function inferAgentWidgets(input: {
@@ -200,9 +220,10 @@ async function inferAgentWidgets(input: {
   documentId: string;
   shareToken: string | null;
   instruction: string;
+  aiRunId: string | null;
 }) {
   if (!input.workspace || !wantsWidget(input.instruction)) {
-    return [];
+    return { created: [] as Array<Record<string, unknown>>, buildErrors: [] as string[] };
   }
 
   const buildScript = path.join(input.workspace, "widgets", "build_rollout_explorer.py");
@@ -213,29 +234,42 @@ async function inferAgentWidgets(input: {
     .catch(() => false);
 
   if (!hasBuildScript) {
-    return [];
+    return { created: [], buildErrors: [] };
   }
+
+  const buildCmd = `python widgets/build_rollout_explorer.py --output ${embedSource}`;
+  const buildResult = await runWidgetBuild(buildCmd, input.workspace);
+  const lastError = buildResult.ok ? null : buildResult.error.slice(0, 6000);
+  const buildErrors = buildResult.ok ? [] : [`Inferred widget failed to build: ${lastError}`];
 
   const record = await db.embeddedWidget.create({
     data: {
       documentId: input.documentId,
       label: "Agentic trajectory explorer",
-      buildCmd: `python widgets/build_rollout_explorer.py --output ${embedSource}`,
-      embedSource
+      buildCmd,
+      embedSource,
+      createdByRunId: input.aiRunId,
+      workspacePath: input.workspace,
+      lastBuiltAt: buildResult.ok ? new Date() : null,
+      lastError
     }
   });
 
-  return [
-    {
-      id: record.id,
-      label: record.label,
-      buildCmd: record.buildCmd,
-      embedSource: record.embedSource,
-      src: `/api/documents/${input.documentId}/widgets/${record.id}/source${
-        input.shareToken ? `?share=${encodeURIComponent(input.shareToken)}` : ""
-      }`
-    }
-  ];
+  return {
+    created: [
+      {
+        id: record.id,
+        label: record.label,
+        buildCmd: record.buildCmd,
+        embedSource: record.embedSource,
+        lastError: record.lastError,
+        src: `/api/documents/${input.documentId}/widgets/${record.id}/source${
+          input.shareToken ? `?share=${encodeURIComponent(input.shareToken)}` : ""
+        }`
+      }
+    ],
+    buildErrors
+  };
 }
 
 type RouteContext = {
@@ -359,14 +393,6 @@ export async function POST(request: Request, { params }: RouteContext) {
         })
       ]).catch(() => null);
     });
-    const commit = linkedRepo
-      ? await commitWorkspaceChanges({
-          workspace: linkedRepo.workspace,
-          repoUrl: linkedRepo.url,
-          message: "AI research for document edit",
-          push: true
-      })
-      : { commitSha: null, commitUrl: null, pushed: false };
     const normalizedImages = normalizeAgentImages(result.images, id, parsed.data.shareToken ?? null, aiRun.id);
     const images =
       normalizedImages.length > 0
@@ -378,20 +404,36 @@ export async function POST(request: Request, { params }: RouteContext) {
             aiRunId: aiRun.id,
             instruction: parsed.data.instruction
           });
-    const createdWidgets = await createAgentWidgets({
+    const widgetResult = await createAgentWidgets({
       widgets: result.widgets,
       documentId: id,
-      shareToken: parsed.data.shareToken ?? null
+      shareToken: parsed.data.shareToken ?? null,
+      workspace: linkedRepo?.workspace ?? null,
+      aiRunId: aiRun.id
     });
-    const widgets =
-      createdWidgets.length > 0
-        ? createdWidgets
+    const widgetOutput =
+      widgetResult.created.length > 0
+        ? widgetResult
         : await inferAgentWidgets({
             workspace: linkedRepo?.workspace ?? null,
             documentId: id,
             shareToken: parsed.data.shareToken ?? null,
-            instruction: parsed.data.instruction
+            instruction: parsed.data.instruction,
+            aiRunId: aiRun.id
           });
+    const widgets = widgetOutput.created;
+    for (const buildError of widgetOutput.buildErrors) {
+      await recordAiRunEvent({ aiRunId: aiRun.id, role: "error", message: buildError });
+    }
+    const commit = linkedRepo
+      ? await commitWorkspaceChanges({
+          workspace: linkedRepo.workspace,
+          baseWorkspace: linkedRepo.baseWorkspace,
+          repoUrl: linkedRepo.url,
+          message: "AI research for document edit",
+          push: true
+      })
+      : { commitSha: null, commitUrl: null, pushed: false };
 
     await db.aiRun.update({
       where: { id: aiRun.id },
@@ -426,6 +468,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     if (linkedRepo) {
       await commitWorkspaceChanges({
         workspace: linkedRepo.workspace,
+        baseWorkspace: linkedRepo.baseWorkspace,
         repoUrl: linkedRepo.url,
         message: "Save failed AI document edit changes",
         push: true

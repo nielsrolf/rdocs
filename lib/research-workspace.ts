@@ -73,6 +73,59 @@ function windowlessTimeout(callback: () => void, ms: number) {
   return setTimeout(callback, ms);
 }
 
+function runPythonJsonScript<TInput, TOutput>(
+  scriptName: string,
+  input: TInput,
+  options: { timeoutMs: number; cwd?: string }
+): Promise<TOutput> {
+  const scriptPath = path.join(process.cwd(), "scripts", scriptName);
+  const command = process.env.PYTHON_BIN || "uv";
+  const args = process.env.PYTHON_BIN ? [scriptPath] : ["run", "python", scriptPath];
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd ?? process.cwd(),
+      env: {
+        ...process.env,
+        UV_NO_PROGRESS: "1"
+      }
+    });
+
+    let stdout = "";
+    let stderr = "";
+    const timeout = windowlessTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error(`${scriptName} timed out.`));
+    }, options.timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(new Error(stderr || stdout || `${scriptName} exited with code ${code}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout) as TOutput);
+      } catch {
+        reject(new Error(`Failed to parse ${scriptName} response: ${stdout || stderr}`));
+      }
+    });
+
+    child.stdin.write(JSON.stringify(input));
+    child.stdin.end();
+  });
+}
+
 function getRepoName(repoUrl: string) {
   const withoutSuffix = repoUrl.replace(/\/$/, "").replace(/\.git$/, "");
   const lastPart = withoutSuffix.split("/").pop()?.replace(/[^a-zA-Z0-9._-]+/g, "-");
@@ -232,8 +285,98 @@ export async function getWorkspaceOverview(workspace: string | null) {
   }
 }
 
+export async function runWidgetBuild(buildCmd: string, cwd: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(buildCmd, {
+      cwd,
+      shell: true,
+      env: process.env
+    });
+    let stderr = "";
+    let stdout = "";
+    const timeout = windowlessTimeout(() => {
+      child.kill("SIGTERM");
+      resolve({ ok: false, error: "Widget build timed out after 120 seconds." });
+    }, 120_000);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      resolve({ ok: false, error: error.message });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        const message = (stderr || stdout || `Widget build exited with code ${code}`).trim();
+        resolve({ ok: false, error: message });
+        return;
+      }
+      resolve({ ok: true });
+    });
+  });
+}
+
+async function syncBranchToBaseWorkspace(baseWorkspace: string, commitSha: string, push: boolean) {
+  const status = await runCommand("git", ["status", "--porcelain"], { cwd: baseWorkspace });
+  if (status.stdout.trim()) {
+    throw new Error(`Cannot merge AI changes into the linked repository because it has pending changes:\n${status.stdout}`);
+  }
+
+  try {
+    await runCommand("git", ["merge", "--ff-only", commitSha], { cwd: baseWorkspace });
+  } catch {
+    try {
+      await runCommand("git", ["merge", "--no-edit", commitSha], { cwd: baseWorkspace });
+    } catch (mergeError) {
+      await resolveMergeConflictsWithClaude(baseWorkspace, commitSha);
+      const unmerged = await runCommand("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: baseWorkspace });
+      if (unmerged.stdout.trim()) {
+        await runCommand("git", ["merge", "--abort"], { cwd: baseWorkspace }).catch(() => null);
+        throw new Error(
+          `Claude could not resolve merge conflicts for ${commitSha}. Unmerged paths:\n${unmerged.stdout.trim()}`
+        );
+      }
+      await runCommand("git", ["add", "-A"], { cwd: baseWorkspace });
+      try {
+        await runCommand("git", ["commit", "--no-edit"], { cwd: baseWorkspace });
+      } catch (commitError) {
+        await runCommand("git", ["merge", "--abort"], { cwd: baseWorkspace }).catch(() => null);
+        throw commitError instanceof Error ? commitError : mergeError;
+      }
+    }
+  }
+
+  if (push) {
+    await runCommand("git", ["push", "origin", "HEAD"], {
+      cwd: baseWorkspace,
+      timeoutMs: 300_000
+    }).catch(() => null);
+  }
+}
+
+async function resolveMergeConflictsWithClaude(baseWorkspace: string, commitSha: string) {
+  await runPythonJsonScript<
+    { workspace: string; commitSha: string },
+    { ok?: boolean; output?: string }
+  >(
+    "claude_merge_conflicts.py",
+    {
+      workspace: baseWorkspace,
+      commitSha
+    },
+    {
+      timeoutMs: 300_000
+    }
+  );
+}
+
 export async function commitWorkspaceChanges(input: {
   workspace: string;
+  baseWorkspace?: string;
   repoUrl: string | null;
   message: string;
   push: boolean;
@@ -259,6 +402,14 @@ export async function commitWorkspaceChanges(input: {
       timeoutMs: 300_000
     });
     pushed = true;
+  }
+
+  if (
+    commitSha &&
+    input.baseWorkspace &&
+    path.resolve(input.baseWorkspace) !== path.resolve(input.workspace)
+  ) {
+    await syncBranchToBaseWorkspace(input.baseWorkspace, commitSha, input.push);
   }
 
   return {
