@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GDocs AI — Agent Context Structure</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f8f9fa;
+    color: #1a1a2e;
+    min-height: 100vh;
+    padding: 24px 16px 40px;
+  }
+  h1 {
+    text-align: center;
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: #111;
+    margin-bottom: 6px;
+    letter-spacing: -0.02em;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: 0.82rem;
+    color: #666;
+    margin-bottom: 28px;
+  }
+
+  /* Tab bar */
+  .tabs {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 28px;
+    flex-wrap: wrap;
+  }
+  .tab-btn {
+    padding: 8px 22px;
+    border-radius: 24px;
+    border: 2px solid transparent;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.18s;
+    background: #fff;
+    color: #555;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  }
+  .tab-btn:hover { transform: translateY(-1px); box-shadow: 0 3px 10px rgba(0,0,0,0.12); }
+  .tab-btn.active { color: #fff; border-color: transparent; }
+  .tab-btn[data-mode="edit"].active    { background: #4f46e5; }
+  .tab-btn[data-mode="comment"].active { background: #0891b2; }
+  .tab-btn[data-mode="document"].active{ background: #059669; }
+
+  /* Main layout */
+  .diagram-wrap {
+    display: flex;
+    gap: 20px;
+    max-width: 960px;
+    margin: 0 auto;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  /* Context stack */
+  .stack-col {
+    flex: 1 1 320px;
+  }
+  .stack-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #888;
+    margin-bottom: 10px;
+    padding-left: 4px;
+  }
+  .stack {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .layer {
+    border-radius: 10px;
+    padding: 11px 14px;
+    cursor: pointer;
+    transition: transform 0.14s, box-shadow 0.14s;
+    position: relative;
+    border-left: 4px solid transparent;
+    background: #fff;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  }
+  .layer:hover { transform: translateX(3px); box-shadow: 0 3px 10px rgba(0,0,0,0.10); }
+  .layer.selected { box-shadow: 0 4px 16px rgba(0,0,0,0.13); transform: translateX(4px); }
+  .layer-name {
+    font-size: 0.82rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .layer-name .icon { font-size: 1rem; }
+  .layer-desc {
+    font-size: 0.76rem;
+    color: #555;
+    margin-top: 4px;
+    line-height: 1.45;
+  }
+  /* size badge */
+  .size-badge {
+    margin-left: auto;
+    font-size: 0.65rem;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 20px;
+    white-space: nowrap;
+  }
+
+  /* Detail panel */
+  .detail-col {
+    flex: 1 1 280px;
+    position: sticky;
+    top: 16px;
+  }
+  .detail-card {
+    background: #fff;
+    border-radius: 12px;
+    padding: 18px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.09);
+    min-height: 180px;
+    transition: all 0.2s;
+  }
+  .detail-card h3 {
+    font-size: 0.9rem;
+    font-weight: 700;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .detail-card p {
+    font-size: 0.8rem;
+    color: #444;
+    line-height: 1.6;
+  }
+  .detail-card .detail-tokens {
+    margin-top: 12px;
+    font-size: 0.72rem;
+    color: #888;
+    border-top: 1px solid #eee;
+    padding-top: 10px;
+  }
+  .detail-card .detail-tokens strong { color: #333; }
+
+  /* Tools grid */
+  .tools-col {
+    flex: 1 1 100%;
+    margin-top: 4px;
+  }
+  .tools-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #888;
+    margin-bottom: 8px;
+    padding-left: 4px;
+  }
+  .tools-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .tool-chip {
+    font-size: 0.73rem;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 20px;
+    background: #f0f0f5;
+    color: #333;
+    transition: background 0.15s;
+  }
+  .tool-chip.available { background: #ecfdf5; color: #065f46; }
+  .tool-chip.unavailable { background: #fef2f2; color: #991b1b; text-decoration: line-through; opacity: 0.6; }
+
+  /* Output contract box */
+  .output-box {
+    margin-top: 18px;
+    border-radius: 10px;
+    padding: 12px 14px;
+    font-size: 0.78rem;
+    line-height: 1.55;
+  }
+  .output-box strong { display: block; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 5px; }
+
+  /* Color themes per mode */
+  .edit-theme    .layer { border-left-color: #c7d2fe; }
+  .edit-theme    .layer.selected { border-left-color: #4f46e5; }
+  .comment-theme .layer { border-left-color: #bae6fd; }
+  .comment-theme .layer.selected { border-left-color: #0891b2; }
+  .document-theme .layer { border-left-color: #a7f3d0; }
+  .document-theme .layer.selected { border-left-color: #059669; }
+
+  .edit-theme .size-badge    { background: #eef2ff; color: #4f46e5; }
+  .comment-theme .size-badge { background: #e0f7fa; color: #0891b2; }
+  .document-theme .size-badge{ background: #d1fae5; color: #059669; }
+
+  .edit-theme .output-box    { background: #eef2ff; color: #3730a3; }
+  .comment-theme .output-box { background: #e0f7fa; color: #0e7490; }
+  .document-theme .output-box{ background: #d1fae5; color: #065f46; }
+
+  .hidden { display: none; }
+  .placeholder-msg {
+    color: #aaa; font-size: 0.8rem; margin-top: 40px; text-align: center;
+  }
+
+  /* Bracket / arrow connector */
+  .connector {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.3rem;
+    color: #ccc;
+    margin: 2px 0;
+    user-select: none;
+  }
+</style>
+</head>
+<body>
+
+<h1>Agent Context Structure</h1>
+<p class="subtitle">Click a mode to explore how the context window is assembled — then click any layer for details.</p>
+
+<div class="tabs">
+  <button class="tab-btn active" data-mode="edit"     onclick="setMode('edit')">✏️ Edit Request</button>
+  <button class="tab-btn"        data-mode="comment"  onclick="setMode('comment')">💬 Comment Request</button>
+  <button class="tab-btn"        data-mode="document" onclick="setMode('document')">📄 Document-level</button>
+</div>
+
+<div class="diagram-wrap" id="diagram">
+  <!-- Stack column -->
+  <div class="stack-col">
+    <div class="stack-title">Context layers (top → bottom of prompt)</div>
+    <div class="stack edit-theme" id="stack"></div>
+  </div>
+
+  <!-- Detail column -->
+  <div class="detail-col">
+    <div class="stack-title">Layer detail</div>
+    <div class="detail-card" id="detail">
+      <p class="placeholder-msg">← Click a layer to inspect it</p>
+    </div>
+
+    <!-- Tools -->
+    <div style="margin-top:20px">
+      <div class="tools-title">Available tools</div>
+      <div class="tools-grid" id="tools-grid"></div>
+    </div>
+
+    <!-- Output contract -->
+    <div class="output-box" id="output-box" style="margin-top:18px"></div>
+  </div>
+</div>
+
+<script>
+const MODES = {
+  edit: {
+    theme: 'edit-theme',
+    accent: '#4f46e5',
+    layers: [
+      {
+        icon: '⚙️', name: 'System prompt', size: '~400 tok',
+        short: 'Role, capabilities, and output contract.',
+        detail: 'Establishes the agent as a document-editing AI inside a collaborative research editor. Describes the document model (title, Markdown body, anchored comment threads), the Git-backed workspace, and the strict output contract — the agent must return a JSON object with a replacementText field, not free prose.'
+      },
+      {
+        icon: '📄', name: 'Full document body', size: 'variable',
+        short: 'Complete Markdown of the document.',
+        detail: 'The entire document body is included as Markdown. This gives the agent awareness of surrounding sections, cross-references, and overall structure so edits are coherent with the whole document, not just the selected fragment.'
+      },
+      {
+        icon: '🔍', name: 'Selected text + context', size: '~200 tok',
+        short: 'The exact selection and its surrounding paragraph.',
+        detail: 'The highlighted span is provided alongside a few lines of surrounding context (the paragraph or section it sits in). This disambiguates repeated phrases and gives the agent sentence-level context to match tone and tense.'
+      },
+      {
+        icon: '✏️', name: 'User instruction', size: '~50 tok',
+        short: 'Free-text instruction from the user.',
+        detail: 'The user\'s instruction (e.g. "expand this into two paragraphs" or "rewrite more formally") is appended as the final human turn. It is the primary directive; all prior layers are context.'
+      },
+      {
+        icon: '🗂️', name: 'Repository (optional)', size: 'on demand',
+        short: 'Checkout path + tool access to repo files.',
+        detail: 'When a repository is linked, the agent receives a checkout path and can use Read, Grep, and Bash to pull in supporting evidence — source code, data files, prior results — before writing its replacement text.'
+      },
+    ],
+    tools: ['Read','Write','Edit','Bash','Glob','Grep','WebSearch','WebFetch','Agent'],
+    unavailable: ['TaskCreate','TaskGet','TaskList','NotebookEdit','EnterWorktree'],
+    output: '<strong>Output contract</strong>Return a JSON object with: <code>replacementText</code> (spliced back into the document), optional <code>images[]</code> for inline figures, optional <code>widgets[]</code> for interactive embeds, and a <code>summary</code> field.'
+  },
+  comment: {
+    theme: 'comment-theme',
+    accent: '#0891b2',
+    layers: [
+      {
+        icon: '⚙️', name: 'System prompt', size: '~400 tok',
+        short: 'Role, capabilities, and output contract.',
+        detail: 'Similar to the edit-mode system prompt but scoped for comment replies. The agent understands it will post a Markdown reply to a thread rather than returning a replacementText payload.'
+      },
+      {
+        icon: '📄', name: 'Full document body', size: 'variable',
+        short: 'Complete Markdown of the document.',
+        detail: 'The entire document Markdown is provided so the agent understands the full context — nearby sections, cross-references, and the document\'s overall structure.'
+      },
+      {
+        icon: '📌', name: 'Anchor text', size: '~100 tok',
+        short: 'The text the comment is attached to.',
+        detail: 'The fragment the comment is anchored to is highlighted, so the agent knows exactly which passage is under discussion even if the same phrase appears elsewhere in the document.'
+      },
+      {
+        icon: '💬', name: 'Comment thread', size: 'variable',
+        short: 'Full serialised thread in order.',
+        detail: 'Every entry in the thread is included: author, timestamp, and message body. This lets the agent understand conversational history — whether earlier replies addressed part of the question, whether the thread has diverged from the original anchor, etc.'
+      },
+      {
+        icon: '✉️', name: 'Latest user message', size: '~80 tok',
+        short: 'The message that triggered the AI request.',
+        detail: 'The most recent user message is the primary directive. Earlier thread turns serve as context, not new instructions.'
+      },
+    ],
+    tools: ['Read','Write','Edit','Bash','Glob','Grep','WebSearch','WebFetch','Agent'],
+    unavailable: ['TaskCreate','TaskGet','NotebookEdit','EnterWorktree'],
+    output: '<strong>Output contract</strong>Return a Markdown reply that is appended to the thread. The agent cannot splice text directly into the document body. It may commit figures or widgets to the repo and embed them in the reply.'
+  },
+  document: {
+    theme: 'document-theme',
+    accent: '#059669',
+    layers: [
+      {
+        icon: '⚙️', name: 'System prompt', size: '~800 tok',
+        short: 'Most expansive system prompt of the three modes.',
+        detail: 'Includes: the application overview, the full document body, all unresolved comment threads, the repository worktree path, any CLAUDE.md or README at the repo root, and the current date. This is the richest context of the three modes.'
+      },
+      {
+        icon: '📄', name: 'Full document body', size: 'variable',
+        short: 'Document as a Markdown string with Title header.',
+        detail: 'Presented as a single Markdown string with a Title: header followed by the body. Section headers, inline figures (as Markdown image references), and widget embeds are all included verbatim so the agent understands the current rendered state.'
+      },
+      {
+        icon: '💬', name: 'All unresolved threads', size: 'variable',
+        short: 'Every open comment thread, in order.',
+        detail: 'Unresolved threads are appended as a structured block after the document body. Each thread shows its anchor text, all replies in order, and resolution status. Resolved threads are omitted to keep the context window manageable.'
+      },
+      {
+        icon: '🗂️', name: 'Repository context', size: 'on demand',
+        short: 'Worktree path, CLAUDE.md, and README.',
+        detail: 'The agent receives the repository worktree path and key orientation files (CLAUDE.md, README). Full file access is provided via tools, allowing the agent to read, write, execute code, and commit results.'
+      },
+      {
+        icon: '🔄', name: 'Conversation history', size: 'grows per turn',
+        short: 'Full multi-turn history accumulates in context.',
+        detail: 'Unlike edit and comment requests (single-shot), document-level sessions are stateful. The full conversation history accumulates across turns, allowing the agent to build on previous answers, remember sub-tasks, and maintain coherent long-horizon plans.'
+      },
+      {
+        icon: '✉️', name: 'User message', size: '~80 tok',
+        short: 'The current user turn.',
+        detail: 'The current user message closes the context window. The agent sees the full history before it and responds to this final turn.'
+      },
+    ],
+    tools: ['Read','Write','Edit','Bash','Glob','Grep','WebSearch','WebFetch','Agent','TaskCreate','TaskGet','TaskList','TaskOutput','TaskStop','TaskUpdate','NotebookEdit','EnterWorktree','ExitWorktree'],
+    unavailable: [],
+    output: '<strong>Output contract</strong>Produces a chat reply rendered in the conversation panel. To modify the document body the user must trigger a selection-edit. The agent can commit supporting assets (plots, widgets) to the repo during the session; those become embeddable via Markdown image syntax immediately.'
+  }
+};
+
+let currentMode = 'edit';
+let selectedLayer = null;
+
+function setMode(mode) {
+  currentMode = mode;
+  selectedLayer = null;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  renderStack();
+  renderDetail(null);
+  renderTools();
+  renderOutput();
+}
+
+function renderStack() {
+  const m = MODES[currentMode];
+  const stack = document.getElementById('stack');
+  stack.className = 'stack ' + m.theme;
+  stack.innerHTML = '';
+  m.layers.forEach((layer, i) => {
+    const div = document.createElement('div');
+    div.className = 'layer' + (selectedLayer === i ? ' selected' : '');
+    div.innerHTML = `
+      <div class="layer-name">
+        <span class="icon">${layer.icon}</span>
+        <span>${layer.name}</span>
+        <span class="size-badge">${layer.size}</span>
+      </div>
+      <div class="layer-desc">${layer.short}</div>
+    `;
+    div.onclick = () => selectLayer(i);
+    stack.appendChild(div);
+    if (i < m.layers.length - 1) {
+      const conn = document.createElement('div');
+      conn.className = 'connector';
+      conn.textContent = '↓';
+      stack.appendChild(conn);
+    }
+  });
+}
+
+function selectLayer(i) {
+  selectedLayer = i;
+  renderStack();
+  renderDetail(i);
+}
+
+function renderDetail(i) {
+  const card = document.getElementById('detail');
+  if (i === null) {
+    card.innerHTML = '<p class="placeholder-msg">← Click a layer to inspect it</p>';
+    return;
+  }
+  const layer = MODES[currentMode].layers[i];
+  const accent = MODES[currentMode].accent;
+  card.innerHTML = `
+    <h3 style="color:${accent}"><span>${layer.icon}</span> ${layer.name}</h3>
+    <p>${layer.detail}</p>
+    <div class="detail-tokens"><strong>Approximate size:</strong> ${layer.size}</div>
+  `;
+}
+
+function renderTools() {
+  const m = MODES[currentMode];
+  const grid = document.getElementById('tools-grid');
+  grid.innerHTML = '';
+  const all = [...m.tools, ...m.unavailable];
+  all.forEach(t => {
+    const chip = document.createElement('span');
+    chip.className = 'tool-chip ' + (m.tools.includes(t) ? 'available' : 'unavailable');
+    chip.textContent = t;
+    grid.appendChild(chip);
+  });
+}
+
+function renderOutput() {
+  const box = document.getElementById('output-box');
+  box.innerHTML = MODES[currentMode].output;
+  const themes = { edit: '#eef2ff', comment: '#e0f7fa', document: '#d1fae5' };
+  const colors = { edit: '#3730a3', comment: '#0e7490', document: '#065f46' };
+  box.style.background = themes[currentMode];
+  box.style.color = colors[currentMode];
+}
+
+// Init
+renderStack();
+renderTools();
+renderOutput();
+</script>
+</body>
+</html>
