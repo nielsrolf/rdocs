@@ -1,13 +1,18 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 
 import "@/app/globals.css";
 import "katex/dist/katex.min.css";
+import { BrandMark } from "@/components/brand-mark";
 import { getCurrentUser } from "@/lib/auth";
 
 export const metadata: Metadata = {
   title: "GDocs AI",
   description: "A collaborative document editor with comments, share links, and AI-assisted replies."
+};
+
+export const viewport: Viewport = {
+  themeColor: "#1a73e8"
 };
 
 export default async function RootLayout({
@@ -23,7 +28,8 @@ export default async function RootLayout({
         <div className="app-frame">
           <header className="topbar">
             <Link href="/" className="brand">
-              GDocs AI
+              <BrandMark />
+              <span>GDocs AI</span>
             </Link>
             <nav className="topbar-nav">
               {user ? (

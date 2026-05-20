@@ -19,6 +19,7 @@ import { AgentPanel } from "./document-workspace/agent-panel";
 import { ClaudeWorkingInline, ToolbarButton, insertImagesAtPosition } from "./document-workspace/atoms";
 import { buildAiEditInsertContent, normalizeWidgetsOutsideTables } from "./document-workspace/ai-edit-insert";
 import { CommentRail } from "./document-workspace/comment-rail";
+import { DocOutline, OUTLINE_MAX_WIDTH, OUTLINE_MIN_WIDTH } from "./document-workspace/doc-outline";
 import { SelectionPopover } from "./document-workspace/selection-popover";
 import { CommentAnchor, createCommentHighlightExtension, resolveCommentAnchorRange } from "./document-workspace/comment-anchors";
 import { buildConversations } from "./document-workspace/conversations";
@@ -127,6 +128,8 @@ export function DocumentWorkspace({
   const [railHeight, setRailHeight] = useState(640);
   const [newTagThreadId, setNewTagThreadId] = useState<string | null>(null);
   const [newTagDraft, setNewTagDraft] = useState("");
+  const [outlineCollapsed, setOutlineCollapsed] = useState(false);
+  const [outlineWidth, setOutlineWidth] = useState(220);
   const saveTimerRef = useRef<number | null>(null);
   const isApplyingRemoteUpdateRef = useRef(false);
   const hasUnsavedChangesRef = useRef(false);
@@ -168,6 +171,43 @@ export function DocumentWorkspace({
   useEffect(() => {
     titleRef.current = title;
   }, [title]);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem("gdocs-ai:outline-collapsed");
+      if (stored === "true") {
+        setOutlineCollapsed(true);
+      }
+      const storedWidth = window.localStorage.getItem("gdocs-ai:outline-width");
+      if (storedWidth) {
+        const parsed = Number.parseInt(storedWidth, 10);
+        if (Number.isFinite(parsed)) {
+          setOutlineWidth(Math.min(OUTLINE_MAX_WIDTH, Math.max(OUTLINE_MIN_WIDTH, parsed)));
+        }
+      }
+    } catch {
+      // Storage unavailable; keep default.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        "gdocs-ai:outline-collapsed",
+        outlineCollapsed ? "true" : "false"
+      );
+    } catch {
+      // Ignore quota / privacy errors.
+    }
+  }, [outlineCollapsed]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("gdocs-ai:outline-width", String(Math.round(outlineWidth)));
+    } catch {
+      // Ignore quota / privacy errors.
+    }
+  }, [outlineWidth]);
 
   useEffect(() => {
     documentUpdatedAtRef.current = documentUpdatedAt;
@@ -214,7 +254,7 @@ export function DocumentWorkspace({
     nextOffsets.forEach((item) => {
       const top = Math.max(item.top, cursor);
       normalized[item.id] = top;
-      cursor = top + (item.id === activeThreadId ? 244 : 124);
+      cursor = top + (item.id === activeThreadId ? 264 : 152);
     });
 
     setThreadOffsets(normalized);
@@ -319,9 +359,9 @@ export function DocumentWorkspace({
       return currentTarget?.type === "selection-edit" ? currentTarget : null;
     });
     setActiveThreadId((currentThreadId) =>
-      snapshot.threads.some((thread) => thread.id === currentThreadId)
+      currentThreadId && snapshot.threads.some((thread) => thread.id === currentThreadId)
         ? currentThreadId
-        : snapshot.threads[0]?.id ?? null
+        : null
     );
 
     if (snapshot.updatedAt === documentUpdatedAtRef.current) {
@@ -1622,7 +1662,18 @@ export function DocumentWorkspace({
         </div>
       ) : null}
 
-      <div className="editor-stage">
+      <div
+        className="editor-stage"
+        data-outline-collapsed={outlineCollapsed ? "true" : "false"}
+        style={{ "--outline-width": `${outlineCollapsed ? 36 : Math.round(outlineWidth)}px` } as React.CSSProperties}
+      >
+        <DocOutline
+          editor={editor}
+          collapsed={outlineCollapsed}
+          width={outlineWidth}
+          onToggleCollapsed={() => setOutlineCollapsed((value) => !value)}
+          onWidthChange={setOutlineWidth}
+        />
         <div className="editor-page-shell">
           <div className="editor-page" ref={editorPageRef}>
             {selection && selectionPopoverMode && (canWriteComments || canWriteDocument) ? (
