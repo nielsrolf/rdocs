@@ -18,8 +18,15 @@ import type { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
 import { permissionLabel } from "@/lib/utils";
 
 import { AgentPanel } from "./document-workspace/agent-panel";
-import { ClaudeWorkingInline, ToolbarButton, insertImagesAtPosition } from "./document-workspace/atoms";
+import { ToolbarButton, insertImagesAtPosition } from "./document-workspace/atoms";
 import { buildAiEditInsertContent, normalizeWidgetsOutsideTables } from "./document-workspace/ai-edit-insert";
+import {
+  AiEditSelections,
+  getAiEditSelectionRange,
+  removeAiEditSelection,
+  syncAiEditSelectionRuns,
+  upsertAiEditSelection
+} from "./document-workspace/ai-edit-selections";
 import { CommentRail } from "./document-workspace/comment-rail";
 import { DocOutline, OUTLINE_MAX_WIDTH, OUTLINE_MIN_WIDTH } from "./document-workspace/doc-outline";
 import { SelectionPopover } from "./document-workspace/selection-popover";
@@ -55,6 +62,7 @@ import {
 } from "./document-workspace/types";
 import {
   describeNodeSelection,
+  buildAiRunSelectionTriggerId,
   getAiRunProgressLabel,
   getSelectionContext,
   getSelectionContextFromEditor,
@@ -78,6 +86,14 @@ function createCollaborationClientId() {
   }
 
   return `client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function createAiEditSelectionId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+
+  return `selection-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function createPresenceColor(input: string) {
@@ -166,6 +182,7 @@ export function DocumentWorkspace({
   const [newTagDraft, setNewTagDraft] = useState("");
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [outlineWidth, setOutlineWidth] = useState(220);
+  const [tableControlsActive, setTableControlsActive] = useState(false);
   const saveTimerRef = useRef<number | null>(null);
   const collaborationFlushTimerRef = useRef<number | null>(null);
   const collaborationPushBusyRef = useRef(false);
@@ -665,6 +682,7 @@ export function DocumentWorkspace({
       CommentAnchor,
       collaborationExtension,
       remotePresenceExtension,
+      AiEditSelections,
       commentHighlightExtension,
       latexRenderExtension,
       Link.configure({
@@ -738,6 +756,7 @@ export function DocumentWorkspace({
     },
     onSelectionUpdate: ({ editor }) => {
       sendPresence(false);
+      setTableControlsActive(editor.isActive("table"));
       const { selection } = editor.state;
       const { from, to } = selection;
       if (!editorPageRef.current) {
@@ -780,11 +799,12 @@ export function DocumentWorkspace({
       });
       setSelectionPopoverMode("menu");
     },
-    onUpdate: () => {
+    onUpdate: ({ editor }) => {
       if (!canWriteDocument || isApplyingRemoteUpdateRef.current) {
         return;
       }
 
+      setTableControlsActive(editor.isActive("table"));
       hasUnsavedChangesRef.current = true;
       setSaveState("saving");
       scheduleCollaborationFlush();
@@ -1184,10 +1204,6 @@ export function DocumentWorkspace({
     };
   }
 
-  function getSelectionEditTarget(selectionState: SelectionState): ActiveAiTarget | null {
-    return getRangeEditTarget(selectionState.from, selectionState.to);
-  }
-
   async function handleAiEdit() {
     if (!selection || !editInstruction.trim() || !editor) {
       return;
@@ -1195,14 +1211,23 @@ export function DocumentWorkspace({
 
     const editSelection = selection;
     const instruction = editInstruction.trim();
-    const aiTarget = getSelectionEditTarget(selection);
     const selectedMarkdown = getSelectionMarkdownFromEditor(editor, editSelection.from, editSelection.to);
+    const selectionId = createAiEditSelectionId();
+    const triggerId = buildAiRunSelectionTriggerId(selectionId, editSelection.from, editSelection.to);
     setGlobalError(null);
     await ensureAgentNotificationPermission();
-    setActiveAiTarget(aiTarget);
+    editor.view.dispatch(
+      upsertAiEditSelection(editor.state, {
+        id: selectionId,
+        from: editSelection.from,
+        to: editSelection.to,
+        progress: "Starting Claude research agent."
+      })
+    );
     setActiveAiRun({
       id: `pending-selection-edit-${Date.now()}`,
       triggerType: "SELECTION_EDIT",
+      triggerId,
       instruction,
       status: "RUNNING",
       progress: "Starting Claude research agent.",
@@ -1222,15 +1247,16 @@ export function DocumentWorkspace({
         selectedMarkdown,
         selectedContext: editSelection.context,
         instruction,
+        selectionId,
         fromPos: editSelection.from,
         toPos: editSelection.to,
         shareToken
       })
-    });
+    }).catch(() => null);
 
-    const data = await response.json().catch(() => null);
+    const data = await response?.json().catch(() => null);
 
-    if (!response.ok || !data?.replacementText) {
+    if (!response?.ok || !data?.replacementText) {
       setGlobalError(data?.error ?? "AI edit failed.");
       notifyAgentCompleted({
         id: `failed-selection-edit-${Date.now()}`,
@@ -1240,6 +1266,7 @@ export function DocumentWorkspace({
       });
       setActiveAiRun(null);
       setActiveAiTarget(null);
+      editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
       return;
     }
 
@@ -1250,11 +1277,16 @@ export function DocumentWorkspace({
     const commitUrl = typeof data.commitUrl === "string" ? data.commitUrl : null;
     const aiRunId = typeof data.aiRunId === "string" ? data.aiRunId : null;
 
+    const replacementRange = getAiEditSelectionRange(editor.state, selectionId) ?? {
+      from: editSelection.from,
+      to: editSelection.to
+    };
+
     editor
       .chain()
       .focus()
       .insertContentAt(
-        { from: editSelection.from, to: editSelection.to },
+        replacementRange,
         buildAiEditInsertContent({
           replacementText: data.replacementText,
           sourceLinks,
@@ -1265,6 +1297,7 @@ export function DocumentWorkspace({
         })
       )
       .run();
+    editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
     normalizeCurrentEditorWidgets();
     hasUnsavedChangesRef.current = true;
     setSaveState("saving");
@@ -1737,28 +1770,29 @@ export function DocumentWorkspace({
     }
   }, [composeMode, conversations, selectedConversationId]);
 
-  const selectionRunTargets = useMemo(() => {
-    if (!editor || !editorPageRef.current) return [];
-    const out: Array<{
-      runId: string;
+  useEffect(() => {
+    if (!editor) return;
+
+    const selectionRuns: Array<{
       run: ActiveAiRunView;
-      coords: { top: number; left: number; width: number; height: number };
+      markerId: string;
+      from: number;
+      to: number;
     }> = [];
+
     for (const run of activeAiRuns) {
-      if (run.status !== "RUNNING") continue;
-      if (run.triggerType !== "SELECTION_EDIT") continue;
+      if (run.status !== "RUNNING" || run.triggerType !== "SELECTION_EDIT") continue;
       const range = parseAiRunSelectionRange(run.triggerId);
       if (!range) continue;
-      const target = getRangeEditTarget(range.from, range.to);
-      if (target && target.type === "selection-edit") {
-        out.push({
-          runId: run.id,
-          run,
-          coords: { top: target.top, left: target.left, width: target.width, height: target.height }
-        });
-      }
+      selectionRuns.push({
+        run,
+        markerId: range.id ?? `run-${run.id}`,
+        from: range.from,
+        to: range.to
+      });
     }
-    return out;
+
+    editor.view.dispatch(syncAiEditSelectionRuns(editor.state, selectionRuns));
   }, [activeAiRuns, editor]);
 
   const commentThreadRunsByThread = useMemo(() => {
@@ -1872,6 +1906,39 @@ export function DocumentWorkspace({
                   disabled={!canWriteDocument || !editor}
                   label="Widget"
                   onClick={handleInsertWidget}
+                />
+              </div>
+
+              <div className="editor-toolbar-group editor-toolbar-table-group">
+                <ToolbarButton
+                  disabled={!canWriteDocument || !editor}
+                  label="Table"
+                  onClick={() => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}
+                />
+                <ToolbarButton
+                  disabled={!canWriteDocument || !tableControlsActive}
+                  label="+ Row"
+                  onClick={() => editor?.chain().focus().addRowAfter().run()}
+                />
+                <ToolbarButton
+                  disabled={!canWriteDocument || !tableControlsActive}
+                  label="- Row"
+                  onClick={() => editor?.chain().focus().deleteRow().run()}
+                />
+                <ToolbarButton
+                  disabled={!canWriteDocument || !tableControlsActive}
+                  label="+ Col"
+                  onClick={() => editor?.chain().focus().addColumnAfter().run()}
+                />
+                <ToolbarButton
+                  disabled={!canWriteDocument || !tableControlsActive}
+                  label="- Col"
+                  onClick={() => editor?.chain().focus().deleteColumn().run()}
+                />
+                <ToolbarButton
+                  disabled={!canWriteDocument || !tableControlsActive}
+                  label="Delete"
+                  onClick={() => editor?.chain().focus().deleteTable().run()}
                 />
               </div>
             </div>
@@ -2054,21 +2121,6 @@ export function DocumentWorkspace({
                 }}
               />
             ) : null}
-
-            {selectionRunTargets.map((target) => (
-              <div
-                className="claude-working-selection"
-                key={target.runId}
-                style={{
-                  left: target.coords.left,
-                  top: target.coords.top,
-                  width: target.coords.width,
-                  minHeight: target.coords.height
-                }}
-              >
-                <ClaudeWorkingInline activeAiRun={target.run} />
-              </div>
-            ))}
 
             <EditorContent editor={editor} />
           </div>

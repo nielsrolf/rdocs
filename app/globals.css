@@ -1030,6 +1030,24 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   height: 1.9rem;
 }
 
+.ai-edit-selection-pending {
+  border-radius: 3px;
+  background:
+    linear-gradient(
+      105deg,
+      rgba(117, 85, 204, 0.08) 0%,
+      rgba(117, 85, 204, 0.08) 38%,
+      rgba(117, 85, 204, 0.2) 50%,
+      rgba(117, 85, 204, 0.08) 62%,
+      rgba(117, 85, 204, 0.08) 100%
+    );
+  background-size: 220% 100%;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  box-shadow: inset 0 -0.18em 0 rgba(117, 85, 204, 0.16);
+  animation: aiEditSelectionSweep 2s ease-in-out infinite;
+}
+
 @keyframes claudeWorkingSweep {
   0% {
     transform: translateX(-100%);
@@ -1062,6 +1080,17 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
 
   50% {
     transform: translate(0.35rem, 0.2rem) rotate(4deg);
+  }
+}
+
+@keyframes aiEditSelectionSweep {
+  0% {
+    background-position: 100% 0;
+  }
+
+  55%,
+  100% {
+    background-position: -100% 0;
   }
 }
 
@@ -1392,6 +1421,11 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   display: flex;
   align-items: center;
   gap: 0.35rem;
+}
+
+.editor-toolbar-table-group {
+  padding-left: 0.55rem;
+  border-left: 1px solid var(--border);
 }
 
 .editor-toolbar-button {
