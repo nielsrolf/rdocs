@@ -67,8 +67,6 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       id: true,
       anchorText: true,
       anchorContext: true,
-      fromPos: true,
-      toPos: true,
       status: true,
       tags: true,
       createdAt: true,

@@ -80,8 +80,6 @@ export function serializeThread(thread: {
   id: string;
   anchorText: string;
   anchorContext: string | null;
-  fromPos: number | null;
-  toPos: number | null;
   status: string;
   tags?: string | null;
   createdAt: Date;
@@ -108,8 +106,6 @@ export function serializeThread(thread: {
     id: thread.id,
     anchorText: thread.anchorText,
     anchorContext: thread.anchorContext,
-    fromPos: thread.fromPos,
-    toPos: thread.toPos,
     status: thread.status,
     tags: parseThreadTags(thread.tags, thread.status),
     createdAt: thread.createdAt,
@@ -149,8 +145,6 @@ export async function listDocumentThreads(documentId: string) {
       id: true,
       anchorText: true,
       anchorContext: true,
-      fromPos: true,
-      toPos: true,
       status: true,
       tags: true,
       createdAt: true,

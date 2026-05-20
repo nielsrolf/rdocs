@@ -24,43 +24,19 @@ export function getAiRunProgressLabel(activeAiRun: ActiveAiRunView | null) {
   return progress.replace(/\.$/, "");
 }
 
-export function parseAiRunSelectionRange(triggerId: string | null | undefined) {
-  const parts = triggerId?.split(":");
-  if (!parts || parts[0] !== "selection") {
-    return null;
-  }
-
-  if (parts.length === 3) {
-    const from = Number(parts[1]);
-    const to = Number(parts[2]);
-    if (!Number.isFinite(from) || !Number.isFinite(to)) {
-      return null;
-    }
-    return {
-      id: null,
-      from,
-      to
-    };
-  }
-
-  if (parts.length === 4) {
-    const from = Number(parts[2]);
-    const to = Number(parts[3]);
-    if (!parts[1] || !Number.isFinite(from) || !Number.isFinite(to)) {
-      return null;
-    }
-    return {
-      id: parts[1],
-      from,
-      to
-    };
-  }
-
+export function parseAiRunSelectionId(triggerId: string | null | undefined) {
+  if (!triggerId) return null;
+  const parts = triggerId.split(":");
+  if (parts[0] !== "selection") return null;
+  // selection:{id}
+  if (parts.length === 2 && parts[1]) return parts[1];
+  // legacy forms: selection:{from}:{to} or selection:{id}:{from}:{to}
+  if (parts.length === 4 && parts[1]) return parts[1];
   return null;
 }
 
-export function buildAiRunSelectionTriggerId(selectionId: string, from: number, to: number) {
-  return `selection:${selectionId}:${from}:${to}`;
+export function buildAiRunSelectionTriggerId(selectionId: string) {
+  return `selection:${selectionId}`;
 }
 
 export function getSelectionContextFromEditor(

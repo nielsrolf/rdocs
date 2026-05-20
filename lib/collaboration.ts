@@ -24,6 +24,7 @@ export type CollaborationPresence = {
     head: number;
     from: number;
     to: number;
+    version: number;
   } | null;
   typing: boolean;
   lastSeen: number;

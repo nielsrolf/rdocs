@@ -14,7 +14,8 @@ const selectionSchema = z
     anchor: z.number().int().nonnegative(),
     head: z.number().int().nonnegative(),
     from: z.number().int().nonnegative(),
-    to: z.number().int().nonnegative()
+    to: z.number().int().nonnegative(),
+    version: z.number().int().nonnegative()
   })
   .nullable();
 

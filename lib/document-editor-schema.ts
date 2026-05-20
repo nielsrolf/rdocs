@@ -8,6 +8,7 @@ import TableRow from "@tiptap/extension-table-row";
 import Underline from "@tiptap/extension-underline";
 import StarterKit from "@tiptap/starter-kit";
 
+import { AiEditRange } from "@/components/document-workspace/ai-edit-selections";
 import { CommentAnchor } from "@/components/document-workspace/comment-anchors";
 import { EmbeddedWidgetSchemaNode, RepoImageSchemaNode } from "@/lib/document-schema-nodes";
 
@@ -20,6 +21,7 @@ export function createDocumentEditorSchema() {
       inline: false
     }),
     CommentAnchor,
+    AiEditRange,
     Link.configure({
       openOnClick: false,
       autolink: true,

@@ -2,10 +2,9 @@ import type { Editor } from "@tiptap/react";
 import { useEffect, useRef, useState } from "react";
 
 type OutlineEntry = {
-  id: string;
+  index: number;
   level: number;
   text: string;
-  pos: number;
 };
 
 export const OUTLINE_MIN_WIDTH = 160;
@@ -40,17 +39,17 @@ export function DocOutline({
       }
 
       const next: OutlineEntry[] = [];
-      editor.state.doc.descendants((node, pos) => {
+      let index = 0;
+      editor.state.doc.descendants((node) => {
         if (node.type.name !== "heading") {
           return;
         }
         const level = typeof node.attrs.level === "number" ? node.attrs.level : 1;
         const text = node.textContent.trim();
         next.push({
-          id: `${pos}-${level}`,
+          index: index++,
           level,
-          text: text || "Untitled section",
-          pos
+          text: text || "Untitled section"
         });
       });
       setEntries(next);
@@ -121,17 +120,28 @@ export function DocOutline({
       return;
     }
 
-    const inside = Math.min(entry.pos + 1, editor.state.doc.content.size);
+    let currentPos: number | null = null;
+    let seen = 0;
+    editor.state.doc.descendants((node, pos) => {
+      if (currentPos != null) return false;
+      if (node.type.name !== "heading") return;
+      if (seen === entry.index) {
+        currentPos = pos;
+        return false;
+      }
+      seen += 1;
+    });
+
+    if (currentPos == null) {
+      return;
+    }
+
+    const inside = Math.min(currentPos + 1, editor.state.doc.content.size);
     editor.commands.focus();
     editor.commands.setTextSelection(inside);
-
-    try {
-      const coords = editor.view.coordsAtPos(inside);
-      const targetY = window.scrollY + coords.top - 96;
-      window.scrollTo({ top: targetY, behavior: "smooth" });
-    } catch {
-      // Position may be stale if doc just changed.
-    }
+    const coords = editor.view.coordsAtPos(inside);
+    const targetY = window.scrollY + coords.top - 96;
+    window.scrollTo({ top: targetY, behavior: "smooth" });
   }
 
   if (collapsed) {
@@ -170,7 +180,7 @@ export function DocOutline({
         ) : (
           <ul className="doc-outline-list">
             {entries.map((entry) => (
-              <li key={entry.id} style={{ paddingLeft: `${Math.max(0, entry.level - 1) * 0.85}rem` }}>
+              <li key={`${entry.index}-${entry.level}-${entry.text}`} style={{ paddingLeft: `${Math.max(0, entry.level - 1) * 0.85}rem` }}>
                 <button
                   className={`doc-outline-item doc-outline-item-level-${Math.min(entry.level, 6)}`}
                   onClick={() => scrollToHeading(entry)}

@@ -121,6 +121,31 @@ export async function GET(request: Request, { params }: RouteContext) {
       }
     })
   ]);
+
+  // In-process agents abort after 10 min and the route updates status accordingly.
+  // A RUNNING run older than that is guaranteed abandoned (server restart/crash).
+  const STALE_RUN_MS = 12 * 60 * 1000;
+  const now = Date.now();
+  const staleRunIds = aiRuns
+    .filter((run) => run.status === "RUNNING" && now - run.startedAt.getTime() > STALE_RUN_MS)
+    .map((run) => run.id);
+  if (staleRunIds.length > 0) {
+    const finishedAt = new Date();
+    const error = "Run abandoned (server restart or crash).";
+    await db.aiRun.updateMany({
+      where: { id: { in: staleRunIds }, status: "RUNNING" },
+      data: { status: "FAILED", error, finishedAt }
+    });
+    const staleSet = new Set(staleRunIds);
+    for (const run of aiRuns) {
+      if (staleSet.has(run.id)) {
+        run.status = "FAILED";
+        run.error = error;
+        run.finishedAt = finishedAt;
+      }
+    }
+  }
+
   const activeAiRuns = aiRuns.filter((run) => run.status === "RUNNING");
 
   return NextResponse.json({

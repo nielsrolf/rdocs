@@ -21,8 +21,6 @@ export type ThreadView = {
   id: string;
   anchorText: string;
   anchorContext: string | null;
-  fromPos: number | null;
-  toPos: number | null;
   status: ThreadStatusValue;
   tags: string[];
   createdAt: string | Date;
@@ -154,8 +152,6 @@ export type CommentTagFilterValue = "yes" | "no" | "all";
 
 export type HighlightThread = {
   id: string;
-  fromPos: number | null;
-  toPos: number | null;
 };
 
 export type CommentAnchorRange = {

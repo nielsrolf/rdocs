@@ -60,8 +60,6 @@ model CommentThread {
   createdById   String
   anchorText    String
   anchorContext String?
-  fromPos       Int?
-  toPos         Int?
   status        String    @default("OPEN")
   tags          String    @default("[]")
   createdAt     DateTime  @default(now())

@@ -17,8 +17,6 @@ const aiEditSchema = z.object({
   selectedContext: z.string().max(50000).optional().nullable(),
   instruction: z.string().min(1).max(4000),
   selectionId: z.string().min(1).max(120).regex(/^[A-Za-z0-9_-]+$/).optional().nullable(),
-  fromPos: z.number().int().nonnegative().optional(),
-  toPos: z.number().int().nonnegative().optional(),
   shareToken: z.string().optional().nullable()
 });
 
@@ -175,12 +173,7 @@ export async function POST(request: Request, { params }: RouteContext) {
       data: {
         documentId: id,
         triggerType: "SELECTION_EDIT",
-        triggerId:
-          typeof parsed.data.fromPos === "number" && typeof parsed.data.toPos === "number"
-            ? parsed.data.selectionId
-              ? `selection:${parsed.data.selectionId}:${parsed.data.fromPos}:${parsed.data.toPos}`
-              : `selection:${parsed.data.fromPos}:${parsed.data.toPos}`
-            : null,
+        triggerId: parsed.data.selectionId ? `selection:${parsed.data.selectionId}` : null,
         instruction: parsed.data.instruction.trim(),
         progress: "Starting Claude research agent."
       }

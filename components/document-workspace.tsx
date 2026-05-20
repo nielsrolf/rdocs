@@ -10,6 +10,7 @@ import Underline from "@tiptap/extension-underline";
 import { getVersion, receiveTransaction, sendableSteps } from "@tiptap/pm/collab";
 import { NodeSelection } from "@tiptap/pm/state";
 import { Step } from "@tiptap/pm/transform";
+import type { Mapping } from "@tiptap/pm/transform";
 import { EditorContent, JSONContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -22,6 +23,7 @@ import { ToolbarButton, insertImagesAtPosition } from "./document-workspace/atom
 import { buildAiEditInsertContent, normalizeWidgetsOutsideTables } from "./document-workspace/ai-edit-insert";
 import {
   AiEditSelections,
+  cleanupStaleAiEditRangeMarks,
   getAiEditSelectionRange,
   removeAiEditSelection,
   syncAiEditSelectionRuns,
@@ -34,12 +36,14 @@ import { CommentAnchor, createCommentHighlightExtension, resolveCommentAnchorRan
 import {
   createCollaborationExtension,
   createRemotePresenceExtension,
+  type ReceivedMappingEntry,
   type RemotePresenceView
 } from "./document-workspace/collaboration";
 import { buildConversations } from "./document-workspace/conversations";
 import { createLatexRenderExtension } from "./document-workspace/latex";
 import { EmbeddedWidget, RepoImage } from "./document-workspace/nodes";
 import { ShareModal } from "./document-workspace/share-modal";
+import { TableInlineControls } from "./document-workspace/table-inline-controls";
 import { useAgentNotifications } from "./document-workspace/use-agent-notifications";
 import { VersionHistoryModal } from "./document-workspace/version-history-modal";
 import { WidgetDialog } from "./document-workspace/widget-dialog";
@@ -63,12 +67,11 @@ import {
 import {
   describeNodeSelection,
   buildAiRunSelectionTriggerId,
-  getAiRunProgressLabel,
   getSelectionContext,
   getSelectionContextFromEditor,
   getSelectionMarkdownFromEditor,
   getThreadTags,
-  parseAiRunSelectionRange
+  parseAiRunSelectionId
 } from "./document-workspace/utils";
 
 type CollaborationStepResponse = {
@@ -208,6 +211,7 @@ export function DocumentWorkspace({
   const activeThreadIdRef = useRef<string | null>(initialThreads[0]?.id ?? null);
   const previousAiRunsRef = useRef<Record<string, string>>({});
   const remotePresenceRef = useRef<RemotePresenceView[]>([]);
+  const receivedMappingsRef = useRef<ReceivedMappingEntry[]>([]);
   const collabClientIdRef = useRef(createCollaborationClientId());
   const collabColorRef = useRef(createPresenceColor(collabClientIdRef.current));
   const {
@@ -234,7 +238,7 @@ export function DocumentWorkspace({
     [initialCollaborationVersion]
   );
   const remotePresenceExtension = useMemo(
-    () => createRemotePresenceExtension(remotePresenceRef),
+    () => createRemotePresenceExtension(remotePresenceRef, receivedMappingsRef),
     []
   );
 
@@ -282,6 +286,12 @@ export function DocumentWorkspace({
   useEffect(() => {
     documentUpdatedAtRef.current = documentUpdatedAt;
   }, [documentUpdatedAt]);
+
+  useEffect(() => {
+    if (!globalError) return;
+    const timeout = window.setTimeout(() => setGlobalError(null), 8000);
+    return () => window.clearTimeout(timeout);
+  }, [globalError]);
 
   function syncAiRuns(nextRuns: ActiveAiRunView[]) {
     const previous = previousAiRunsRef.current;
@@ -340,6 +350,15 @@ export function DocumentWorkspace({
     setSaveState("saved");
   }
 
+  const RECEIVED_MAPPING_BUFFER_LIMIT = 500;
+  function recordReceivedMapping(versionBefore: number, mapping: Mapping) {
+    const buffer = receivedMappingsRef.current;
+    buffer.push({ versionBefore, mapping });
+    if (buffer.length > RECEIVED_MAPPING_BUFFER_LIMIT) {
+      buffer.splice(0, buffer.length - RECEIVED_MAPPING_BUFFER_LIMIT);
+    }
+  }
+
   function applyCollaborationPayload(payload: CollaborationStepResponse) {
     if (!editor || !Array.isArray(payload.steps) || payload.steps.length === 0) {
       markCollaborationSavedIfSettled();
@@ -367,11 +386,12 @@ export function DocumentWorkspace({
     try {
       const steps = payload.steps.map((step) => Step.fromJSON(editor.schema, step));
       isApplyingRemoteUpdateRef.current = true;
-      editor.view.dispatch(
-        receiveTransaction(editor.state, steps, clientIds, {
-          mapSelectionBackward: true
-        })
-      );
+      const versionBefore = getVersion(editor.state);
+      const receiveTr = receiveTransaction(editor.state, steps, clientIds, {
+        mapSelectionBackward: true
+      });
+      recordReceivedMapping(versionBefore, receiveTr.mapping);
+      editor.view.dispatch(receiveTr);
       if (typeof payload.updatedAt === "string") {
         setDocumentUpdatedAt(payload.updatedAt);
       }
@@ -483,7 +503,7 @@ export function DocumentWorkspace({
     }
 
     const { anchor, head, from, to } = editor.state.selection;
-    return { anchor, head, from, to };
+    return { anchor, head, from, to, version: getVersion(editor.state) };
   }
 
   function sendPresence(typing: boolean, immediate = false) {
@@ -617,8 +637,9 @@ export function DocumentWorkspace({
         };
       }
 
-      if (visibleRun.triggerType === "SELECTION_EDIT") {
-        const range = parseAiRunSelectionRange(visibleRun.triggerId);
+      if (visibleRun.triggerType === "SELECTION_EDIT" && editor) {
+        const selectionId = parseAiRunSelectionId(visibleRun.triggerId);
+        const range = selectionId ? getAiEditSelectionRange(editor.state, selectionId) : null;
         if (range) {
           return getRangeEditTarget(range.from, range.to);
         }
@@ -1138,7 +1159,6 @@ export function DocumentWorkspace({
     }
 
     await flushCollaborationSteps();
-    const nextContent = editor.getJSON();
 
     const response = await fetch(`/api/documents/${documentId}/comments`, {
       method: "POST",
@@ -1150,9 +1170,6 @@ export function DocumentWorkspace({
         body: composerBody.trim(),
         anchorText: selectedRange.text,
         anchorContext: selectedRange.context,
-        fromPos: selectedRange.from,
-        toPos: selectedRange.to,
-        content: nextContent,
         shareToken
       })
     });
@@ -1213,7 +1230,7 @@ export function DocumentWorkspace({
     const instruction = editInstruction.trim();
     const selectedMarkdown = getSelectionMarkdownFromEditor(editor, editSelection.from, editSelection.to);
     const selectionId = createAiEditSelectionId();
-    const triggerId = buildAiRunSelectionTriggerId(selectionId, editSelection.from, editSelection.to);
+    const triggerId = buildAiRunSelectionTriggerId(selectionId);
     setGlobalError(null);
     await ensureAgentNotificationPermission();
     editor.view.dispatch(
@@ -1248,8 +1265,6 @@ export function DocumentWorkspace({
         selectedContext: editSelection.context,
         instruction,
         selectionId,
-        fromPos: editSelection.from,
-        toPos: editSelection.to,
         shareToken
       })
     }).catch(() => null);
@@ -1277,10 +1292,14 @@ export function DocumentWorkspace({
     const commitUrl = typeof data.commitUrl === "string" ? data.commitUrl : null;
     const aiRunId = typeof data.aiRunId === "string" ? data.aiRunId : null;
 
-    const replacementRange = getAiEditSelectionRange(editor.state, selectionId) ?? {
-      from: editSelection.from,
-      to: editSelection.to
-    };
+    const replacementRange = getAiEditSelectionRange(editor.state, selectionId);
+    if (!replacementRange) {
+      setGlobalError("The edited range was deleted before the AI run finished. Replacement skipped.");
+      setActiveAiRun(null);
+      setActiveAiTarget(null);
+      editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
+      return;
+    }
 
     editor
       .chain()
@@ -1773,26 +1792,32 @@ export function DocumentWorkspace({
   useEffect(() => {
     if (!editor) return;
 
-    const selectionRuns: Array<{
-      run: ActiveAiRunView;
-      markerId: string;
-      from: number;
-      to: number;
-    }> = [];
+    const selectionRuns: Array<{ run: ActiveAiRunView; selectionId: string }> = [];
 
     for (const run of activeAiRuns) {
       if (run.status !== "RUNNING" || run.triggerType !== "SELECTION_EDIT") continue;
-      const range = parseAiRunSelectionRange(run.triggerId);
-      if (!range) continue;
-      selectionRuns.push({
-        run,
-        markerId: range.id ?? `run-${run.id}`,
-        from: range.from,
-        to: range.to
-      });
+      const selectionId = parseAiRunSelectionId(run.triggerId);
+      if (!selectionId) continue;
+      selectionRuns.push({ run, selectionId });
     }
 
     editor.view.dispatch(syncAiEditSelectionRuns(editor.state, selectionRuns));
+  }, [activeAiRuns, editor]);
+
+  const aiEditMarkCleanupDoneRef = useRef(false);
+  useEffect(() => {
+    if (!editor || aiEditMarkCleanupDoneRef.current) return;
+    aiEditMarkCleanupDoneRef.current = true;
+
+    const activeSelectionIds = new Set<string>();
+    for (const run of activeAiRuns) {
+      if (run.status !== "RUNNING" || run.triggerType !== "SELECTION_EDIT") continue;
+      const selectionId = parseAiRunSelectionId(run.triggerId);
+      if (selectionId) activeSelectionIds.add(selectionId);
+    }
+
+    const cleanupTr = cleanupStaleAiEditRangeMarks(editor.state, activeSelectionIds);
+    if (cleanupTr) editor.view.dispatch(cleanupTr);
   }, [activeAiRuns, editor]);
 
   const commentThreadRunsByThread = useMemo(() => {
@@ -1809,7 +1834,11 @@ export function DocumentWorkspace({
 
   return (
     <section className="workspace-shell">
-      {globalError ? <div className="error-banner">{globalError}</div> : null}
+      {globalError ? (
+        <div className="error-toast" role="alert" onClick={() => setGlobalError(null)}>
+          {globalError}
+        </div>
+      ) : null}
 
       {agentPanelOpen ? null : (
       <>
@@ -2074,18 +2103,6 @@ export function DocumentWorkspace({
         </button>
       ) : null}
 
-      {activeAiRuns.length > 1 ? (
-        <div className="agent-progress-banner">
-          <div>
-            <strong>{activeAiRuns.length} agents running</strong>
-            <p>{activeAiRuns.map((run) => getAiRunProgressLabel(run)).join(" · ")}</p>
-          </div>
-          <button className="ghost-button" onClick={() => setAgentPanelOpen(true)} type="button">
-            Open agent view
-          </button>
-        </div>
-      ) : null}
-
       <div
         className="editor-stage"
         data-outline-collapsed={outlineCollapsed ? "true" : "false"}
@@ -2123,6 +2140,11 @@ export function DocumentWorkspace({
             ) : null}
 
             <EditorContent editor={editor} />
+            <TableInlineControls
+              editor={editor}
+              containerRef={editorPageRef}
+              enabled={canWriteDocument}
+            />
           </div>
         </div>
 

@@ -163,22 +163,19 @@ select:focus {
   color: var(--muted);
 }
 
-.agent-progress-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  width: min(100%, 1320px);
-  margin: 0 auto;
-  padding: 0.8rem 1rem;
-  border: 1px solid rgba(26, 115, 232, 0.22);
-  border-radius: 8px;
-  background: rgba(232, 240, 254, 0.94);
-}
-
-.agent-progress-banner p {
-  margin: 0.18rem 0 0;
-  color: var(--muted);
+.error-toast {
+  position: fixed;
+  left: 1.25rem;
+  bottom: 1.25rem;
+  z-index: 45;
+  width: min(22rem, calc(100vw - 2rem));
+  border-radius: 12px;
+  border: 1px solid rgba(197, 34, 31, 0.32);
+  background: rgba(197, 34, 31, 0.08);
+  color: var(--danger);
+  padding: 0.75rem 0.95rem;
+  box-shadow: var(--shadow);
+  cursor: pointer;
 }
 
 .agent-toast {
@@ -1730,6 +1727,52 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
 .ProseMirror th {
   background: #f8f9fa;
   font-weight: 700;
+}
+
+.table-inline-controls {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.table-inline-btn {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid #c9cccf;
+  background: white;
+  color: #5f6368;
+  font-size: 13px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  pointer-events: auto;
+  opacity: 0.55;
+  transition: opacity 100ms ease, background 100ms ease, color 100ms ease, border-color 100ms ease, transform 100ms ease;
+  user-select: none;
+  box-shadow: 0 1px 2px rgba(60, 64, 67, 0.12);
+}
+
+.table-inline-btn:hover {
+  opacity: 1;
+  transform: scale(1.1);
+}
+
+.table-inline-btn-add:hover {
+  background: #e6f4ea;
+  color: #137333;
+  border-color: #137333;
+}
+
+.table-inline-btn-del:hover {
+  background: #fce8e6;
+  color: #d93025;
+  border-color: #d93025;
 }
 
 .comment-anchor-highlight {
