@@ -4,6 +4,7 @@ import { DocumentWorkspace } from "@/components/document-workspace";
 import { getCurrentUser } from "@/lib/auth";
 import { listDocumentThreads } from "@/lib/document-data";
 import { parseDocumentContent } from "@/lib/content";
+import { getCollaborationVersion } from "@/lib/collaboration";
 import { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
 import { db } from "@/lib/db";
 import { resolveDocumentAccess } from "@/lib/permissions";
@@ -84,6 +85,11 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
     ...member,
     permission: member.permission as PermissionLevelValue
   }));
+  const initialCollaborationVersion = await getCollaborationVersion(
+    access.document.id,
+    access.document.content,
+    access.document.updatedAt
+  );
 
   return (
     <main className="document-page-shell">
@@ -91,6 +97,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         currentUserId={user?.id ?? null}
         currentUserName={user?.name ?? "Guest"}
         documentId={access.document.id}
+        initialCollaborationVersion={initialCollaborationVersion}
         initialContent={parseDocumentContent(access.document.content)}
         initialDocumentUpdatedAt={access.document.updatedAt.toISOString()}
         initialPermission={access.permission}

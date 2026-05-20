@@ -7,7 +7,9 @@ import TableCell from "@tiptap/extension-table-cell";
 import TableHeader from "@tiptap/extension-table-header";
 import TableRow from "@tiptap/extension-table-row";
 import Underline from "@tiptap/extension-underline";
+import { getVersion, receiveTransaction, sendableSteps } from "@tiptap/pm/collab";
 import { NodeSelection } from "@tiptap/pm/state";
+import { Step } from "@tiptap/pm/transform";
 import { EditorContent, JSONContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -22,6 +24,11 @@ import { CommentRail } from "./document-workspace/comment-rail";
 import { DocOutline, OUTLINE_MAX_WIDTH, OUTLINE_MIN_WIDTH } from "./document-workspace/doc-outline";
 import { SelectionPopover } from "./document-workspace/selection-popover";
 import { CommentAnchor, createCommentHighlightExtension, resolveCommentAnchorRange } from "./document-workspace/comment-anchors";
+import {
+  createCollaborationExtension,
+  createRemotePresenceExtension,
+  type RemotePresenceView
+} from "./document-workspace/collaboration";
 import { buildConversations } from "./document-workspace/conversations";
 import { createLatexRenderExtension } from "./document-workspace/latex";
 import { EmbeddedWidget, RepoImage } from "./document-workspace/nodes";
@@ -56,12 +63,40 @@ import {
   parseAiRunSelectionRange
 } from "./document-workspace/utils";
 
+type CollaborationStepResponse = {
+  accepted?: boolean;
+  steps?: unknown[];
+  clientIds?: Array<string | number>;
+  fromVersion?: number;
+  version?: number;
+  updatedAt?: string | null;
+};
+
+function createCollaborationClientId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+
+  return `client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function createPresenceColor(input: string) {
+  const colors = ["#1a73e8", "#188038", "#d93025", "#9334e6", "#e8710a", "#00796b", "#c5221f"];
+  let hash = 0;
+  for (let index = 0; index < input.length; index += 1) {
+    hash = (hash * 31 + input.charCodeAt(index)) >>> 0;
+  }
+
+  return colors[hash % colors.length];
+}
+
 export function DocumentWorkspace({
   currentUserId,
   currentUserName,
   documentId,
   initialTitle,
   initialContent,
+  initialCollaborationVersion,
   initialDocumentUpdatedAt,
   initialPermission,
   initialMembers,
@@ -124,6 +159,7 @@ export function DocumentWorkspace({
   });
   const [widgetBusy, setWidgetBusy] = useState(false);
   const [remoteNotice, setRemoteNotice] = useState<string | null>(null);
+  const [remotePresence, setRemotePresence] = useState<RemotePresenceView[]>([]);
   const [threadOffsets, setThreadOffsets] = useState<Record<string, number>>({});
   const [railHeight, setRailHeight] = useState(640);
   const [newTagThreadId, setNewTagThreadId] = useState<string | null>(null);
@@ -131,6 +167,12 @@ export function DocumentWorkspace({
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [outlineWidth, setOutlineWidth] = useState(220);
   const saveTimerRef = useRef<number | null>(null);
+  const collaborationFlushTimerRef = useRef<number | null>(null);
+  const collaborationPushBusyRef = useRef(false);
+  const collaborationPushQueuedRef = useRef(false);
+  const collaborationPullBusyRef = useRef(false);
+  const presenceTimerRef = useRef<number | null>(null);
+  const typingClearTimerRef = useRef<number | null>(null);
   const isApplyingRemoteUpdateRef = useRef(false);
   const hasUnsavedChangesRef = useRef(false);
   const pendingVersionSourcesRef = useRef<string[]>([]);
@@ -148,6 +190,9 @@ export function DocumentWorkspace({
   const threadsRef = useRef<HighlightThread[]>(initialThreads);
   const activeThreadIdRef = useRef<string | null>(initialThreads[0]?.id ?? null);
   const previousAiRunsRef = useRef<Record<string, string>>({});
+  const remotePresenceRef = useRef<RemotePresenceView[]>([]);
+  const collabClientIdRef = useRef(createCollaborationClientId());
+  const collabColorRef = useRef(createPresenceColor(collabClientIdRef.current));
   const {
     ensurePermission: ensureAgentNotificationPermission,
     notifyDone: notifyAgentDone,
@@ -167,6 +212,14 @@ export function DocumentWorkspace({
     []
   );
   const latexRenderExtension = useMemo(() => createLatexRenderExtension(), []);
+  const collaborationExtension = useMemo(
+    () => createCollaborationExtension(initialCollaborationVersion, collabClientIdRef.current),
+    [initialCollaborationVersion]
+  );
+  const remotePresenceExtension = useMemo(
+    () => createRemotePresenceExtension(remotePresenceRef),
+    []
+  );
 
   useEffect(() => {
     titleRef.current = title;
@@ -259,6 +312,204 @@ export function DocumentWorkspace({
 
     setThreadOffsets(normalized);
     setRailHeight(Math.max(editorPageRef.current.offsetHeight, cursor + 32));
+  }
+
+  function markCollaborationSavedIfSettled() {
+    if (!editor || sendableSteps(editor.state)) {
+      return;
+    }
+
+    hasUnsavedChangesRef.current = false;
+    setSaveState("saved");
+  }
+
+  function applyCollaborationPayload(payload: CollaborationStepResponse) {
+    if (!editor || !Array.isArray(payload.steps) || payload.steps.length === 0) {
+      markCollaborationSavedIfSettled();
+      return true;
+    }
+
+    const clientIds = Array.isArray(payload.clientIds) ? payload.clientIds : [];
+    if (clientIds.length !== payload.steps.length) {
+      return false;
+    }
+
+    if (typeof payload.fromVersion === "number") {
+      const currentVersion = getVersion(editor.state);
+      if (payload.fromVersion < currentVersion) {
+        markCollaborationSavedIfSettled();
+        return true;
+      }
+
+      if (payload.fromVersion > currentVersion) {
+        void pullCollaborationSteps();
+        return true;
+      }
+    }
+
+    try {
+      const steps = payload.steps.map((step) => Step.fromJSON(editor.schema, step));
+      isApplyingRemoteUpdateRef.current = true;
+      editor.view.dispatch(
+        receiveTransaction(editor.state, steps, clientIds, {
+          mapSelectionBackward: true
+        })
+      );
+      if (typeof payload.updatedAt === "string") {
+        setDocumentUpdatedAt(payload.updatedAt);
+      }
+      setRemoteNotice(null);
+      markCollaborationSavedIfSettled();
+      return true;
+    } catch {
+      setRemoteNotice("Live collaboration lost sync. Refresh this document to reconnect.");
+      return false;
+    } finally {
+      window.requestAnimationFrame(() => {
+        isApplyingRemoteUpdateRef.current = false;
+        updateThreadOffsets();
+      });
+    }
+  }
+
+  async function flushCollaborationSteps() {
+    if (!editor || collaborationPushBusyRef.current) {
+      collaborationPushQueuedRef.current = true;
+      return;
+    }
+
+    const sendable = sendableSteps(editor.state);
+    if (!sendable || sendable.steps.length === 0) {
+      hasUnsavedChangesRef.current = false;
+      setSaveState("saved");
+      return;
+    }
+
+    collaborationPushBusyRef.current = true;
+    collaborationPushQueuedRef.current = false;
+
+    try {
+      const response = await fetch(`/api/documents/${documentId}/collaboration`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          version: sendable.version,
+          steps: sendable.steps.map((step) => step.toJSON()),
+          clientId: collabClientIdRef.current,
+          shareToken
+        })
+      });
+      const data = (await response.json().catch(() => null)) as CollaborationStepResponse | null;
+
+      if (!data || !Array.isArray(data.steps) || !Array.isArray(data.clientIds)) {
+        setSaveState("error");
+        return;
+      }
+
+      if (!applyCollaborationPayload(data)) {
+        setSaveState("error");
+        return;
+      }
+
+      setSaveState(response.ok && !sendableSteps(editor.state) ? "saved" : "saving");
+    } catch {
+      setSaveState("error");
+    } finally {
+      collaborationPushBusyRef.current = false;
+    }
+
+    if (collaborationPushQueuedRef.current || sendableSteps(editor.state)) {
+      collaborationPushQueuedRef.current = false;
+      await flushCollaborationSteps();
+    }
+  }
+
+  function scheduleCollaborationFlush(delay = 80) {
+    if (collaborationFlushTimerRef.current) {
+      window.clearTimeout(collaborationFlushTimerRef.current);
+    }
+
+    collaborationFlushTimerRef.current = window.setTimeout(() => {
+      collaborationFlushTimerRef.current = null;
+      void flushCollaborationSteps();
+    }, delay);
+  }
+
+  async function pullCollaborationSteps() {
+    if (!editor || collaborationPullBusyRef.current) {
+      return;
+    }
+
+    collaborationPullBusyRef.current = true;
+
+    try {
+      const shareQuery = shareToken ? `&share=${encodeURIComponent(shareToken)}` : "";
+      const response = await fetch(
+        `/api/documents/${documentId}/collaboration?version=${getVersion(editor.state)}${shareQuery}`,
+        { cache: "no-store" }
+      ).catch(() => null);
+      const data = (await response?.json().catch(() => null)) as CollaborationStepResponse | null;
+
+      if (data && Array.isArray(data.steps) && data.steps.length > 0) {
+        applyCollaborationPayload(data);
+      }
+    } finally {
+      collaborationPullBusyRef.current = false;
+    }
+  }
+
+  function getPresenceSelection() {
+    if (!editor) {
+      return null;
+    }
+
+    const { anchor, head, from, to } = editor.state.selection;
+    return { anchor, head, from, to };
+  }
+
+  function sendPresence(typing: boolean, immediate = false) {
+    if (!editor) {
+      return;
+    }
+
+    const payload = {
+      clientId: collabClientIdRef.current,
+      userName: currentUserName || "Guest",
+      color: collabColorRef.current,
+      selection: getPresenceSelection(),
+      typing,
+      shareToken
+    };
+
+    const postPresence = () => {
+      void fetch(`/api/documents/${documentId}/collaboration/presence`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      }).catch(() => undefined);
+    };
+
+    if (immediate) {
+      if (presenceTimerRef.current) {
+        window.clearTimeout(presenceTimerRef.current);
+        presenceTimerRef.current = null;
+      }
+      postPresence();
+      return;
+    }
+
+    if (presenceTimerRef.current) {
+      return;
+    }
+
+    presenceTimerRef.current = window.setTimeout(() => {
+      presenceTimerRef.current = null;
+      postPresence();
+    }, 120);
   }
 
   async function saveDocument(
@@ -372,19 +623,13 @@ export function DocumentWorkspace({
       return;
     }
 
-    if (hasUnsavedChangesRef.current) {
-      setRemoteNotice("A collaborator updated the document. Save your edits to refresh.");
-      return;
+    if (snapshot.title !== titleRef.current) {
+      setTitle(snapshot.title);
+      titleRef.current = snapshot.title;
     }
-
-    isApplyingRemoteUpdateRef.current = true;
-    setTitle(snapshot.title);
-    titleRef.current = snapshot.title;
-    editor.commands.setContent(snapshot.content, false);
     setDocumentUpdatedAt(snapshot.updatedAt);
     setRemoteNotice(null);
     window.requestAnimationFrame(() => {
-      isApplyingRemoteUpdateRef.current = false;
       updateThreadOffsets();
     });
   }
@@ -418,6 +663,8 @@ export function DocumentWorkspace({
         inline: false
       }),
       CommentAnchor,
+      collaborationExtension,
+      remotePresenceExtension,
       commentHighlightExtension,
       latexRenderExtension,
       Link.configure({
@@ -490,6 +737,7 @@ export function DocumentWorkspace({
       }
     },
     onSelectionUpdate: ({ editor }) => {
+      sendPresence(false);
       const { selection } = editor.state;
       const { from, to } = selection;
       if (!editorPageRef.current) {
@@ -532,20 +780,22 @@ export function DocumentWorkspace({
       });
       setSelectionPopoverMode("menu");
     },
-    onUpdate: ({ editor }) => {
+    onUpdate: () => {
       if (!canWriteDocument || isApplyingRemoteUpdateRef.current) {
         return;
       }
 
       hasUnsavedChangesRef.current = true;
       setSaveState("saving");
-      if (saveTimerRef.current) {
-        window.clearTimeout(saveTimerRef.current);
+      scheduleCollaborationFlush();
+      sendPresence(true);
+      if (typingClearTimerRef.current) {
+        window.clearTimeout(typingClearTimerRef.current);
       }
-
-      saveTimerRef.current = window.setTimeout(async () => {
-        await saveDocument(editor.getJSON());
-      }, 700);
+      typingClearTimerRef.current = window.setTimeout(() => {
+        typingClearTimerRef.current = null;
+        sendPresence(false, true);
+      }, 900);
 
       window.requestAnimationFrame(() => {
         updateThreadOffsets();
@@ -561,6 +811,73 @@ export function DocumentWorkspace({
       editor.view.dispatch(editor.state.tr.setMeta("comment-highlight-refresh", Date.now()));
     }
   }, [activeThreadId, editor, threads]);
+
+  useEffect(() => {
+    remotePresenceRef.current = remotePresence;
+    if (editor) {
+      editor.view.dispatch(editor.state.tr.setMeta("remote-presence-refresh", Date.now()));
+    }
+  }, [editor, remotePresence]);
+
+  useEffect(() => {
+    if (!editor) {
+      return;
+    }
+
+    const shareQuery = shareToken ? `&share=${encodeURIComponent(shareToken)}` : "";
+    const stream = new EventSource(
+      `/api/documents/${documentId}/collaboration/stream?clientId=${encodeURIComponent(
+        collabClientIdRef.current
+      )}${shareQuery}`
+    );
+
+    stream.addEventListener("steps", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data) as CollaborationStepResponse;
+      applyCollaborationPayload(payload);
+    });
+
+    const handlePresence = (event: Event) => {
+      const payload = JSON.parse((event as MessageEvent).data) as { presence?: RemotePresenceView[] };
+      const nextPresence = Array.isArray(payload.presence) ? payload.presence : [];
+      setRemotePresence(nextPresence.filter((presence) => presence.clientId !== collabClientIdRef.current));
+    };
+
+    stream.addEventListener("presence", handlePresence);
+    stream.addEventListener("ready", handlePresence);
+    stream.onerror = () => {
+      setRemoteNotice("Reconnecting live collaboration...");
+    };
+    sendPresence(false, true);
+    const stepPull = window.setInterval(() => {
+      void pullCollaborationSteps();
+    }, 500);
+    const presencePoll = window.setInterval(async () => {
+      const presenceShareQuery = shareToken ? `?share=${encodeURIComponent(shareToken)}` : "";
+      const response = await fetch(
+        `/api/documents/${documentId}/collaboration/presence${presenceShareQuery}`,
+        { cache: "no-store" }
+      ).catch(() => null);
+      const data = await response?.json().catch(() => null);
+      const nextPresence: RemotePresenceView[] = Array.isArray(data?.presence) ? data.presence : [];
+      setRemotePresence(nextPresence.filter((presence) => presence.clientId !== collabClientIdRef.current));
+    }, 500);
+
+    return () => {
+      window.clearInterval(stepPull);
+      window.clearInterval(presencePoll);
+      stream.close();
+      void fetch(`/api/documents/${documentId}/collaboration/presence`, {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          clientId: collabClientIdRef.current,
+          shareToken
+        })
+      }).catch(() => undefined);
+    };
+  }, [documentId, editor, shareToken]);
 
   useEffect(() => {
     window.requestAnimationFrame(() => {
@@ -581,6 +898,15 @@ export function DocumentWorkspace({
       window.removeEventListener("scroll", handleLayoutChange, true);
       if (saveTimerRef.current) {
         window.clearTimeout(saveTimerRef.current);
+      }
+      if (collaborationFlushTimerRef.current) {
+        window.clearTimeout(collaborationFlushTimerRef.current);
+      }
+      if (presenceTimerRef.current) {
+        window.clearTimeout(presenceTimerRef.current);
+      }
+      if (typingClearTimerRef.current) {
+        window.clearTimeout(typingClearTimerRef.current);
       }
     };
   }, [editor, threads, activeThreadId]);
@@ -634,14 +960,30 @@ export function DocumentWorkspace({
   }
 
   async function handleSaveTitleBlur() {
-    if (!canWriteDocument || !editor) {
+    if (!canWriteDocument) {
       return;
     }
 
-    hasUnsavedChangesRef.current = true;
     setSaveState("saving");
     titleRef.current = title;
-    await saveDocument(editor.getJSON());
+    const response = await fetch(`/api/documents/${documentId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        title: titleRef.current,
+        shareToken
+      })
+    });
+    const data = await response.json().catch(() => null);
+    if (response.ok && typeof data?.updatedAt === "string") {
+      setDocumentUpdatedAt(data.updatedAt);
+      setSaveState("saved");
+      return;
+    }
+
+    setSaveState("error");
   }
 
   async function handleSaveRepository() {
@@ -762,14 +1104,12 @@ export function DocumentWorkspace({
         : `comment-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const previousContent = editor.getJSON();
 
-    isApplyingRemoteUpdateRef.current = true;
     const marked = editor
       .chain()
       .setTextSelection({ from: selectedRange.from, to: selectedRange.to })
       .setMark("commentAnchor", { threadId })
       .setTextSelection({ from: selectedRange.to, to: selectedRange.to })
       .run();
-    isApplyingRemoteUpdateRef.current = false;
 
     if (!marked) {
       setGlobalError("Unable to anchor the comment to the selected text.");
@@ -777,6 +1117,7 @@ export function DocumentWorkspace({
       return;
     }
 
+    await flushCollaborationSteps();
     const nextContent = editor.getJSON();
 
     const response = await fetch(`/api/documents/${documentId}/comments`, {
@@ -924,13 +1265,15 @@ export function DocumentWorkspace({
         })
       )
       .run();
-    const contentToSave = normalizeCurrentEditorWidgets() ?? editor.getJSON();
+    normalizeCurrentEditorWidgets();
     hasUnsavedChangesRef.current = true;
     setSaveState("saving");
     if (saveTimerRef.current) {
       window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
     }
+    await flushCollaborationSteps();
+    const contentToSave = editor.getJSON();
     await saveDocument(contentToSave, {
       sourceLinks,
       commitSha,
@@ -1600,6 +1943,20 @@ export function DocumentWorkspace({
           </details>
 
           <div className="document-topbar-actions">
+            {remotePresence.length > 0 ? (
+              <div className="collaboration-presence-list" aria-label="Active collaborators">
+                {remotePresence.slice(0, 4).map((presence) => (
+                  <span
+                    className="collaboration-presence-avatar"
+                    key={presence.clientId}
+                    style={{ backgroundColor: presence.color }}
+                    title={presence.typing ? `${presence.userName} is typing` : presence.userName}
+                  >
+                    {presence.userName.slice(0, 1).toUpperCase()}
+                  </span>
+                ))}
+              </div>
+            ) : null}
             <button
               className="ghost-button"
               onClick={() => setAgentPanelOpen((open) => !open)}

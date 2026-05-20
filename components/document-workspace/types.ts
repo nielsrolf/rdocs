@@ -56,6 +56,7 @@ export type DocumentWorkspaceProps = {
   documentId: string;
   initialTitle: string;
   initialContent: unknown;
+  initialCollaborationVersion: number;
   initialDocumentUpdatedAt: string;
   initialPermission: PermissionLevelValue;
   initialMembers: MemberView[];

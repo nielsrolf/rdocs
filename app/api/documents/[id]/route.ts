@@ -11,7 +11,7 @@ import { normalizeSourceLinks } from "@/lib/sources";
 
 const updateDocumentSchema = z.object({
   title: z.string().min(1).max(200),
-  content: z.unknown(),
+  content: z.unknown().optional(),
   shareToken: z.string().optional().nullable(),
   forceVersion: z.boolean().optional(),
   sourceLinks: z.array(z.string().url()).optional(),
@@ -42,26 +42,31 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   }
 
   const nextTitle = parsed.data.title.trim();
-  const nextContent = serializeDocumentContent(parsed.data.content);
+  const hasContentUpdate = parsed.data.content !== undefined;
+  const nextContent = hasContentUpdate
+    ? serializeDocumentContent(parsed.data.content)
+    : access.document.content;
 
-  await maybeCreateVersionSnapshot({
-    documentId: id,
-    currentTitle: access.document.title,
-    currentContent: access.document.content,
-    nextTitle,
-    nextContent,
-    force: parsed.data.forceVersion,
-    sourceLinks: normalizeSourceLinks(parsed.data.sourceLinks ?? []),
-    commitSha: parsed.data.commitSha ?? null,
-    commitUrl: parsed.data.commitUrl ?? null,
-    aiRunId: parsed.data.aiRunId ?? null
-  });
+  if (hasContentUpdate || nextTitle !== access.document.title || parsed.data.forceVersion) {
+    await maybeCreateVersionSnapshot({
+      documentId: id,
+      currentTitle: access.document.title,
+      currentContent: access.document.content,
+      nextTitle,
+      nextContent,
+      force: parsed.data.forceVersion,
+      sourceLinks: normalizeSourceLinks(parsed.data.sourceLinks ?? []),
+      commitSha: parsed.data.commitSha ?? null,
+      commitUrl: parsed.data.commitUrl ?? null,
+      aiRunId: parsed.data.aiRunId ?? null
+    });
+  }
 
   const updated = await db.document.update({
     where: { id },
     data: {
       title: nextTitle,
-      content: nextContent
+      ...(hasContentUpdate ? { content: nextContent } : {})
     },
     select: {
       updatedAt: true

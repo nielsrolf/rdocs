@@ -1148,6 +1148,31 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   color: var(--muted);
 }
 
+.collaboration-presence-list {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 0.2rem;
+}
+
+.collaboration-presence-avatar {
+  width: 2rem;
+  height: 2rem;
+  border: 2px solid var(--surface);
+  border-radius: 999px;
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.82rem;
+  font-weight: 700;
+  margin-left: -0.45rem;
+  text-transform: uppercase;
+}
+
+.collaboration-presence-avatar:first-child {
+  margin-left: 0;
+}
+
 .section-heading {
   margin-bottom: 1rem;
 }
@@ -1856,6 +1881,37 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   color: var(--muted);
   font-size: 0.92rem;
   font-style: italic;
+}
+
+.remote-collab-selection {
+  border-radius: 2px;
+}
+
+.remote-collab-cursor {
+  border-left: 2px solid var(--remote-collab-color);
+  margin-left: -1px;
+  margin-right: -1px;
+  pointer-events: none;
+  position: relative;
+}
+
+.remote-collab-cursor::after {
+  content: attr(data-name);
+  position: absolute;
+  left: -2px;
+  top: -1.55rem;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--remote-collab-color);
+  color: #fff;
+  border-radius: 4px;
+  padding: 0.14rem 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.2;
+  z-index: 5;
 }
 
 .ProseMirror-selectednode.embedded-widget-node,
