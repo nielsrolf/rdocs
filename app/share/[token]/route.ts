@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { db } from "@/lib/db";
+import { getRequestOrigin } from "@/lib/request-origin";
 
 type RouteContext = {
   params: Promise<{
@@ -8,7 +9,7 @@ type RouteContext = {
   }>;
 };
 
-export async function GET(_request: Request, { params }: RouteContext) {
+export async function GET(request: Request, { params }: RouteContext) {
   const { token } = await params;
   const shareLink = await db.shareLink.findUnique({
     where: { token },
@@ -19,9 +20,10 @@ export async function GET(_request: Request, { params }: RouteContext) {
     }
   });
 
+  const base = getRequestOrigin(request);
   if (!shareLink || shareLink.revokedAt) {
-    return NextResponse.redirect(new URL("/", _request.url));
+    return NextResponse.redirect(new URL("/", base));
   }
 
-  return NextResponse.redirect(new URL(`/documents/${shareLink.documentId}?share=${shareLink.token}`, _request.url));
+  return NextResponse.redirect(new URL(`/documents/${shareLink.documentId}?share=${shareLink.token}`, base));
 }

@@ -8,7 +8,7 @@ import { CLAUDE_AGENT_TOOLS } from "@/lib/ai-tools";
 import { db } from "@/lib/db";
 
 export type LinkedRepository = {
-  url: string;
+  url: string | null;
   branch: string | null;
   workspace: string;
 };
@@ -33,15 +33,39 @@ export type CommitResult = {
 const WORKSPACE_ROOT = path.join(process.cwd(), ".research-workspaces");
 const MAX_OVERVIEW_FILES = 240;
 
+function buildGitEnv() {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  // Strip VS Code's askpass plumbing so background git doesn't try (and fail
+  // with ECONNREFUSED) on a dead IPC socket inherited from the launching shell.
+  delete env.GIT_ASKPASS;
+  delete env.SSH_ASKPASS;
+  delete env.VSCODE_GIT_ASKPASS_NODE;
+  delete env.VSCODE_GIT_ASKPASS_EXTRA_ARGS;
+  delete env.VSCODE_GIT_ASKPASS_MAIN;
+  delete env.VSCODE_GIT_IPC_HANDLE;
+  env.GIT_TERMINAL_PROMPT = "0";
+  return env;
+}
+
+function buildGitArgs(args: string[]) {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) return args;
+  const header = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+  return ["-c", `http.https://github.com/.extraheader=${header}`, ...args];
+}
+
 function runCommand(
   command: string,
   args: string[],
   options: { cwd?: string; timeoutMs?: number } = {}
 ): Promise<GitResult> {
+  const isGit = command === "git";
+  const finalArgs = isGit ? buildGitArgs(args) : args;
+  const env = isGit ? buildGitEnv() : process.env;
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const child = spawn(command, finalArgs, {
       cwd: options.cwd ?? process.cwd(),
-      env: process.env
+      env
     });
 
     let stdout = "";
@@ -82,12 +106,32 @@ function slugifyBranchPart(value: string) {
   return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "run";
 }
 
-export function getWorkspacePath(documentId: string, repoUrl: string) {
-  return path.join(WORKSPACE_ROOT, documentId, getRepoName(repoUrl));
+export function getWorkspacePath(documentId: string, repoUrl: string | null) {
+  return path.join(WORKSPACE_ROOT, documentId, repoUrl ? getRepoName(repoUrl) : "local");
 }
 
-function getWorktreePath(documentId: string, repoUrl: string, runId: string) {
-  return path.join(WORKSPACE_ROOT, documentId, "worktrees", `${slugifyBranchPart(runId)}-${getRepoName(repoUrl)}`);
+function getWorktreePath(documentId: string, repoUrl: string | null, runId: string) {
+  const repoName = repoUrl ? getRepoName(repoUrl) : "local";
+  return path.join(WORKSPACE_ROOT, documentId, "worktrees", `${slugifyBranchPart(runId)}-${repoName}`);
+}
+
+async function initLocalWorkspace(workspace: string) {
+  await fs.mkdir(workspace, { recursive: true });
+  await runCommand("git", ["init", "--initial-branch=main"], { cwd: workspace });
+  // git needs an identity to commit; set local config so we don't depend on global config.
+  await runCommand("git", ["config", "user.email", "ai-agent@gdocs.local"], { cwd: workspace });
+  await runCommand("git", ["config", "user.name", "gdocs-ai"], { cwd: workspace });
+  // Establish an initial commit so worktree add and HEAD work.
+  await runCommand("git", ["commit", "--allow-empty", "-m", "initial"], { cwd: workspace });
+}
+
+async function hasOriginRemote(workspace: string) {
+  try {
+    const result = await runCommand("git", ["remote"], { cwd: workspace });
+    return result.stdout.split("\n").map((s) => s.trim()).includes("origin");
+  } catch {
+    return false;
+  }
 }
 
 export function getGithubCommitUrl(repoUrl: string | null | undefined, commitSha: string | null) {
@@ -115,7 +159,7 @@ export async function ensureLinkedRepository(
     }
   });
 
-  if (!document?.repoUrl) {
+  if (!document) {
     return null;
   }
 
@@ -129,11 +173,15 @@ export async function ensureLinkedRepository(
   await fs.mkdir(path.dirname(workspace), { recursive: true });
 
   if (!hasCheckout) {
-    const cloneArgs = ["clone", document.repoUrl, workspace];
-    if (document.repoBranch) {
-      cloneArgs.splice(1, 0, "--branch", document.repoBranch);
+    if (document.repoUrl) {
+      const cloneArgs = ["clone", document.repoUrl, workspace];
+      if (document.repoBranch) {
+        cloneArgs.splice(1, 0, "--branch", document.repoBranch);
+      }
+      await runCommand("git", cloneArgs, { timeoutMs: 300_000 });
+    } else {
+      await initLocalWorkspace(workspace);
     }
-    await runCommand("git", cloneArgs, { timeoutMs: 300_000 });
   }
 
   if (options.requireClean ?? true) {
@@ -143,7 +191,7 @@ export async function ensureLinkedRepository(
         workspace,
         repoUrl: document.repoUrl,
         message: "Save pending AI workspace changes",
-        push: options.pushPendingChanges ?? true
+        push: (options.pushPendingChanges ?? true) && Boolean(document.repoUrl)
       });
     }
   }
@@ -175,14 +223,16 @@ export async function ensureLinkedRepositoryWorktree(
     return null;
   }
 
-  await runCommand("git", ["fetch", "--all", "--prune"], {
-    cwd: linked.workspace,
-    timeoutMs: 300_000
-  }).catch(() => null);
+  if (linked.url) {
+    await runCommand("git", ["fetch", "--all", "--prune"], {
+      cwd: linked.workspace,
+      timeoutMs: 300_000
+    }).catch(() => null);
+  }
 
   const worktree = getWorktreePath(documentId, linked.url, runId);
   const branchName = `ai/${slugifyBranchPart(documentId)}/${slugifyBranchPart(runId)}`;
-  const baseRef = linked.branch ? `origin/${linked.branch}` : "HEAD";
+  const baseRef = linked.branch && linked.url ? `origin/${linked.branch}` : "HEAD";
   const hasWorktree = await fs
     .stat(path.join(worktree, ".git"))
     .then((stat) => stat.isFile() || stat.isDirectory())
@@ -384,7 +434,7 @@ async function syncBranchToBaseWorkspace(baseWorkspace: string, commitSha: strin
     }
   }
 
-  if (push) {
+  if (push && (await hasOriginRemote(baseWorkspace))) {
     await runCommand("git", ["push", "origin", "HEAD"], {
       cwd: baseWorkspace,
       timeoutMs: 300_000
@@ -463,7 +513,7 @@ export async function commitWorkspaceChanges(input: {
   const commitSha = shaResult.stdout.trim();
 
   let pushed = false;
-  if (input.push) {
+  if (input.push && (await hasOriginRemote(input.workspace))) {
     await runCommand("git", ["push", "-u", "origin", "HEAD"], {
       cwd: input.workspace,
       timeoutMs: 300_000

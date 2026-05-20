@@ -229,7 +229,8 @@ export function buildSystemPrompt(input: ClaudeResearchAgentInput) {
 
 App environment:
 - A document can be linked to one Git repository.
-- You are running in the linked repository checkout when one is available.
+- You are running in the linked repository checkout when one is available. Your current working directory IS that checkout: a writable Git worktree the app set up for this turn. You can freely Write/Edit/Bash inside it — there is no read-only sandbox to escape from. Do not use EnterWorktree, ExitWorktree, plan-mode tools, or any other "get a writable copy" workaround; files written outside this cwd are not visible to the app and will cause widget builds, image embeds, and the auto-commit to silently miss your work.
+- After you finish, the app runs your widget build_cmd from this same cwd and then auto-commits whatever changed here. Anything written elsewhere on disk is discarded.
 - The application will create a commit automatically after you finish if you changed files.
 - The editor renders replacementText as Markdown. Use Markdown structure deliberately: ##/### headings, short paragraphs, bullet or numbered lists, blockquotes, fenced code blocks, and Markdown tables when they improve scanability. Avoid returning one long paragraph.
 - The editor supports LaTeX math in Markdown text with $inline$ and $$display$$ delimiters.
@@ -602,6 +603,13 @@ async function runClaudeResearchAgentOnce(
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       allowedTools: [...CLAUDE_AGENT_TOOLS, SUBMIT_TOOL_NAME],
+      disallowedTools: [
+        "EnterWorktree",
+        "ExitWorktree",
+        "EnterPlanMode",
+        "ExitPlanMode",
+        "ToolSearch"
+      ],
       mcpServers: { gdocs: mcpServer },
       maxTurns: Number.parseInt(process.env.CLAUDE_AGENT_MAX_TURNS || "12", 10),
       model,

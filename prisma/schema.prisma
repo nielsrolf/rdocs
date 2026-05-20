@@ -159,6 +159,17 @@ model EmbeddedWidget {
   @@index([documentId, createdAt])
 }
 
+model CollaborationStep {
+  documentId String
+  version    Int
+  step       String
+  clientId   String
+  createdAt  DateTime @default(now())
+
+  @@id([documentId, version])
+  @@index([documentId, version])
+}
+
 model ShareLink {
   id          String    @id @default(cuid())
   token       String    @unique

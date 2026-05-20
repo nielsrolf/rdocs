@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { clearSessionCookie } from "@/lib/auth";
+import { getRequestOrigin } from "@/lib/request-origin";
 
 export async function POST(request: Request) {
   await clearSessionCookie();
@@ -9,5 +10,5 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true });
   }
 
-  return NextResponse.redirect(new URL("/", request.url));
+  return NextResponse.redirect(new URL("/", getRequestOrigin(request)));
 }
