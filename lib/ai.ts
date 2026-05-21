@@ -250,6 +250,14 @@ App environment:
   2. a generated HTML asset under assets/, for example assets/fft_explorer.html
   3. a widgets array entry submitted via the submit_response tool with label, build_cmd, and embed_source.
 - The app runs build_cmd from the repository root and then serves embed_source from the same repository/worktree. Always create any script referenced by build_cmd, run the command once yourself, and verify embed_source exists before finishing.
+- Widget HTML is served with a Content-Security-Policy that restricts which external origins scripts/styles/fonts can come from. Loading from a non-allowed CDN will silently fail and the widget will render blank. The following origins are allowed in <script src>, <link rel=stylesheet>, and fetch/XHR — use them and you do NOT need to inline the library:
+    - https://cdn.plot.ly (Plotly)
+    - https://cdn.jsdelivr.net (D3, Chart.js, Vega, KaTeX, most npm packages — \`https://cdn.jsdelivr.net/npm/<pkg>@<ver>\`)
+    - https://unpkg.com (npm packages — \`https://unpkg.com/<pkg>@<ver>\`)
+    - https://cdnjs.cloudflare.com (Cloudflare's library CDN)
+    - https://d3js.org (D3 official)
+    - https://fonts.googleapis.com / https://fonts.gstatic.com (Google Fonts CSS + fonts)
+  Inline-bundle a library ONLY if you need a version that is not on any of these CDNs. Do not pull scripts from any other origin (e.g. random GitHub raw URLs, project-specific CDNs) — they will be blocked by CSP and the widget will appear empty.
 - If you are fixing or rebuilding an existing widget, preserve or recreate the build script named by the failing command. Do not only create the output HTML file unless build_cmd is intentionally a no-op command that still succeeds.
 - When existing widgets or repository images are present in the document context, their repo paths and build/source metadata are lookup hints. Read those files before making claims about their content.
 - If you use web search or web fetch, include the most relevant HTTP(S) sources in the sources array passed to submit_response.
@@ -647,6 +655,7 @@ async function runClaudeResearchAgentOnce(
       mcpServers: { gdocs: mcpServer },
       maxTurns: Number.parseInt(process.env.CLAUDE_AGENT_MAX_TURNS || "12", 10),
       model,
+      thinking: { type: "disabled" },
       abortController
     }
   });

@@ -1334,6 +1334,15 @@ export function DocumentWorkspace({
       forceVersion: true
     });
 
+    // Force node-view remount so freshly inserted widgets/tables render
+    // cleanly. Without this, iframes and tables sometimes paint in a
+    // half-initialized state until the user refreshes the page.
+    isApplyingRemoteUpdateRef.current = true;
+    editor.commands.setContent(contentToSave, false);
+    window.requestAnimationFrame(() => {
+      isApplyingRemoteUpdateRef.current = false;
+    });
+
     setActiveAiRun(null);
     setActiveAiTarget(null);
     notifyAgentCompleted({
@@ -1856,9 +1865,10 @@ export function DocumentWorkspace({
           </div>
 
           <div className="document-compact-status">
-            <span className="save-indicator">
+            <span className="save-indicator" data-state={saveState}>
+              <span className="save-indicator-dot" aria-hidden="true" />
               {saveState === "saving"
-                ? "Saving..."
+                ? "Saving"
                 : saveState === "saved"
                   ? "Saved"
                   : saveState === "error"

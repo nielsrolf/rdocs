@@ -67,7 +67,14 @@ export async function GET(request: Request, { params }: RouteContext) {
       return new NextResponse(html, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
-          "Content-Security-Policy": "default-src 'self' 'unsafe-inline' data: blob:; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';"
+          "Content-Security-Policy": [
+            "default-src 'self' 'unsafe-inline' data: blob:",
+            "img-src 'self' data: blob: https:",
+            "script-src 'self' 'unsafe-inline' https://cdn.plot.ly https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://d3js.org",
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://fonts.googleapis.com",
+            "font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com",
+            "connect-src 'self' https://cdn.plot.ly https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com"
+          ].join("; ")
         }
       });
     }
