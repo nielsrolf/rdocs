@@ -72,6 +72,15 @@ export type ClaudeAgentProgressEvent = {
   message: string;
 };
 
+export type ClaudeAgentSubmissionValidator = (
+  submission: Partial<ClaudeResearchAgentOutput>
+) => string | null | Promise<string | null>;
+
+export type ClaudeAgentRunOptions = {
+  onProgress?: (event: ClaudeAgentProgressEvent) => void | Promise<void>;
+  validateSubmission?: ClaudeAgentSubmissionValidator;
+};
+
 const SUBMIT_TOOL_NAME = "mcp__gdocs__submit_response";
 
 const submitResponseSchema = {
@@ -563,20 +572,45 @@ function normalizeSubmittedOutput(args: unknown): Partial<ClaudeResearchAgentOut
 
 async function runClaudeResearchAgentOnce(
   input: ClaudeResearchAgentInput,
-  onProgress?: (event: ClaudeAgentProgressEvent) => void | Promise<void>
+  options: ClaudeAgentRunOptions = {}
 ): Promise<ClaudeResearchAgentOutput> {
+  const { onProgress, validateSubmission } = options;
   const model = process.env.CLAUDE_AGENT_MODEL || "sonnet";
-  const cwd = input.workspacePath || process.cwd();
+  if (!input.workspacePath) {
+    throw new Error(
+      "Claude research agent requires an isolated workspace path. Refusing to run with the server's working directory as cwd — that would let the agent write into the gdocs-ai repo."
+    );
+  }
+  const cwd = input.workspacePath;
   const abortController = new AbortController();
   const timeout = setTimeout(() => abortController.abort(), CLAUDE_AGENT_TIMEOUT_MS);
 
   let captured: Partial<ClaudeResearchAgentOutput> | null = null;
   const submitTool = tool(
     "submit_response",
-    "Submit the final response for this turn. Call exactly once when finished. After calling this tool, end your turn — do not emit additional text.",
+    "Submit the final response for this turn. Call exactly once when finished. After calling this tool, end your turn — do not emit additional text. If the submission is rejected with an error, fix the issue and call submit_response again.",
     submitResponseSchema,
     async (args) => {
-      captured = normalizeSubmittedOutput(args);
+      const normalized = normalizeSubmittedOutput(args);
+      if (validateSubmission) {
+        const validationError = await validateSubmission(normalized);
+        if (validationError) {
+          emitProgress(onProgress, {
+            role: "system",
+            message: `Submission rejected: ${validationError}`
+          });
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Submission rejected: ${validationError}\n\nPlease fix the issue and call submit_response again. Do not end your turn yet.`
+              }
+            ],
+            isError: true
+          };
+        }
+      }
+      captured = normalized;
       return {
         content: [
           {
@@ -680,18 +714,24 @@ function isRetryableAgentError(error: unknown) {
 
 export async function runClaudeResearchAgent(
   input: ClaudeResearchAgentInput,
-  onProgress?: (event: ClaudeAgentProgressEvent) => void | Promise<void>
+  onProgressOrOptions?:
+    | ((event: ClaudeAgentProgressEvent) => void | Promise<void>)
+    | ClaudeAgentRunOptions
 ): Promise<ClaudeResearchAgentOutput> {
+  const options: ClaudeAgentRunOptions =
+    typeof onProgressOrOptions === "function"
+      ? { onProgress: onProgressOrOptions }
+      : onProgressOrOptions ?? {};
   try {
-    return await runClaudeResearchAgentOnce(input, onProgress);
+    return await runClaudeResearchAgentOnce(input, options);
   } catch (error) {
     if (!isRetryableAgentError(error)) {
       throw error;
     }
-    emitProgress(onProgress, {
+    emitProgress(options.onProgress, {
       role: "system",
       message: `Retrying after transient error: ${error instanceof Error ? error.message : "unknown"}`
     });
-    return runClaudeResearchAgentOnce(input, onProgress);
+    return runClaudeResearchAgentOnce(input, options);
   }
 }
