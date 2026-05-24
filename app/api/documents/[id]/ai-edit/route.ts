@@ -8,7 +8,12 @@ import { runClaudeResearchAgent } from "@/lib/ai";
 import { detectEditAssetIntent } from "@/lib/ai-asset-intent";
 import { db } from "@/lib/db";
 import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
-import { commitWorkspaceChanges, ensureLinkedRepositoryWorktree, getWorkspaceOverview, runWidgetBuild } from "@/lib/research-workspace";
+import {
+  commitWorkspaceChanges,
+  ensureLinkedRepositoryWorktree,
+  getWorkspaceOverview,
+  runWidgetBuild
+} from "@/lib/research-workspace";
 import { normalizeSourceLinks } from "@/lib/sources";
 
 const aiEditSchema = z.object({
@@ -144,6 +149,245 @@ async function createAgentWidgets(input: {
   return { created, buildErrors };
 }
 
+type AiEditPayload = z.infer<typeof aiEditSchema>;
+
+async function runAiEditInBackground(input: {
+  documentId: string;
+  aiRunId: string;
+  parsed: AiEditPayload;
+  documentTitle: string;
+  documentContentRaw: string;
+}) {
+  const { documentId, aiRunId, parsed, documentTitle, documentContentRaw } = input;
+  let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
+  try {
+    const documentContent = parseDocumentContent(documentContentRaw);
+    const documentText = getDocumentPlainText(documentContent);
+    const documentBlocks = getDocumentAiBlocks(documentContent);
+    const unresolvedThreads = await db.commentThread.findMany({
+      where: { documentId, status: "OPEN" },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        id: true,
+        anchorText: true,
+        anchorContext: true,
+        comments: {
+          orderBy: { createdAt: "asc" },
+          select: { body: true, author: { select: { name: true } }, aiModel: true }
+        }
+      }
+    });
+
+    linkedRepo = await ensureLinkedRepositoryWorktree(documentId, aiRunId);
+    if (linkedRepo) {
+      await db.aiRun.update({
+        where: { id: aiRunId },
+        data: { workspacePath: linkedRepo.workspace, branchName: linkedRepo.branchName }
+      });
+      await recordAiRunEvent({
+        aiRunId,
+        role: "system",
+        message: `Using isolated worktree ${linkedRepo.workspace} on branch ${linkedRepo.branchName}.`
+      });
+    }
+    const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null);
+    const assetIntent = detectEditAssetIntent(parsed.instruction);
+
+    const result = await runClaudeResearchAgent(
+      {
+        mode: "edit_selection",
+        documentTitle,
+        documentText,
+        documentBlocks,
+        unresolvedThreads: unresolvedThreads.map((thread) => ({
+          id: thread.id,
+          anchorText: thread.anchorText,
+          anchorContext: thread.anchorContext,
+          comments: thread.comments.map((comment) => ({
+            author: comment.author?.name ?? comment.aiModel ?? "Claude",
+            body: comment.body
+          }))
+        })),
+        workspacePath: linkedRepo?.workspace ?? null,
+        workspaceOverview,
+        selectedText: parsed.selectedText,
+        selectedMarkdown: parsed.selectedMarkdown ?? null,
+        selectedContext: parsed.selectedContext ?? null,
+        instruction: parsed.instruction.trim()
+      },
+      {
+        onProgress: async (event) => {
+          await Promise.all([
+            db.aiRun.update({ where: { id: aiRunId }, data: { progress: event.message } }),
+            recordAiRunEvent({
+              aiRunId,
+              role: event.role ?? "agent",
+              message: event.message
+            })
+          ]).catch(() => null);
+        },
+        validateSubmission: (submission) => {
+          const submittedImages = Array.isArray(submission.images) ? submission.images : [];
+          const submittedWidgets = Array.isArray(submission.widgets) ? submission.widgets : [];
+          const hasImage =
+            submittedImages.length > 0 || hasMarkdownImage(submission.replacementText ?? "");
+          const hasWidget = submittedWidgets.length > 0;
+          const replacement =
+            typeof submission.replacementText === "string" ? submission.replacementText : "";
+          const trimmedReplacement = replacement.trim();
+          const trimmedSelected = parsed.selectedText.trim();
+          if (!trimmedReplacement && !hasImage && !hasWidget) {
+            return "Your submission has no replacementText (and no images or widgets). Provide the new Markdown for the selection in replacementText and resubmit.";
+          }
+          if (trimmedReplacement && trimmedReplacement === trimmedSelected) {
+            return "Your replacementText is identical to the user's selected text — no change was made. Apply the requested edit to the text and resubmit, or return the modified Markdown that reflects the instruction.";
+          }
+          if (assetIntent.requiresAnyAsset && !hasImage && !hasWidget) {
+            return "The edit request asked for a figure or widget, but the submission included neither. Add an image (via the images array, after committing the file to the repo) or a widget (via the widgets array) and resubmit.";
+          }
+          if (assetIntent.requiresImage && !hasImage) {
+            return "The edit request asked for a figure or visual. Generate the image, commit it to the repo, and include it in the images array (or as a Markdown image in replacementText). Then resubmit.";
+          }
+          if (assetIntent.requiresWidget && !hasWidget) {
+            return "The edit request asked for an interactive widget. Build the HTML widget and include it in the widgets array (with label, build_cmd, embed_source). Then resubmit.";
+          }
+          return null;
+        }
+      }
+    );
+
+    const sourceLinks = normalizeSourceLinks([
+      ...(Array.isArray(result.sources) ? result.sources : []),
+      ...(Array.isArray(result.sourceLinks) ? result.sourceLinks : [])
+    ]);
+    const images = normalizeAgentImages(result.images, documentId, parsed.shareToken ?? null, aiRunId);
+    const widgetResult = await createAgentWidgets({
+      widgets: result.widgets,
+      documentId,
+      shareToken: parsed.shareToken ?? null,
+      workspace: linkedRepo?.workspace ?? null,
+      aiRunId
+    });
+    const widgets = widgetResult.created;
+    for (const buildError of widgetResult.buildErrors) {
+      await recordAiRunEvent({ aiRunId, role: "error", message: buildError });
+    }
+
+    const returnedImage = images.length > 0 || hasMarkdownImage(result.replacementText ?? "");
+    const returnedWidget = widgets.length > 0;
+    if (assetIntent.requiresAnyAsset && !returnedImage && !returnedWidget) {
+      throw new Error(
+        "The edit request asked for a figure or widget, but the agent did not return either asset."
+      );
+    }
+    if (assetIntent.requiresImage && !returnedImage) {
+      throw new Error(
+        "The edit request asked for a figure or visual, but the agent did not return a repo image."
+      );
+    }
+    if (assetIntent.requiresWidget && !returnedWidget) {
+      throw new Error(
+        "The edit request asked for an interactive widget, but the agent did not return a valid widget."
+      );
+    }
+
+    const commit = linkedRepo
+      ? await commitWorkspaceChanges({
+          workspace: linkedRepo.workspace,
+          baseWorkspace: linkedRepo.baseWorkspace,
+          repoUrl: linkedRepo.url,
+          message: "AI research for document edit",
+          push: true
+        })
+      : { commitSha: null, commitUrl: null, pushed: false };
+
+    const rawReplacement = typeof result.replacementText === "string" ? result.replacementText : "";
+    const trimmedReplacement = rawReplacement.trim();
+    const trimmedSelected = parsed.selectedText.trim();
+    const replacementIsEmpty = !trimmedReplacement;
+    const replacementEqualsSelection =
+      !replacementIsEmpty && trimmedReplacement === trimmedSelected;
+    const fallbackFired = replacementIsEmpty;
+    const finalReplacement = trimmedReplacement
+      ? rawReplacement
+      : result.summary || parsed.selectedText;
+    const diagnostics = {
+      aiRunId,
+      documentId,
+      instructionPreview: parsed.instruction.trim().slice(0, 140),
+      selectedTextLen: parsed.selectedText.length,
+      replacementTextLen: rawReplacement.length,
+      replacementIsEmpty,
+      replacementEqualsSelection,
+      fallbackFired,
+      imageCount: images.length,
+      widgetCount: widgets.length,
+      hasMarkdownImage: hasMarkdownImage(rawReplacement),
+      commitSha: commit.commitSha,
+      model: result.model
+    };
+    console.log(`[ai-edit] finished ${JSON.stringify(diagnostics)}`);
+    if (fallbackFired || replacementEqualsSelection) {
+      const note = fallbackFired
+        ? "Diagnostics: agent submitted empty replacementText; the document will fall back to the agent's summary or the original selection."
+        : "Diagnostics: agent submitted replacementText identical to the original selection; the document will not visibly change.";
+      console.warn(`[ai-edit] suspect ${JSON.stringify(diagnostics)}`);
+      await recordAiRunEvent({ aiRunId, role: "system", message: note }).catch(() => null);
+    }
+
+    await db.aiRun.update({
+      where: { id: aiRunId },
+      data: {
+        status: "SUCCEEDED",
+        model: result.model,
+        commitSha: commit.commitSha,
+        commitUrl: commit.commitUrl,
+        finishedAt: new Date(),
+        replacementText: finalReplacement,
+        replacementImages: JSON.stringify(images),
+        replacementWidgets: JSON.stringify(widgets),
+        replacementSources: JSON.stringify(sourceLinks)
+      }
+    });
+    await recordAiRunEvent({
+      aiRunId,
+      role: "agent",
+      message: result.summary || "Finished AI edit."
+    });
+  } catch (error) {
+    if (linkedRepo) {
+      await commitWorkspaceChanges({
+        workspace: linkedRepo.workspace,
+        baseWorkspace: linkedRepo.baseWorkspace,
+        repoUrl: linkedRepo.url,
+        message: "Save failed AI document edit changes",
+        push: true
+      }).catch((commitError) => {
+        console.error("Failed to commit AI edit workspace changes", {
+          documentId,
+          error: commitError instanceof Error ? commitError.message : commitError
+        });
+      });
+    }
+
+    await recordAiRunEvent({
+      aiRunId,
+      role: "error",
+      message: error instanceof Error ? error.message : "AI edit failed."
+    }).catch(() => null);
+    await db.aiRun
+      .update({
+        where: { id: aiRunId },
+        data: {
+          status: "FAILED",
+          error: error instanceof Error ? error.message : "AI edit failed.",
+          finishedAt: new Date()
+        }
+      })
+      .catch(() => null);
+  }
+}
+
 type RouteContext = {
   params: Promise<{
     id: string;
@@ -165,211 +409,36 @@ export async function POST(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
   }
 
-  let aiRunId: string | null = null;
-  let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
-
-  try {
-    const aiRun = await db.aiRun.create({
-      data: {
-        documentId: id,
-        triggerType: "SELECTION_EDIT",
-        triggerId: parsed.data.selectionId ? `selection:${parsed.data.selectionId}` : null,
-        instruction: parsed.data.instruction.trim(),
-        progress: "Starting Claude research agent."
-      }
-    });
-    aiRunId = aiRun.id;
-    await recordAiRunEvent({
-      aiRunId: aiRun.id,
-      role: "user",
-      message: parsed.data.instruction.trim()
-    });
-
-    const documentContent = parseDocumentContent(access.document.content);
-    const documentText = getDocumentPlainText(documentContent);
-    const documentBlocks = getDocumentAiBlocks(documentContent);
-    const unresolvedThreads = await db.commentThread.findMany({
-      where: {
-        documentId: id,
-        status: "OPEN"
-      },
-      orderBy: {
-        updatedAt: "desc"
-      },
-      select: {
-        id: true,
-        anchorText: true,
-        anchorContext: true,
-        comments: {
-          orderBy: {
-            createdAt: "asc"
-          },
-          select: {
-            body: true,
-            author: {
-              select: {
-                name: true
-              }
-            },
-            aiModel: true
-          }
-        }
-      }
-    });
-    linkedRepo = await ensureLinkedRepositoryWorktree(id, aiRun.id);
-    if (linkedRepo) {
-      await db.aiRun.update({
-        where: { id: aiRun.id },
-        data: {
-          workspacePath: linkedRepo.workspace,
-          branchName: linkedRepo.branchName
-        }
-      });
-      await recordAiRunEvent({
-        aiRunId: aiRun.id,
-        role: "system",
-        message: `Using isolated worktree ${linkedRepo.workspace} on branch ${linkedRepo.branchName}.`
-      });
-    }
-    const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null);
-    const result = await runClaudeResearchAgent({
-      mode: "edit_selection",
-      documentTitle: access.document.title,
-      documentText,
-      documentBlocks,
-      unresolvedThreads: unresolvedThreads.map((thread) => ({
-        id: thread.id,
-        anchorText: thread.anchorText,
-        anchorContext: thread.anchorContext,
-        comments: thread.comments.map((comment) => ({
-          author: comment.author?.name ?? comment.aiModel ?? "Claude",
-          body: comment.body
-        }))
-      })),
-      workspacePath: linkedRepo?.workspace ?? null,
-      workspaceOverview,
-      selectedText: parsed.data.selectedText,
-      selectedMarkdown: parsed.data.selectedMarkdown ?? null,
-      selectedContext: parsed.data.selectedContext ?? null,
-      instruction: parsed.data.instruction.trim()
-    }, async (event) => {
-      await Promise.all([
-        db.aiRun.update({
-          where: { id: aiRun.id },
-          data: { progress: event.message }
-        }),
-        recordAiRunEvent({
-          aiRunId: aiRun.id,
-          role: event.role ?? "agent",
-          message: event.message
-        })
-      ]).catch(() => null);
-    });
-    const sourceLinks = normalizeSourceLinks([
-      ...(Array.isArray(result.sources) ? result.sources : []),
-      ...(Array.isArray(result.sourceLinks) ? result.sourceLinks : [])
-    ]);
-    const images = normalizeAgentImages(result.images, id, parsed.data.shareToken ?? null, aiRun.id);
-    const widgetResult = await createAgentWidgets({
-      widgets: result.widgets,
+  const aiRun = await db.aiRun.create({
+    data: {
       documentId: id,
-      shareToken: parsed.data.shareToken ?? null,
-      workspace: linkedRepo?.workspace ?? null,
-      aiRunId: aiRun.id
-    });
-    const widgets = widgetResult.created;
-    for (const buildError of widgetResult.buildErrors) {
-      await recordAiRunEvent({ aiRunId: aiRun.id, role: "error", message: buildError });
+      triggerType: "SELECTION_EDIT",
+      triggerId: parsed.data.selectionId ? `selection:${parsed.data.selectionId}` : null,
+      selectionId: parsed.data.selectionId ?? null,
+      instruction: parsed.data.instruction.trim(),
+      progress: "Starting Claude research agent."
     }
-    const assetIntent = detectEditAssetIntent(parsed.data.instruction);
-    const returnedImage = images.length > 0 || hasMarkdownImage(result.replacementText ?? "");
-    const returnedWidget = widgets.length > 0;
-    if (assetIntent.requiresAnyAsset && !returnedImage && !returnedWidget) {
-      throw new Error("The edit request asked for a figure or widget, but the agent did not return either asset.");
-    }
-    if (assetIntent.requiresImage && !returnedImage) {
-      throw new Error("The edit request asked for a figure or visual, but the agent did not return a repo image.");
-    }
-    if (assetIntent.requiresWidget && !returnedWidget) {
-      throw new Error("The edit request asked for an interactive widget, but the agent did not return a valid widget.");
-    }
-    const commit = linkedRepo
-      ? await commitWorkspaceChanges({
-          workspace: linkedRepo.workspace,
-          baseWorkspace: linkedRepo.baseWorkspace,
-          repoUrl: linkedRepo.url,
-          message: "AI research for document edit",
-          push: true
-      })
-      : { commitSha: null, commitUrl: null, pushed: false };
+  });
 
-    await db.aiRun.update({
-      where: { id: aiRun.id },
-      data: {
-        status: "SUCCEEDED",
-        model: result.model,
-        commitSha: commit.commitSha,
-        commitUrl: commit.commitUrl,
-        finishedAt: new Date()
-      }
-    });
-    await recordAiRunEvent({
+  await recordAiRunEvent({
+    aiRunId: aiRun.id,
+    role: "user",
+    message: parsed.data.instruction.trim()
+  });
+
+  void runAiEditInBackground({
+    documentId: id,
+    aiRunId: aiRun.id,
+    parsed: parsed.data,
+    documentTitle: access.document.title,
+    documentContentRaw: access.document.content
+  }).catch((error) => {
+    console.error("[ai-edit] background run threw", {
       aiRunId: aiRun.id,
-      role: "agent",
-      message: result.summary || "Finished AI edit."
+      documentId: id,
+      error: error instanceof Error ? error.message : error
     });
+  });
 
-    return NextResponse.json({
-      replacementText:
-        typeof result.replacementText === "string" && result.replacementText.trim()
-          ? result.replacementText
-          : result.summary || parsed.data.selectedText,
-      model: result.model,
-      visitedSources: sourceLinks,
-      images,
-      widgets,
-      commitSha: commit.commitSha,
-      commitUrl: commit.commitUrl,
-      aiRunId: aiRun.id
-    });
-  } catch (error) {
-    if (linkedRepo) {
-      await commitWorkspaceChanges({
-        workspace: linkedRepo.workspace,
-        baseWorkspace: linkedRepo.baseWorkspace,
-        repoUrl: linkedRepo.url,
-        message: "Save failed AI document edit changes",
-        push: true
-      }).catch((commitError) => {
-        console.error("Failed to commit AI edit workspace changes", {
-          documentId: id,
-          error: commitError instanceof Error ? commitError.message : commitError
-        });
-      });
-    }
-
-    if (aiRunId) {
-      await recordAiRunEvent({
-        aiRunId,
-        role: "error",
-        message: error instanceof Error ? error.message : "AI edit failed."
-      }).catch(() => null);
-      await db.aiRun.update({
-        where: { id: aiRunId },
-        data: {
-          status: "FAILED",
-          error: error instanceof Error ? error.message : "AI edit failed.",
-          finishedAt: new Date()
-        }
-      }).catch(() => null);
-    }
-
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "The AI edit helper failed unexpectedly."
-      },
-      { status: 500 }
-    );
-  }
+  return NextResponse.json({ aiRunId: aiRun.id, status: aiRun.status }, { status: 202 });
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import Image from "@tiptap/extension-image";
+import ImageExtension from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
 import Table from "@tiptap/extension-table";
 import TableCell from "@tiptap/extension-table-cell";
@@ -13,7 +13,7 @@ import { Step } from "@tiptap/pm/transform";
 import type { Mapping } from "@tiptap/pm/transform";
 import { EditorContent, JSONContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
 import { permissionLabel } from "@/lib/utils";
@@ -24,6 +24,7 @@ import { buildAiEditInsertContent, normalizeWidgetsOutsideTables } from "./docum
 import {
   AiEditSelections,
   cleanupStaleAiEditRangeMarks,
+  describeAiEditSelectionPresence,
   getAiEditSelectionRange,
   removeAiEditSelection,
   syncAiEditSelectionRuns,
@@ -42,6 +43,16 @@ import {
 import { buildConversations } from "./document-workspace/conversations";
 import { createLatexRenderExtension } from "./document-workspace/latex";
 import { EmbeddedWidget, RepoImage } from "./document-workspace/nodes";
+import { commentThreadIdsAttributeSpec } from "@/lib/document-schema-nodes";
+
+const Image = ImageExtension.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      ...commentThreadIdsAttributeSpec
+    };
+  }
+});
 import { ShareModal } from "./document-workspace/share-modal";
 import { TableInlineControls } from "./document-workspace/table-inline-controls";
 import { useAgentNotifications } from "./document-workspace/use-agent-notifications";
@@ -71,6 +82,7 @@ import {
   getSelectionContextFromEditor,
   getSelectionMarkdownFromEditor,
   getThreadTags,
+  logClientEvent,
   parseAiRunSelectionId
 } from "./document-workspace/utils";
 
@@ -128,6 +140,7 @@ export function DocumentWorkspace({
   shareToken,
   viaShareLink
 }: DocumentWorkspaceProps) {
+  const isPublicView = viaShareLink && initialPermission === "VIEW";
   const [title, setTitle] = useState(initialTitle);
   const [members, setMembers] = useState<MemberView[]>(initialMembers);
   const [threads, setThreads] = useState<ThreadView[]>(initialThreads);
@@ -143,6 +156,18 @@ export function DocumentWorkspace({
   const [editInstruction, setEditInstruction] = useState("");
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [globalError, setGlobalError] = useState<string | null>(null);
+  const reportClientError = useCallback(
+    (message: string, scope: string, data?: unknown) => {
+      setGlobalError(message);
+      logClientEvent({
+        scope,
+        level: "error",
+        message,
+        data: data === undefined ? null : data
+      });
+    },
+    []
+  );
   const [activeThreadId, setActiveThreadId] = useState<string | null>(initialThreads[0]?.id ?? null);
   const [shareModalOpen, setShareModalOpen] = useState(false);
   const [creatingLink, setCreatingLink] = useState<PermissionLevelValue | null>(null);
@@ -155,6 +180,7 @@ export function DocumentWorkspace({
   const [activeAiRun, setActiveAiRun] = useState<ActiveAiRunView | null>(null);
   const [activeAiRuns, setActiveAiRuns] = useState<ActiveAiRunView[]>([]);
   const [aiRuns, setAiRuns] = useState<ActiveAiRunView[]>([]);
+  const aiEditRunStateRef = useRef<Map<string, "applying" | "applied" | "failed">>(new Map());
   const [, setActiveAiTarget] = useState<ActiveAiTarget | null>(null);
   const [agentPanelOpen, setAgentPanelOpen] = useState(false);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
@@ -292,6 +318,14 @@ export function DocumentWorkspace({
     const timeout = window.setTimeout(() => setGlobalError(null), 8000);
     return () => window.clearTimeout(timeout);
   }, [globalError]);
+
+  useEffect(() => {
+    if (!isPublicView) return;
+    document.body.classList.add("public-view-shell");
+    return () => {
+      document.body.classList.remove("public-view-shell");
+    };
+  }, [isPublicView]);
 
   function syncAiRuns(nextRuns: ActiveAiRunView[]) {
     const previous = previousAiRunsRef.current;
@@ -590,6 +624,21 @@ export function DocumentWorkspace({
       if (historyOpen) {
         void loadVersionHistory();
       }
+    } else {
+      logClientEvent({
+        scope: "save-document",
+        level: "error",
+        message: "PATCH /api/documents/:id did not save",
+        data: {
+          documentId,
+          status: response.status,
+          ok: response.ok,
+          updatedAtType: typeof data?.updatedAt,
+          serverError: typeof data?.error === "string" ? data.error : null,
+          forceVersion: metadata?.forceVersion ?? forceVersionRef.current,
+          aiRunId: metadata?.aiRunId ?? pendingCommitRef.current.aiRunId
+        }
+      });
     }
 
     setSaveState(saved ? "saved" : "error");
@@ -681,7 +730,11 @@ export function DocumentWorkspace({
     const data = await response.json().catch(() => null);
 
     if (!response.ok || !Array.isArray(data?.versions)) {
-      setGlobalError(data?.error ?? "Unable to load version history.");
+      reportClientError(data?.error ?? "Unable to load version history.", "version-history", {
+        documentId,
+        status: response.status,
+        serverError: typeof data?.error === "string" ? data.error : null
+      });
       setHistoryLoading(false);
       return;
     }
@@ -1050,7 +1103,11 @@ export function DocumentWorkspace({
     const data = await response.json().catch(() => null);
 
     if (!response.ok || !data?.repository) {
-      setGlobalError(data?.error ?? "Unable to save repository settings.");
+      reportClientError(data?.error ?? "Unable to save repository settings.", "repo-settings", {
+        documentId,
+        status: response.status,
+        serverError: typeof data?.error === "string" ? data.error : null
+      });
       setRepoBusy(false);
       return;
     }
@@ -1080,7 +1137,11 @@ export function DocumentWorkspace({
     const embedSource = widgetDraft.embedSource.trim();
 
     if (!buildCmd || !embedSource) {
-      setGlobalError("Widget config needs build command and embed source.");
+      reportClientError(
+        "Widget config needs build command and embed source.",
+        "widget-create-invalid",
+        { documentId }
+      );
       return;
     }
 
@@ -1101,7 +1162,11 @@ export function DocumentWorkspace({
     });
     const data = await response.json().catch(() => null);
     if (!response.ok || !data?.widget) {
-      setGlobalError(data?.error ?? "Unable to create widget.");
+      reportClientError(data?.error ?? "Unable to create widget.", "widget-create", {
+        documentId,
+        status: response.status,
+        serverError: typeof data?.error === "string" ? data.error : null
+      });
       setWidgetBusy(false);
       return;
     }
@@ -1145,15 +1210,63 @@ export function DocumentWorkspace({
         : `comment-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const previousContent = editor.getJSON();
 
-    const marked = editor
-      .chain()
-      .setTextSelection({ from: selectedRange.from, to: selectedRange.to })
-      .setMark("commentAnchor", { threadId })
-      .setTextSelection({ from: selectedRange.to, to: selectedRange.to })
-      .run();
+    const editorSelectionBeforeAnchor = editor.state.selection;
+    const blockAnchorNode =
+      editorSelectionBeforeAnchor instanceof NodeSelection &&
+      ["embeddedWidget", "repoImage", "image"].includes(
+        editorSelectionBeforeAnchor.node.type?.name ?? ""
+      )
+        ? editorSelectionBeforeAnchor.node
+        : null;
+    const blockAnchorPos = blockAnchorNode ? editorSelectionBeforeAnchor.from : null;
+
+    let marked: boolean;
+    if (blockAnchorNode && blockAnchorPos !== null) {
+      const existingIds = Array.isArray(blockAnchorNode.attrs?.commentThreadIds)
+        ? (blockAnchorNode.attrs.commentThreadIds as string[])
+        : [];
+      const nextIds = existingIds.includes(threadId) ? existingIds : [...existingIds, threadId];
+      marked = editor
+        .chain()
+        .command(({ tr }) => {
+          tr.setNodeAttribute(blockAnchorPos, "commentThreadIds", nextIds);
+          return true;
+        })
+        .run();
+    } else {
+      marked = editor
+        .chain()
+        .setTextSelection({ from: selectedRange.from, to: selectedRange.to })
+        .setMark("commentAnchor", { threadId })
+        .setTextSelection({ from: selectedRange.to, to: selectedRange.to })
+        .run();
+    }
 
     if (!marked) {
-      setGlobalError("Unable to anchor the comment to the selected text.");
+      const editorSelection = editor.state.selection;
+      const isNode = editorSelection instanceof NodeSelection;
+      const nodeTypeName = isNode ? editorSelection.node.type?.name ?? null : null;
+      const nodesInRange: string[] = [];
+      editor.state.doc.nodesBetween(selectedRange.from, selectedRange.to, (node) => {
+        if (node.type?.name) {
+          nodesInRange.push(node.type.name);
+        }
+        return true;
+      });
+      reportClientError(
+        "Unable to anchor the comment to the selected text.",
+        "comment-anchor",
+        {
+          documentId,
+          threadId,
+          from: selectedRange.from,
+          to: selectedRange.to,
+          selectionKind: isNode ? "node" : "text",
+          selectedNodeType: nodeTypeName,
+          nodesInRange: Array.from(new Set(nodesInRange)),
+          textPreview: selectedRange.text.slice(0, 120)
+        }
+      );
       setCommentBusy(false);
       return;
     }
@@ -1180,7 +1293,12 @@ export function DocumentWorkspace({
       isApplyingRemoteUpdateRef.current = true;
       editor.commands.setContent(previousContent, false);
       isApplyingRemoteUpdateRef.current = false;
-      setGlobalError(data?.error ?? "Unable to create thread.");
+      reportClientError(data?.error ?? "Unable to create thread.", "comment-create", {
+        documentId,
+        threadId,
+        status: response.status,
+        serverError: typeof data?.error === "string" ? data.error : null
+      });
       setCommentBusy(false);
       return;
     }
@@ -1245,6 +1363,7 @@ export function DocumentWorkspace({
       id: `pending-selection-edit-${Date.now()}`,
       triggerType: "SELECTION_EDIT",
       triggerId,
+      selectionId,
       instruction,
       status: "RUNNING",
       progress: "Starting Claude research agent.",
@@ -1254,6 +1373,7 @@ export function DocumentWorkspace({
     setSelection(null);
     setEditInstruction("");
 
+    const fetchStartedAt = Date.now();
     const response = await fetch(`/api/documents/${documentId}/ai-edit`, {
       method: "POST",
       headers: {
@@ -1267,12 +1387,33 @@ export function DocumentWorkspace({
         selectionId,
         shareToken
       })
-    }).catch(() => null);
+    }).catch((error) => {
+      logClientEvent({
+        scope: "ai-edit",
+        level: "error",
+        message: "kickoff fetch threw",
+        data: {
+          documentId,
+          selectionId,
+          error: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+        }
+      });
+      return null;
+    });
 
     const data = await response?.json().catch(() => null);
+    const kickoffAiRunId =
+      data && typeof data.aiRunId === "string" ? (data.aiRunId as string) : null;
 
-    if (!response?.ok || !data?.replacementText) {
-      setGlobalError(data?.error ?? "AI edit failed.");
+    if (!response?.ok || !kickoffAiRunId) {
+      reportClientError(data?.error ?? "AI edit failed to start.", "ai-edit-kickoff", {
+        documentId,
+        selectionId,
+        status: response?.status ?? null,
+        ok: response?.ok ?? false,
+        serverError: typeof data?.error === "string" ? data.error : null,
+        elapsedMs: Date.now() - fetchStartedAt
+      });
       notifyAgentCompleted({
         id: `failed-selection-edit-${Date.now()}`,
         triggerType: "SELECTION_EDIT",
@@ -1285,68 +1426,192 @@ export function DocumentWorkspace({
       return;
     }
 
-    const sourceLinks = Array.isArray(data.visitedSources) ? data.visitedSources : [];
-    const aiImages: AiEditImage[] = Array.isArray(data.images) ? data.images : [];
-    const aiWidgets: AiEditWidget[] = Array.isArray(data.widgets) ? data.widgets : [];
-    const commitSha = typeof data.commitSha === "string" ? data.commitSha : null;
-    const commitUrl = typeof data.commitUrl === "string" ? data.commitUrl : null;
-    const aiRunId = typeof data.aiRunId === "string" ? data.aiRunId : null;
+    logClientEvent({
+      scope: "ai-edit-kickoff",
+      level: "info",
+      message: "agent run accepted by server",
+      data: {
+        documentId,
+        selectionId,
+        aiRunId: kickoffAiRunId,
+        elapsedMs: Date.now() - fetchStartedAt
+      }
+    });
+    // Polling effect (watching `aiRuns`) will pick up status changes and apply the
+    // result when the agent finishes. No further work here.
+  }
 
+  async function applyAiEditRun(input: {
+    aiRunId: string;
+    selectionId: string;
+    instruction: string;
+    replacementText: string;
+    images: AiEditImage[];
+    widgets: AiEditWidget[];
+    sources: string[];
+    commitSha: string | null;
+    commitUrl: string | null;
+  }) {
+    if (!editor) return;
+
+    const { aiRunId, selectionId, instruction, replacementText, images, widgets, sources, commitSha, commitUrl } = input;
     const replacementRange = getAiEditSelectionRange(editor.state, selectionId);
     if (!replacementRange) {
-      setGlobalError("The edited range was deleted before the AI run finished. Replacement skipped.");
+      logClientEvent({
+        scope: "ai-edit-marker-lost",
+        level: "error",
+        message: "marker not in editor when applying ai run",
+        data: {
+          documentId,
+          selectionId,
+          aiRunId,
+          replacementTextLen: replacementText.length,
+          imageCount: images.length,
+          widgetCount: widgets.length,
+          presence: describeAiEditSelectionPresence(editor.state, selectionId)
+        }
+      });
+      // Claim the run so we don't loop on it; the user already lost the anchor.
+      await fetch(`/api/documents/${documentId}/ai-runs/${aiRunId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "markApplied", shareToken })
+      }).catch(() => null);
+      setActiveAiRun(null);
+      setActiveAiTarget(null);
+      reportClientError(
+        "The edited range was deleted before the AI run finished. Replacement skipped.",
+        "ai-edit-marker-lost",
+        { documentId, selectionId, aiRunId }
+      );
+      return;
+    }
+
+    const docSizeBefore = editor.state.doc.content.size;
+    let docSizeAfter = docSizeBefore;
+    let insertedContent: ReturnType<typeof buildAiEditInsertContent> | null = null;
+    let contentToSave: JSONContent | null = null;
+
+    try {
+      insertedContent = buildAiEditInsertContent({
+        replacementText,
+        sourceLinks: sources,
+        images,
+        widgets,
+        documentId,
+        shareToken
+      });
+      const applied = editor
+        .chain()
+        .focus()
+        .insertContentAt(replacementRange, insertedContent)
+        .run();
+      docSizeAfter = editor.state.doc.content.size;
+      logClientEvent({
+        scope: "ai-edit-apply",
+        level: applied && docSizeAfter !== docSizeBefore ? "info" : "warn",
+        message:
+          applied && docSizeAfter !== docSizeBefore
+            ? "insertContentAt applied"
+            : "insertContentAt returned without changing doc size",
+        data: {
+          documentId,
+          selectionId,
+          aiRunId,
+          applied,
+          replacementRange,
+          docSizeBefore,
+          docSizeAfter,
+          charDelta: docSizeAfter - docSizeBefore,
+          replacementTextLen: replacementText.length,
+          insertedHtmlLen: insertedContent.length,
+          imageCount: images.length,
+          widgetCount: widgets.length
+        }
+      });
+      editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
+      normalizeCurrentEditorWidgets();
+      hasUnsavedChangesRef.current = true;
+      setSaveState("saving");
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      await flushCollaborationSteps();
+      contentToSave = editor.getJSON();
+      const saved = await saveDocument(contentToSave, {
+        sourceLinks: sources,
+        commitSha,
+        commitUrl,
+        aiRunId,
+        forceVersion: true
+      });
+      if (!saved) {
+        reportClientError(
+          "AI edit could not be saved to the server. Your local document still shows the change.",
+          "ai-edit-save-failed",
+          {
+            documentId,
+            selectionId,
+            aiRunId,
+            docSizeBefore,
+            docSizeAfter,
+            replacementTextLen: replacementText.length,
+            imageCount: images.length,
+            widgetCount: widgets.length
+          }
+        );
+      }
+    } catch (error) {
+      reportClientError("AI edit could not be applied to the document.", "ai-edit-apply-threw", {
+        documentId,
+        selectionId,
+        aiRunId,
+        docSizeBefore,
+        docSizeAfter: editor.state.doc.content.size,
+        replacementTextLen: replacementText.length,
+        insertedHtmlLen: insertedContent?.length ?? null,
+        imageCount: images.length,
+        widgetCount: widgets.length,
+        error:
+          error instanceof Error
+            ? { name: error.name, message: error.message, stack: error.stack?.slice(0, 1500) ?? null }
+            : String(error)
+      });
+      notifyAgentCompleted({
+        id: `failed-selection-edit-${Date.now()}`,
+        triggerType: "SELECTION_EDIT",
+        instruction,
+        status: "FAILED"
+      });
       setActiveAiRun(null);
       setActiveAiTarget(null);
       editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
       return;
     }
 
-    editor
-      .chain()
-      .focus()
-      .insertContentAt(
-        replacementRange,
-        buildAiEditInsertContent({
-          replacementText: data.replacementText,
-          sourceLinks,
-          images: aiImages,
-          widgets: aiWidgets,
-          documentId,
-          shareToken
-        })
-      )
-      .run();
-    editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
-    normalizeCurrentEditorWidgets();
-    hasUnsavedChangesRef.current = true;
-    setSaveState("saving");
-    if (saveTimerRef.current) {
-      window.clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
-    await flushCollaborationSteps();
-    const contentToSave = editor.getJSON();
-    await saveDocument(contentToSave, {
-      sourceLinks,
-      commitSha,
-      commitUrl,
-      aiRunId,
-      forceVersion: true
-    });
+    // Tell the server the run was applied so other open tabs won't re-apply.
+    await fetch(`/api/documents/${documentId}/ai-runs/${aiRunId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "markApplied", shareToken })
+    }).catch(() => null);
 
     // Force node-view remount so freshly inserted widgets/tables render
     // cleanly. Without this, iframes and tables sometimes paint in a
     // half-initialized state until the user refreshes the page.
-    isApplyingRemoteUpdateRef.current = true;
-    editor.commands.setContent(contentToSave, false);
-    window.requestAnimationFrame(() => {
-      isApplyingRemoteUpdateRef.current = false;
-    });
+    if (contentToSave) {
+      isApplyingRemoteUpdateRef.current = true;
+      editor.commands.setContent(contentToSave, false);
+      window.requestAnimationFrame(() => {
+        isApplyingRemoteUpdateRef.current = false;
+      });
+    }
 
     setActiveAiRun(null);
     setActiveAiTarget(null);
     notifyAgentCompleted({
-      id: aiRunId ?? `finished-selection-edit-${Date.now()}`,
+      id: aiRunId,
       triggerType: "SELECTION_EDIT",
       instruction
     });
@@ -1375,7 +1640,12 @@ export function DocumentWorkspace({
     const data = await response.json().catch(() => null);
 
     if (!response.ok || !data?.comment) {
-      setGlobalError(data?.error ?? "Unable to send reply.");
+      reportClientError(data?.error ?? "Unable to send reply.", "comment-reply", {
+        threadId,
+        documentId,
+        status: response.status,
+        serverError: typeof data?.error === "string" ? data.error : null
+      });
       setReplyBusyThreadId(null);
       return;
     }
@@ -1425,7 +1695,12 @@ export function DocumentWorkspace({
     const data = await response.json().catch(() => null);
 
     if (!response.ok || !data?.comment) {
-      setGlobalError(data?.error ?? "AI reply failed.");
+      reportClientError(data?.error ?? "AI reply failed.", "ask-ai", {
+        threadId,
+        documentId,
+        status: response.status,
+        serverError: typeof data?.error === "string" ? data.error : null
+      });
       notifyAgentCompleted({
         id: `failed-comment-reply-${Date.now()}`,
         triggerType: "COMMENT_THREAD",
@@ -1475,7 +1750,12 @@ export function DocumentWorkspace({
 
     const data = await response.json().catch(() => null);
     if (!response.ok || !data?.thread) {
-      setGlobalError(data?.error ?? "Unable to update comment tags.");
+      reportClientError(data?.error ?? "Unable to update comment tags.", "comment-update", {
+        documentId,
+        threadId: thread.id,
+        status: response.status,
+        serverError: typeof data?.error === "string" ? data.error : null
+      });
       return;
     }
 
@@ -1556,7 +1836,11 @@ export function DocumentWorkspace({
     const data = await response.json().catch(() => null);
 
     if (!response.ok || !data?.aiRun) {
-      setGlobalError(data?.error ?? "Agent message failed.");
+      reportClientError(data?.error ?? "Agent message failed.", "agent-message", {
+        documentId,
+        status: response.status,
+        serverError: typeof data?.error === "string" ? data.error : null
+      });
       setAgentBusy(false);
       return;
     }
@@ -1593,7 +1877,11 @@ export function DocumentWorkspace({
     const data = await response.json().catch(() => null);
 
     if (!response.ok || !data?.shareLink) {
-      setGlobalError(data?.error ?? "Unable to create share link.");
+      reportClientError(data?.error ?? "Unable to create share link.", "share-link-create", {
+        documentId,
+        status: response.status,
+        serverError: typeof data?.error === "string" ? data.error : null
+      });
       setCreatingLink(null);
       return;
     }
@@ -1608,7 +1896,7 @@ export function DocumentWorkspace({
     });
 
     if (!response.ok) {
-      setGlobalError("Unable to revoke share link.");
+      reportClientError("Unable to revoke share link.", "share-link-revoke", { documentId });
       return;
     }
 
@@ -1638,7 +1926,11 @@ export function DocumentWorkspace({
     const data = await response.json().catch(() => null);
 
     if (!response.ok || !data?.membership) {
-      setGlobalError(data?.error ?? "Unable to add collaborator.");
+      reportClientError(data?.error ?? "Unable to add collaborator.", "collaborator-add", {
+        documentId,
+        status: response.status,
+        serverError: typeof data?.error === "string" ? data.error : null
+      });
       setInviteBusy(false);
       return;
     }
@@ -1694,7 +1986,11 @@ export function DocumentWorkspace({
     const data = await response.json().catch(() => null);
 
     if (!response.ok || !data?.deletedCommentId) {
-      setGlobalError(data?.error ?? "Unable to delete comment.");
+      reportClientError(data?.error ?? "Unable to delete comment.", "comment-delete", {
+        documentId,
+        status: response.status,
+        serverError: typeof data?.error === "string" ? data.error : null
+      });
       setDeleteBusyCommentId(null);
       return;
     }
@@ -1743,6 +2039,11 @@ export function DocumentWorkspace({
       [tag.toLowerCase()]: value
     }));
   }
+
+  const hasUnresolvedThreads = useMemo(
+    () => threads.some((thread) => thread.status === "OPEN"),
+    [threads]
+  );
 
   const visibleThreads = useMemo(
     () =>
@@ -1805,13 +2106,107 @@ export function DocumentWorkspace({
 
     for (const run of activeAiRuns) {
       if (run.status !== "RUNNING" || run.triggerType !== "SELECTION_EDIT") continue;
-      const selectionId = parseAiRunSelectionId(run.triggerId);
+      const selectionId = run.selectionId ?? parseAiRunSelectionId(run.triggerId);
       if (!selectionId) continue;
       selectionRuns.push({ run, selectionId });
     }
 
     editor.view.dispatch(syncAiEditSelectionRuns(editor.state, selectionRuns));
   }, [activeAiRuns, editor]);
+
+  useEffect(() => {
+    if (!editor) return;
+
+    for (const run of aiRuns) {
+      if (run.triggerType !== "SELECTION_EDIT") continue;
+      const selectionId = run.selectionId ?? parseAiRunSelectionId(run.triggerId);
+      if (!selectionId) continue;
+      const prev = aiEditRunStateRef.current.get(run.id);
+      if (prev === "applying" || prev === "applied" || prev === "failed") continue;
+
+      if (run.status === "FAILED") {
+        aiEditRunStateRef.current.set(run.id, "failed");
+        reportClientError(run.error ?? "AI edit failed.", "ai-edit-run-failed", {
+          documentId,
+          selectionId,
+          aiRunId: run.id
+        });
+        notifyAgentCompleted({
+          id: run.id,
+          triggerType: "SELECTION_EDIT",
+          instruction: run.instruction,
+          status: "FAILED"
+        });
+        editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
+        setActiveAiRun(null);
+        continue;
+      }
+
+      if (run.status !== "SUCCEEDED") continue;
+      if (run.appliedAt) {
+        aiEditRunStateRef.current.set(run.id, "applied");
+        continue;
+      }
+
+      aiEditRunStateRef.current.set(run.id, "applying");
+      void (async () => {
+        const shareQuery = shareToken ? `?share=${encodeURIComponent(shareToken)}` : "";
+        const response = await fetch(
+          `/api/documents/${documentId}/ai-runs/${run.id}${shareQuery}`,
+          { cache: "no-store" }
+        ).catch(() => null);
+        const data = await response?.json().catch(() => null);
+        const fetched = data?.aiRun;
+        if (!response?.ok || !fetched) {
+          logClientEvent({
+            scope: "ai-edit-fetch-result",
+            level: "error",
+            message: "failed to fetch ai run result",
+            data: {
+              documentId,
+              selectionId,
+              aiRunId: run.id,
+              status: response?.status ?? null
+            }
+          });
+          // Retry on the next poll cycle by clearing our state mark.
+          aiEditRunStateRef.current.delete(run.id);
+          return;
+        }
+        if (typeof fetched.replacementText !== "string" || !fetched.replacementText) {
+          // Legacy run that completed before the replacement column existed, or
+          // any other "succeeded with no payload" state. Claim it so we stop
+          // re-fetching it every 2s.
+          logClientEvent({
+            scope: "ai-edit-fetch-result",
+            level: "warn",
+            message: "succeeded run has no replacementText; claiming to stop retry",
+            data: { documentId, selectionId, aiRunId: run.id }
+          });
+          await fetch(`/api/documents/${documentId}/ai-runs/${run.id}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "markApplied", shareToken })
+          }).catch(() => null);
+          aiEditRunStateRef.current.set(run.id, "applied");
+          editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
+          return;
+        }
+        await applyAiEditRun({
+          aiRunId: run.id,
+          selectionId,
+          instruction: run.instruction,
+          replacementText: fetched.replacementText,
+          images: Array.isArray(fetched.images) ? (fetched.images as AiEditImage[]) : [],
+          widgets: Array.isArray(fetched.widgets) ? (fetched.widgets as AiEditWidget[]) : [],
+          sources: Array.isArray(fetched.sources) ? (fetched.sources as string[]) : [],
+          commitSha: typeof fetched.commitSha === "string" ? fetched.commitSha : null,
+          commitUrl: typeof fetched.commitUrl === "string" ? fetched.commitUrl : null
+        });
+        aiEditRunStateRef.current.set(run.id, "applied");
+      })();
+    }
+  }, [aiRuns, editor, documentId, shareToken]);
 
   const aiEditMarkCleanupDoneRef = useRef(false);
   useEffect(() => {
@@ -1851,6 +2246,7 @@ export function DocumentWorkspace({
 
       {agentPanelOpen ? null : (
       <>
+      {isPublicView ? null : (
       <div className="document-chrome">
         <div className="document-topbar">
           <div className="document-topbar-left">
@@ -2016,16 +2412,16 @@ export function DocumentWorkspace({
                 <strong>Research repository</strong>
                 <p>
                   {repoUrl
-                    ? `${repoUrl}${repoBranch ? ` on ${repoBranch}` : ""}`
-                    : "Link a GitHub repo to give the AI a checked-out workspace."}
+                    ? `${repoUrl}${repoBranch ? ` on ${repoBranch}` : ""}${repoUrl.startsWith("https://huggingface.co/") ? " (read-only)" : ""}`
+                    : "Link a GitHub repo, or a public HuggingFace repo (read-only), to give the AI a checked-out workspace."}
                 </p>
               </div>
               {canWriteDocument ? (
                 <div className="research-repo-controls">
                   <input
-                    aria-label="GitHub repository URL"
+                    aria-label="Repository URL"
                     onChange={(event) => setRepoUrl(event.target.value)}
-                    placeholder="https://github.com/org/repo"
+                    placeholder="https://github.com/org/repo or https://huggingface.co/datasets/owner/name"
                     value={repoUrl}
                   />
                   <input
@@ -2098,6 +2494,7 @@ export function DocumentWorkspace({
           </div>
         </div>
       </div>
+      )}
 
       {agentToast ? (
         <button
@@ -2116,15 +2513,19 @@ export function DocumentWorkspace({
       <div
         className="editor-stage"
         data-outline-collapsed={outlineCollapsed ? "true" : "false"}
-        style={{ "--outline-width": `${outlineCollapsed ? 36 : Math.round(outlineWidth)}px` } as React.CSSProperties}
+        data-public-view={isPublicView ? "true" : "false"}
+        data-comments-hidden={isPublicView && !hasUnresolvedThreads ? "true" : "false"}
+        style={{ "--outline-width": `${isPublicView ? 0 : outlineCollapsed ? 36 : Math.round(outlineWidth)}px` } as React.CSSProperties}
       >
-        <DocOutline
-          editor={editor}
-          collapsed={outlineCollapsed}
-          width={outlineWidth}
-          onToggleCollapsed={() => setOutlineCollapsed((value) => !value)}
-          onWidthChange={setOutlineWidth}
-        />
+        {isPublicView ? null : (
+          <DocOutline
+            editor={editor}
+            collapsed={outlineCollapsed}
+            width={outlineWidth}
+            onToggleCollapsed={() => setOutlineCollapsed((value) => !value)}
+            onWidthChange={setOutlineWidth}
+          />
+        )}
         <div className="editor-page-shell">
           <div className="editor-page" ref={editorPageRef}>
             {selection && selectionPopoverMode && (canWriteComments || canWriteDocument) ? (
@@ -2158,6 +2559,7 @@ export function DocumentWorkspace({
           </div>
         </div>
 
+        {isPublicView && !hasUnresolvedThreads ? null : (
         <CommentRail
           threads={threads}
           orderedThreads={orderedThreads}
@@ -2192,6 +2594,7 @@ export function DocumentWorkspace({
           onAskAi={handleAskAi}
           onDeleteComment={(commentId) => void handleDeleteComment(commentId)}
         />
+        )}
       </div>
       </>
       )}

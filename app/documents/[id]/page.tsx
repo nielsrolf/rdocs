@@ -112,7 +112,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         shareToken={access.shareToken}
         viaShareLink={access.viaShareLink}
       />
-      {access.permission !== "EDIT" && (
+      {access.permission !== "EDIT" && !(access.viaShareLink && access.permission === "VIEW") && (
         <div className="read-only-banner">
           {access.permission === "COMMENT"
             ? "You can comment, but not edit, in this document."

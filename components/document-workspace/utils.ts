@@ -101,6 +101,20 @@ export function isNodeSelection(value: unknown): value is NodeSelection {
   return value instanceof NodeSelection;
 }
 
+export function logClientEvent(input: {
+  scope: string;
+  level?: "info" | "warn" | "error";
+  message: string;
+  data?: unknown;
+}) {
+  void fetch("/api/client-log", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+    keepalive: true
+  }).catch(() => null);
+}
+
 export function getInitials(name: string) {
   return name
     .split(/\s+/)

@@ -653,7 +653,7 @@ async function runClaudeResearchAgentOnce(
         "ToolSearch"
       ],
       mcpServers: { gdocs: mcpServer },
-      maxTurns: Number.parseInt(process.env.CLAUDE_AGENT_MAX_TURNS || "12", 10),
+      maxTurns: Number.parseInt(process.env.CLAUDE_AGENT_MAX_TURNS || "1000000", 10),
       model,
       thinking: { type: "disabled" },
       abortController

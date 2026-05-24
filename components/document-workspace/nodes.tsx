@@ -2,13 +2,17 @@ import { Node, mergeAttributes } from "@tiptap/core";
 import { NodeViewProps, NodeViewWrapper, ReactNodeViewRenderer } from "@tiptap/react";
 import { useEffect, useRef, useState } from "react";
 
+import { commentThreadIdsAttributeSpec } from "@/lib/document-schema-nodes";
+
 function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttributes }: NodeViewProps) {
   const [refreshing, setRefreshing] = useState(false);
   const collapsed = node.attrs.collapsed !== false;
   const expanded = !collapsed;
-  const [frameHeight, setFrameHeight] = useState(720);
+  const [frameHeight, setFrameHeight] = useState(120);
   const [error, setError] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const lastSelfResizeAtRef = useRef(0);
+  const lastAppliedHeightRef = useRef(0);
   const widgetId = node.attrs.widgetId as string;
   const documentId = node.attrs.documentId as string;
   const shareToken = (node.attrs.shareToken as string | null) || null;
@@ -21,6 +25,40 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
 
   useEffect(() => {
     window.requestAnimationFrame(resizeFrame);
+  }, [expanded, src]);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const frame = iframeRef.current;
+    if (!frame) return;
+
+    let observer: ResizeObserver | null = null;
+    let mutationObserver: MutationObserver | null = null;
+
+    function attachObservers() {
+      const doc = frame?.contentDocument;
+      if (!doc?.body) return;
+      observer = new ResizeObserver(() => resizeFrame());
+      observer.observe(doc.body);
+      if (doc.documentElement) observer.observe(doc.documentElement);
+      mutationObserver = new MutationObserver(() => resizeFrame());
+      mutationObserver.observe(doc.body, { childList: true, subtree: true, attributes: true });
+    }
+
+    attachObservers();
+    const onLoad = () => {
+      observer?.disconnect();
+      mutationObserver?.disconnect();
+      attachObservers();
+      resizeFrame();
+    };
+    frame.addEventListener("load", onLoad);
+
+    return () => {
+      frame.removeEventListener("load", onLoad);
+      observer?.disconnect();
+      mutationObserver?.disconnect();
+    };
   }, [expanded, src]);
 
   async function refreshWidget() {
@@ -49,6 +87,7 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
 
   function resizeFrame() {
     if (!expanded) {
+      lastAppliedHeightRef.current = 0;
       setFrameHeight(0);
       return;
     }
@@ -56,14 +95,54 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
     const frame = iframeRef.current;
     const body = frame?.contentDocument?.body;
     const documentElement = frame?.contentDocument?.documentElement;
+    if (!frame || !body) return;
+
+    // Suppress observer ticks that fire as a direct echo of our own resize.
+    // Plotly/D3/etc. with autosize redraw to fill the iframe, which causes
+    // scrollHeight to creep up by a few px on every tick — that feedback loop
+    // is what was making widgets grow unboundedly over hundreds of frames.
+    const sinceSelfResize = Date.now() - lastSelfResizeAtRef.current;
+
     const contentHeight = Math.max(
-      body?.scrollHeight ?? 0,
-      body?.offsetHeight ?? 0,
+      body.scrollHeight,
+      body.offsetHeight,
       documentElement?.scrollHeight ?? 0,
-      documentElement?.offsetHeight ?? 0,
-      520
+      documentElement?.offsetHeight ?? 0
     );
-    setFrameHeight(expanded ? Math.min(Math.max(contentHeight + 24, 720), 8000) : 520);
+    if (contentHeight <= 0) return;
+
+    const frameClient = frame.clientHeight;
+    const currentApplied = lastAppliedHeightRef.current;
+    // If the body is just filling the iframe (i.e. content uses height:100% /
+    // autosize), scrollHeight ~= clientHeight. Don't keep growing in that case.
+    const realOverflow = contentHeight - frameClient;
+
+    // Within ~400ms of our own resize, only accept changes that look like real
+    // new content (a meaningful delta), not small autosize echoes.
+    if (sinceSelfResize < 400 && Math.abs(contentHeight - currentApplied) < 32) {
+      return;
+    }
+
+    // Only grow when there is actual overflow beyond the current iframe size.
+    // Allow shrink only when content is clearly smaller than the iframe.
+    let nextHeight = currentApplied;
+    if (realOverflow > 4) {
+      nextHeight = contentHeight + 4;
+    } else if (contentHeight + 48 < currentApplied) {
+      nextHeight = contentHeight + 4;
+    } else if (currentApplied === 0) {
+      // First measurement after mount/expand.
+      nextHeight = contentHeight + 4;
+    } else {
+      return;
+    }
+
+    nextHeight = Math.max(0, Math.min(nextHeight, 8000));
+    if (nextHeight === currentApplied) return;
+
+    lastSelfResizeAtRef.current = Date.now();
+    lastAppliedHeightRef.current = nextHeight;
+    setFrameHeight(nextHeight);
   }
 
   return (
@@ -170,7 +249,8 @@ export const RepoImage = Node.create({
       path: {
         default: null,
         parseHTML: (element) => element.getAttribute("path") || null
-      }
+      },
+      ...commentThreadIdsAttributeSpec
     };
   },
   parseHTML() {
@@ -220,7 +300,8 @@ export const EmbeddedWidget = Node.create({
         renderHTML: (attributes) => ({
           collapsed: attributes.collapsed === false ? "false" : "true"
         })
-      }
+      },
+      ...commentThreadIdsAttributeSpec
     };
   },
   parseHTML() {

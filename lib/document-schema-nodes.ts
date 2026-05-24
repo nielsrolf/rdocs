@@ -1,5 +1,21 @@
 import { Node, mergeAttributes } from "@tiptap/core";
 
+export const commentThreadIdsAttributeSpec = {
+  commentThreadIds: {
+    default: [] as string[],
+    parseHTML: (element: HTMLElement) => {
+      const raw = element.getAttribute("data-comment-thread-ids");
+      if (!raw) return [];
+      return raw.split(",").map((value) => value.trim()).filter(Boolean);
+    },
+    renderHTML: (attributes: { commentThreadIds?: unknown }) => {
+      const ids = Array.isArray(attributes.commentThreadIds) ? attributes.commentThreadIds : [];
+      if (ids.length === 0) return {};
+      return { "data-comment-thread-ids": ids.join(",") };
+    }
+  }
+};
+
 export const RepoImageSchemaNode = Node.create({
   name: "repoImage",
   group: "block",
@@ -17,7 +33,8 @@ export const RepoImageSchemaNode = Node.create({
       path: {
         default: null,
         parseHTML: (element) => element.getAttribute("path") || null
-      }
+      },
+      ...commentThreadIdsAttributeSpec
     };
   },
   parseHTML() {
@@ -64,7 +81,8 @@ export const EmbeddedWidgetSchemaNode = Node.create({
         renderHTML: (attributes) => ({
           collapsed: attributes.collapsed === false ? "false" : "true"
         })
-      }
+      },
+      ...commentThreadIdsAttributeSpec
     };
   },
   parseHTML() {

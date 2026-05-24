@@ -12,12 +12,24 @@ export type AiEditSelectionMetadata = {
   source: "local" | "run";
 };
 
+type AiEditSelectionEntry = {
+  metadata: AiEditSelectionMetadata;
+  from: number;
+  to: number;
+};
+
 type AiEditSelectionState = {
-  metadata: Map<string, AiEditSelectionMetadata>;
+  metadata: Map<string, AiEditSelectionEntry>;
 };
 
 type AiEditSelectionMeta =
-  | { type: "upsertMetadata"; id: string; metadata: AiEditSelectionMetadata }
+  | {
+      type: "upsertMetadata";
+      id: string;
+      metadata: AiEditSelectionMetadata;
+      from: number;
+      to: number;
+    }
   | { type: "removeMetadata"; id: string }
   | { type: "syncRuns"; entries: Array<{ id: string; metadata: AiEditSelectionMetadata }> };
 
@@ -73,8 +85,23 @@ export function collectAiEditSelectionRanges(doc: EditorState["doc"]) {
   return ranges;
 }
 
+function mapMetadata(
+  metadata: Map<string, AiEditSelectionEntry>,
+  transaction: Transaction
+) {
+  if (!transaction.docChanged) return metadata;
+  const next = new Map<string, AiEditSelectionEntry>();
+  for (const [id, entry] of metadata) {
+    const from = transaction.mapping.map(entry.from, 1);
+    const to = transaction.mapping.map(entry.to, -1);
+    if (to <= from) continue;
+    next.set(id, { metadata: entry.metadata, from, to });
+  }
+  return next;
+}
+
 function applyMeta(
-  metadata: Map<string, AiEditSelectionMetadata>,
+  metadata: Map<string, AiEditSelectionEntry>,
   meta: AiEditSelectionMeta | undefined
 ) {
   if (!meta) return metadata;
@@ -85,34 +112,60 @@ function applyMeta(
     return next;
   }
   if (meta.type === "upsertMetadata") {
-    next.set(meta.id, meta.metadata);
+    next.set(meta.id, {
+      metadata: meta.metadata,
+      from: meta.from,
+      to: meta.to
+    });
     return next;
   }
 
   const syncedIds = new Set(meta.entries.map((entry) => entry.id));
   for (const [id, value] of next) {
-    if (value.source === "run" && !syncedIds.has(id)) {
+    if (value.metadata.source === "run" && !syncedIds.has(id)) {
       next.delete(id);
     }
   }
   for (const entry of meta.entries) {
     const current = next.get(entry.id);
+    if (!current) {
+      // No tracked range — skip; we don't know where to place it.
+      continue;
+    }
     next.set(entry.id, {
-      ...entry.metadata,
-      source: current?.source ?? entry.metadata.source
+      ...current,
+      metadata: {
+        ...entry.metadata,
+        source: current.metadata.source ?? entry.metadata.source
+      }
     });
   }
   return next;
 }
 
 function buildDecorationSet(state: EditorState) {
-  const ranges = collectAiEditSelectionRanges(state.doc);
+  const ranges = new Map<string, { from: number; to: number }>();
+  for (const [id, range] of collectAiEditSelectionRanges(state.doc)) {
+    ranges.set(id, range);
+  }
+  const pluginState = aiEditSelectionPluginKey.getState(state);
+  if (pluginState) {
+    for (const [id, entry] of pluginState.metadata) {
+      if (entry.to > entry.from) {
+        ranges.set(id, { from: entry.from, to: entry.to });
+      }
+    }
+  }
   const decorations: Decoration[] = [];
+  const docSize = state.doc.content.size;
   for (const [selectionId, range] of ranges) {
+    const from = Math.max(0, Math.min(range.from, docSize));
+    const to = Math.max(from, Math.min(range.to, docSize));
+    if (to <= from) continue;
     decorations.push(
       Decoration.inline(
-        range.from,
-        range.to,
+        from,
+        to,
         {
           class: "ai-edit-selection-pending",
           "data-ai-edit-id": selectionId
@@ -138,9 +191,10 @@ export const AiEditSelections = Extension.create({
         state: {
           init: () => ({ metadata: new Map() }),
           apply: (transaction, previous) => {
+            const mapped = mapMetadata(previous.metadata, transaction);
             const meta = transaction.getMeta(aiEditSelectionPluginKey) as AiEditSelectionMeta | undefined;
             return {
-              metadata: applyMeta(previous.metadata, meta)
+              metadata: applyMeta(mapped, meta)
             };
           }
         },
@@ -155,11 +209,37 @@ export const AiEditSelections = Extension.create({
 });
 
 export function getAiEditSelectionRange(state: EditorState, id: string) {
+  const entry = aiEditSelectionPluginKey.getState(state)?.metadata.get(id);
+  if (entry && entry.to > entry.from) {
+    return { from: entry.from, to: entry.to };
+  }
   return collectAiEditSelectionRanges(state.doc).get(id) ?? null;
 }
 
+export function describeAiEditSelectionPresence(state: EditorState, id: string) {
+  const pluginState = aiEditSelectionPluginKey.getState(state);
+  const pluginEntry = pluginState?.metadata.get(id) ?? null;
+  const markRanges = findAiEditRangeMark(state, id)?.ranges ?? [];
+  let totalMarkRangesAnyId = 0;
+  state.doc.descendants((node) => {
+    if (!node.isText) return;
+    for (const mark of node.marks) {
+      if (mark.type.name === "aiEditRange") totalMarkRangesAnyId += 1;
+    }
+  });
+  return {
+    docSize: state.doc.content.size,
+    pluginHasEntry: !!pluginEntry,
+    pluginFrom: pluginEntry?.from ?? null,
+    pluginTo: pluginEntry?.to ?? null,
+    markRangeCountForId: markRanges.length,
+    markRangeCountAnyId: totalMarkRangesAnyId,
+    pluginMetadataKeys: pluginState ? Array.from(pluginState.metadata.keys()) : []
+  };
+}
+
 export function getAiEditSelectionMetadata(state: EditorState, id: string) {
-  return aiEditSelectionPluginKey.getState(state)?.metadata.get(id) ?? null;
+  return aiEditSelectionPluginKey.getState(state)?.metadata.get(id)?.metadata ?? null;
 }
 
 function findAiEditRangeMark(state: EditorState, selectionId: string) {
@@ -210,6 +290,8 @@ export function upsertAiEditSelection(
   tr.setMeta(aiEditSelectionPluginKey, {
     type: "upsertMetadata",
     id: marker.id,
+    from,
+    to,
     metadata: {
       runId: marker.runId ?? null,
       progress: marker.progress ?? null,

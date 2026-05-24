@@ -37,9 +37,17 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   const repoUrl = parsed.data.repoUrl?.trim() || null;
   const repoBranch = parsed.data.repoBranch?.trim() || null;
 
-  if (repoUrl && !/^https:\/\/github\.com\/[^/\s]+\/[^/\s]+(?:\.git)?$/.test(repoUrl) && !/^git@github\.com:[^/\s]+\/[^/\s]+(?:\.git)?$/.test(repoUrl)) {
+  if (
+    repoUrl &&
+    !/^https:\/\/github\.com\/[^/\s]+\/[^/\s]+(?:\.git)?$/.test(repoUrl) &&
+    !/^git@github\.com:[^/\s]+\/[^/\s]+(?:\.git)?$/.test(repoUrl) &&
+    !/^https:\/\/huggingface\.co\/(?:datasets\/|spaces\/)?[^/\s]+\/[^/\s]+(?:\.git)?$/.test(repoUrl)
+  ) {
     return NextResponse.json(
-      { error: "Use a GitHub HTTPS or SSH repository URL." },
+      {
+        error:
+          "Use a GitHub HTTPS/SSH URL or a HuggingFace repository URL (https://huggingface.co/datasets/owner/name)."
+      },
       { status: 400 }
     );
   }

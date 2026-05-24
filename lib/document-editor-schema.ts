@@ -1,5 +1,5 @@
 import { getSchema } from "@tiptap/core";
-import Image from "@tiptap/extension-image";
+import ImageExtension from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
 import Table from "@tiptap/extension-table";
 import TableCell from "@tiptap/extension-table-cell";
@@ -10,7 +10,20 @@ import StarterKit from "@tiptap/starter-kit";
 
 import { AiEditRange } from "@/components/document-workspace/ai-edit-selections";
 import { CommentAnchor } from "@/components/document-workspace/comment-anchors";
-import { EmbeddedWidgetSchemaNode, RepoImageSchemaNode } from "@/lib/document-schema-nodes";
+import {
+  EmbeddedWidgetSchemaNode,
+  RepoImageSchemaNode,
+  commentThreadIdsAttributeSpec
+} from "@/lib/document-schema-nodes";
+
+const Image = ImageExtension.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      ...commentThreadIdsAttributeSpec
+    };
+  }
+});
 
 export function createDocumentEditorSchema() {
   return getSchema([

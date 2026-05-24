@@ -119,6 +119,12 @@ model AiRun {
   error         String?
   startedAt     DateTime          @default(now())
   finishedAt    DateTime?
+  selectionId        String?
+  replacementText    String?
+  replacementImages  String?
+  replacementWidgets String?
+  replacementSources String?
+  appliedAt          DateTime?
   document      Document          @relation(fields: [documentId], references: [id], onDelete: Cascade)
   parentRun     AiRun?            @relation("AiRunFollowUps", fields: [parentRunId], references: [id], onDelete: SetNull)
   followUps     AiRun[]           @relation("AiRunFollowUps")

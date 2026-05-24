@@ -96,6 +96,7 @@ export async function GET(request: Request, { params }: RouteContext) {
         id: true,
         triggerType: true,
         triggerId: true,
+        selectionId: true,
         parentRunId: true,
         instruction: true,
         status: true,
@@ -108,6 +109,7 @@ export async function GET(request: Request, { params }: RouteContext) {
         error: true,
         startedAt: true,
         finishedAt: true,
+        appliedAt: true,
         events: {
           orderBy: { createdAt: "asc" },
           take: 80,

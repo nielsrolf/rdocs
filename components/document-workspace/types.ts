@@ -104,6 +104,7 @@ export type ActiveAiRunView = {
   id: string;
   triggerType: string;
   triggerId?: string | null;
+  selectionId?: string | null;
   parentRunId?: string | null;
   instruction: string;
   status: string;
@@ -116,6 +117,7 @@ export type ActiveAiRunView = {
   error?: string | null;
   startedAt: string | Date;
   finishedAt?: string | Date | null;
+  appliedAt?: string | Date | null;
   events?: AiRunEventView[];
 };
 

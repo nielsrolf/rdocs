@@ -54,6 +54,11 @@ function buildGitArgs(args: string[]) {
   return ["-c", `http.https://github.com/.extraheader=${header}`, ...args];
 }
 
+export function isReadOnlyRepoUrl(repoUrl: string | null | undefined) {
+  if (!repoUrl) return false;
+  return /^https:\/\/huggingface\.co\//.test(repoUrl);
+}
+
 function runCommand(
   command: string,
   args: string[],
@@ -121,8 +126,11 @@ async function initLocalWorkspace(workspace: string) {
   // git needs an identity to commit; set local config so we don't depend on global config.
   await runCommand("git", ["config", "user.email", "ai-agent@gdocs.local"], { cwd: workspace });
   await runCommand("git", ["config", "user.name", "gdocs-ai"], { cwd: workspace });
-  // Establish an initial commit so worktree add and HEAD work.
-  await runCommand("git", ["commit", "--allow-empty", "-m", "initial"], { cwd: workspace });
+  // Keep agent scratch dirs out of the linked repo. If an agent ever creates one,
+  // a dirty .claude/worktrees gitlink would otherwise block every future merge.
+  await fs.writeFile(path.join(workspace, ".gitignore"), ".claude/\n");
+  await runCommand("git", ["add", ".gitignore"], { cwd: workspace });
+  await runCommand("git", ["commit", "-m", "initial"], { cwd: workspace });
 }
 
 async function hasOriginRemote(workspace: string) {
@@ -191,7 +199,10 @@ export async function ensureLinkedRepository(
         workspace,
         repoUrl: document.repoUrl,
         message: "Save pending AI workspace changes",
-        push: (options.pushPendingChanges ?? true) && Boolean(document.repoUrl)
+        push:
+          (options.pushPendingChanges ?? true) &&
+          Boolean(document.repoUrl) &&
+          !isReadOnlyRepoUrl(document.repoUrl)
       });
     }
   }
@@ -469,6 +480,7 @@ Return only JSON:
       allowedTools: CLAUDE_AGENT_TOOLS,
       maxTurns: Number.parseInt(process.env.CLAUDE_MERGE_MAX_TURNS || "8", 10),
       model,
+      thinking: { type: "disabled" },
       abortController
     }
   });
@@ -513,7 +525,7 @@ export async function commitWorkspaceChanges(input: {
   const commitSha = shaResult.stdout.trim();
 
   let pushed = false;
-  if (input.push && (await hasOriginRemote(input.workspace))) {
+  if (input.push && !isReadOnlyRepoUrl(input.repoUrl) && (await hasOriginRemote(input.workspace))) {
     await runCommand("git", ["push", "-u", "origin", "HEAD"], {
       cwd: input.workspace,
       timeoutMs: 300_000
@@ -526,7 +538,11 @@ export async function commitWorkspaceChanges(input: {
     input.baseWorkspace &&
     path.resolve(input.baseWorkspace) !== path.resolve(input.workspace)
   ) {
-    await syncBranchToBaseWorkspace(input.baseWorkspace, commitSha, input.push);
+    await syncBranchToBaseWorkspace(
+      input.baseWorkspace,
+      commitSha,
+      input.push && !isReadOnlyRepoUrl(input.repoUrl)
+    );
   }
 
   return {
