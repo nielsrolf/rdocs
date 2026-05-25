@@ -124,8 +124,8 @@ async function initLocalWorkspace(workspace: string) {
   await fs.mkdir(workspace, { recursive: true });
   await runCommand("git", ["init", "--initial-branch=main"], { cwd: workspace });
   // git needs an identity to commit; set local config so we don't depend on global config.
-  await runCommand("git", ["config", "user.email", "ai-agent@gdocs.local"], { cwd: workspace });
-  await runCommand("git", ["config", "user.name", "gdocs-ai"], { cwd: workspace });
+  await runCommand("git", ["config", "user.email", "ai-agent@r-docs.local"], { cwd: workspace });
+  await runCommand("git", ["config", "user.name", "r-docs"], { cwd: workspace });
   // Keep agent scratch dirs out of the linked repo. If an agent ever creates one,
   // a dirty .claude/worktrees gitlink would otherwise block every future merge.
   await fs.writeFile(path.join(workspace, ".gitignore"), ".claude/\n");

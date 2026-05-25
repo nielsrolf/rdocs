@@ -10,12 +10,12 @@ export function BrandMark({ size = 26 }: { size?: number }) {
       xmlns="http://www.w3.org/2000/svg"
     >
       <defs>
-        <linearGradient id="gdocs-ai-bg" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+        <linearGradient id="r-docs-bg" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
           <stop offset="0" stopColor="#1a73e8" />
           <stop offset="1" stopColor="#174ea6" />
         </linearGradient>
       </defs>
-      <rect x="2" y="2" width="28" height="28" rx="8" fill="url(#gdocs-ai-bg)" />
+      <rect x="2" y="2" width="28" height="28" rx="8" fill="url(#r-docs-bg)" />
       <rect x="8.5" y="11" width="11" height="2" rx="1" fill="#ffffff" />
       <rect x="8.5" y="15.5" width="15" height="2" rx="1" fill="#ffffff" fillOpacity="0.85" />
       <rect x="8.5" y="20" width="8.5" height="2" rx="1" fill="#ffffff" fillOpacity="0.7" />

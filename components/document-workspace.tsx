@@ -2,6 +2,7 @@
 
 import ImageExtension from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
+import Placeholder from "@tiptap/extension-placeholder";
 import Table from "@tiptap/extension-table";
 import TableCell from "@tiptap/extension-table-cell";
 import TableHeader from "@tiptap/extension-table-header";
@@ -16,7 +17,6 @@ import StarterKit from "@tiptap/starter-kit";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
-import { permissionLabel } from "@/lib/utils";
 
 import { AgentPanel } from "./document-workspace/agent-panel";
 import { ToolbarButton, insertImagesAtPosition } from "./document-workspace/atoms";
@@ -32,7 +32,10 @@ import {
 } from "./document-workspace/ai-edit-selections";
 import { CommentRail } from "./document-workspace/comment-rail";
 import { DocOutline, OUTLINE_MAX_WIDTH, OUTLINE_MIN_WIDTH } from "./document-workspace/doc-outline";
+import { FileMenu } from "./document-workspace/file-menu";
 import { SelectionPopover } from "./document-workspace/selection-popover";
+import { LinkPopover } from "./document-workspace/link-popover";
+import { HeadingCopyOverlay } from "./document-workspace/heading-copy-overlay";
 import { CommentAnchor, createCommentHighlightExtension, resolveCommentAnchorRange } from "./document-workspace/comment-anchors";
 import {
   createCollaborationExtension,
@@ -181,6 +184,7 @@ export function DocumentWorkspace({
   const [activeAiRuns, setActiveAiRuns] = useState<ActiveAiRunView[]>([]);
   const [aiRuns, setAiRuns] = useState<ActiveAiRunView[]>([]);
   const aiEditRunStateRef = useRef<Map<string, "applying" | "applied" | "failed">>(new Map());
+  const mountedAtRef = useRef<number>(Date.now());
   const [, setActiveAiTarget] = useState<ActiveAiTarget | null>(null);
   const [agentPanelOpen, setAgentPanelOpen] = useState(false);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
@@ -192,6 +196,7 @@ export function DocumentWorkspace({
   const [inviteBusy, setInviteBusy] = useState(false);
   const [deleteBusyCommentId, setDeleteBusyCommentId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [formatBarOpen, setFormatBarOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyVersions, setHistoryVersions] = useState<VersionView[]>([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
@@ -274,11 +279,11 @@ export function DocumentWorkspace({
 
   useEffect(() => {
     try {
-      const stored = window.localStorage.getItem("gdocs-ai:outline-collapsed");
+      const stored = window.localStorage.getItem("r-docs:outline-collapsed");
       if (stored === "true") {
         setOutlineCollapsed(true);
       }
-      const storedWidth = window.localStorage.getItem("gdocs-ai:outline-width");
+      const storedWidth = window.localStorage.getItem("r-docs:outline-width");
       if (storedWidth) {
         const parsed = Number.parseInt(storedWidth, 10);
         if (Number.isFinite(parsed)) {
@@ -293,7 +298,7 @@ export function DocumentWorkspace({
   useEffect(() => {
     try {
       window.localStorage.setItem(
-        "gdocs-ai:outline-collapsed",
+        "r-docs:outline-collapsed",
         outlineCollapsed ? "true" : "false"
       );
     } catch {
@@ -303,7 +308,7 @@ export function DocumentWorkspace({
 
   useEffect(() => {
     try {
-      window.localStorage.setItem("gdocs-ai:outline-width", String(Math.round(outlineWidth)));
+      window.localStorage.setItem("r-docs:outline-width", String(Math.round(outlineWidth)));
     } catch {
       // Ignore quota / privacy errors.
     }
@@ -326,6 +331,45 @@ export function DocumentWorkspace({
       document.body.classList.remove("public-view-shell");
     };
   }, [isPublicView]);
+
+  useEffect(() => {
+    function closeOpenHeaderMenus(exception: Element | null) {
+      const openMenus = document.querySelectorAll<HTMLDetailsElement>("details.header-menu[open]");
+      openMenus.forEach((node) => {
+        if (exception && node.contains(exception)) return;
+        node.open = false;
+      });
+    }
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target instanceof Element ? event.target : null;
+      const insideMenu = target ? target.closest("details.header-menu") : null;
+      closeOpenHeaderMenus(insideMenu);
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") closeOpenHeaderMenus(null);
+    }
+    function handleClickInside(event: MouseEvent) {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      const ownMenu = target.closest("details.header-menu");
+      if (!ownMenu) return;
+      if (target.closest("summary")) return;
+      const link = target.closest("a");
+      if (link) {
+        closeOpenHeaderMenus(null);
+        return;
+      }
+      closeOpenHeaderMenus(ownMenu);
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("click", handleClickInside);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("click", handleClickInside);
+    };
+  }, []);
 
   function syncAiRuns(nextRuns: ActiveAiRunView[]) {
     const previous = previousAiRunsRef.current;
@@ -763,6 +807,11 @@ export function DocumentWorkspace({
         openOnClick: false,
         autolink: true,
         defaultProtocol: "https"
+      }),
+      Placeholder.configure({
+        placeholder: "Start writing, or paste content here. Select text to add a comment or ask AI to edit.",
+        showOnlyWhenEditable: true,
+        showOnlyCurrent: false
       }),
       Table.configure({
         resizable: false
@@ -2126,17 +2175,22 @@ export function DocumentWorkspace({
 
       if (run.status === "FAILED") {
         aiEditRunStateRef.current.set(run.id, "failed");
-        reportClientError(run.error ?? "AI edit failed.", "ai-edit-run-failed", {
-          documentId,
-          selectionId,
-          aiRunId: run.id
-        });
-        notifyAgentCompleted({
-          id: run.id,
-          triggerType: "SELECTION_EDIT",
-          instruction: run.instruction,
-          status: "FAILED"
-        });
+        const finishedAtMs = run.finishedAt ? new Date(run.finishedAt).getTime() : 0;
+        const isStaleFromPreviousSession =
+          finishedAtMs > 0 && finishedAtMs < mountedAtRef.current - 5_000;
+        if (!isStaleFromPreviousSession) {
+          reportClientError(run.error ?? "AI edit failed.", "ai-edit-run-failed", {
+            documentId,
+            selectionId,
+            aiRunId: run.id
+          });
+          notifyAgentCompleted({
+            id: run.id,
+            triggerType: "SELECTION_EDIT",
+            instruction: run.instruction,
+            status: "FAILED"
+          });
+        }
         editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
         setActiveAiRun(null);
         continue;
@@ -2273,9 +2327,19 @@ export function DocumentWorkspace({
             </span>
           </div>
 
-          <details className="header-menu">
-            <summary>Format</summary>
-            <div className="header-menu-panel editor-toolbar" role="toolbar" aria-label="Document formatting">
+          <FileMenu currentDocumentId={documentId} onOpenVersionHistory={() => setHistoryOpen(true)} />
+
+          <button
+            aria-pressed={formatBarOpen}
+            className={`ghost-button header-toggle-button${formatBarOpen ? " active" : ""}`}
+            onClick={() => setFormatBarOpen((value) => !value)}
+            type="button"
+          >
+            Format
+          </button>
+
+          <div className="format-bar-placeholder" data-open={formatBarOpen ? "true" : "false"} hidden={!formatBarOpen}>
+            <div className="editor-toolbar" role="toolbar" aria-label="Document formatting">
               <div className="editor-toolbar-group">
                 <ToolbarButton
                   active={editor?.isActive("heading", { level: 1 }) ?? false}
@@ -2377,7 +2441,7 @@ export function DocumentWorkspace({
                 />
               </div>
             </div>
-          </details>
+          </div>
 
           <details className="header-menu header-menu-comments">
             <summary>Comments</summary>
@@ -2445,6 +2509,7 @@ export function DocumentWorkspace({
           </details>
 
           <div className="document-topbar-actions">
+            {remoteNotice ? <span className="subtle-pill">{remoteNotice}</span> : null}
             {remotePresence.length > 0 ? (
               <div className="collaboration-presence-list" aria-label="Active collaborators">
                 {remotePresence.slice(0, 4).map((presence) => (
@@ -2471,26 +2536,6 @@ export function DocumentWorkspace({
                 Share
               </button>
             ) : null}
-            <details className="header-menu header-menu-right">
-              <summary>More</summary>
-              <div className="header-menu-panel header-actions-panel">
-                <div className="presence-chip">
-                  {isAuthenticated ? `Signed in as ${currentUserName}` : "Browsing via share link"}
-                </div>
-                <div className="document-menu-status">
-                  <span className="permission-pill">{permissionLabel(initialPermission)}</span>
-                  {viaShareLink ? <span className="subtle-pill">Link access</span> : null}
-                  {remoteNotice ? <span className="subtle-pill">{remoteNotice}</span> : null}
-                </div>
-                <button
-                  className="ghost-button"
-                  onClick={() => setHistoryOpen(true)}
-                  type="button"
-                >
-                  Version history
-                </button>
-              </div>
-            </details>
           </div>
         </div>
       </div>
@@ -2551,6 +2596,8 @@ export function DocumentWorkspace({
             ) : null}
 
             <EditorContent editor={editor} />
+            <LinkPopover editor={editor} containerRef={editorPageRef} canEdit={canWriteDocument} />
+            <HeadingCopyOverlay editor={editor} containerRef={editorPageRef} />
             <TableInlineControls
               editor={editor}
               containerRef={editorPageRef}

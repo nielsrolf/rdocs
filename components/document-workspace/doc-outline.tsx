@@ -5,7 +5,18 @@ type OutlineEntry = {
   index: number;
   level: number;
   text: string;
+  slug: string;
 };
+
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
 
 export const OUTLINE_MIN_WIDTH = 160;
 export const OUTLINE_MAX_WIDTH = 420;
@@ -39,6 +50,7 @@ export function DocOutline({
       }
 
       const next: OutlineEntry[] = [];
+      const slugCounts = new Map<string, number>();
       let index = 0;
       editor.state.doc.descendants((node) => {
         if (node.type.name !== "heading") {
@@ -46,10 +58,16 @@ export function DocOutline({
         }
         const level = typeof node.attrs.level === "number" ? node.attrs.level : 1;
         const text = node.textContent.trim();
+        const display = text || "Untitled section";
+        const baseSlug = slugify(text) || `section-${index + 1}`;
+        const seen = slugCounts.get(baseSlug) ?? 0;
+        slugCounts.set(baseSlug, seen + 1);
+        const slug = seen === 0 ? baseSlug : `${baseSlug}-${seen + 1}`;
         next.push({
           index: index++,
           level,
-          text: text || "Untitled section"
+          text: display,
+          slug
         });
       });
       setEntries(next);
@@ -144,6 +162,52 @@ export function DocOutline({
     window.scrollTo({ top: targetY, behavior: "smooth" });
   }
 
+  const [copiedSlug, setCopiedSlug] = useState<string | null>(null);
+
+  async function copyHeadingLink(entry: OutlineEntry) {
+    if (typeof window === "undefined") return;
+    const url = `${window.location.origin}${window.location.pathname}${window.location.search}#${entry.slug}`;
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      window.prompt("Copy heading link:", url);
+    }
+    setCopiedSlug(entry.slug);
+    window.setTimeout(() => {
+      setCopiedSlug((current) => (current === entry.slug ? null : current));
+    }, 1500);
+  }
+
+  useEffect(() => {
+    if (!editor || typeof window === "undefined") return;
+    const hash = window.location.hash.replace(/^#/, "");
+    if (!hash) return;
+    if (entries.length === 0) return;
+    const match: OutlineEntry | undefined = entries.find((entry) => entry.slug === hash);
+    if (!match) return;
+    const target: OutlineEntry = match;
+    const dedupKey = `${window.location.pathname}#${hash}`;
+    const w = window as unknown as { __gdocsLastHashKey?: string };
+    if (w.__gdocsLastHashKey === dedupKey) return;
+    w.__gdocsLastHashKey = dedupKey;
+
+    // Layout settles after images/widgets load — re-scroll a few times so the
+    // user ends up on the right heading even if content above grows.
+    const delays = [0, 250, 800, 2000];
+    const timers: number[] = [];
+    for (const delay of delays) {
+      timers.push(window.setTimeout(() => scrollToHeading(target), delay));
+    }
+    function onWindowLoad() {
+      scrollToHeading(target);
+    }
+    window.addEventListener("load", onWindowLoad, { once: true });
+    return () => {
+      for (const id of timers) window.clearTimeout(id);
+      window.removeEventListener("load", onWindowLoad);
+    };
+  }, [editor, entries]);
+
   if (collapsed) {
     return (
       <aside className="doc-outline doc-outline-collapsed" aria-label="Document outline">
@@ -181,14 +245,28 @@ export function DocOutline({
           <ul className="doc-outline-list">
             {entries.map((entry) => (
               <li key={`${entry.index}-${entry.level}-${entry.text}`} style={{ paddingLeft: `${Math.max(0, entry.level - 1) * 0.85}rem` }}>
-                <button
-                  className={`doc-outline-item doc-outline-item-level-${Math.min(entry.level, 6)}`}
-                  onClick={() => scrollToHeading(entry)}
-                  title={entry.text}
-                  type="button"
-                >
-                  {entry.text}
-                </button>
+                <div className="doc-outline-row">
+                  <button
+                    className={`doc-outline-item doc-outline-item-level-${Math.min(entry.level, 6)}`}
+                    onClick={() => scrollToHeading(entry)}
+                    title={entry.text}
+                    type="button"
+                  >
+                    {entry.text}
+                  </button>
+                  <button
+                    aria-label={`Copy link to ${entry.text}`}
+                    className="doc-outline-copy"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void copyHeadingLink(entry);
+                    }}
+                    title={copiedSlug === entry.slug ? "Copied!" : "Copy link to heading"}
+                    type="button"
+                  >
+                    {copiedSlug === entry.slug ? <CheckIcon /> : <LinkIcon />}
+                  </button>
+                </div>
               </li>
             ))}
           </ul>
@@ -214,6 +292,36 @@ function OutlineIcon() {
   return (
     <svg aria-hidden="true" focusable="false" height="16" viewBox="0 0 16 16" width="16">
       <path d="M2 4h12M2 8h12M2 12h8" stroke="currentColor" strokeLinecap="round" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function LinkIcon() {
+  return (
+    <svg aria-hidden="true" focusable="false" height="13" viewBox="0 0 16 16" width="13">
+      <path
+        d="M6.5 9.5L9.5 6.5M6 4.5h-1a3 3 0 100 6h1m4-6h1a3 3 0 110 6h-1"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.5"
+      />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg aria-hidden="true" focusable="false" height="13" viewBox="0 0 16 16" width="13">
+      <path
+        d="M3.5 8.5l3 3 6-6.5"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
     </svg>
   );
 }

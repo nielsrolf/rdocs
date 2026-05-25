@@ -38,13 +38,7 @@ export const defaultDocumentContent: DocumentContent = {
   type: "doc",
   content: [
     {
-      type: "paragraph",
-      content: [
-        {
-          type: "text",
-          text: "Start writing. Select text to attach a comment thread, or share the document with a view/comment/edit link."
-        }
-      ]
+      type: "paragraph"
     }
   ]
 };
@@ -127,7 +121,7 @@ export function getDocumentPlainText(content: unknown): string {
     .replace(/[ \t]+\n/g, "\n")
     .trim();
 
-  return text || defaultDocumentContent.content[0]?.content?.[0]?.text || "";
+  return text;
 }
 
 export function stripCommentAnchorMarks(node: unknown): unknown {
@@ -538,12 +532,5 @@ export function getDocumentAiBlocks(content: unknown): AiDocumentBlock[] {
     )
     .filter((block) => block.type !== "text" || block.text);
 
-  return normalized.length > 0
-    ? normalized
-    : [
-        {
-          type: "text",
-          text: defaultDocumentContent.content[0]?.content?.[0]?.text || ""
-        }
-      ];
+  return normalized.length > 0 ? normalized : [{ type: "text", text: "" }];
 }

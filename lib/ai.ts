@@ -586,7 +586,7 @@ async function runClaudeResearchAgentOnce(
   const model = process.env.CLAUDE_AGENT_MODEL || "sonnet";
   if (!input.workspacePath) {
     throw new Error(
-      "Claude research agent requires an isolated workspace path. Refusing to run with the server's working directory as cwd — that would let the agent write into the gdocs-ai repo."
+      "Claude research agent requires an isolated workspace path. Refusing to run with the server's working directory as cwd — that would let the agent write into the r-docs repo."
     );
   }
   const cwd = input.workspacePath;

@@ -1311,6 +1311,64 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   border: 1px dashed var(--border);
 }
 
+.dashboard-search {
+  max-width: 1200px;
+  margin: 0 auto 1rem;
+}
+
+.dashboard-search input {
+  width: 100%;
+  max-width: 420px;
+  padding: 0.65rem 0.9rem;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.85);
+  font-size: 0.95rem;
+}
+
+.dashboard-search input:focus {
+  outline: 2px solid rgba(26, 115, 232, 0.4);
+  outline-offset: 1px;
+}
+
+.doc-row-deletable {
+  padding: 0;
+  align-items: stretch;
+}
+
+.doc-row-deletable .doc-row-main {
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.95rem 1rem;
+  text-decoration: none;
+  color: inherit;
+  min-width: 0;
+}
+
+.doc-row-delete {
+  align-self: stretch;
+  border: none;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  padding: 0 0.95rem;
+  cursor: pointer;
+  border-radius: 0 18px 18px 0;
+  font-size: 0.95rem;
+}
+
+.doc-row-delete:hover:not(:disabled) {
+  background: rgba(220, 38, 38, 0.08);
+  color: rgb(185, 28, 28);
+}
+
+.doc-row-delete:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
 .workspace-shell {
   max-width: 1620px;
   margin: 0 auto;
@@ -1326,6 +1384,7 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
 .document-topbar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.35rem;
   padding: 0.42rem 0.55rem;
   border: 1px solid rgba(218, 220, 224, 0.9);
@@ -1489,6 +1548,116 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
 
 .header-menu-right .header-menu-panel {
   min-width: 240px;
+}
+
+.header-menu-file .header-menu-panel {
+  left: 0;
+  right: auto;
+  min-width: 320px;
+  max-width: min(420px, calc(100vw - 2rem));
+  padding: 0.5rem;
+}
+
+.file-menu-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.file-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 7px;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  font-size: 0.88rem;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  width: 100%;
+  transition: background 120ms ease;
+}
+
+.file-menu-item:hover,
+.file-menu-item:focus-visible {
+  background: rgba(60, 64, 67, 0.08);
+  outline: none;
+}
+
+.file-menu-item:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.file-menu-item-primary {
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.file-menu-item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-menu-item-hint {
+  flex: 0 0 auto;
+  font-size: 0.76rem;
+  color: var(--text-muted, #5f6368);
+}
+
+.file-menu-section-label {
+  padding: 0.55rem 0.6rem 0.2rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted, #5f6368);
+}
+
+.file-menu-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+  max-height: min(60vh, 360px);
+  overflow-y: auto;
+}
+
+.file-menu-empty {
+  padding: 0.5rem 0.6rem;
+  font-size: 0.82rem;
+  color: var(--text-muted, #5f6368);
+}
+
+.header-toggle-button.active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border-color: rgba(26, 115, 232, 0.25);
+}
+
+.format-bar-placeholder {
+  order: 99;
+  flex: 1 0 100%;
+  padding: 0.45rem 0.2rem 0.1rem;
+  border-top: 1px solid var(--border);
+  margin-top: 0.15rem;
+}
+
+.format-bar-placeholder[hidden] {
+  display: none;
+}
+
+.format-bar-placeholder .editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
 }
 
 .header-actions-panel {
@@ -1721,6 +1890,41 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   padding: 0;
   display: grid;
   gap: 0.05rem;
+}
+
+.doc-outline-row {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.doc-outline-row .doc-outline-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.doc-outline-copy {
+  opacity: 0.45;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  color: var(--muted);
+  padding: 0.2rem 0.35rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  line-height: 1;
+  transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
+  flex-shrink: 0;
+}
+
+.doc-outline-row:hover .doc-outline-copy,
+.doc-outline-copy:focus-visible {
+  opacity: 1;
+}
+
+.doc-outline-copy:hover {
+  background: rgba(26, 115, 232, 0.12);
+  color: rgb(26, 115, 232);
 }
 
 .doc-outline-item {
@@ -2113,6 +2317,82 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   font-weight: 700;
   line-height: 1.2;
   z-index: 5;
+}
+
+.heading-copy-button {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  color: var(--muted);
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.06);
+  z-index: 20;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.heading-copy-button:hover {
+  color: rgb(26, 115, 232);
+  background: rgba(26, 115, 232, 0.08);
+  border-color: rgba(26, 115, 232, 0.4);
+}
+
+.link-popover {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.55rem;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  font-size: 0.85rem;
+  z-index: 30;
+  max-width: 480px;
+}
+
+.link-popover-url {
+  color: var(--muted);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 240px;
+}
+
+.link-popover-url:hover {
+  text-decoration: underline;
+}
+
+.link-popover-button {
+  border: none;
+  background: transparent;
+  color: rgb(26, 115, 232);
+  text-decoration: none;
+  cursor: pointer;
+  padding: 0.15rem 0.4rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.link-popover-button:hover {
+  background: rgba(26, 115, 232, 0.1);
+}
+
+.gdocs-prosemirror p.is-editor-empty:first-child::before,
+.gdocs-prosemirror h1.is-empty:first-child::before {
+  content: attr(data-placeholder);
+  color: rgba(15, 23, 42, 0.32);
+  float: left;
+  height: 0;
+  pointer-events: none;
 }
 
 .ProseMirror-selectednode.embedded-widget-node,

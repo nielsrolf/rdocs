@@ -15,10 +15,12 @@ export default async function HomePage() {
       <section className="hero-card">
         <div className="hero-copy">
           <span className="eyebrow">AI-assisted research workspace</span>
-          <h1>Supervise research in a document with a linked repo beside it.</h1>
+          <h1>r-docs: research-docs meets repo-docs.</h1>
           <p>
-            Draft, comment, ask Claude to investigate, and keep the resulting code or experiment
-            artifacts committed back to the repository attached to the document.
+            One workspace where your <strong>research</strong> document and the <strong>repo</strong>{" "}
+            it produces live side by side. Draft, comment, ask Claude to investigate, and keep the
+            resulting code or experiment artifacts committed back to the repository attached to the
+            document.
           </p>
           <div className="hero-actions">
             <Link href="/sign-up" className="primary-button">

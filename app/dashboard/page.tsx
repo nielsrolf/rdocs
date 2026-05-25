@@ -1,10 +1,9 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
 
+import { DocumentList } from "@/components/document-list";
 import { NewDocumentButton } from "@/components/new-document-button";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { formatDateTime, permissionLabel, truncate } from "@/lib/utils";
 
 export default async function DashboardPage() {
   const user = await getCurrentUser();
@@ -44,6 +43,19 @@ export default async function DashboardPage() {
     })
   ]);
 
+  const owned = ownedDocuments.map((d) => ({
+    id: d.id,
+    title: d.title,
+    updatedAt: d.updatedAt.toISOString()
+  }));
+  const shared = sharedDocuments.map(({ document, permission }) => ({
+    id: document.id,
+    title: document.title,
+    updatedAt: document.updatedAt.toISOString(),
+    ownerName: document.owner.name,
+    permission
+  }));
+
   return (
     <main className="dashboard-shell">
       <section className="dashboard-header">
@@ -55,55 +67,7 @@ export default async function DashboardPage() {
         <NewDocumentButton />
       </section>
 
-      <section className="dashboard-grid">
-        <div className="surface-card">
-          <div className="section-heading">
-            <h2>Owned by you</h2>
-          </div>
-          <div className="doc-list">
-            {ownedDocuments.length === 0 ? (
-              <div className="empty-state">
-                <p>No documents yet.</p>
-              </div>
-            ) : (
-              ownedDocuments.map((document) => (
-                <Link className="doc-row" href={`/documents/${document.id}`} key={document.id}>
-                  <div>
-                    <strong>{truncate(document.title, 60)}</strong>
-                    <span>Updated {formatDateTime(document.updatedAt)}</span>
-                  </div>
-                  <span className="permission-pill">Owner</span>
-                </Link>
-              ))
-            )}
-          </div>
-        </div>
-
-        <div className="surface-card">
-          <div className="section-heading">
-            <h2>Shared with you</h2>
-          </div>
-          <div className="doc-list">
-            {sharedDocuments.length === 0 ? (
-              <div className="empty-state">
-                <p>No shared documents yet.</p>
-              </div>
-            ) : (
-              sharedDocuments.map(({ document, permission }) => (
-                <Link className="doc-row" href={`/documents/${document.id}`} key={document.id}>
-                  <div>
-                    <strong>{truncate(document.title, 60)}</strong>
-                    <span>
-                      Shared by {document.owner.name} • Updated {formatDateTime(document.updatedAt)}
-                    </span>
-                  </div>
-                  <span className="permission-pill">{permissionLabel(permission)}</span>
-                </Link>
-              ))
-            )}
-          </div>
-        </div>
-      </section>
+      <DocumentList ownedDocuments={owned} sharedDocuments={shared} />
     </main>
   );
 }

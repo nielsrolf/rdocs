@@ -7,7 +7,7 @@ import { getDocumentAiBlocks } from "../lib/content";
 
 const baseInput = {
   mode: "edit_selection" as const,
-  documentTitle: "GDocs AI",
+  documentTitle: "r-docs",
   documentText: "Intro text",
   documentBlocks: [
     { type: "text" as const, text: "Intro text" },

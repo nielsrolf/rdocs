@@ -76,6 +76,25 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   return NextResponse.json({ ok: true, updatedAt: updated.updatedAt });
 }
 
+export async function DELETE(_request: Request, { params }: RouteContext) {
+  const { id } = await params;
+  const user = await getCurrentUser();
+  if (!user) {
+    return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+  }
+
+  const document = await db.document.findUnique({ where: { id }, select: { ownerId: true } });
+  if (!document) {
+    return NextResponse.json({ error: "Document not found." }, { status: 404 });
+  }
+  if (document.ownerId !== user.id) {
+    return NextResponse.json({ error: "Only the owner can delete this document." }, { status: 403 });
+  }
+
+  await db.document.delete({ where: { id } });
+  return NextResponse.json({ ok: true });
+}
+
 export async function GET(request: Request, { params }: RouteContext) {
   const { id } = await params;
   const user = await getCurrentUser();

@@ -7,7 +7,7 @@ import { BrandMark } from "@/components/brand-mark";
 import { getCurrentUser } from "@/lib/auth";
 
 export const metadata: Metadata = {
-  title: "GDocs AI",
+  title: "r-docs",
   description: "A collaborative document editor with comments, share links, and AI-assisted replies."
 };
 
@@ -29,7 +29,7 @@ export default async function RootLayout({
           <header className="topbar">
             <Link href="/" className="brand">
               <BrandMark />
-              <span>GDocs AI</span>
+              <span>r-docs</span>
             </Link>
             <nav className="topbar-nav">
               {user ? (

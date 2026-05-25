@@ -1,6 +1,8 @@
-# GDocs AI
+# r-docs
 
-A Google Docs-style MVP with:
+Short for **research-docs** and **repo-docs**: a Google Docs-style workspace where a rich-text research document lives next to the repository it produces.
+
+Features:
 
 - rich text editing
 - threaded comments on selected text
