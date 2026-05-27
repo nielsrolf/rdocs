@@ -8,7 +8,7 @@ import {
   type ActiveAiRunView,
   type ThreadView
 } from "./types";
-import { getThreadTags } from "./utils";
+import { getThreadTags, isThreadUnread } from "./utils";
 
 export function CommentRail({
   threads,
@@ -87,14 +87,17 @@ export function CommentRail({
           const allComments = thread.comments;
           const visibleComments = isActive ? allComments : allComments.slice(0, 1);
           const hiddenReplyCount = allComments.length - visibleComments.length;
+          const unread = !isActive && isThreadUnread(thread, currentUserId);
           const canDeleteCommentFor = (comment: typeof allComments[number]) =>
             isOwner || comment.author?.id === currentUserId || Boolean(comment.aiModel);
 
           return (
             <article
-              className={`comment-thread-card ${isActive ? "comment-thread-card-active" : ""}`}
+              className={`comment-thread-card${isActive ? " comment-thread-card-active" : ""}${unread ? " comment-thread-card-unread" : ""}`}
               key={thread.id}
-              onMouseDown={() => onFocusThread(thread)}
+              onMouseDown={() => {
+                if (!isActive) onFocusThread(thread);
+              }}
               style={{ top: threadOffsets[thread.id] ?? 16 }}
             >
               <button className="comment-thread-anchor" onClick={() => onFocusThread(thread)} type="button">

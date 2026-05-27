@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
 
 import { DocumentWorkspace } from "@/components/document-workspace";
@@ -18,6 +19,16 @@ type PageProps = {
   }>;
 };
 
+export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
+  const { id } = await params;
+  const doc = await db.document.findUnique({
+    where: { id },
+    select: { title: true }
+  });
+  const title = doc?.title?.trim();
+  return { title: title ? `${title} — r-docs` : "r-docs" };
+}
+
 export default async function DocumentPage({ params, searchParams }: PageProps) {
   const { id } = await params;
   const resolvedSearchParams = searchParams ? await searchParams : undefined;
@@ -34,7 +45,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
   }
 
   const [threads, shareLinks, members] = await Promise.all([
-    listDocumentThreads(id),
+    listDocumentThreads(id, user?.id ?? null),
     user && access.document.ownerId === user.id
       ? db.shareLink.findMany({
           where: {

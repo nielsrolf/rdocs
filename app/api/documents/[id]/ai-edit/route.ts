@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -66,6 +69,71 @@ function hasMarkdownImage(text: string) {
   return /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/.test(text);
 }
 
+type NormalizedSubmittedWidget = {
+  label: string;
+  buildCmd: string;
+  embedSource: string;
+};
+
+function normalizeSubmittedWidget(widget: unknown): NormalizedSubmittedWidget | null {
+  if (!widget || typeof widget !== "object") return null;
+  const typed = widget as {
+    label?: unknown;
+    build_cmd?: unknown;
+    buildCmd?: unknown;
+    embed_source?: unknown;
+    embedSource?: unknown;
+  };
+  const label =
+    typeof typed.label === "string" && typed.label.trim() ? typed.label.trim() : "Interactive widget";
+  const buildCmd =
+    typeof typed.build_cmd === "string"
+      ? typed.build_cmd.trim()
+      : typeof typed.buildCmd === "string"
+        ? typed.buildCmd.trim()
+        : "";
+  const embedSource =
+    typeof typed.embed_source === "string"
+      ? typed.embed_source.trim()
+      : typeof typed.embedSource === "string"
+        ? typed.embedSource.trim()
+        : "";
+  if (!buildCmd || !embedSource) return null;
+  return { label, buildCmd, embedSource };
+}
+
+async function embedSourceExists(workspace: string, embedSource: string): Promise<boolean> {
+  const resolved = path.resolve(workspace, embedSource);
+  const workspaceRoot = path.resolve(workspace);
+  if (!resolved.startsWith(`${workspaceRoot}${path.sep}`)) {
+    return false;
+  }
+  try {
+    const stat = await fs.stat(resolved);
+    return stat.isFile();
+  } catch {
+    return false;
+  }
+}
+
+async function buildAndVerifyWidget(
+  widget: NormalizedSubmittedWidget,
+  workspace: string
+): Promise<{ ok: true; lastBuiltAt: Date } | { ok: false; error: string }> {
+  const result = await runWidgetBuild(widget.buildCmd, workspace);
+  if (!result.ok) {
+    return { ok: false, error: result.error };
+  }
+  const exists = await embedSourceExists(workspace, widget.embedSource);
+  if (!exists) {
+    return {
+      ok: false,
+      error: `Build command succeeded but embed_source "${widget.embedSource}" was not produced in the workspace.`
+    };
+  }
+  return { ok: true, lastBuiltAt: new Date() };
+}
+
 async function createAgentWidgets(input: {
   widgets: unknown;
   documentId: string;
@@ -80,44 +148,19 @@ async function createAgentWidgets(input: {
   const created: Array<Record<string, unknown>> = [];
   const buildErrors: string[] = [];
   for (const widget of input.widgets) {
-    if (!widget || typeof widget !== "object") {
-      continue;
-    }
-
-    const typed = widget as {
-      label?: unknown;
-      build_cmd?: unknown;
-      buildCmd?: unknown;
-      embed_source?: unknown;
-      embedSource?: unknown;
-    };
-    const label = typeof typed.label === "string" && typed.label.trim() ? typed.label.trim() : "Interactive widget";
-    const buildCmd =
-      typeof typed.build_cmd === "string"
-        ? typed.build_cmd.trim()
-        : typeof typed.buildCmd === "string"
-          ? typed.buildCmd.trim()
-          : "";
-    const embedSource =
-      typeof typed.embed_source === "string"
-        ? typed.embed_source.trim()
-        : typeof typed.embedSource === "string"
-          ? typed.embedSource.trim()
-          : "";
-
-    if (!buildCmd || !embedSource) {
-      continue;
-    }
+    const normalized = normalizeSubmittedWidget(widget);
+    if (!normalized) continue;
+    const { label, buildCmd, embedSource } = normalized;
 
     let lastError: string | null = null;
     let lastBuiltAt: Date | null = null;
     if (input.workspace) {
-      const result = await runWidgetBuild(buildCmd, input.workspace);
+      const result = await buildAndVerifyWidget(normalized, input.workspace);
       if (!result.ok) {
         lastError = result.error.slice(0, 6000);
         buildErrors.push(`Widget "${label}" failed to build: ${lastError}`);
       } else {
-        lastBuiltAt = new Date();
+        lastBuiltAt = result.lastBuiltAt;
       }
     }
 
@@ -226,7 +269,7 @@ async function runAiEditInBackground(input: {
             })
           ]).catch(() => null);
         },
-        validateSubmission: (submission) => {
+        validateSubmission: async (submission) => {
           const submittedImages = Array.isArray(submission.images) ? submission.images : [];
           const submittedWidgets = Array.isArray(submission.widgets) ? submission.widgets : [];
           const hasImage =
@@ -250,6 +293,27 @@ async function runAiEditInBackground(input: {
           }
           if (assetIntent.requiresWidget && !hasWidget) {
             return "The edit request asked for an interactive widget. Build the HTML widget and include it in the widgets array (with label, build_cmd, embed_source). Then resubmit.";
+          }
+          if (hasWidget) {
+            const workspace = linkedRepo?.workspace ?? null;
+            if (!workspace) {
+              return "You submitted a widget but no isolated workspace is available. Remove the widget from the submission.";
+            }
+            for (let i = 0; i < submittedWidgets.length; i += 1) {
+              const normalized = normalizeSubmittedWidget(submittedWidgets[i]);
+              if (!normalized) {
+                return `Widget #${i + 1} is missing label, build_cmd, or embed_source. Provide all three and resubmit.`;
+              }
+              const result = await buildAndVerifyWidget(normalized, workspace);
+              if (!result.ok) {
+                const truncated = result.error.length > 4000 ? `${result.error.slice(0, 4000)}…` : result.error;
+                return (
+                  `Widget "${normalized.label}" (build_cmd: ${normalized.buildCmd}, embed_source: ${normalized.embedSource}) is not ready:\n` +
+                  `${truncated}\n\n` +
+                  `Fix the cause — create or repair the build script under widgets/, run it from the repo root (cwd is the workspace), confirm it writes ${normalized.embedSource}, then resubmit.`
+                );
+              }
+            }
           }
           return null;
         }

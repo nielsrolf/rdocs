@@ -76,6 +76,10 @@ export async function POST(request: Request, { params }: RouteContext) {
   } catch (error) {
     console.error("collaboration step merge failed", {
       documentId: id,
+      clientId: parsed.data.clientId,
+      version: parsed.data.version,
+      stepCount: parsed.data.steps.length,
+      firstStepPreview: JSON.stringify(parsed.data.steps[0] ?? null).slice(0, 600),
       error: error instanceof Error ? error.message : error
     });
     return NextResponse.json({ error: "Unable to merge collaboration steps." }, { status: 409 });

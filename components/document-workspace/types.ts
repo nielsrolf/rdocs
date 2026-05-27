@@ -28,6 +28,7 @@ export type ThreadView = {
     id: string;
     name: string;
   };
+  lastReadAt: string | Date | null;
   comments: CommentView[];
 };
 

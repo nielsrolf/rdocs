@@ -45,6 +45,41 @@ export const RepoImageSchemaNode = Node.create({
   }
 });
 
+export const TabBreakSchemaNode = Node.create({
+  name: "tabBreak",
+  group: "block",
+  atom: true,
+  selectable: true,
+  draggable: false,
+  defining: true,
+  addAttributes() {
+    return {
+      tabId: {
+        default: "",
+        parseHTML: (element) => element.getAttribute("data-tab-id") || "",
+        renderHTML: (attributes) => {
+          const id = typeof attributes.tabId === "string" ? attributes.tabId : "";
+          return id ? { "data-tab-id": id } : {};
+        }
+      },
+      title: {
+        default: "Untitled tab",
+        parseHTML: (element) => element.getAttribute("data-tab-title") || "Untitled tab",
+        renderHTML: (attributes) => {
+          const title = typeof attributes.title === "string" ? attributes.title : "Untitled tab";
+          return { "data-tab-title": title };
+        }
+      }
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div[data-tab-break]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", mergeAttributes(HTMLAttributes, { "data-tab-break": "" })];
+  }
+});
+
 export const EmbeddedWidgetSchemaNode = Node.create({
   name: "embeddedWidget",
   group: "block",

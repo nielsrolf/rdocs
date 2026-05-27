@@ -264,6 +264,55 @@ export const RepoImage = Node.create({
   }
 });
 
+function TabBreakView({ node }: NodeViewProps) {
+  const title = (node.attrs.title as string) || "Untitled tab";
+  return (
+    <NodeViewWrapper className="tab-break-node" contentEditable={false} data-tab-break>
+      <div className="tab-break-marker">
+        <span className="tab-break-label">Tab: {title}</span>
+      </div>
+    </NodeViewWrapper>
+  );
+}
+
+export const TabBreak = Node.create({
+  name: "tabBreak",
+  group: "block",
+  atom: true,
+  selectable: true,
+  draggable: false,
+  defining: true,
+  addAttributes() {
+    return {
+      tabId: {
+        default: "",
+        parseHTML: (element) => element.getAttribute("data-tab-id") || "",
+        renderHTML: (attributes) => {
+          const id = typeof attributes.tabId === "string" ? attributes.tabId : "";
+          return id ? { "data-tab-id": id } : {};
+        }
+      },
+      title: {
+        default: "Untitled tab",
+        parseHTML: (element) => element.getAttribute("data-tab-title") || "Untitled tab",
+        renderHTML: (attributes) => {
+          const title = typeof attributes.title === "string" ? attributes.title : "Untitled tab";
+          return { "data-tab-title": title };
+        }
+      }
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div[data-tab-break]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", mergeAttributes(HTMLAttributes, { "data-tab-break": "" })];
+  },
+  addNodeView() {
+    return ReactNodeViewRenderer(TabBreakView);
+  }
+});
+
 export const EmbeddedWidget = Node.create({
   name: "embeddedWidget",
   group: "block",

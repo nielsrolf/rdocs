@@ -30,7 +30,13 @@ export async function POST(request: Request, { params }: RouteContext) {
   const body = await request.json().catch(() => null);
   const parsed = createThreadSchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json({ error: "Invalid comment payload." }, { status: 400 });
+    const issues = parsed.error.issues.map((issue) => ({
+      path: issue.path.join("."),
+      code: issue.code,
+      message: issue.message
+    }));
+    console.warn("[comments] invalid payload", { documentId: id, issues });
+    return NextResponse.json({ error: "Invalid comment payload.", issues }, { status: 400 });
   }
 
   const access = await resolveDocumentAccess(id, user.id, parsed.data.shareToken ?? null);
@@ -89,6 +95,13 @@ export async function POST(request: Request, { params }: RouteContext) {
     }
   });
 
+  const now = new Date();
+  await db.commentThreadRead.upsert({
+    where: { threadId_userId: { threadId: thread.id, userId: user.id } },
+    create: { threadId: thread.id, userId: user.id, lastReadAt: now },
+    update: { lastReadAt: now }
+  });
+
   const updated = await db.document.findUnique({
     where: { id },
     select: {
@@ -97,7 +110,7 @@ export async function POST(request: Request, { params }: RouteContext) {
   });
 
   return NextResponse.json({
-    thread: serializeThread(thread),
+    thread: serializeThread(thread, { lastReadAt: now }),
     updatedAt: updated?.updatedAt ?? null
   });
 }

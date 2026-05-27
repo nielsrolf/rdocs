@@ -1858,6 +1858,162 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   letter-spacing: 0.06em;
 }
 
+.doc-outline-list-tabbed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.doc-outline-tab-group {
+  list-style: none;
+}
+
+.doc-outline-tab-headings {
+  list-style: none;
+  margin: 0.1rem 0 0;
+  padding: 0;
+}
+
+.doc-tab-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 0.2rem;
+  border-radius: 4px;
+}
+
+.doc-tab-row-active {
+  background: rgba(26, 115, 232, 0.1);
+}
+
+.doc-tab-button {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 0.3rem 0.4rem;
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 4px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.doc-tab-row-active .doc-tab-button {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.doc-tab-button:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.doc-tab-title {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.doc-tab-rename-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border, rgba(60, 64, 67, 0.3));
+  border-radius: 4px;
+  font: inherit;
+}
+
+.doc-tab-actions {
+  display: none;
+  gap: 2px;
+}
+
+.doc-tab-row:hover .doc-tab-actions,
+.doc-tab-row-active .doc-tab-actions {
+  display: inline-flex;
+}
+
+.doc-tab-action {
+  background: transparent;
+  border: none;
+  padding: 0.15rem 0.3rem;
+  cursor: pointer;
+  border-radius: 3px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  line-height: 1;
+}
+
+.doc-tab-action:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--text);
+}
+
+.doc-tab-action:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.doc-tab-action-danger:hover:not(:disabled) {
+  background: rgba(217, 48, 37, 0.12);
+  color: #d93025;
+}
+
+.doc-outline-add-tab {
+  display: block;
+  width: calc(100% - 0.4rem);
+  margin: 0 0.2rem 0.6rem;
+  padding: 0.35rem 0.4rem;
+  text-align: left;
+  background: transparent;
+  border: 1px dashed rgba(60, 64, 67, 0.25);
+  border-radius: 4px;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.doc-outline-add-tab:hover {
+  border-color: rgba(26, 115, 232, 0.5);
+  color: #1a73e8;
+}
+
+.tab-break-node {
+  display: block;
+  margin: 1.25rem 0;
+  user-select: none;
+}
+
+.tab-break-marker {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.6rem;
+  background: rgba(26, 115, 232, 0.08);
+  border-left: 3px solid #1a73e8;
+  border-radius: 3px;
+  font-size: 0.78rem;
+  color: #1a73e8;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.tab-break-label {
+  font-weight: 600;
+}
+
+.tab-hidden-block {
+  display: none !important;
+}
+
 .doc-outline-toggle {
   display: inline-flex;
   align-items: center;
@@ -1992,6 +2148,33 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
 
 .ProseMirror li + li {
   margin-top: 0.12rem;
+}
+
+.ProseMirror ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0.2rem;
+}
+
+.ProseMirror ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.ProseMirror ul[data-type="taskList"] li > label {
+  flex: 0 0 auto;
+  margin-top: 0.25rem;
+  user-select: none;
+}
+
+.ProseMirror ul[data-type="taskList"] li > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ProseMirror ul[data-type="taskList"] li[data-checked="true"] > div {
+  color: #707070;
+  text-decoration: line-through;
 }
 
 .ProseMirror a {
@@ -2486,6 +2669,28 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   border-color: rgba(26, 115, 232, 0.36);
   box-shadow: 0 10px 24px rgba(26, 115, 232, 0.12);
   z-index: 5;
+}
+
+.comment-thread-card-unread {
+  border-color: rgba(26, 115, 232, 0.55);
+  background: linear-gradient(180deg, rgba(26, 115, 232, 0.06), white 70%);
+  box-shadow: 0 4px 14px rgba(26, 115, 232, 0.14);
+}
+
+.comment-thread-card-unread::before {
+  content: "";
+  position: absolute;
+  top: 0.85rem;
+  right: 0.85rem;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #1a73e8;
+  box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.18);
+}
+
+.comment-thread-card-unread .comment-author-chip strong {
+  font-weight: 700;
 }
 
 .comment-thread-anchor {

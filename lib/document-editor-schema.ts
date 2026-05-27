@@ -5,6 +5,8 @@ import Table from "@tiptap/extension-table";
 import TableCell from "@tiptap/extension-table-cell";
 import TableHeader from "@tiptap/extension-table-header";
 import TableRow from "@tiptap/extension-table-row";
+import TaskItem from "@tiptap/extension-task-item";
+import TaskList from "@tiptap/extension-task-list";
 import Underline from "@tiptap/extension-underline";
 import StarterKit from "@tiptap/starter-kit";
 
@@ -13,6 +15,7 @@ import { CommentAnchor } from "@/components/document-workspace/comment-anchors";
 import {
   EmbeddedWidgetSchemaNode,
   RepoImageSchemaNode,
+  TabBreakSchemaNode,
   commentThreadIdsAttributeSpec
 } from "@/lib/document-schema-nodes";
 
@@ -29,6 +32,8 @@ export function createDocumentEditorSchema() {
   return getSchema([
     StarterKit,
     Underline,
+    TaskList,
+    TaskItem.configure({ nested: true }),
     Image.configure({
       allowBase64: true,
       inline: false
@@ -47,6 +52,7 @@ export function createDocumentEditorSchema() {
     TableHeader,
     TableCell,
     RepoImageSchemaNode,
-    EmbeddedWidgetSchemaNode
+    EmbeddedWidgetSchemaNode,
+    TabBreakSchemaNode
   ]);
 }

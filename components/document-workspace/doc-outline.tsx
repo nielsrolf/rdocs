@@ -1,12 +1,19 @@
 import type { Editor } from "@tiptap/react";
 import { useEffect, useRef, useState } from "react";
 
+import { type TabSummary } from "./tabs";
+
 type OutlineEntry = {
-  index: number;
+  // Absolute position of the heading in the doc.
+  pos: number;
   level: number;
   text: string;
   slug: string;
+  // The id of the tab that owns this heading, or null when the doc has no tabs.
+  tabId: string | null;
 };
+
+export type TabReorderDirection = "up" | "down";
 
 function slugify(text: string): string {
   return text
@@ -26,13 +33,29 @@ export function DocOutline({
   collapsed,
   width,
   onToggleCollapsed,
-  onWidthChange
+  onWidthChange,
+  tabs = [],
+  activeTabId,
+  canEditTabs = false,
+  onSelectTab,
+  onRenameTab,
+  onCreateTab,
+  onDeleteTab,
+  onReorderTab
 }: {
   editor: Editor | null;
   collapsed: boolean;
   width: number;
   onToggleCollapsed: () => void;
   onWidthChange: (next: number) => void;
+  tabs?: TabSummary[];
+  activeTabId?: string | null;
+  canEditTabs?: boolean;
+  onSelectTab?: (tabId: string) => void;
+  onRenameTab?: (tabId: string, title: string) => void;
+  onCreateTab?: () => void;
+  onDeleteTab?: (tabId: string) => void;
+  onReorderTab?: (tabId: string, direction: TabReorderDirection) => void;
 }) {
   const dragStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -51,23 +74,35 @@ export function DocOutline({
 
       const next: OutlineEntry[] = [];
       const slugCounts = new Map<string, number>();
-      let index = 0;
-      editor.state.doc.descendants((node) => {
+      // Sorted by ascending contentFrom; find the owning tab by linear scan since
+      // outlines are tiny.
+      const sortedTabs = [...tabs].sort((a, b) => a.contentFrom - b.contentFrom);
+      function findOwningTab(pos: number): string | null {
+        if (sortedTabs.length === 0) return null;
+        for (const tab of sortedTabs) {
+          if (pos >= tab.contentFrom && pos <= tab.contentTo) return tab.id;
+        }
+        return sortedTabs[sortedTabs.length - 1].id;
+      }
+      let counter = 0;
+      editor.state.doc.descendants((node, pos) => {
         if (node.type.name !== "heading") {
           return;
         }
         const level = typeof node.attrs.level === "number" ? node.attrs.level : 1;
         const text = node.textContent.trim();
         const display = text || "Untitled section";
-        const baseSlug = slugify(text) || `section-${index + 1}`;
+        const baseSlug = slugify(text) || `section-${counter + 1}`;
+        counter += 1;
         const seen = slugCounts.get(baseSlug) ?? 0;
         slugCounts.set(baseSlug, seen + 1);
         const slug = seen === 0 ? baseSlug : `${baseSlug}-${seen + 1}`;
         next.push({
-          index: index++,
+          pos,
           level,
           text: display,
-          slug
+          slug,
+          tabId: findOwningTab(pos)
         });
       });
       setEntries(next);
@@ -81,7 +116,7 @@ export function DocOutline({
       editor.off("update", refresh);
       editor.off("selectionUpdate", refresh);
     };
-  }, [editor]);
+  }, [editor, tabs]);
 
   useEffect(() => {
     if (!dragging) {
@@ -138,28 +173,54 @@ export function DocOutline({
       return;
     }
 
-    let currentPos: number | null = null;
-    let seen = 0;
-    editor.state.doc.descendants((node, pos) => {
-      if (currentPos != null) return false;
-      if (node.type.name !== "heading") return;
-      if (seen === entry.index) {
-        currentPos = pos;
-        return false;
-      }
-      seen += 1;
-    });
-
-    if (currentPos == null) {
-      return;
+    if (entry.tabId && entry.tabId !== activeTabId) {
+      onSelectTab?.(entry.tabId);
     }
 
-    const inside = Math.min(currentPos + 1, editor.state.doc.content.size);
-    editor.commands.focus();
-    editor.commands.setTextSelection(inside);
-    const coords = editor.view.coordsAtPos(inside);
-    const targetY = window.scrollY + coords.top - 96;
-    window.scrollTo({ top: targetY, behavior: "smooth" });
+    const headingPos = entry.pos;
+    const docSize = editor.state.doc.content.size;
+    if (headingPos < 0 || headingPos >= docSize) return;
+    const inside = Math.min(headingPos + 1, docSize);
+
+    function focusAndScroll() {
+      if (!editor) return;
+      editor.commands.focus();
+      editor.commands.setTextSelection(inside);
+      try {
+        const coords = editor.view.coordsAtPos(inside);
+        window.scrollTo({ top: window.scrollY + coords.top - 96, behavior: "smooth" });
+      } catch {
+        // Heading is in a hidden tab — give the visibility plugin a frame and retry.
+      }
+    }
+
+    if (entry.tabId && entry.tabId !== activeTabId) {
+      window.requestAnimationFrame(() => window.requestAnimationFrame(focusAndScroll));
+    } else {
+      focusAndScroll();
+    }
+  }
+
+  function scrollToTab(tab: TabSummary) {
+    if (!editor) return;
+    if (tab.id !== activeTabId) onSelectTab?.(tab.id);
+    function focusContentTop() {
+      if (!editor) return;
+      const inside = Math.min(tab.contentFrom + 1, editor.state.doc.content.size);
+      editor.commands.focus();
+      editor.commands.setTextSelection(inside);
+      try {
+        const coords = editor.view.coordsAtPos(inside);
+        window.scrollTo({ top: window.scrollY + coords.top - 96, behavior: "smooth" });
+      } catch {
+        // ignore
+      }
+    }
+    if (tab.id !== activeTabId) {
+      window.requestAnimationFrame(() => window.requestAnimationFrame(focusContentTop));
+    } else {
+      focusContentTop();
+    }
   }
 
   const [copiedSlug, setCopiedSlug] = useState<string | null>(null);
@@ -224,6 +285,40 @@ export function DocOutline({
     );
   }
 
+  const hasTabs = tabs.length > 0;
+
+  function renderHeadingItem(entry: OutlineEntry, indentLevel: number) {
+    return (
+      <li
+        key={`${entry.pos}-${entry.level}-${entry.text}`}
+        style={{ paddingLeft: `${indentLevel * 0.85}rem` }}
+      >
+        <div className="doc-outline-row">
+          <button
+            className={`doc-outline-item doc-outline-item-level-${Math.min(entry.level, 6)}`}
+            onClick={() => scrollToHeading(entry)}
+            title={entry.text}
+            type="button"
+          >
+            {entry.text}
+          </button>
+          <button
+            aria-label={`Copy link to ${entry.text}`}
+            className="doc-outline-copy"
+            onClick={(event) => {
+              event.stopPropagation();
+              void copyHeadingLink(entry);
+            }}
+            title={copiedSlug === entry.slug ? "Copied!" : "Copy link to heading"}
+            type="button"
+          >
+            {copiedSlug === entry.slug ? <CheckIcon /> : <LinkIcon />}
+          </button>
+        </div>
+      </li>
+    );
+  }
+
   return (
     <aside className="doc-outline" aria-label="Document outline">
       <div className="doc-outline-inner">
@@ -239,38 +334,49 @@ export function DocOutline({
             <ChevronLeftIcon />
           </button>
         </header>
-        {entries.length === 0 ? (
+        {hasTabs ? (
+          <ul className="doc-outline-list doc-outline-list-tabbed">
+            {tabs.map((tab, index) => {
+              const tabHeadings = entries.filter((entry) => entry.tabId === tab.id);
+              return (
+                <li key={tab.id} className="doc-outline-tab-group">
+                  <TabRow
+                    tab={tab}
+                    index={index}
+                    totalTabs={tabs.length}
+                    isActive={tab.id === activeTabId}
+                    canEdit={canEditTabs}
+                    onSelect={() => scrollToTab(tab)}
+                    onRename={onRenameTab}
+                    onDelete={onDeleteTab}
+                    onReorder={onReorderTab}
+                  />
+                  {tabHeadings.length > 0 ? (
+                    <ul className="doc-outline-tab-headings">
+                      {tabHeadings.map((entry) => renderHeadingItem(entry, Math.max(0, entry.level - 1)))}
+                    </ul>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        ) : entries.length === 0 ? (
           <p className="doc-outline-empty">Add headings to navigate this document.</p>
         ) : (
           <ul className="doc-outline-list">
-            {entries.map((entry) => (
-              <li key={`${entry.index}-${entry.level}-${entry.text}`} style={{ paddingLeft: `${Math.max(0, entry.level - 1) * 0.85}rem` }}>
-                <div className="doc-outline-row">
-                  <button
-                    className={`doc-outline-item doc-outline-item-level-${Math.min(entry.level, 6)}`}
-                    onClick={() => scrollToHeading(entry)}
-                    title={entry.text}
-                    type="button"
-                  >
-                    {entry.text}
-                  </button>
-                  <button
-                    aria-label={`Copy link to ${entry.text}`}
-                    className="doc-outline-copy"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void copyHeadingLink(entry);
-                    }}
-                    title={copiedSlug === entry.slug ? "Copied!" : "Copy link to heading"}
-                    type="button"
-                  >
-                    {copiedSlug === entry.slug ? <CheckIcon /> : <LinkIcon />}
-                  </button>
-                </div>
-              </li>
-            ))}
+            {entries.map((entry) => renderHeadingItem(entry, Math.max(0, entry.level - 1)))}
           </ul>
         )}
+        {canEditTabs ? (
+          <button
+            className="doc-outline-add-tab"
+            onClick={() => onCreateTab?.()}
+            title="Add a new tab"
+            type="button"
+          >
+            + Add tab
+          </button>
+        ) : null}
       </div>
       <div
         aria-label="Resize outline sidebar"
@@ -285,6 +391,118 @@ export function DocOutline({
         title="Drag to resize outline"
       />
     </aside>
+  );
+}
+
+function TabRow({
+  tab,
+  index,
+  totalTabs,
+  isActive,
+  canEdit,
+  onSelect,
+  onRename,
+  onDelete,
+  onReorder
+}: {
+  tab: TabSummary;
+  index: number;
+  totalTabs: number;
+  isActive: boolean;
+  canEdit: boolean;
+  onSelect: () => void;
+  onRename?: (tabId: string, title: string) => void;
+  onDelete?: (tabId: string) => void;
+  onReorder?: (tabId: string, direction: TabReorderDirection) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(tab.title);
+
+  function startRename() {
+    setDraft(tab.title);
+    setEditing(true);
+  }
+
+  function commitRename() {
+    const next = draft.trim() || "Untitled tab";
+    onRename?.(tab.id, next);
+    setEditing(false);
+  }
+
+  return (
+    <div className={`doc-tab-row ${isActive ? "doc-tab-row-active" : ""}`}>
+      {editing ? (
+        <input
+          autoFocus
+          className="doc-tab-rename-input"
+          onBlur={commitRename}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commitRename();
+            } else if (event.key === "Escape") {
+              setEditing(false);
+            }
+          }}
+          value={draft}
+        />
+      ) : (
+        <button
+          className="doc-tab-button"
+          onClick={onSelect}
+          onDoubleClick={() => {
+            if (canEdit) startRename();
+          }}
+          title={tab.title}
+          type="button"
+        >
+          <span className="doc-tab-title">{tab.title}</span>
+        </button>
+      )}
+      {canEdit && !editing ? (
+        <span className="doc-tab-actions">
+          <button
+            aria-label="Move tab up"
+            className="doc-tab-action"
+            disabled={index === 0}
+            onClick={() => onReorder?.(tab.id, "up")}
+            title="Move up"
+            type="button"
+          >
+            ↑
+          </button>
+          <button
+            aria-label="Move tab down"
+            className="doc-tab-action"
+            disabled={index === totalTabs - 1}
+            onClick={() => onReorder?.(tab.id, "down")}
+            title="Move down"
+            type="button"
+          >
+            ↓
+          </button>
+          <button
+            aria-label="Rename tab"
+            className="doc-tab-action"
+            onClick={startRename}
+            title="Rename"
+            type="button"
+          >
+            ✎
+          </button>
+          <button
+            aria-label="Delete tab"
+            className="doc-tab-action doc-tab-action-danger"
+            onClick={() => onDelete?.(tab.id)}
+            title="Delete tab (merges content into previous tab)"
+            type="button"
+          >
+            ✕
+          </button>
+        </span>
+      ) : null}
+    </div>
   );
 }
 

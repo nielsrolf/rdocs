@@ -76,32 +76,35 @@ export function serializeComment(comment: {
   };
 }
 
-export function serializeThread(thread: {
-  id: string;
-  anchorText: string;
-  anchorContext: string | null;
-  status: string;
-  tags?: string | null;
-  createdAt: Date;
-  createdBy: {
+export function serializeThread(
+  thread: {
     id: string;
-    name: string;
-  };
-  comments: Array<{
-    id: string;
-    body: string;
-    aiModel: string | null;
-    sourceLinks?: string | null;
-    commitSha?: string | null;
-    commitUrl?: string | null;
-    aiRunId?: string | null;
+    anchorText: string;
+    anchorContext: string | null;
+    status: string;
+    tags?: string | null;
     createdAt: Date;
-    author: {
+    createdBy: {
       id: string;
       name: string;
-    } | null;
-  }>;
-}) {
+    };
+    comments: Array<{
+      id: string;
+      body: string;
+      aiModel: string | null;
+      sourceLinks?: string | null;
+      commitSha?: string | null;
+      commitUrl?: string | null;
+      aiRunId?: string | null;
+      createdAt: Date;
+      author: {
+        id: string;
+        name: string;
+      } | null;
+    }>;
+  },
+  options?: { lastReadAt?: Date | null }
+) {
   return {
     id: thread.id,
     anchorText: thread.anchorText,
@@ -110,6 +113,7 @@ export function serializeThread(thread: {
     tags: parseThreadTags(thread.tags, thread.status),
     createdAt: thread.createdAt,
     createdBy: thread.createdBy,
+    lastReadAt: options?.lastReadAt ?? null,
     comments: thread.comments.map(serializeComment)
   };
 }
@@ -137,7 +141,7 @@ export function serializeVersion(version: {
   };
 }
 
-export async function listDocumentThreads(documentId: string) {
+export async function listDocumentThreads(documentId: string, userId?: string | null) {
   const threads = await db.commentThread.findMany({
     where: { documentId },
     orderBy: { updatedAt: "desc" },
@@ -176,7 +180,22 @@ export async function listDocumentThreads(documentId: string) {
     }
   });
 
-  return threads.map(serializeThread);
+  if (!userId) {
+    return threads.map((thread) => serializeThread(thread));
+  }
+
+  const reads = await db.commentThreadRead.findMany({
+    where: {
+      userId,
+      threadId: { in: threads.map((thread) => thread.id) }
+    },
+    select: { threadId: true, lastReadAt: true }
+  });
+  const lastReadByThread = new Map(reads.map((row) => [row.threadId, row.lastReadAt]));
+
+  return threads.map((thread) =>
+    serializeThread(thread, { lastReadAt: lastReadByThread.get(thread.id) ?? null })
+  );
 }
 
 export async function listDocumentVersions(documentId: string) {

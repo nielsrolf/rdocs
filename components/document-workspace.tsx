@@ -7,6 +7,7 @@ import Table from "@tiptap/extension-table";
 import TableCell from "@tiptap/extension-table-cell";
 import TableHeader from "@tiptap/extension-table-header";
 import TableRow from "@tiptap/extension-table-row";
+import TaskList from "@tiptap/extension-task-list";
 import Underline from "@tiptap/extension-underline";
 import { getVersion, receiveTransaction, sendableSteps } from "@tiptap/pm/collab";
 import { NodeSelection } from "@tiptap/pm/state";
@@ -32,6 +33,7 @@ import {
 } from "./document-workspace/ai-edit-selections";
 import { CommentRail } from "./document-workspace/comment-rail";
 import { DocOutline, OUTLINE_MAX_WIDTH, OUTLINE_MIN_WIDTH } from "./document-workspace/doc-outline";
+import { MoveBlock, SlashTab, StrikeShortcut, TaskItem } from "./document-workspace/editor-extras";
 import { FileMenu } from "./document-workspace/file-menu";
 import { SelectionPopover } from "./document-workspace/selection-popover";
 import { LinkPopover } from "./document-workspace/link-popover";
@@ -45,7 +47,16 @@ import {
 } from "./document-workspace/collaboration";
 import { buildConversations } from "./document-workspace/conversations";
 import { createLatexRenderExtension } from "./document-workspace/latex";
-import { EmbeddedWidget, RepoImage } from "./document-workspace/nodes";
+import { EmbeddedWidget, RepoImage, TabBreak } from "./document-workspace/nodes";
+import {
+  createTabId,
+  createTabsVisibilityExtension,
+  ensureTabsHaveContent,
+  listTabs,
+  normalizePreludeTab,
+  setActiveTab,
+  type TabSummary
+} from "./document-workspace/tabs";
 import { commentThreadIdsAttributeSpec } from "@/lib/document-schema-nodes";
 
 const Image = ImageExtension.extend({
@@ -85,6 +96,7 @@ import {
   getSelectionContextFromEditor,
   getSelectionMarkdownFromEditor,
   getThreadTags,
+  isThreadUnread,
   logClientEvent,
   parseAiRunSelectionId
 } from "./document-workspace/utils";
@@ -216,6 +228,8 @@ export function DocumentWorkspace({
   const [newTagDraft, setNewTagDraft] = useState("");
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [outlineWidth, setOutlineWidth] = useState(220);
+  const [activeTabId, setActiveTabIdState] = useState<string | null>(null);
+  const [tabs, setTabs] = useState<TabSummary[]>([]);
   const [tableControlsActive, setTableControlsActive] = useState(false);
   const saveTimerRef = useRef<number | null>(null);
   const collaborationFlushTimerRef = useRef<number | null>(null);
@@ -272,9 +286,29 @@ export function DocumentWorkspace({
     () => createRemotePresenceExtension(remotePresenceRef, receivedMappingsRef),
     []
   );
+  const tabsVisibilityExtension = useMemo(
+    () => createTabsVisibilityExtension(null),
+    []
+  );
+  const handleCreateTabRef = useRef<(() => void) | null>(null);
+  const slashTabExtension = useMemo(
+    () =>
+      SlashTab.configure({
+        onInsertTab: () => {
+          handleCreateTabRef.current?.();
+          return true;
+        }
+      }),
+    []
+  );
 
   useEffect(() => {
     titleRef.current = title;
+  }, [title]);
+
+  useEffect(() => {
+    const trimmed = title.trim();
+    document.title = trimmed ? `${trimmed} — r-docs` : "r-docs";
   }, [title]);
 
   useEffect(() => {
@@ -516,10 +550,28 @@ export function DocumentWorkspace({
           shareToken
         })
       });
-      const data = (await response.json().catch(() => null)) as CollaborationStepResponse | null;
+      const data = (await response.json().catch(() => null)) as
+        | (CollaborationStepResponse & { error?: string })
+        | null;
 
-      if (!data || !Array.isArray(data.steps) || !Array.isArray(data.clientIds)) {
+      if (!response.ok || !data || !Array.isArray(data.steps) || !Array.isArray(data.clientIds)) {
+        logClientEvent({
+          scope: "collaboration-push",
+          level: "error",
+          message: "collaboration POST rejected",
+          data: {
+            documentId,
+            status: response.status,
+            sentVersion: sendable.version,
+            sentStepCount: sendable.steps.length,
+            serverError: typeof data?.error === "string" ? data.error : null
+          }
+        });
+        // Don't loop: leave the sendable steps in place and let the next user
+        // action or a manual pull retry. Looping causes us to hammer the server
+        // and stall awaiting callers (e.g. the AI-edit save path).
         setSaveState("error");
+        void pullCollaborationSteps();
         return;
       }
 
@@ -535,7 +587,7 @@ export function DocumentWorkspace({
       collaborationPushBusyRef.current = false;
     }
 
-    if (collaborationPushQueuedRef.current || sendableSteps(editor.state)) {
+    if (collaborationPushQueuedRef.current && sendableSteps(editor.state)) {
       collaborationPushQueuedRef.current = false;
       await flushCollaborationSteps();
     }
@@ -793,6 +845,11 @@ export function DocumentWorkspace({
     extensions: [
       StarterKit,
       Underline,
+      TaskList,
+      TaskItem.configure({ nested: true }),
+      StrikeShortcut,
+      MoveBlock,
+      slashTabExtension,
       Image.configure({
         allowBase64: true,
         inline: false
@@ -820,7 +877,9 @@ export function DocumentWorkspace({
       TableHeader,
       TableCell,
       RepoImage,
-      EmbeddedWidget
+      EmbeddedWidget,
+      TabBreak,
+      tabsVisibilityExtension
     ],
     immediatelyRender: false,
     editable: canWriteDocument,
@@ -945,6 +1004,147 @@ export function DocumentWorkspace({
       });
     }
   });
+
+  useEffect(() => {
+    if (!editor) {
+      setTabs([]);
+      return;
+    }
+
+    function refreshTabs() {
+      if (!editor) return;
+      if (canWriteDocument) {
+        const result = normalizePreludeTab(editor);
+        if (result.createdTabId) {
+          // Document mutated; this update will fire another onUpdate that re-runs refreshTabs.
+          return;
+        }
+        if (ensureTabsHaveContent(editor)) {
+          return;
+        }
+      }
+      const next = listTabs(editor.state.doc);
+      setTabs(next);
+      setActiveTabIdState((current) => {
+        if (next.length === 0) return null;
+        if (current && next.some((tab) => tab.id === current)) return current;
+        return next[0].id;
+      });
+    }
+
+    refreshTabs();
+    editor.on("update", refreshTabs);
+    return () => {
+      editor.off("update", refreshTabs);
+    };
+  }, [editor, canWriteDocument]);
+
+  useEffect(() => {
+    if (!editor) return;
+    setActiveTab(editor, activeTabId);
+  }, [editor, activeTabId, tabs.length]);
+
+  function handleSelectTab(tabId: string) {
+    setActiveTabIdState(tabId);
+  }
+
+  useEffect(() => {
+    handleCreateTabRef.current = () => {
+      handleCreateTab();
+    };
+  });
+
+  function findTabBreakPos(tabId: string): number | null {
+    if (!editor) return null;
+    let foundPos: number | null = null;
+    editor.state.doc.forEach((child, offset) => {
+      if (foundPos !== null) return;
+      if (child.type.name === "tabBreak" && child.attrs?.tabId === tabId) {
+        foundPos = offset;
+      }
+    });
+    return foundPos;
+  }
+
+  function handleCreateTab() {
+    if (!editor || !canWriteDocument) return;
+    const tabBreakType = editor.schema.nodes.tabBreak;
+    if (!tabBreakType) return;
+
+    const newId = createTabId();
+    const newTitle = `Tab ${tabs.length + 1}`;
+    const tr = editor.state.tr;
+
+    // If this is the first explicit tab and there is existing content, also insert
+    // a leading break so the existing content has a name. (normalizePreludeTab
+    // will also do this defensively after the update.)
+    if (tabs.length === 0 && editor.state.doc.content.size > 2) {
+      tr.insert(0, tabBreakType.create({ tabId: createTabId(), title: "Tab 1" }));
+    }
+    const paragraphType = editor.schema.nodes.paragraph;
+    const newTabContent = paragraphType
+      ? [tabBreakType.create({ tabId: newId, title: newTitle }), paragraphType.create()]
+      : [tabBreakType.create({ tabId: newId, title: newTitle })];
+    tr.insert(tr.doc.content.size, newTabContent);
+    editor.view.dispatch(tr);
+    setActiveTabIdState(newId);
+  }
+
+  function handleRenameTab(tabId: string, title: string) {
+    if (!editor || !canWriteDocument) return;
+    const pos = findTabBreakPos(tabId);
+    if (pos === null) return;
+    const tr = editor.state.tr.setNodeAttribute(pos, "title", title);
+    editor.view.dispatch(tr);
+  }
+
+  function handleDeleteTab(tabId: string) {
+    if (!editor || !canWriteDocument) return;
+    const pos = findTabBreakPos(tabId);
+    if (pos === null) return;
+    const node = editor.state.doc.nodeAt(pos);
+    if (!node) return;
+    const wasActive = activeTabId === tabId;
+    // Find previous tab to switch to.
+    const previousTab = (() => {
+      const idx = tabs.findIndex((tab) => tab.id === tabId);
+      if (idx > 0) return tabs[idx - 1];
+      if (idx === 0 && tabs.length > 1) return tabs[1];
+      return null;
+    })();
+    const tr = editor.state.tr.delete(pos, pos + node.nodeSize);
+    editor.view.dispatch(tr);
+    if (wasActive) setActiveTabIdState(previousTab?.id ?? null);
+  }
+
+  function handleReorderTab(tabId: string, direction: "up" | "down") {
+    if (!editor || !canWriteDocument) return;
+    const idx = tabs.findIndex((tab) => tab.id === tabId);
+    if (idx === -1) return;
+    const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+    if (swapIdx < 0 || swapIdx >= tabs.length) return;
+
+    const a = tabs[idx];
+    const b = tabs[swapIdx];
+    // a.contentFrom..a.contentTo and b.contentFrom..b.contentTo are adjacent (separated
+    // by the next tabBreak). We move whichever tab comes first to where the second was,
+    // by swapping the two slices including their leading tabBreak nodes.
+    const first = direction === "up" ? b : a;
+    const second = direction === "up" ? a : b;
+    const firstFrom = first.breakPos;
+    const firstTo = first.contentTo;
+    const secondFrom = second.breakPos;
+    const secondTo = second.contentTo;
+    if (firstTo !== secondFrom) return; // sanity check: adjacency
+    const firstSlice = editor.state.doc.slice(firstFrom, firstTo);
+    const secondSlice = editor.state.doc.slice(secondFrom, secondTo);
+    const tr = editor.state.tr.replaceWith(
+      firstFrom,
+      secondTo,
+      secondSlice.content.append(firstSlice.content)
+    );
+    editor.view.dispatch(tr);
+  }
 
   useEffect(() => {
     threadsRef.current = threads;
@@ -1330,8 +1530,8 @@ export function DocumentWorkspace({
       body: JSON.stringify({
         threadId,
         body: composerBody.trim(),
-        anchorText: selectedRange.text,
-        anchorContext: selectedRange.context,
+        anchorText: selectedRange.text.slice(0, 1000),
+        anchorContext: selectedRange.context ? selectedRange.context.slice(0, 2000) : selectedRange.context,
         shareToken
       })
     });
@@ -1704,6 +1904,7 @@ export function DocumentWorkspace({
         thread.id === threadId
           ? {
               ...thread,
+              lastReadAt: data.lastReadAt ?? thread.lastReadAt,
               comments: [...thread.comments, data.comment]
             }
           : thread
@@ -1999,9 +2200,26 @@ export function DocumentWorkspace({
     setInviteBusy(false);
   }
 
+  function markThreadRead(threadId: string) {
+    const now = new Date().toISOString();
+    setThreads((current) =>
+      current.map((thread) =>
+        thread.id === threadId ? { ...thread, lastReadAt: now } : thread
+      )
+    );
+    void fetch(`/api/comments/${threadId}/read`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ shareToken })
+    }).catch(() => null);
+  }
+
   function focusThread(thread: ThreadView) {
     setActiveThreadId(thread.id);
     setSelectionPopoverMode(null);
+    if (currentUserId && isThreadUnread(thread, currentUserId)) {
+      markThreadRead(thread.id);
+    }
 
     if (editor) {
       try {
@@ -2111,9 +2329,22 @@ export function DocumentWorkspace({
             return false;
           }
         }
+
+        // When the doc has tabs, hide threads whose anchor falls outside the active tab.
+        if (editor && tabs.length > 0 && activeTabId) {
+          const activeTab = tabs.find((tab) => tab.id === activeTabId);
+          if (activeTab) {
+            const range = resolveCommentAnchorRange(editor.state.doc, thread);
+            if (!range) return false;
+            const anchorPos = range.fromPos;
+            if (anchorPos < activeTab.contentFrom || anchorPos > activeTab.contentTo) {
+              return false;
+            }
+          }
+        }
         return true;
       }),
-    [availableCommentTags, commentTagFilters, threads]
+    [availableCommentTags, commentTagFilters, threads, editor, tabs, activeTabId]
   );
 
   const orderedThreads = useMemo(() => {
@@ -2569,6 +2800,14 @@ export function DocumentWorkspace({
             width={outlineWidth}
             onToggleCollapsed={() => setOutlineCollapsed((value) => !value)}
             onWidthChange={setOutlineWidth}
+            tabs={tabs}
+            activeTabId={activeTabId}
+            canEditTabs={canWriteDocument}
+            onSelectTab={handleSelectTab}
+            onCreateTab={handleCreateTab}
+            onRenameTab={handleRenameTab}
+            onDeleteTab={handleDeleteTab}
+            onReorderTab={handleReorderTab}
           />
         )}
         <div className="editor-page-shell">

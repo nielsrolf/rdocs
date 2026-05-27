@@ -70,12 +70,18 @@ export async function POST(request: Request, { params }: RouteContext) {
     }
   });
 
+  const now = new Date();
   await db.commentThread.update({
     where: { id: threadId },
     data: {
-      updatedAt: new Date()
+      updatedAt: now
     }
   });
+  await db.commentThreadRead.upsert({
+    where: { threadId_userId: { threadId, userId: user.id } },
+    create: { threadId, userId: user.id, lastReadAt: now },
+    update: { lastReadAt: now }
+  });
 
-  return NextResponse.json({ comment: serializeComment(comment) });
+  return NextResponse.json({ comment: serializeComment(comment), lastReadAt: now });
 }

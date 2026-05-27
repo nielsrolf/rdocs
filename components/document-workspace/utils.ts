@@ -4,7 +4,7 @@ import type { useEditor } from "@tiptap/react";
 import { getDocumentMarkdown } from "@/lib/content";
 import { formatDateTime } from "@/lib/utils";
 
-import type { ActiveAiRunView } from "./types";
+import type { ActiveAiRunView, ThreadView } from "./types";
 
 export function getSelectionContext(text: string) {
   return text.replace(/\s+/g, " ").trim();
@@ -66,19 +66,26 @@ export function getSelectionMarkdownFromEditor(
   return editor.state.doc.textBetween(from, to, " ").trim();
 }
 
+function truncateForAnchor(value: string, max = 200) {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max - 1)}…`;
+}
+
 export function describeNodeSelection(node: { type?: { name?: string }; attrs?: Record<string, unknown> }) {
   if (node.type?.name === "image") {
-    const alt = typeof node.attrs?.alt === "string" ? node.attrs.alt : "Image";
-    const title = typeof node.attrs?.title === "string" ? node.attrs.title : null;
-    const src = typeof node.attrs?.src === "string" ? node.attrs.src : null;
-    return [alt, title, src ? `Source: ${src}` : null].filter(Boolean).join("\n");
+    const altAttr = typeof node.attrs?.alt === "string" ? node.attrs.alt.trim() : "";
+    const titleAttr = typeof node.attrs?.title === "string" ? node.attrs.title.trim() : "";
+    const src = typeof node.attrs?.src === "string" ? node.attrs.src : "";
+    const alt = altAttr || (titleAttr ? "" : "Image");
+    const parts = [alt, titleAttr, src ? `Source: ${truncateForAnchor(src)}` : ""].filter(Boolean);
+    return parts.join("\n");
   }
 
   if (node.type?.name === "repoImage") {
     const alt = typeof node.attrs?.alt === "string" ? node.attrs.alt : "Repository image";
     const caption = typeof node.attrs?.caption === "string" ? node.attrs.caption : null;
     const path = typeof node.attrs?.path === "string" ? node.attrs.path : null;
-    return [alt, caption, path ? `Repository path: ${path}` : null].filter(Boolean).join("\n");
+    return [alt, caption, path ? `Repository path: ${truncateForAnchor(path)}` : null].filter(Boolean).join("\n");
   }
 
   if (node.type?.name === "embeddedWidget") {
@@ -87,8 +94,8 @@ export function describeNodeSelection(node: { type?: { name?: string }; attrs?: 
     const buildCmd = typeof node.attrs?.buildCmd === "string" ? node.attrs.buildCmd : null;
     return [
       `Interactive widget: ${label}`,
-      embedSource ? `Embed source: ${embedSource}` : null,
-      buildCmd ? `Build command: ${buildCmd}` : null
+      embedSource ? `Embed source: ${truncateForAnchor(embedSource)}` : null,
+      buildCmd ? `Build command: ${truncateForAnchor(buildCmd)}` : null
     ]
       .filter(Boolean)
       .join("\n");
@@ -177,6 +184,16 @@ export function formatRelativeTime(value: string | Date): string {
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days}d ago`;
   return formatDateTime(date);
+}
+
+export function isThreadUnread(thread: ThreadView, currentUserId: string | null): boolean {
+  if (!currentUserId) return false;
+  const lastReadMs = thread.lastReadAt ? new Date(thread.lastReadAt).getTime() : 0;
+  return thread.comments.some((comment) => {
+    if (comment.author?.id === currentUserId) return false;
+    const createdMs = new Date(comment.createdAt).getTime();
+    return Number.isFinite(createdMs) && createdMs > lastReadMs;
+  });
 }
 
 export function getThreadTags(thread: { tags: string[]; status: string }) {

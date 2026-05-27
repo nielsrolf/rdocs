@@ -19,6 +19,7 @@ model User {
   comments          Comment[]
   createdShareLinks ShareLink[]
   createdThreads    CommentThread[]
+  threadReads       CommentThreadRead[]
 }
 
 model Document {
@@ -67,6 +68,19 @@ model CommentThread {
   document      Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
   createdBy     User      @relation(fields: [createdById], references: [id], onDelete: Cascade)
   comments      Comment[]
+  reads         CommentThreadRead[]
+}
+
+model CommentThreadRead {
+  id         String        @id @default(cuid())
+  threadId   String
+  userId     String
+  lastReadAt DateTime      @default(now())
+  thread     CommentThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([threadId, userId])
+  @@index([userId])
 }
 
 model Comment {

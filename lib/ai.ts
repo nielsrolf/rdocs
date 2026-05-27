@@ -245,6 +245,7 @@ App environment:
 - The editor supports LaTeX math in Markdown text with $inline$ and $$display$$ delimiters.
 - The editor converts repo-local Markdown images in replacementText into document figure nodes. Use ![Concise figure caption](assets/plot.png), and put a useful caption in the alt text. Do not use HTML image tags.
 - Existing document images and widgets are listed in the document context as bracketed records. Treat them as already-rendered document elements, not literal prose.
+- The document may be organized into tabs. In the document context, tabs are shown as <tab title="...">...</tab> sections. These wrappers describe document structure — never write them in your replacementText. The editor decides which tab the user is in; just produce Markdown for the content.
 - Interactive widgets are repo files, not inline HTML in your chat reply. A widget needs:
   1. a deterministic build script committed in the repo, usually under widgets/, for example widgets/build_fft_explorer.py
   2. a generated HTML asset under assets/, for example assets/fft_explorer.html

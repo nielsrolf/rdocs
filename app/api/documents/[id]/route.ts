@@ -106,7 +106,7 @@ export async function GET(request: Request, { params }: RouteContext) {
   }
 
   const [threads, aiRuns] = await Promise.all([
-    listDocumentThreads(id),
+    listDocumentThreads(id, user?.id ?? null),
     db.aiRun.findMany({
       where: { documentId: id },
       orderBy: { startedAt: "desc" },

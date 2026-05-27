@@ -100,8 +100,13 @@ function extractTextFromNode(node: unknown): string {
       return `${childText}\n\n`;
     case "listItem":
       return `${childText}\n`;
+    case "taskItem": {
+      const checked = (typedNode as { attrs?: { checked?: unknown } }).attrs?.checked === true;
+      return `[${checked ? "x" : " "}] ${childText}\n`;
+    }
     case "bulletList":
     case "orderedList":
+    case "taskList":
       return `${childText}\n`;
     case "tableRow":
       return `${childText}\n`;
@@ -239,6 +244,17 @@ function getNodeContent(node: unknown) {
   return Array.isArray(content) ? content : [];
 }
 
+function extractLinkHref(marks: unknown): string | null {
+  if (!Array.isArray(marks)) return null;
+  for (const mark of marks) {
+    if (!mark || typeof mark !== "object") continue;
+    if ((mark as { type?: unknown }).type !== "link") continue;
+    const href = (mark as { attrs?: { href?: unknown } }).attrs?.href;
+    if (typeof href === "string" && href) return href;
+  }
+  return null;
+}
+
 function appendTextBlock(blocks: AiDocumentBlock[], text: string) {
   const normalized = text.replace(/\s+\n/g, "\n");
   if (!normalized) {
@@ -262,7 +278,9 @@ function visitNodeForAiBlocks(node: unknown, blocks: AiDocumentBlock[]) {
 
   if (nodeType === "text") {
     const text = (node as { text?: unknown }).text;
-    appendTextBlock(blocks, typeof text === "string" ? text : "");
+    const raw = typeof text === "string" ? text : "";
+    const href = extractLinkHref((node as { marks?: unknown }).marks);
+    appendTextBlock(blocks, href ? `[${raw}](${href})` : raw);
     return;
   }
 
@@ -333,8 +351,10 @@ function visitNodeForAiBlocks(node: unknown, blocks: AiDocumentBlock[]) {
       appendTextBlock(blocks, "\n\n");
       break;
     case "listItem":
+    case "taskItem":
     case "bulletList":
     case "orderedList":
+    case "taskList":
     case "tableRow":
       appendTextBlock(blocks, "\n");
       break;
@@ -482,6 +502,27 @@ function serializeNodeToMarkdown(node: unknown, context: MarkdownContext): strin
     return `${body}\n`;
   }
 
+  if (nodeType === "taskList") {
+    context.listStack.push({ ordered: false, index: 1 });
+    const body = serializeChildrenToMarkdown(node, context);
+    context.listStack.pop();
+    return `${body}\n`;
+  }
+
+  if (nodeType === "taskItem") {
+    const stack = context.listStack;
+    const checked = (getNodeAttrs(node) as { checked?: unknown } | null)?.checked === true;
+    const marker = `- [${checked ? "x" : " "}]`;
+    const indent = "  ".repeat(Math.max(0, stack.length - 1));
+    const body = serializeChildrenToMarkdown(node, context).trim();
+    const lines = body.split("\n");
+    const first = lines.shift() ?? "";
+    const rest = lines
+      .map((line) => (line ? `${indent}${" ".repeat(marker.length + 1)}${line}` : ""))
+      .join("\n");
+    return `${indent}${marker} ${first}${rest ? `\n${rest}` : ""}\n`;
+  }
+
   if (nodeType === "listItem") {
     const stack = context.listStack;
     const current = stack[stack.length - 1] ?? { ordered: false, index: 1 };
@@ -509,12 +550,55 @@ function serializeNodeToMarkdown(node: unknown, context: MarkdownContext): strin
   return serializeChildrenToMarkdown(node, context);
 }
 
-export function getDocumentMarkdown(content: unknown): string {
+function serializeBlocksToMarkdown(blocks: unknown[]): string {
   const context: MarkdownContext = { listStack: [], inCodeBlock: false };
-  const text = serializeNodeToMarkdown(content, context)
+  return blocks
+    .map((block) => serializeNodeToMarkdown(block, context))
+    .join("")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  return text;
+}
+
+function escapeTabTitle(title: string) {
+  return title.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+export function getDocumentMarkdown(content: unknown): string {
+  const topLevel = getNodeContent(content);
+  const groups: Array<{ title: string | null; nodes: unknown[] }> = [
+    { title: null, nodes: [] }
+  ];
+
+  for (const child of topLevel) {
+    if (getNodeType(child) === "tabBreak") {
+      const attrs = getNodeAttrs(child) as { title?: unknown } | null;
+      const title = typeof attrs?.title === "string" && attrs.title ? attrs.title : "Untitled tab";
+      groups.push({ title, nodes: [] });
+      continue;
+    }
+    groups[groups.length - 1].nodes.push(child);
+  }
+
+  const hasBreaks = groups.length > 1;
+  if (!hasBreaks) {
+    return serializeBlocksToMarkdown(groups[0].nodes);
+  }
+
+  // First group with no title only renders if it has content (untitled prelude).
+  const sections: string[] = [];
+  groups.forEach((group, index) => {
+    const body = serializeBlocksToMarkdown(group.nodes);
+    if (group.title == null) {
+      if (body) sections.push(body);
+      return;
+    }
+    const title = escapeTabTitle(group.title);
+    // Tab with no content still emits an empty wrapper so the LLM sees the tab exists.
+    sections.push(`<tab title="${title}">\n${body}\n</tab>`);
+    void index;
+  });
+
+  return sections.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 export function getDocumentAiBlocks(content: unknown): AiDocumentBlock[] {
