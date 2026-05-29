@@ -48,6 +48,8 @@ import {
 } from "./document-workspace/collaboration";
 import { useCollaborationStream } from "./document-workspace/use-collaboration-stream";
 import { usePresence } from "./document-workspace/use-presence";
+import { FindBar } from "./document-workspace/find-bar";
+import { SearchExtension } from "./document-workspace/search";
 import { buildConversations } from "./document-workspace/conversations";
 import { createLatexRenderExtension } from "./document-workspace/latex";
 import { EmbeddedWidget, RepoImage, TabBreak } from "./document-workspace/nodes";
@@ -222,6 +224,7 @@ export function DocumentWorkspace({
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [restoringVersion, setRestoringVersion] = useState(false);
+  const [findOpen, setFindOpen] = useState(false);
   const [widgetDialogOpen, setWidgetDialogOpen] = useState(false);
   const [widgetDraft, setWidgetDraft] = useState<WidgetDraft>({
     label: "",
@@ -818,6 +821,7 @@ export function DocumentWorkspace({
       AiEditSelections,
       commentHighlightExtension,
       latexRenderExtension,
+      SearchExtension,
       Link.configure({
         openOnClick: false,
         autolink: true,
@@ -1157,6 +1161,19 @@ export function DocumentWorkspace({
       setDocStats(computeDocStats(editor.getText()));
     }
   }, [editor]);
+
+  // Intercept Cmd/Ctrl-F to open the in-document find bar instead of the
+  // browser's find (which can't see hidden-tab content).
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        setFindOpen(true);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   // Warn before navigating away with unsaved local edits or a pending collab
   // flush, so a tab close mid-save doesn't silently lose work.
@@ -2529,9 +2546,13 @@ export function DocumentWorkspace({
   return (
     <section className="workspace-shell">
       {globalError ? (
-        <div className="error-toast" role="alert" onClick={() => setGlobalError(null)}>
+        <div className="error-toast" role="alert" aria-live="assertive" onClick={() => setGlobalError(null)}>
           {globalError}
         </div>
+      ) : null}
+
+      {findOpen && editor ? (
+        <FindBar editor={editor} canReplace={canWriteDocument} onClose={() => setFindOpen(false)} />
       ) : null}
 
       {agentPanelOpen ? null : (

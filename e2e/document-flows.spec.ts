@@ -74,6 +74,40 @@ test("a previous version can be restored", async ({ baseURL, browser }) => {
   }
 });
 
+test("find & replace highlights matches and replaces all (persisting via collab)", async ({
+  baseURL,
+  browser
+}) => {
+  if (!baseURL) throw new Error("baseURL is required");
+  const { user, document } = await createDocumentFixture("find the target word and another target here");
+  const context = await browser.newContext();
+  try {
+    await authenticate(context, baseURL, user.id);
+    const page = await context.newPage();
+    await page.goto(`/documents/${document.id}`);
+    await expect(editor(page)).toHaveText("find the target word and another target here");
+
+    // Open the in-document find bar (intercepts Ctrl/Cmd-F).
+    await page.keyboard.press("Control+f");
+    await expect(page.locator(".find-bar")).toBeVisible();
+
+    await page.getByPlaceholder("Find").fill("target");
+    await expect(page.locator(".find-bar-count")).toHaveText("1/2");
+
+    // Replace all and confirm the document changed + persisted.
+    await page.getByPlaceholder("Replace").fill("token");
+    await page.getByRole("button", { name: "All", exact: true }).click();
+    await expect.poll(() => visibleEditorText(page), { timeout: 8_000 }).toBe(
+      "find the token word and another token here"
+    );
+    await expect(saveIndicator(page)).toHaveText("Saved", { timeout: 8_000 });
+
+    await context.close();
+  } finally {
+    await cleanupFixture(user.id, document.id);
+  }
+});
+
 test("a modal closes on Escape (keyboard accessibility)", async ({ baseURL, browser }) => {
   if (!baseURL) throw new Error("baseURL is required");
   const { user, document } = await createDocumentFixture("Body");
