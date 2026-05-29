@@ -1,7 +1,7 @@
 import { Extension } from "@tiptap/core";
 import { collab, getVersion, sendableSteps } from "@tiptap/pm/collab";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
-import type { Mapping } from "@tiptap/pm/transform";
+import type { Mappable, Mapping } from "@tiptap/pm/transform";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type { MutableRefObject } from "react";
 
@@ -25,6 +25,37 @@ export type ReceivedMappingEntry = {
   versionBefore: number;
   mapping: Mapping;
 };
+
+// Map a remote collaborator's position (captured at `remoteVersion`) into the
+// local document's current coordinate space. This is the core of correct remote
+// cursor/selection rendering: when the local user edits an EARLIER part of the
+// document, every remote position after the insertion must shift by the same
+// amount, otherwise the remote cursor/selection is drawn at the wrong place.
+//
+// We apply (a) the mappings we received for steps at or after the remote's
+// version, then (b) our own not-yet-confirmed local step maps. Exported as a
+// pure function so it can be regression-tested headlessly.
+export function mapRemotePosition(
+  pos: number,
+  remoteVersion: number,
+  bias: number,
+  localVersion: number,
+  receivedMappings: ReceivedMappingEntry[],
+  unconfirmedMaps: Mappable[]
+): number {
+  let result = pos;
+  if (remoteVersion < localVersion) {
+    for (const entry of receivedMappings) {
+      if (entry.versionBefore >= remoteVersion) {
+        result = entry.mapping.map(result, bias);
+      }
+    }
+  }
+  for (const map of unconfirmedMaps) {
+    result = map.map(result, bias);
+  }
+  return result;
+}
 
 export function createCollaborationExtension(version: number, clientID: string) {
   return Extension.create({
@@ -60,20 +91,8 @@ export function createRemotePresenceExtension(
               const unconfirmedMaps = unconfirmed?.steps.map((step) => step.getMap()) ?? [];
               const buffer = receivedMappingsRef.current;
 
-              const mapPosition = (pos: number, remoteVersion: number, bias: number) => {
-                let result = pos;
-                if (remoteVersion < localVersion) {
-                  for (const entry of buffer) {
-                    if (entry.versionBefore >= remoteVersion) {
-                      result = entry.mapping.map(result, bias);
-                    }
-                  }
-                }
-                for (const map of unconfirmedMaps) {
-                  result = map.map(result, bias);
-                }
-                return result;
-              };
+              const mapPosition = (pos: number, remoteVersion: number, bias: number) =>
+                mapRemotePosition(pos, remoteVersion, bias, localVersion, buffer, unconfirmedMaps);
 
               remotePresenceRef.current.forEach((presence) => {
                 const selection = presence.selection;

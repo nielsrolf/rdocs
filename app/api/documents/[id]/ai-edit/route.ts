@@ -1,6 +1,3 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -9,6 +6,14 @@ import { getCurrentUser } from "@/lib/auth";
 import { recordAiRunEvent } from "@/lib/ai-runs";
 import { runClaudeResearchAgent } from "@/lib/ai";
 import { detectEditAssetIntent } from "@/lib/ai-asset-intent";
+import {
+  embedSourceExists,
+  hasMarkdownImage,
+  normalizeAgentImages,
+  normalizeSubmittedWidget,
+  validateAiEditAssets,
+  type NormalizedSubmittedWidget
+} from "@/lib/ai-edit-submission";
 import { db } from "@/lib/db";
 import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
 import { getClientIp, rateLimit } from "@/lib/rate-limit";
@@ -29,94 +34,6 @@ const aiEditSchema = z.object({
   selectionId: z.string().min(1).max(120).regex(/^[A-Za-z0-9_-]+$/).optional().nullable(),
   shareToken: z.string().optional().nullable()
 });
-
-function buildRepoFileUrl(documentId: string, path: string, shareToken: string | null, aiRunId: string | null) {
-  const params = new URLSearchParams({ path });
-  if (shareToken) {
-    params.set("share", shareToken);
-  }
-  if (aiRunId) {
-    params.set("run", aiRunId);
-  }
-
-  return `/api/documents/${documentId}/repo-files?${params.toString()}`;
-}
-
-function normalizeAgentImages(images: unknown, documentId: string, shareToken: string | null, aiRunId: string | null) {
-  if (!Array.isArray(images)) {
-    return [];
-  }
-
-  return images
-    .map((image) => {
-      if (!image || typeof image !== "object") {
-        return null;
-      }
-      const typed = image as { path?: unknown; alt?: unknown; caption?: unknown };
-      if (typeof typed.path !== "string" || !typed.path.trim()) {
-        return null;
-      }
-      const path = typed.path.trim();
-      return {
-        path,
-        src: buildRepoFileUrl(documentId, path, shareToken, aiRunId),
-        alt: typeof typed.alt === "string" ? typed.alt : path,
-        caption: typeof typed.caption === "string" ? typed.caption : null
-      };
-    })
-    .filter((image): image is NonNullable<typeof image> => image != null);
-}
-
-function hasMarkdownImage(text: string) {
-  return /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/.test(text);
-}
-
-type NormalizedSubmittedWidget = {
-  label: string;
-  buildCmd: string;
-  embedSource: string;
-};
-
-function normalizeSubmittedWidget(widget: unknown): NormalizedSubmittedWidget | null {
-  if (!widget || typeof widget !== "object") return null;
-  const typed = widget as {
-    label?: unknown;
-    build_cmd?: unknown;
-    buildCmd?: unknown;
-    embed_source?: unknown;
-    embedSource?: unknown;
-  };
-  const label =
-    typeof typed.label === "string" && typed.label.trim() ? typed.label.trim() : "Interactive widget";
-  const buildCmd =
-    typeof typed.build_cmd === "string"
-      ? typed.build_cmd.trim()
-      : typeof typed.buildCmd === "string"
-        ? typed.buildCmd.trim()
-        : "";
-  const embedSource =
-    typeof typed.embed_source === "string"
-      ? typed.embed_source.trim()
-      : typeof typed.embedSource === "string"
-        ? typed.embedSource.trim()
-        : "";
-  if (!buildCmd || !embedSource) return null;
-  return { label, buildCmd, embedSource };
-}
-
-async function embedSourceExists(workspace: string, embedSource: string): Promise<boolean> {
-  const resolved = path.resolve(workspace, embedSource);
-  const workspaceRoot = path.resolve(workspace);
-  if (!resolved.startsWith(`${workspaceRoot}${path.sep}`)) {
-    return false;
-  }
-  try {
-    const stat = await fs.stat(resolved);
-    return stat.isFile();
-  } catch {
-    return false;
-  }
-}
 
 async function buildAndVerifyWidget(
   widget: NormalizedSubmittedWidget,
@@ -277,24 +194,15 @@ async function runAiEditInBackground(input: {
           const hasImage =
             submittedImages.length > 0 || hasMarkdownImage(submission.replacementText ?? "");
           const hasWidget = submittedWidgets.length > 0;
-          const replacement =
-            typeof submission.replacementText === "string" ? submission.replacementText : "";
-          const trimmedReplacement = replacement.trim();
-          const trimmedSelected = parsed.selectedText.trim();
-          if (!trimmedReplacement && !hasImage && !hasWidget) {
-            return "Your submission has no replacementText (and no images or widgets). Provide the new Markdown for the selection in replacementText and resubmit.";
-          }
-          if (trimmedReplacement && trimmedReplacement === trimmedSelected) {
-            return "Your replacementText is identical to the user's selected text — no change was made. Apply the requested edit to the text and resubmit, or return the modified Markdown that reflects the instruction.";
-          }
-          if (assetIntent.requiresAnyAsset && !hasImage && !hasWidget) {
-            return "The edit request asked for a figure or widget, but the submission included neither. Add an image (via the images array, after committing the file to the repo) or a widget (via the widgets array) and resubmit.";
-          }
-          if (assetIntent.requiresImage && !hasImage) {
-            return "The edit request asked for a figure or visual. Generate the image, commit it to the repo, and include it in the images array (or as a Markdown image in replacementText). Then resubmit.";
-          }
-          if (assetIntent.requiresWidget && !hasWidget) {
-            return "The edit request asked for an interactive widget. Build the HTML widget and include it in the widgets array (with label, build_cmd, embed_source). Then resubmit.";
+          const assetError = validateAiEditAssets({
+            replacementText: submission.replacementText,
+            selectedText: parsed.selectedText,
+            hasImage,
+            hasWidget,
+            assetIntent
+          });
+          if (assetError) {
+            return assetError;
           }
           if (hasWidget) {
             const workspace = linkedRepo?.workspace ?? null;

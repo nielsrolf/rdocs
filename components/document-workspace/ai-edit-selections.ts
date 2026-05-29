@@ -188,6 +188,30 @@ function buildDecorationSet(state: EditorState) {
   return DecorationSet.create(state.doc, decorations);
 }
 
+// The ProseMirror plugin that tracks AI-edit selection ranges through document
+// changes. Exported as a factory so it can be exercised on a raw EditorState in
+// regression tests (no editor view / DOM required).
+export function createAiEditSelectionPlugin() {
+  return new Plugin<AiEditSelectionState>({
+    key: aiEditSelectionPluginKey,
+    state: {
+      init: () => ({ metadata: new Map() }),
+      apply: (transaction, previous) => {
+        const mapped = mapMetadata(previous.metadata, transaction);
+        const meta = transaction.getMeta(aiEditSelectionPluginKey) as AiEditSelectionMeta | undefined;
+        return {
+          metadata: applyMeta(mapped, meta)
+        };
+      }
+    },
+    props: {
+      decorations(state) {
+        return buildDecorationSet(state);
+      }
+    }
+  });
+}
+
 export const AiEditSelections = Extension.create({
   name: "aiEditSelections",
 
@@ -196,26 +220,7 @@ export const AiEditSelections = Extension.create({
   },
 
   addProseMirrorPlugins() {
-    return [
-      new Plugin<AiEditSelectionState>({
-        key: aiEditSelectionPluginKey,
-        state: {
-          init: () => ({ metadata: new Map() }),
-          apply: (transaction, previous) => {
-            const mapped = mapMetadata(previous.metadata, transaction);
-            const meta = transaction.getMeta(aiEditSelectionPluginKey) as AiEditSelectionMeta | undefined;
-            return {
-              metadata: applyMeta(mapped, meta)
-            };
-          }
-        },
-        props: {
-          decorations(state) {
-            return buildDecorationSet(state);
-          }
-        }
-      })
-    ];
+    return [createAiEditSelectionPlugin()];
   }
 });
 

@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "test": "tsx --test tests/*.test.ts",
+    "test:integration": "tsx --test tests/integration/*.test.ts",
     "test:e2e": "playwright test",
     "lint": "eslint .",
     "db:generate": "prisma generate",

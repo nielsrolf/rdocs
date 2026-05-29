@@ -1,12 +1,10 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-
 import { NextResponse } from "next/server";
 
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { resolveDocumentAccess } from "@/lib/permissions";
 import { ensureLinkedRepository } from "@/lib/research-workspace";
+import { readEmbedSourceFromCandidates } from "@/lib/widget-source";
 
 export const runtime = "nodejs";
 
@@ -16,19 +14,6 @@ type RouteContext = {
     widgetId: string;
   }>;
 };
-
-async function tryReadInside(workspace: string, embedSource: string) {
-  const sourcePath = path.resolve(workspace, embedSource);
-  const workspaceRoot = path.resolve(workspace);
-  if (!sourcePath.startsWith(`${workspaceRoot}${path.sep}`)) {
-    return null;
-  }
-  try {
-    return await fs.readFile(sourcePath, "utf8");
-  } catch {
-    return null;
-  }
-}
 
 export async function GET(request: Request, { params }: RouteContext) {
   const { id, widgetId } = await params;
@@ -56,28 +41,26 @@ export async function GET(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Repository is not linked." }, { status: 400 });
   }
 
-  const candidates = [linkedRepo.workspace];
-  if (widget.workspacePath && !candidates.includes(widget.workspacePath)) {
-    candidates.push(widget.workspacePath);
-  }
-
-  for (const candidate of candidates) {
-    const html = await tryReadInside(candidate, widget.embedSource);
-    if (html !== null) {
-      return new NextResponse(html, {
-        headers: {
-          "Content-Type": "text/html; charset=utf-8",
-          "Content-Security-Policy": [
-            "default-src 'self' 'unsafe-inline' data: blob:",
-            "img-src 'self' data: blob: https:",
-            "script-src 'self' 'unsafe-inline' https://cdn.plot.ly https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://d3js.org",
-            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://fonts.googleapis.com",
-            "font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com",
-            "connect-src 'self' https://cdn.plot.ly https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com"
-          ].join("; ")
-        }
-      });
-    }
+  // Base checkout first (post-merge home of the asset, and the per-run worktree
+  // may have been garbage-collected), then the run's recorded workspace.
+  const html = await readEmbedSourceFromCandidates(
+    [linkedRepo.workspace, widget.workspacePath],
+    widget.embedSource
+  );
+  if (html !== null) {
+    return new NextResponse(html, {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Security-Policy": [
+          "default-src 'self' 'unsafe-inline' data: blob:",
+          "img-src 'self' data: blob: https:",
+          "script-src 'self' 'unsafe-inline' https://cdn.plot.ly https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://d3js.org",
+          "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://fonts.googleapis.com",
+          "font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com",
+          "connect-src 'self' https://cdn.plot.ly https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com"
+        ].join("; ")
+      }
+    });
   }
 
   const escapedSource = widget.embedSource.replace(/[&<>"']/g, (ch) =>

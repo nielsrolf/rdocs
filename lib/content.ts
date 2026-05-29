@@ -189,6 +189,17 @@ export function stripCommentAnchorMarks(node: unknown): unknown {
       return;
     }
 
+    // Comments on block atoms (embeddedWidget / repoImage / image) are stored as
+    // a `commentThreadIds` attr, not an inline mark. Strip it too so that adding
+    // or removing such a comment counts as an anchor-only change (parity with the
+    // inline commentAnchor mark above).
+    if (key === "attrs" && value && typeof value === "object" && !Array.isArray(value)) {
+      const attrs = { ...(value as Record<string, unknown>) };
+      delete attrs.commentThreadIds;
+      output[key] = stripCommentAnchorMarks(attrs);
+      return;
+    }
+
     output[key] = stripCommentAnchorMarks(value);
   });
 
