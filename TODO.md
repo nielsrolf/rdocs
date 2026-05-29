@@ -32,16 +32,17 @@ Tracked items intentionally deferred. Most recent context first.
   only.
 
 ## Phase 5/6 remaining (not yet implemented)
-- Restore-from-version + diff view (must flow through the collab step pipeline,
-  not a direct content PATCH).
+- Restore-from-version: DONE (restore through the collab pipeline + e2e). A side-
+  by-side DIFF view is still a nice-to-have.
+- Modal a11y: Escape-to-close + focus + aria-labelledby DONE (useDialogDismiss on
+  the 3 modals). Still TODO: a true focus TRAP, and aria-live on the error toast.
 - Find & replace.
 - Mobile: tab navigation + outline are hidden < 1080px, leaving tabbed docs
   largely unusable on small screens.
-- Modal a11y: focus trap, Escape-to-close, aria-labelledby on version-history /
-  share / widget-dialog modals; aria-live on the save indicator + error toast.
 - @mentions + notification fan-out (persisted notifications for offline users).
 - Orphaned-thread surfacing + fuzzy re-anchoring using stored
   `anchorText`/`anchorContext`.
-- Decompose `components/document-workspace.tsx` (~3k lines) into domain hooks
-  (`useCollaboration`, `useAiRuns`, `useComments`, `useTabs`, `usePresence`) —
-  incremental, ideally behind Playwright coverage first.
+- Decompose `components/document-workspace.tsx` into domain hooks. DONE so far:
+  `useCollaborationStream`, `usePresence`. Remaining: `useComments`, `useAiRuns`,
+  `useTabs`, and splitting the JSX into `<DocumentTopbar>`/`<EditorStage>`/
+  `<Modals>`. Each step verified against the Playwright net.
