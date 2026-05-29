@@ -26,6 +26,16 @@ export type ReceivedMappingEntry = {
   mapping: Mapping;
 };
 
+// Shape of a /collaboration step push/pull response (and the SSE "steps" event).
+export type CollaborationStepResponse = {
+  accepted?: boolean;
+  steps?: unknown[];
+  clientIds?: Array<string | number>;
+  fromVersion?: number;
+  version?: number;
+  updatedAt?: string | null;
+};
+
 // Map a remote collaborator's position (captured at `remoteVersion`) into the
 // local document's current coordinate space. This is the core of correct remote
 // cursor/selection rendering: when the local user edits an EARLIER part of the
