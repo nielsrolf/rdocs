@@ -7,7 +7,13 @@ import { getCurrentUser } from "@/lib/auth";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
-import { commitWorkspaceChanges, ensureLinkedRepositoryWorktree, getWorkspaceOverview } from "@/lib/research-workspace";
+import { rateLimit } from "@/lib/rate-limit";
+import {
+  commitWorkspaceChanges,
+  ensureLinkedRepositoryWorktree,
+  getWorkspaceOverview,
+  removeRunWorktree
+} from "@/lib/research-workspace";
 
 export const runtime = "nodejs";
 
@@ -74,6 +80,15 @@ export async function POST(request: Request, { params }: RouteContext) {
   const access = await resolveDocumentAccess(id, user.id, parsed.data.shareToken ?? null);
   if (!access || !canComment(access.permission)) {
     return NextResponse.json({ error: "You do not have agent access." }, { status: 403 });
+  }
+
+  // Agent runs are expensive; cap how many a single user can kick off per minute.
+  const runLimit = rateLimit(`ai-run:user:${user.id}`, 10, 60_000);
+  if (!runLimit.allowed) {
+    return NextResponse.json(
+      { error: "You're messaging the agent too quickly. Try again shortly." },
+      { status: 429, headers: { "Retry-After": String(runLimit.retryAfterSeconds) } }
+    );
   }
 
   let aiRunId: string | null = null;
@@ -239,5 +254,9 @@ export async function POST(request: Request, { params }: RouteContext) {
       { error: error instanceof Error ? error.message : "Agent conversation failed." },
       { status: 500 }
     );
+  } finally {
+    if (linkedRepo && linkedRepo.baseWorkspace !== linkedRepo.worktree) {
+      await removeRunWorktree(linkedRepo).catch(() => null);
+    }
   }
 }

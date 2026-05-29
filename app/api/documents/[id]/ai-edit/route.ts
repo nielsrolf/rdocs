@@ -11,10 +11,12 @@ import { runClaudeResearchAgent } from "@/lib/ai";
 import { detectEditAssetIntent } from "@/lib/ai-asset-intent";
 import { db } from "@/lib/db";
 import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import { getClientIp, rateLimit } from "@/lib/rate-limit";
 import {
   commitWorkspaceChanges,
   ensureLinkedRepositoryWorktree,
   getWorkspaceOverview,
+  removeRunWorktree,
   runWidgetBuild
 } from "@/lib/research-workspace";
 import { normalizeSourceLinks } from "@/lib/sources";
@@ -449,6 +451,10 @@ async function runAiEditInBackground(input: {
         }
       })
       .catch(() => null);
+  } finally {
+    if (linkedRepo && linkedRepo.baseWorkspace !== linkedRepo.worktree) {
+      await removeRunWorktree(linkedRepo).catch(() => null);
+    }
   }
 }
 
@@ -471,6 +477,16 @@ export async function POST(request: Request, { params }: RouteContext) {
   const access = await resolveDocumentAccess(id, user?.id, parsed.data.shareToken ?? null);
   if (!access || !canEdit(access.permission)) {
     return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+  }
+
+  // Agent runs are expensive; cap per-user (or per-IP for share-token editors).
+  const runLimitKey = user ? `ai-run:user:${user.id}` : `ai-run:ip:${getClientIp(request)}`;
+  const runLimit = rateLimit(runLimitKey, 10, 60_000);
+  if (!runLimit.allowed) {
+    return NextResponse.json(
+      { error: "You're starting AI edits too quickly. Try again shortly." },
+      { status: 429, headers: { "Retry-After": String(runLimit.retryAfterSeconds) } }
+    );
   }
 
   const aiRun = await db.aiRun.create({

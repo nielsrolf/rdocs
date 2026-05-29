@@ -118,6 +118,10 @@ test("collaboration merges against the persisted document even when the in-memor
 });
 
 test("a stale browser can apply missing remote steps, retry its local edit, and converge", async () => {
+  // Stale pushes return 409 + missing steps so the client can rebase locally.
+  // Server-side rebase was tried but breaks prosemirror-collab's confirmation
+  // convention (it expects own-clientId steps at the *start* of the response,
+  // not interleaved chronologically) — see lib/collaboration.ts for details.
   const { user, document } = await createTestDocument("Weather tomorrow in Berlinfff");
 
   try {
@@ -155,8 +159,11 @@ test("a stale browser can apply missing remote steps, retry its local edit, and 
 
     assert.equal(staleGuestResult.accepted, false);
     assert.equal(staleGuestResult.version, 1);
+    assert.equal(staleGuestResult.fromVersion, 0);
     assert.equal(staleGuestResult.steps.length, 1);
 
+    // Client applies the missing remote step locally (rebases its sendable),
+    // then retries the push at the new version.
     guest = applyPayload(guest, staleGuestResult);
     const rebasedGuestPayload = payloadFromState(guest);
     assert.equal(rebasedGuestPayload.version, 1);
@@ -174,7 +181,6 @@ test("a stale browser can apply missing remote steps, retry its local edit, and 
       steps: rebasedGuestPayload.steps,
       clientId: "guest"
     });
-
     assert.equal(retryResult.accepted, true);
 
     const saved = await db.document.findUniqueOrThrow({

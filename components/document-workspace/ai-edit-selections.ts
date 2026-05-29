@@ -91,11 +91,22 @@ function mapMetadata(
 ) {
   if (!transaction.docChanged) return metadata;
   const next = new Map<string, AiEditSelectionEntry>();
+  const docSize = transaction.doc.content.size;
   for (const [id, entry] of metadata) {
     const from = transaction.mapping.map(entry.from, 1);
     const to = transaction.mapping.map(entry.to, -1);
-    if (to <= from) continue;
-    next.set(id, { metadata: entry.metadata, from, to });
+    if (to > from) {
+      next.set(id, { metadata: entry.metadata, from, to });
+      continue;
+    }
+    // The range collapsed — a concurrent edit (typically a remote collaboration
+    // step during a long agent run) deleted the selected text. Rather than drop
+    // the entry (which loses the anchor entirely and forces "replacement
+    // skipped"), retain a zero-width anchor at the surviving position so the AI
+    // result can still be inserted there. This is what makes the AI-edit anchor
+    // resilient to concurrent edits instead of relying on a deletable mark.
+    const point = Math.max(0, Math.min(from, docSize));
+    next.set(id, { metadata: entry.metadata, from: point, to: point });
   }
   return next;
 }
@@ -209,10 +220,20 @@ export const AiEditSelections = Extension.create({
 });
 
 export function getAiEditSelectionRange(state: EditorState, id: string) {
+  // Prefer the plugin entry: it is rebased through every transaction's mapping
+  // (local and remote collab steps), so it survives concurrent edits. A
+  // collapsed entry (from === to) is a valid zero-width insertion point — the
+  // selected text was deleted out from under the run, but we can still insert
+  // the result at the recovered position.
   const entry = aiEditSelectionPluginKey.getState(state)?.metadata.get(id);
-  if (entry && entry.to > entry.from) {
-    return { from: entry.from, to: entry.to };
+  if (entry) {
+    const docSize = state.doc.content.size;
+    const from = Math.max(0, Math.min(entry.from, docSize));
+    const to = Math.max(from, Math.min(entry.to, docSize));
+    return { from, to };
   }
+  // Fallback: scan for a surviving mark (covers cold-load before the plugin
+  // entry is re-seeded).
   return collectAiEditSelectionRanges(state.doc).get(id) ?? null;
 }
 

@@ -66,8 +66,24 @@ type GlobalCollaborationState = {
   queues: Map<string, Promise<void>>;
 };
 
+// Thrown when an incoming step cannot be applied to the current document
+// (e.g. a corrupt step or a client/server schema mismatch). This is distinct
+// from a version conflict: a conflict is recoverable by rebasing, but an
+// un-appliable step will fail identically on every retry, so the API surfaces
+// it as 422 rather than 409 to stop the client from retrying forever.
+export class StepApplyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StepApplyError";
+  }
+}
+
 const schema = createDocumentEditorSchema();
 const PRESENCE_TTL_MS = 30_000;
+// Cap the in-memory step buffer so a long-lived hot room can't grow unbounded.
+// The durable CollaborationStep table remains the long-term source of truth;
+// pulls for older versions fall back to it.
+const MAX_ROOM_STEPS = 2000;
 let collaborationStepTableReady: Promise<void> | null = null;
 
 function getGlobalState(): GlobalCollaborationState {
@@ -169,17 +185,30 @@ async function getDurableStepsSince(documentId: string, version: number): Promis
   }));
 }
 
-async function insertDurableSteps(documentId: string, records: StepRecord[]) {
-  await ensureCollaborationStepTable();
-  for (const record of records) {
-    await db.$executeRawUnsafe(
-      "INSERT INTO CollaborationStep (documentId, version, step, clientId) VALUES (?, ?, ?, ?)",
-      documentId,
-      record.version,
-      JSON.stringify(record.step),
-      String(record.clientId)
-    );
+// Insert step rows in a single multi-row statement. Accepts a Prisma client or
+// an interactive-transaction client so the caller can keep the content update
+// and the step inserts in one atomic commit.
+type RawExecutor = Pick<typeof db, "$executeRawUnsafe">;
+
+async function insertDurableSteps(
+  executor: RawExecutor,
+  documentId: string,
+  records: StepRecord[]
+) {
+  if (records.length === 0) {
+    return;
   }
+  const placeholders = records.map(() => "(?, ?, ?, ?)").join(", ");
+  const values = records.flatMap((record) => [
+    documentId,
+    record.version,
+    JSON.stringify(record.step),
+    String(record.clientId)
+  ]);
+  await executor.$executeRawUnsafe(
+    `INSERT INTO CollaborationStep (documentId, version, step, clientId) VALUES ${placeholders}`,
+    ...values
+  );
 }
 
 export async function getCollaborationVersion(documentId: string, rawContent: string, updatedAt?: Date | string | null) {
@@ -271,6 +300,18 @@ function broadcast(room: CollaborationRoom, event: string, payload: unknown, exc
   });
 }
 
+// Optional metadata attached to the version snapshot produced by a step push.
+// Used by the AI-edit apply path so the post-edit version records the agent's
+// commit / sources / run id — previously this was done by a separate full-content
+// PATCH, which wrote Document.content out-of-band and desynced the collab room.
+export type CollaborationVersionMeta = {
+  forceVersion?: boolean;
+  sourceLinks?: string[];
+  commitSha?: string | null;
+  commitUrl?: string | null;
+  aiRunId?: string | null;
+};
+
 export async function submitCollaborationSteps(input: {
   documentId: string;
   rawContent: string;
@@ -279,6 +320,7 @@ export async function submitCollaborationSteps(input: {
   version: number;
   steps: unknown[];
   clientId: string;
+  versionMeta?: CollaborationVersionMeta;
 }) {
   return withDocumentQueue(input.documentId, async () => {
     const persistedDocument = await db.document.findUnique({
@@ -302,8 +344,23 @@ export async function submitCollaborationSteps(input: {
     const durableVersion = await getDurableVersion(input.documentId);
     alignColdRoomVersion(room, durableVersion);
 
+    // Server-side rebase was attempted previously but is fundamentally
+    // incompatible with prosemirror-collab's confirmation convention: the
+    // plugin treats *leading* own-clientId steps in the response as
+    // confirmations, while a chronologically correct rebase response puts
+    // foreign steps first and own steps last. That ordering causes the client
+    // to re-apply its local steps instead of confirming them, accumulating
+    // duplicate edits and eventually corrupting doc structure. The client
+    // must rebase locally — return 409 + missing steps and let it handle it.
     if (input.version !== durableVersion) {
       const missingRecords = await getDurableStepsSince(input.documentId, input.version);
+      console.warn("[collab-push] stale push", {
+        documentId: input.documentId,
+        clientId: input.clientId,
+        clientVersion: input.version,
+        durableVersion,
+        missingStepCount: missingRecords.length
+      });
       return {
         accepted: false,
         ...buildStepPayload(
@@ -321,10 +378,17 @@ export async function submitCollaborationSteps(input: {
     const previousContent = serializeDocumentContent(baseDoc.toJSON());
 
     for (const stepJson of input.steps) {
-      const step = Step.fromJSON(schema, stepJson);
+      let step: Step;
+      try {
+        step = Step.fromJSON(schema, stepJson);
+      } catch (error) {
+        throw new StepApplyError(
+          error instanceof Error ? `Malformed collaboration step: ${error.message}` : "Malformed collaboration step."
+        );
+      }
       const result = step.apply(nextDoc);
       if (result.failed || !result.doc) {
-        throw new Error(result.failed ?? "Unable to apply collaboration step.");
+        throw new StepApplyError(result.failed ?? "Unable to apply collaboration step.");
       }
 
       nextDoc = result.doc;
@@ -336,30 +400,45 @@ export async function submitCollaborationSteps(input: {
     }
 
     const nextContent = serializeDocumentContent(nextDoc.toJSON());
+    // Snapshot the pre-edit content for version history before overwriting.
+    // When the push carries AI-run metadata, attach it to the post-edit version
+    // (and force a snapshot) so AI edits remain attributable in version history.
     await maybeCreateVersionSnapshot({
       documentId: input.documentId,
       currentTitle: persistedDocument.title,
       currentContent: previousContent,
       nextTitle: persistedDocument.title,
-      nextContent
+      nextContent,
+      force: input.versionMeta?.forceVersion,
+      sourceLinks: input.versionMeta?.sourceLinks,
+      commitSha: input.versionMeta?.commitSha,
+      commitUrl: input.versionMeta?.commitUrl,
+      aiRunId: input.versionMeta?.aiRunId
     });
 
-    const updated = await db.document.update({
-      where: { id: input.documentId },
-      data: {
-        content: nextContent
-      },
-      select: {
-        updatedAt: true
-      }
+    // Persist the new content and the step rows in ONE transaction so the
+    // durable step log can never diverge from Document.content (a partial
+    // failure previously left content advanced but steps missing, permanently
+    // desyncing every other client that replays from the step log).
+    const updated = await db.$transaction(async (tx) => {
+      const result = await tx.document.update({
+        where: { id: input.documentId },
+        data: { content: nextContent },
+        select: { updatedAt: true }
+      });
+      await insertDurableSteps(tx, input.documentId, records);
+      return result;
     });
 
-    await insertDurableSteps(input.documentId, records);
-
+    // Only after the commit succeeds do we mutate the in-memory room and
+    // broadcast — otherwise a rolled-back write would still reach other clients.
     room.doc = nextDoc;
     room.version = durableVersion + records.length;
     room.updatedAt = updated.updatedAt.toISOString();
     room.steps.push(...records);
+    if (room.steps.length > MAX_ROOM_STEPS) {
+      room.steps.splice(0, room.steps.length - MAX_ROOM_STEPS);
+    }
 
     const payload = buildStepPayload(records, durableVersion, room.version, room.updatedAt);
 
@@ -383,6 +462,22 @@ export async function pullCollaborationSteps(input: {
   syncRoomToPersistedDocument(room, input.rawContent, input.currentUpdatedAt, durableVersion);
   const records = await getDurableStepsSince(input.documentId, input.version);
   return buildStepPayload(records, input.version, durableVersion, room.updatedAt);
+}
+
+// Lightweight fan-out for non-OT events (comment threads etc.) over the same
+// SSE room. No-op if no room exists yet (no one connected). Excludes the
+// originating client so the submitter doesn't get its own change echoed back
+// (it already applied the change optimistically).
+export function broadcastDocumentEvent(
+  documentId: string,
+  event: string,
+  payload: unknown,
+  originClientId?: string | null
+) {
+  const state = getGlobalState();
+  const room = state.rooms.get(documentId);
+  if (!room) return;
+  broadcast(room, event, payload, originClientId ?? undefined);
 }
 
 export function subscribeToCollaboration(input: {

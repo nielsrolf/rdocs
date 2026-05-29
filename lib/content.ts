@@ -47,6 +47,40 @@ export function serializeDocumentContent(content: unknown) {
   return JSON.stringify(content);
 }
 
+// Walks a doc-content JSON tree looking for any commentAnchor mark on a text
+// node or commentThreadIds attr on a block node that references this thread.
+// Used by the comment-create route to refuse creating an orphan thread row.
+export function documentHasAnchorForThread(content: unknown, threadId: string): boolean {
+  if (!content || typeof content !== "object") return false;
+  const node = content as {
+    marks?: unknown[];
+    attrs?: { commentThreadIds?: unknown };
+    content?: unknown[];
+  };
+
+  if (Array.isArray(node.marks)) {
+    for (const mark of node.marks) {
+      if (!mark || typeof mark !== "object") continue;
+      const m = mark as { type?: unknown; attrs?: { threadId?: unknown } };
+      if (m.type === "commentAnchor" && m.attrs?.threadId === threadId) return true;
+    }
+  }
+
+  if (Array.isArray(node.attrs?.commentThreadIds)) {
+    for (const tid of node.attrs.commentThreadIds as unknown[]) {
+      if (tid === threadId) return true;
+    }
+  }
+
+  if (Array.isArray(node.content)) {
+    for (const child of node.content) {
+      if (documentHasAnchorForThread(child, threadId)) return true;
+    }
+  }
+
+  return false;
+}
+
 export function parseDocumentContent(raw: string): DocumentContent {
   try {
     return JSON.parse(raw) as DocumentContent;

@@ -267,6 +267,82 @@ export async function ensureLinkedRepositoryWorktree(
   };
 }
 
+// Remove a per-run worktree and its branch once the run is finished. The run's
+// commit is merged into the base workspace before this is called, so the branch
+// is redundant and the worktree would otherwise leak (unbounded disk growth).
+// Safe to call multiple times / on a missing worktree.
+export async function removeRunWorktree(worktree: {
+  baseWorkspace: string;
+  worktree: string;
+  branchName: string;
+}) {
+  try {
+    await runCommand("git", ["worktree", "remove", "--force", worktree.worktree], {
+      cwd: worktree.baseWorkspace
+    });
+  } catch {
+    // Worktree may already be gone; fall back to pruning + direct rm.
+    await runCommand("git", ["worktree", "prune"], { cwd: worktree.baseWorkspace }).catch(() => null);
+    await fs.rm(worktree.worktree, { recursive: true, force: true }).catch(() => null);
+  }
+  await runCommand("git", ["branch", "-D", worktree.branchName], {
+    cwd: worktree.baseWorkspace
+  }).catch(() => null);
+}
+
+// Best-effort sweep of orphaned worktrees left behind by crashed/killed runs.
+// Prunes git's worktree metadata in every base workspace and removes worktree
+// directories older than maxAgeMs. Intended to run at startup.
+export async function gcStaleWorktrees(maxAgeMs = 6 * 60 * 60 * 1000) {
+  let documentDirs: string[] = [];
+  try {
+    documentDirs = await fs.readdir(WORKSPACE_ROOT);
+  } catch {
+    return; // no workspaces yet
+  }
+
+  const now = Date.now();
+  for (const documentId of documentDirs) {
+    const worktreesDir = path.join(WORKSPACE_ROOT, documentId, "worktrees");
+    let entries: string[] = [];
+    try {
+      entries = await fs.readdir(worktreesDir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(worktreesDir, entry);
+      try {
+        const stat = await fs.stat(fullPath);
+        if (now - stat.mtimeMs > maxAgeMs) {
+          await fs.rm(fullPath, { recursive: true, force: true }).catch(() => null);
+        }
+      } catch {
+        // ignore
+      }
+    }
+    // Reconcile git's worktree list with what's left on disk.
+    const baseDir = path.join(WORKSPACE_ROOT, documentId);
+    let baseEntries: string[] = [];
+    try {
+      baseEntries = await fs.readdir(baseDir);
+    } catch {
+      continue;
+    }
+    for (const repoName of baseEntries) {
+      if (repoName === "worktrees") continue;
+      const candidate = path.join(baseDir, repoName);
+      const hasGit = await fs
+        .stat(path.join(candidate, ".git"))
+        .then(() => true)
+        .catch(() => false);
+      if (hasGit) {
+        await runCommand("git", ["worktree", "prune"], { cwd: candidate }).catch(() => null);
+      }
+    }
+  }
+}
+
 export async function getWorkspaceOverview(workspace: string | null) {
   if (!workspace) {
     return "No repository is linked to this document.";

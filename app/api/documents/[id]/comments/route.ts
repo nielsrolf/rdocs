@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getCurrentUser } from "@/lib/auth";
+import { broadcastDocumentEvent } from "@/lib/collaboration";
+import { documentHasAnchorForThread, parseDocumentContent } from "@/lib/content";
 import { serializeThread } from "@/lib/document-data";
 import { db } from "@/lib/db";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
@@ -11,6 +13,7 @@ const createThreadSchema = z.object({
   body: z.string().min(1).max(4000),
   anchorText: z.string().min(1).max(1000),
   anchorContext: z.string().max(2000).optional().nullable(),
+  clientId: z.string().min(1).max(120).optional().nullable(),
   shareToken: z.string().optional().nullable()
 });
 
@@ -21,9 +24,11 @@ type RouteContext = {
 };
 
 export async function POST(request: Request, { params }: RouteContext) {
+  const startedAt = Date.now();
   const { id } = await params;
   const user = await getCurrentUser();
   if (!user) {
+    console.warn("[comment-create] unauthenticated", { documentId: id });
     return NextResponse.json({ error: "You must be signed in to comment." }, { status: 401 });
   }
 
@@ -35,15 +40,38 @@ export async function POST(request: Request, { params }: RouteContext) {
       code: issue.code,
       message: issue.message
     }));
-    console.warn("[comments] invalid payload", { documentId: id, issues });
+    console.warn("[comment-create] invalid payload", { documentId: id, userId: user.id, issues });
     return NextResponse.json({ error: "Invalid comment payload.", issues }, { status: 400 });
   }
 
   const access = await resolveDocumentAccess(id, user.id, parsed.data.shareToken ?? null);
   if (!access || !canComment(access.permission)) {
+    console.warn("[comment-create] forbidden", { documentId: id, userId: user.id, hasAccess: !!access, permission: access?.permission ?? null });
     return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
   }
 
+  // Refuse to create an orphan: the client is expected to push the
+  // commentAnchor step before POSTing the thread. If the anchor isn't on the
+  // server's current doc yet, the client must wait for its collab flush to
+  // succeed and retry. Without this, a transient "Save failed" between the
+  // step push and this POST leaves a thread row with no anchor mark and the
+  // comment becomes invisible in the editor.
+  if (parsed.data.threadId) {
+    const docContent = parseDocumentContent(access.document.content);
+    if (!documentHasAnchorForThread(docContent, parsed.data.threadId)) {
+      console.warn("[comment-create] anchor missing", {
+        documentId: id,
+        userId: user.id,
+        threadId: parsed.data.threadId
+      });
+      return NextResponse.json(
+        { error: "Anchor not yet saved. Please retry in a moment." },
+        { status: 409 }
+      );
+    }
+  }
+
+  try {
   const thread = await db.commentThread.create({
     data: {
       id: parsed.data.threadId,
@@ -109,8 +137,36 @@ export async function POST(request: Request, { params }: RouteContext) {
     }
   });
 
-  return NextResponse.json({
-    thread: serializeThread(thread, { lastReadAt: now }),
-    updatedAt: updated?.updatedAt ?? null
-  });
+    const serialized = serializeThread(thread, { lastReadAt: now });
+    broadcastDocumentEvent(
+      id,
+      "thread-created",
+      { thread: serialized, updatedAt: updated?.updatedAt ?? null },
+      parsed.data.clientId ?? null
+    );
+
+    console.log("[comment-create]", {
+      documentId: id,
+      userId: user.id,
+      threadId: thread.id,
+      anchorBytes: parsed.data.anchorText.length,
+      bodyBytes: parsed.data.body.length,
+      elapsedMs: Date.now() - startedAt
+    });
+
+    return NextResponse.json({
+      thread: serialized,
+      updatedAt: updated?.updatedAt ?? null
+    });
+  } catch (error) {
+    console.error("[comment-create] failed", {
+      documentId: id,
+      userId: user.id,
+      requestedThreadId: parsed.data.threadId ?? null,
+      bodyBytes: parsed.data.body.length,
+      elapsedMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : error
+    });
+    return NextResponse.json({ error: "Failed to save comment." }, { status: 500 });
+  }
 }

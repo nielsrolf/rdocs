@@ -431,37 +431,8 @@ function TabRow({
 
   return (
     <div className={`doc-tab-row ${isActive ? "doc-tab-row-active" : ""}`}>
-      {editing ? (
-        <input
-          autoFocus
-          className="doc-tab-rename-input"
-          onBlur={commitRename}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              commitRename();
-            } else if (event.key === "Escape") {
-              setEditing(false);
-            }
-          }}
-          value={draft}
-        />
-      ) : (
-        <button
-          className="doc-tab-button"
-          onClick={onSelect}
-          onDoubleClick={() => {
-            if (canEdit) startRename();
-          }}
-          title={tab.title}
-          type="button"
-        >
-          <span className="doc-tab-title">{tab.title}</span>
-        </button>
-      )}
       {canEdit && !editing ? (
-        <span className="doc-tab-actions">
+        <div className="doc-tab-actions">
           <button
             aria-label="Move tab up"
             className="doc-tab-action"
@@ -500,8 +471,37 @@ function TabRow({
           >
             ✕
           </button>
-        </span>
+        </div>
       ) : null}
+      {editing ? (
+        <input
+          autoFocus
+          className="doc-tab-rename-input"
+          onBlur={commitRename}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commitRename();
+            } else if (event.key === "Escape") {
+              setEditing(false);
+            }
+          }}
+          value={draft}
+        />
+      ) : (
+        <button
+          className="doc-tab-button"
+          onClick={onSelect}
+          onDoubleClick={() => {
+            if (canEdit) startRename();
+          }}
+          title={tab.title}
+          type="button"
+        >
+          <span className="doc-tab-title">{tab.title}</span>
+        </button>
+      )}
     </div>
   );
 }

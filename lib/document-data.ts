@@ -236,7 +236,7 @@ export async function maybeCreateVersionSnapshot(input: {
     return;
   }
 
-  const latestVersion = await db.documentVersion.findFirst({
+  let latestVersion = await db.documentVersion.findFirst({
     where: {
       documentId: input.documentId
     },
@@ -249,6 +249,35 @@ export async function maybeCreateVersionSnapshot(input: {
       content: true
     }
   });
+
+  // Always archive the previous remote state if it isn't already the latest
+  // version. This is the safety net for overwrites and server-side rebases:
+  // every unique pre-overwrite state stays recoverable from the version
+  // history, regardless of cooldown.
+  const previousIsArchived =
+    !!latestVersion &&
+    latestVersion.title === input.currentTitle &&
+    latestVersion.content === input.currentContent;
+
+  if (!previousIsArchived) {
+    await db.documentVersion.create({
+      data: {
+        documentId: input.documentId,
+        title: input.currentTitle,
+        content: input.currentContent,
+        sourceLinks: serializeSourceLinks([]),
+        commitSha: null,
+        commitUrl: null,
+        aiRunId: null
+      }
+    });
+
+    latestVersion = await db.documentVersion.findFirst({
+      where: { documentId: input.documentId },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true, title: true, content: true }
+    });
+  }
 
   const withinCooldown =
     latestVersion &&

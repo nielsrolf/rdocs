@@ -84,6 +84,7 @@ import {
   type MemberView,
   type SelectionPopoverMode,
   type SelectionState,
+  type CommentView,
   type ShareLinkView,
   type ThreadView,
   type VersionView,
@@ -240,13 +241,18 @@ export function DocumentWorkspace({
   const typingClearTimerRef = useRef<number | null>(null);
   const isApplyingRemoteUpdateRef = useRef(false);
   const hasUnsavedChangesRef = useRef(false);
-  const pendingVersionSourcesRef = useRef<string[]>([]);
-  const pendingCommitRef = useRef<{ commitSha: string | null; commitUrl: string | null; aiRunId: string | null }>({
-    commitSha: null,
-    commitUrl: null,
-    aiRunId: null
-  });
-  const forceVersionRef = useRef(false);
+  // One-shot version metadata attached to the NEXT collaboration step push.
+  // The AI-edit apply path sets this and then flushes so the agent's
+  // commit/sources/run id land on the post-edit version, without a separate
+  // full-content PATCH (which would write Document.content out-of-band and
+  // desync the live collaboration room).
+  const pendingCollabVersionMetaRef = useRef<{
+    forceVersion?: boolean;
+    sourceLinks?: string[];
+    commitSha?: string | null;
+    commitUrl?: string | null;
+    aiRunId?: string | null;
+  } | null>(null);
   const titleRef = useRef(initialTitle);
   const documentUpdatedAtRef = useRef(initialDocumentUpdatedAt);
   const replyDraftsRef = useRef<Record<string, string>>({});
@@ -537,6 +543,10 @@ export function DocumentWorkspace({
     collaborationPushBusyRef.current = true;
     collaborationPushQueuedRef.current = false;
 
+    // Attach any one-shot AI-edit version metadata to this push. Kept until the
+    // push is accepted (a 409 rebase + re-flush must still carry it).
+    const versionMeta = pendingCollabVersionMetaRef.current;
+
     try {
       const response = await fetch(`/api/documents/${documentId}/collaboration`, {
         method: "POST",
@@ -547,7 +557,8 @@ export function DocumentWorkspace({
           version: sendable.version,
           steps: sendable.steps.map((step) => step.toJSON()),
           clientId: collabClientIdRef.current,
-          shareToken
+          shareToken,
+          ...(versionMeta ? { versionMeta } : {})
         })
       });
       const data = (await response.json().catch(() => null)) as
@@ -567,12 +578,40 @@ export function DocumentWorkspace({
             serverError: typeof data?.error === "string" ? data.error : null
           }
         });
-        // Don't loop: leave the sendable steps in place and let the next user
-        // action or a manual pull retry. Looping causes us to hammer the server
-        // and stall awaiting callers (e.g. the AI-edit save path).
+
+        // A 409 with missing steps is the protocol's "you're stale, here's
+        // what you missed" reply. Apply those steps locally — receiveTransaction
+        // rebases our sendable over them — and queue a re-flush so the rebased
+        // steps push immediately. Without this, the tab stays stuck on
+        // "Save failed" until the user edits again.
+        if (response.status === 409 && data && Array.isArray(data.steps) && Array.isArray(data.clientIds)) {
+          if (applyCollaborationPayload(data)) {
+            collaborationPushQueuedRef.current = true;
+            setSaveState(sendableSteps(editor.state) ? "saving" : "saved");
+            return;
+          }
+        }
+
+        // A 422 means the server could not apply our steps at all (corrupt step
+        // or client/server schema mismatch). Retrying sends the same bad steps
+        // and fails identically, so do NOT queue a re-flush — surface a refresh
+        // prompt and stop. (Distinct from 409, which IS retryable.)
+        if (response.status === 422) {
+          collaborationPushQueuedRef.current = false;
+          setRemoteNotice("Live collaboration lost sync. Refresh this document to reconnect.");
+          setSaveState("error");
+          return;
+        }
+
         setSaveState("error");
         void pullCollaborationSteps();
         return;
+      }
+
+      // Push accepted — the version metadata (if any) was consumed by this
+      // commit, so don't re-attach it to subsequent pushes.
+      if (versionMeta && pendingCollabVersionMetaRef.current === versionMeta) {
+        pendingCollabVersionMetaRef.current = null;
       }
 
       if (!applyCollaborationPayload(data)) {
@@ -677,68 +716,6 @@ export function DocumentWorkspace({
       presenceTimerRef.current = null;
       postPresence();
     }, 120);
-  }
-
-  async function saveDocument(
-    nextContent: JSONContent,
-    metadata?: {
-      sourceLinks?: string[];
-      commitSha?: string | null;
-      commitUrl?: string | null;
-      aiRunId?: string | null;
-      forceVersion?: boolean;
-    }
-  ) {
-    const normalizedContent = normalizeWidgetsOutsideTables(nextContent).content;
-    const response = await fetch(`/api/documents/${documentId}`, {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        title: titleRef.current,
-        content: normalizedContent,
-        shareToken,
-        forceVersion: metadata?.forceVersion ?? forceVersionRef.current,
-        sourceLinks: metadata?.sourceLinks ?? pendingVersionSourcesRef.current,
-        commitSha: metadata?.commitSha ?? pendingCommitRef.current.commitSha,
-        commitUrl: metadata?.commitUrl ?? pendingCommitRef.current.commitUrl,
-        aiRunId: metadata?.aiRunId ?? pendingCommitRef.current.aiRunId
-      })
-    });
-
-    const data = await response.json().catch(() => null);
-    const saved = response.ok && typeof data?.updatedAt === "string";
-
-    if (saved) {
-      hasUnsavedChangesRef.current = false;
-      forceVersionRef.current = false;
-      pendingVersionSourcesRef.current = [];
-      pendingCommitRef.current = { commitSha: null, commitUrl: null, aiRunId: null };
-      setDocumentUpdatedAt(data.updatedAt);
-      setRemoteNotice(null);
-      if (historyOpen) {
-        void loadVersionHistory();
-      }
-    } else {
-      logClientEvent({
-        scope: "save-document",
-        level: "error",
-        message: "PATCH /api/documents/:id did not save",
-        data: {
-          documentId,
-          status: response.status,
-          ok: response.ok,
-          updatedAtType: typeof data?.updatedAt,
-          serverError: typeof data?.error === "string" ? data.error : null,
-          forceVersion: metadata?.forceVersion ?? forceVersionRef.current,
-          aiRunId: metadata?.aiRunId ?? pendingCommitRef.current.aiRunId
-        }
-      });
-    }
-
-    setSaveState(saved ? "saved" : "error");
-    return saved;
   }
 
   function normalizeCurrentEditorWidgets() {
@@ -1179,6 +1156,68 @@ export function DocumentWorkspace({
       applyCollaborationPayload(payload);
     });
 
+    // Live thread sync — server broadcasts comment-create/reply/update/delete
+    // so collaborators see new comments without reloading.
+    stream.addEventListener("thread-created", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data) as {
+        thread: ThreadView;
+        updatedAt?: string | null;
+      };
+      if (!payload?.thread?.id) return;
+      setThreads((current) =>
+        current.some((t) => t.id === payload.thread.id) ? current : [payload.thread, ...current]
+      );
+      if (typeof payload.updatedAt === "string") {
+        setDocumentUpdatedAt(payload.updatedAt);
+      }
+    });
+
+    stream.addEventListener("thread-updated", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data) as { thread: ThreadView };
+      if (!payload?.thread?.id) return;
+      setThreads((current) =>
+        current.map((t) => (t.id === payload.thread.id ? { ...t, ...payload.thread } : t))
+      );
+    });
+
+    stream.addEventListener("thread-deleted", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data) as { threadId: string };
+      if (!payload?.threadId) return;
+      setThreads((current) => current.filter((t) => t.id !== payload.threadId));
+    });
+
+    stream.addEventListener("comment-created", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data) as {
+        threadId: string;
+        comment: CommentView;
+      };
+      if (!payload?.threadId || !payload?.comment?.id) return;
+      setThreads((current) =>
+        current.map((t) =>
+          t.id === payload.threadId
+            ? t.comments.some((c) => c.id === payload.comment.id)
+              ? t
+              : { ...t, comments: [...t.comments, payload.comment] }
+            : t
+        )
+      );
+    });
+
+    stream.addEventListener("comment-deleted", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data) as {
+        threadId: string;
+        commentId: string;
+      };
+      if (!payload?.threadId || !payload?.commentId) return;
+      setThreads((current) =>
+        current.map((t) =>
+          t.id === payload.threadId
+            ? { ...t, comments: t.comments.filter((c) => c.id !== payload.commentId) }
+            : t
+        )
+      );
+    });
+
     const handlePresence = (event: Event) => {
       const payload = JSON.parse((event as MessageEvent).data) as { presence?: RemotePresenceView[] };
       const nextPresence = Array.isArray(payload.presence) ? payload.presence : [];
@@ -1532,6 +1571,7 @@ export function DocumentWorkspace({
         body: composerBody.trim(),
         anchorText: selectedRange.text.slice(0, 1000),
         anchorContext: selectedRange.context ? selectedRange.context.slice(0, 2000) : selectedRange.context,
+        clientId: collabClientIdRef.current,
         shareToken
       })
     });
@@ -1786,30 +1826,34 @@ export function DocumentWorkspace({
         window.clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
       }
-      await flushCollaborationSteps();
-      contentToSave = editor.getJSON();
-      const saved = await saveDocument(contentToSave, {
+      // Persist the AI edit through the collaboration step pipeline ONLY. The
+      // insertContentAt above produced local steps; flushing them is what writes
+      // the new content + step log atomically and broadcasts to other clients.
+      // We attach the agent's commit/source/run metadata to that same push so it
+      // lands on the post-edit version. (Previously this path also did a direct
+      // full-content PATCH via saveDocument, which wrote Document.content
+      // out-of-band, desynced the collab room, and was the root cause of
+      // post-AI-edit doc divergence / marker loss.)
+      pendingCollabVersionMetaRef.current = {
+        forceVersion: true,
         sourceLinks: sources,
         commitSha,
         commitUrl,
-        aiRunId,
-        forceVersion: true
-      });
-      if (!saved) {
-        reportClientError(
-          "AI edit could not be saved to the server. Your local document still shows the change.",
-          "ai-edit-save-failed",
-          {
-            documentId,
-            selectionId,
-            aiRunId,
-            docSizeBefore,
-            docSizeAfter,
-            replacementTextLen: replacementText.length,
-            imageCount: images.length,
-            widgetCount: widgets.length
-          }
-        );
+        aiRunId
+      };
+      contentToSave = editor.getJSON();
+      await flushCollaborationSteps();
+      if (pendingCollabVersionMetaRef.current) {
+        // Flush had nothing to send (no sendable steps) or did not get accepted,
+        // so the metadata was not consumed. Clear it so it can't leak onto an
+        // unrelated later push, and log for diagnosis.
+        pendingCollabVersionMetaRef.current = null;
+        logClientEvent({
+          scope: "ai-edit-save-failed",
+          level: "warn",
+          message: "AI edit flush did not consume version metadata",
+          data: { documentId, selectionId, aiRunId, docSizeBefore, docSizeAfter }
+        });
       }
     } catch (error) {
       reportClientError("AI edit could not be applied to the document.", "ai-edit-apply-threw", {
@@ -1882,6 +1926,7 @@ export function DocumentWorkspace({
       },
       body: JSON.stringify({
         body: draft,
+        clientId: collabClientIdRef.current,
         shareToken
       })
     });
@@ -1994,6 +2039,7 @@ export function DocumentWorkspace({
       body: JSON.stringify({
         tags,
         status,
+        clientId: collabClientIdRef.current,
         shareToken
       })
     });
@@ -2246,6 +2292,7 @@ export function DocumentWorkspace({
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
+        clientId: collabClientIdRef.current,
         shareToken
       })
     });

@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { recordAiRunEvent } from "@/lib/ai-runs";
 import { getCurrentUser } from "@/lib/auth";
+import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { serializeComment } from "@/lib/document-data";
 import { runClaudeResearchAgent } from "@/lib/ai";
 import {
@@ -13,8 +14,14 @@ import {
 } from "@/lib/content";
 import { db } from "@/lib/db";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
+import { rateLimit } from "@/lib/rate-limit";
 import { normalizeSourceLinks, serializeSourceLinks } from "@/lib/sources";
-import { commitWorkspaceChanges, ensureLinkedRepositoryWorktree, getWorkspaceOverview } from "@/lib/research-workspace";
+import {
+  commitWorkspaceChanges,
+  ensureLinkedRepositoryWorktree,
+  getWorkspaceOverview,
+  removeRunWorktree
+} from "@/lib/research-workspace";
 
 export const runtime = "nodejs";
 
@@ -84,6 +91,16 @@ export async function POST(request: Request, { params }: RouteContext) {
   );
   if (!access || !canComment(access.permission)) {
     return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
+  }
+
+  // Agent runs are expensive; cap how many a single user can kick off per minute
+  // to prevent cost-amplification / DoS.
+  const runLimit = rateLimit(`ai-run:user:${user.id}`, 10, 60_000);
+  if (!runLimit.allowed) {
+    return NextResponse.json(
+      { error: "You're starting AI runs too quickly. Try again shortly." },
+      { status: 429, headers: { "Retry-After": String(runLimit.retryAfterSeconds) } }
+    );
   }
 
   let aiRunId: string | null = null;
@@ -256,7 +273,13 @@ export async function POST(request: Request, { params }: RouteContext) {
       message: aiReply.summary || "Finished AI comment reply."
     });
 
-    return NextResponse.json({ comment: serializeComment(comment) });
+    const serialized = serializeComment(comment);
+    broadcastDocumentEvent(thread.documentId, "comment-created", {
+      threadId: thread.id,
+      comment: serialized
+    });
+
+    return NextResponse.json({ comment: serialized });
   } catch (error) {
     if (linkedRepo) {
       await commitWorkspaceChanges({
@@ -303,5 +326,9 @@ export async function POST(request: Request, { params }: RouteContext) {
       },
       { status: 500 }
     );
+  } finally {
+    if (linkedRepo && linkedRepo.baseWorkspace !== linkedRepo.worktree) {
+      await removeRunWorktree(linkedRepo).catch(() => null);
+    }
   }
 }

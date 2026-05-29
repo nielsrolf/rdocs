@@ -10,7 +10,19 @@ export const runtime = "nodejs";
 
 const repositorySchema = z.object({
   repoUrl: z.string().trim().max(500).optional().nullable(),
-  repoBranch: z.string().trim().max(120).optional().nullable()
+  repoBranch: z
+    .string()
+    .trim()
+    .max(120)
+    // Restrict to a git-ref-safe charset and forbid a leading dash so the value
+    // can never be interpreted as an option by the git commands it flows into
+    // (clone --branch, worktree add origin/<branch>). Empty string clears it.
+    .refine(
+      (v) => v === "" || /^[A-Za-z0-9._/][A-Za-z0-9._/-]*$/.test(v),
+      "Branch name contains unsupported characters."
+    )
+    .optional()
+    .nullable()
 });
 
 type RouteContext = {

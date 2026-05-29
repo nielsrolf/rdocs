@@ -4,7 +4,24 @@ A Next.js (App Router) + Prisma/SQLite + TipTap app that runs the Claude Agent S
 
 ## Running the app
 
-The user launches the service via `./gdocs-ai.sh`, which loads `.env`, runs `npm ci`, `prisma generate`, `prisma db push`, `npm run build`, and finally `npm run start` on port `14141`. Do not start the dev server yourself — assume the service is already running. If you need a restart, ask the user to do it.
+The service runs via `./gdocs-ai.sh`, which loads `.env`, runs `npm ci`, `prisma generate`, `prisma db push`, `npm run build`, and finally `npm run start` on port `14141`. The currently running PID is stored in `.service.pid`.
+
+You are allowed to manage the service yourself when debugging — restart it whenever a server-side change needs to be live. The standard restart recipe:
+
+```bash
+# 1. Stop the running instance, if any.
+if [ -s .service.pid ]; then kill "$(cat .service.pid)" 2>/dev/null || true; fi
+
+# 2. Start a fresh build+run in the background, capturing logs and PID.
+LOG="logs/service_$(date +%Y%m%d_%H%M%S).log"
+nohup ./gdocs-ai.sh > "$LOG" 2>&1 &
+echo $! > .service.pid
+
+# 3. Wait for "Ready in" before exercising the API.
+until grep -q "Ready in" "$LOG" 2>/dev/null; do sleep 2; done
+```
+
+The `npm ci` + `npm run build` step typically takes 30–90 seconds, so run the restart in the background (or via Bash `run_in_background`) and poll/monitor the log for `Ready in`. Do not start the dev server (`npm run dev`); production `npm run start` is what the deploy uses.
 
 - Public URL: `https://docs.nielsrolf.com`
 - Local: `http://localhost:14141`

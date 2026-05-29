@@ -27,17 +27,29 @@ type RouteContext = {
 };
 
 export async function PATCH(request: Request, { params }: RouteContext) {
+  const startedAt = Date.now();
   const { id } = await params;
   const user = await getCurrentUser();
   const body = await request.json().catch(() => null);
   const parsed = updateDocumentSchema.safeParse(body);
 
   if (!parsed.success) {
+    console.warn("[doc-patch] invalid payload", {
+      documentId: id,
+      userId: user?.id ?? null,
+      issues: parsed.error.issues.map((issue) => issue.path.join(".") + ":" + issue.code)
+    });
     return NextResponse.json({ error: "Invalid document update payload." }, { status: 400 });
   }
 
   const access = await resolveDocumentAccess(id, user?.id, parsed.data.shareToken ?? null);
   if (!access || !canEdit(access.permission)) {
+    console.warn("[doc-patch] forbidden", {
+      documentId: id,
+      userId: user?.id ?? null,
+      hasAccess: !!access,
+      permission: access?.permission ?? null
+    });
     return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
   }
 
@@ -46,34 +58,77 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   const nextContent = hasContentUpdate
     ? serializeDocumentContent(parsed.data.content)
     : access.document.content;
+  const titleChanged = nextTitle !== access.document.title;
+  const contentChanged = hasContentUpdate && nextContent !== access.document.content;
 
-  if (hasContentUpdate || nextTitle !== access.document.title || parsed.data.forceVersion) {
-    await maybeCreateVersionSnapshot({
+  // Document content is now persisted exclusively through the collaboration
+  // step pipeline (POST /collaboration). A direct content write here bypasses
+  // the step log and the in-memory room, desyncing every connected client — the
+  // historical root cause of post-AI-edit divergence. No client should send
+  // `content` to this route anymore; warn loudly if one does so we can find it.
+  if (hasContentUpdate) {
+    console.warn("[doc-patch] direct content write bypasses collaboration pipeline", {
       documentId: id,
-      currentTitle: access.document.title,
-      currentContent: access.document.content,
-      nextTitle,
-      nextContent,
-      force: parsed.data.forceVersion,
-      sourceLinks: normalizeSourceLinks(parsed.data.sourceLinks ?? []),
-      commitSha: parsed.data.commitSha ?? null,
-      commitUrl: parsed.data.commitUrl ?? null,
-      aiRunId: parsed.data.aiRunId ?? null
+      userId: user?.id ?? null,
+      contentChanged
     });
   }
 
-  const updated = await db.document.update({
-    where: { id },
-    data: {
-      title: nextTitle,
-      ...(hasContentUpdate ? { content: nextContent } : {})
-    },
-    select: {
-      updatedAt: true
+  try {
+    if (hasContentUpdate || titleChanged || parsed.data.forceVersion) {
+      await maybeCreateVersionSnapshot({
+        documentId: id,
+        currentTitle: access.document.title,
+        currentContent: access.document.content,
+        nextTitle,
+        nextContent,
+        force: parsed.data.forceVersion,
+        sourceLinks: normalizeSourceLinks(parsed.data.sourceLinks ?? []),
+        commitSha: parsed.data.commitSha ?? null,
+        commitUrl: parsed.data.commitUrl ?? null,
+        aiRunId: parsed.data.aiRunId ?? null
+      });
     }
-  });
 
-  return NextResponse.json({ ok: true, updatedAt: updated.updatedAt });
+    const updated = await db.document.update({
+      where: { id },
+      data: {
+        title: nextTitle,
+        ...(hasContentUpdate ? { content: nextContent } : {})
+      },
+      select: {
+        updatedAt: true
+      }
+    });
+
+    console.log("[doc-patch]", {
+      documentId: id,
+      userId: user?.id ?? null,
+      titleChanged,
+      contentChanged,
+      hasContentUpdate,
+      previousBytes: access.document.content.length,
+      nextBytes: nextContent.length,
+      forceVersion: parsed.data.forceVersion ?? false,
+      aiRunId: parsed.data.aiRunId ?? null,
+      commitSha: parsed.data.commitSha ?? null,
+      elapsedMs: Date.now() - startedAt
+    });
+
+    return NextResponse.json({ ok: true, updatedAt: updated.updatedAt });
+  } catch (error) {
+    console.error("[doc-patch] failed", {
+      documentId: id,
+      userId: user?.id ?? null,
+      titleChanged,
+      contentChanged,
+      previousBytes: access.document.content.length,
+      nextBytes: nextContent.length,
+      elapsedMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : error
+    });
+    return NextResponse.json({ error: "Failed to save document." }, { status: 500 });
+  }
 }
 
 export async function DELETE(_request: Request, { params }: RouteContext) {
@@ -85,13 +140,16 @@ export async function DELETE(_request: Request, { params }: RouteContext) {
 
   const document = await db.document.findUnique({ where: { id }, select: { ownerId: true } });
   if (!document) {
+    console.warn("[doc-delete] not found", { documentId: id, userId: user.id });
     return NextResponse.json({ error: "Document not found." }, { status: 404 });
   }
   if (document.ownerId !== user.id) {
+    console.warn("[doc-delete] forbidden", { documentId: id, userId: user.id, ownerId: document.ownerId });
     return NextResponse.json({ error: "Only the owner can delete this document." }, { status: 403 });
   }
 
   await db.document.delete({ where: { id } });
+  console.log("[doc-delete]", { documentId: id, userId: user.id });
   return NextResponse.json({ ok: true });
 }
 

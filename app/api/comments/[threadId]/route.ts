@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getCurrentUser } from "@/lib/auth";
+import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { normalizeThreadTags, serializeThread } from "@/lib/document-data";
 import { db } from "@/lib/db";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
@@ -9,6 +10,7 @@ import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 const updateThreadSchema = z.object({
   tags: z.array(z.string().min(1).max(48)).max(20).optional(),
   status: z.enum(["OPEN", "RESOLVED"]).optional(),
+  clientId: z.string().min(1).max(120).optional().nullable(),
   shareToken: z.string().optional().nullable()
 });
 
@@ -19,15 +21,18 @@ type RouteContext = {
 };
 
 export async function PATCH(request: Request, { params }: RouteContext) {
+  const startedAt = Date.now();
   const { threadId } = await params;
   const user = await getCurrentUser();
   if (!user) {
+    console.warn("[thread-update] unauthenticated", { threadId });
     return NextResponse.json({ error: "You must be signed in to update comments." }, { status: 401 });
   }
 
   const body = await request.json().catch(() => null);
   const parsed = updateThreadSchema.safeParse(body);
   if (!parsed.success) {
+    console.warn("[thread-update] invalid payload", { threadId, userId: user.id, issues: parsed.error.issues.map((i) => i.path.join(".") + ":" + i.code) });
     return NextResponse.json({ error: "Invalid thread update payload." }, { status: 400 });
   }
 
@@ -39,11 +44,13 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   });
 
   if (!existing) {
+    console.warn("[thread-update] not found", { threadId, userId: user.id });
     return NextResponse.json({ error: "Thread not found." }, { status: 404 });
   }
 
   const access = await resolveDocumentAccess(existing.documentId, user.id, parsed.data.shareToken ?? null);
   if (!access || !canComment(access.permission)) {
+    console.warn("[thread-update] forbidden", { threadId, documentId: existing.documentId, userId: user.id, permission: access?.permission ?? null });
     return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
   }
 
@@ -100,5 +107,22 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     }
   });
 
-  return NextResponse.json({ thread: serializeThread(thread) });
+  const serialized = serializeThread(thread);
+  broadcastDocumentEvent(
+    existing.documentId,
+    "thread-updated",
+    { thread: serialized },
+    parsed.data.clientId ?? null
+  );
+
+  console.log("[thread-update]", {
+    threadId,
+    documentId: existing.documentId,
+    userId: user.id,
+    status,
+    tagCount: nextTags.length,
+    elapsedMs: Date.now() - startedAt
+  });
+
+  return NextResponse.json({ thread: serialized });
 }

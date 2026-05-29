@@ -1275,6 +1275,111 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.dashboard-list {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.dashboard-toolbar {
+  max-width: 1200px;
+  margin: 0 auto 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dashboard-search-input {
+  flex: 1 1 280px;
+  max-width: 420px;
+  padding: 0.65rem 0.9rem;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.85);
+  font-size: 0.95rem;
+}
+
+.dashboard-search-input:focus {
+  outline: 2px solid rgba(26, 115, 232, 0.4);
+  outline-offset: 1px;
+}
+
+.dashboard-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.dashboard-sort select {
+  padding: 0.5rem 0.7rem;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.85);
+  font-size: 0.9rem;
+  color: inherit;
+}
+
+.doc-row-unified {
+  padding: 0;
+  align-items: stretch;
+}
+
+.doc-row-unified .doc-row-main {
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.95rem 1rem;
+  text-decoration: none;
+  color: inherit;
+  min-width: 0;
+}
+
+.doc-row-unified .doc-row-text {
+  min-width: 0;
+}
+
+.doc-row-meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.doc-row-owner {
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.doc-row-aside {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+}
+
+.doc-row-has-unread {
+  border-color: rgba(26, 115, 232, 0.45);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.unread-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  border-radius: 999px;
+  padding: 0.22rem 0.65rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: var(--accent);
+  color: #fff;
+}
+
 .surface-card {
   border-radius: 24px;
   padding: 1.2rem;
@@ -1879,10 +1984,14 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
 
 .doc-tab-row {
   display: flex;
+  flex-direction: row;
   align-items: center;
   gap: 2px;
   padding: 0 0.2rem;
   border-radius: 4px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .doc-tab-row-active {
@@ -1890,8 +1999,9 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
 }
 
 .doc-tab-button {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
+  overflow: hidden;
   text-align: left;
   background: transparent;
   border: none;
@@ -1920,6 +2030,8 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .doc-tab-rename-input {
@@ -1932,13 +2044,17 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
 }
 
 .doc-tab-actions {
-  display: none;
+  display: inline-flex;
+  flex-shrink: 0;
   gap: 2px;
+  opacity: 0.55;
+  transition: opacity 120ms ease;
 }
 
 .doc-tab-row:hover .doc-tab-actions,
-.doc-tab-row-active .doc-tab-actions {
-  display: inline-flex;
+.doc-tab-row-active .doc-tab-actions,
+.doc-tab-actions:focus-within {
+  opacity: 1;
 }
 
 .doc-tab-action {
