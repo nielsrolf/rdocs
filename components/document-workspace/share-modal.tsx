@@ -2,6 +2,7 @@ import { permissionLevels, type PermissionLevelValue } from "@/lib/contracts";
 import { permissionLabel } from "@/lib/utils";
 
 import type { MemberView, ShareLinkView } from "./types";
+import { useDialogDismiss } from "./use-dialog-dismiss";
 
 export function ShareModal({
   members,
@@ -30,17 +31,21 @@ export function ShareModal({
   onRevokeShareLink: (id: string) => void;
   onClose: () => void;
 }) {
+  const dialogRef = useDialogDismiss<HTMLDivElement>(onClose);
   return (
     <div className="share-modal-backdrop" onClick={onClose} role="presentation">
       <div
+        aria-labelledby="share-modal-title"
         aria-modal="true"
         className="share-modal"
         onClick={(event) => event.stopPropagation()}
+        ref={dialogRef}
         role="dialog"
+        tabIndex={-1}
       >
         <div className="share-modal-header">
           <div>
-            <h2>Share document</h2>
+            <h2 id="share-modal-title">Share document</h2>
             <p>Add collaborators or create permissioned links.</p>
           </div>
           <button className="ghost-button" onClick={onClose} type="button">

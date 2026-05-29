@@ -74,6 +74,29 @@ test("a previous version can be restored", async ({ baseURL, browser }) => {
   }
 });
 
+test("a modal closes on Escape (keyboard accessibility)", async ({ baseURL, browser }) => {
+  if (!baseURL) throw new Error("baseURL is required");
+  const { user, document } = await createDocumentFixture("Body");
+  const context = await browser.newContext();
+  try {
+    await authenticate(context, baseURL, user.id);
+    const page = await context.newPage();
+    await page.goto(`/documents/${document.id}`);
+    await expect(editor(page)).toHaveText("Body");
+
+    await page.locator("summary").filter({ hasText: "File" }).click();
+    await page.getByRole("button", { name: "Version history" }).click();
+    await expect(page.locator(".version-history-modal")).toBeVisible();
+
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".version-history-modal")).toBeHidden();
+
+    await context.close();
+  } finally {
+    await cleanupFixture(user.id, document.id);
+  }
+});
+
 test("a comment can be created and survives a reload", async ({ baseURL, browser }) => {
   if (!baseURL) throw new Error("baseURL is required");
   const { user, document } = await createDocumentFixture("Comment me please");

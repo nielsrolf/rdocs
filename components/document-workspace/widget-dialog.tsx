@@ -1,4 +1,5 @@
 import type { WidgetDraft } from "./types";
+import { useDialogDismiss } from "./use-dialog-dismiss";
 
 export function WidgetDialog({
   busy,
@@ -13,6 +14,11 @@ export function WidgetDialog({
   onChange: (next: WidgetDraft) => void;
   onSubmit: () => void;
 }) {
+  const dialogRef = useDialogDismiss<HTMLFormElement>(() => {
+    if (!busy) {
+      onClose();
+    }
+  });
   return (
     <div
       className="share-modal-backdrop"
@@ -24,6 +30,7 @@ export function WidgetDialog({
       role="presentation"
     >
       <form
+        aria-labelledby="widget-dialog-title"
         aria-modal="true"
         className="widget-config-modal"
         onClick={(event) => event.stopPropagation()}
@@ -31,11 +38,13 @@ export function WidgetDialog({
           event.preventDefault();
           onSubmit();
         }}
+        ref={dialogRef}
         role="dialog"
+        tabIndex={-1}
       >
         <div className="share-modal-header">
           <div>
-            <h2>Insert widget</h2>
+            <h2 id="widget-dialog-title">Insert widget</h2>
             <p>Create an embedded widget from a build command and generated HTML file.</p>
           </div>
           <button

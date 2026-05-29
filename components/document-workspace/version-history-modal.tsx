@@ -2,6 +2,7 @@ import { getSourceLabel } from "@/lib/sources";
 import { formatDateTime } from "@/lib/utils";
 
 import type { VersionView } from "./types";
+import { useDialogDismiss } from "./use-dialog-dismiss";
 
 export function VersionHistoryModal({
   loading,
@@ -22,17 +23,21 @@ export function VersionHistoryModal({
   onSelectVersion: (id: string) => void;
   onRestoreVersion: (id: string) => void;
 }) {
+  const dialogRef = useDialogDismiss<HTMLDivElement>(onClose);
   return (
     <div className="share-modal-backdrop" onClick={onClose} role="presentation">
       <div
+        aria-labelledby="version-history-title"
         aria-modal="true"
         className="version-history-modal"
         onClick={(event) => event.stopPropagation()}
+        ref={dialogRef}
         role="dialog"
+        tabIndex={-1}
       >
         <div className="share-modal-header">
           <div>
-            <h2>Version history</h2>
+            <h2 id="version-history-title">Version history</h2>
             <p>Past snapshots load only when this panel is opened.</p>
           </div>
           <button className="ghost-button" onClick={onClose} type="button">
