@@ -123,6 +123,17 @@ User flow, for context when reading logs:
 
 Every step is now logged. If you change any of them, keep the `scope` strings stable so historical greps still work.
 
+## Bug-fix workflow (required)
+
+When the user reports a bug, **reproduce it first with a new test case that initially fails, then fix it.** Concretely:
+
+1. Write a test that exercises the reported flow and asserts the *correct* behavior. Run it and confirm it **fails** for the reason the user described (a failing test that fails for the wrong reason proves nothing).
+2. Only then make the code change.
+3. Re-run the test and confirm it now **passes**, and that the rest of the suite stays green.
+4. Keep the test — it is the regression guard.
+
+Prefer the cheapest layer that genuinely reproduces the bug: a headless test in `tests/` (real ProseMirror + real SQLite, no browser/LLM) when possible, or the HTTP integration suite (`tests/integration/`, real routes + auth) when the bug needs the request path. See the testable seams already extracted for collab mapping, AI-edit guards, anchor tracking, and widget paths.
+
 ## Conventions
 
 - **Don't bypass the agent submission validator.** If the agent regularly trips a check, prefer to fix the prompt or widen the validator (`validateSubmission` in `route.ts`) rather than removing the guard.
@@ -130,7 +141,7 @@ Every step is now logged. If you change any of them, keep the `scope` strings st
 - **Don't add new `console.log`s on the server without a `[scope]` prefix** — the `logs/` files are searched by prefix.
 - **The `AI agent` running edits writes inside `.research-workspaces/<documentId>/worktrees/...`**, never in the gdocs-ai repo itself. `runClaudeResearchAgentOnce` will throw if no isolated workspace is supplied.
 - **Schema changes** must be mirrored on both the client TipTap schema (`components/document-workspace/nodes.tsx` + `document-workspace.tsx`) and the server schema (`lib/document-editor-schema.ts` + `lib/document-schema-nodes.ts`). The server schema is used to parse and re-render document content out-of-browser.
-- **Tests**: `npm test` runs `tsx --test tests/*.test.ts`; `npm run test:e2e` runs Playwright. Lint with `npx tsc --noEmit -p .` and `npx next lint`.
+- **Tests**: `npm test` runs the headless suite (`tsx --test tests/*.test.ts`); `npm run test:integration` runs the HTTP suite against a running server (`GDOCS_TEST_URL`, default `http://localhost:14141`, skips if unreachable); `npm run test:e2e` runs Playwright. Lint with `npx tsc --noEmit -p .` and `npx next lint`.
 
 ## Things that have caused real failures (so far)
 
