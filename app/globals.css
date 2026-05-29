@@ -1191,6 +1191,13 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   letter-spacing: 0.01em;
 }
 
+.doc-word-count {
+  font-size: 0.78rem;
+  color: var(--muted);
+  padding: 0 0.25rem;
+  white-space: nowrap;
+}
+
 .save-indicator-dot {
   width: 0.45rem;
   height: 0.45rem;

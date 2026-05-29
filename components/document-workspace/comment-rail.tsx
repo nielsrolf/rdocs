@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import { getSourceLabel } from "@/lib/sources";
 import { formatDateTime, truncate } from "@/lib/utils";
 
@@ -21,6 +23,7 @@ export function CommentRail({
   aiBusyThreadId,
   replyBusyThreadId,
   deleteBusyCommentId,
+  editBusyCommentId,
   canWriteComments,
   isOwner,
   currentUserId,
@@ -36,7 +39,8 @@ export function CommentRail({
   onChangeReplyDraft,
   onSubmitReply,
   onAskAi,
-  onDeleteComment
+  onDeleteComment,
+  onEditComment
 }: {
   threads: ThreadView[];
   orderedThreads: ThreadView[];
@@ -48,6 +52,7 @@ export function CommentRail({
   aiBusyThreadId: string | null;
   replyBusyThreadId: string | null;
   deleteBusyCommentId: string | null;
+  editBusyCommentId: string | null;
   canWriteComments: boolean;
   isOwner: boolean;
   currentUserId: string | null;
@@ -64,7 +69,11 @@ export function CommentRail({
   onSubmitReply: (threadId: string) => void;
   onAskAi: (threadId: string) => void;
   onDeleteComment: (commentId: string) => void;
+  onEditComment: (commentId: string, body: string) => void;
 }) {
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+
   return (
     <aside className="comment-rail" style={{ minHeight: railHeight }}>
       {threads.length === 0 ? (
@@ -90,6 +99,9 @@ export function CommentRail({
           const unread = !isActive && isThreadUnread(thread, currentUserId);
           const canDeleteCommentFor = (comment: typeof allComments[number]) =>
             isOwner || comment.author?.id === currentUserId || Boolean(comment.aiModel);
+          // Only the author can edit their own (non-AI) comment.
+          const canEditCommentFor = (comment: typeof allComments[number]) =>
+            canWriteComments && !comment.aiModel && comment.author?.id === currentUserId;
 
           return (
             <article
@@ -114,6 +126,20 @@ export function CommentRail({
                       </div>
                       <div className="comment-bubble-meta">
                         <span>{formatDateTime(comment.createdAt)}</span>
+                        {isActive && editingCommentId !== comment.id && canEditCommentFor(comment) ? (
+                          <button
+                            className="comment-delete-button"
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setEditingCommentId(comment.id);
+                              setEditDraft(comment.body);
+                            }}
+                            type="button"
+                          >
+                            Edit
+                          </button>
+                        ) : null}
                         {isActive && canDeleteCommentFor(comment) ? (
                           <button
                             className="comment-delete-button"
@@ -130,14 +156,45 @@ export function CommentRail({
                         ) : null}
                       </div>
                     </div>
-                    <MarkdownBody
-                      body={comment.body}
-                      className={
-                        isActive
-                          ? "comment-bubble-body markdown-body"
-                          : "comment-bubble-body markdown-body comment-bubble-body-compact"
-                      }
-                    />
+                    {editingCommentId === comment.id ? (
+                      <div className="thread-actions" onMouseDown={(event) => event.stopPropagation()}>
+                        <textarea
+                          autoFocus
+                          onChange={(event) => setEditDraft(event.target.value)}
+                          rows={3}
+                          value={editDraft}
+                        />
+                        <div className="comment-composer-actions">
+                          <button
+                            className="ghost-button"
+                            onClick={() => setEditingCommentId(null)}
+                            type="button"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            className="primary-button"
+                            disabled={editBusyCommentId === comment.id || !editDraft.trim()}
+                            onClick={() => {
+                              onEditComment(comment.id, editDraft.trim());
+                              setEditingCommentId(null);
+                            }}
+                            type="button"
+                          >
+                            {editBusyCommentId === comment.id ? "Saving..." : "Save"}
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <MarkdownBody
+                        body={comment.body}
+                        className={
+                          isActive
+                            ? "comment-bubble-body markdown-body"
+                            : "comment-bubble-body markdown-body comment-bubble-body-compact"
+                        }
+                      />
+                    )}
                     {isActive && comment.aiModel ? (
                       <div className="comment-ai-meta">
                         <span className="subtle-pill">{comment.aiModel}</span>

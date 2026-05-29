@@ -137,6 +137,14 @@ function createPresenceColor(input: string) {
   return colors[hash % colors.length];
 }
 
+function computeDocStats(text: string) {
+  const trimmed = text.trim();
+  return {
+    words: trimmed ? trimmed.split(/\s+/).length : 0,
+    characters: text.length
+  };
+}
+
 export function DocumentWorkspace({
   currentUserId,
   currentUserName,
@@ -171,6 +179,7 @@ export function DocumentWorkspace({
   const [composerBody, setComposerBody] = useState("");
   const [editInstruction, setEditInstruction] = useState("");
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [docStats, setDocStats] = useState<{ words: number; characters: number }>({ words: 0, characters: 0 });
   const [globalError, setGlobalError] = useState<string | null>(null);
   const reportClientError = useCallback(
     (message: string, scope: string, data?: unknown) => {
@@ -212,6 +221,7 @@ export function DocumentWorkspace({
   const [invitePermission, setInvitePermission] = useState<PermissionLevelValue>("COMMENT");
   const [inviteBusy, setInviteBusy] = useState(false);
   const [deleteBusyCommentId, setDeleteBusyCommentId] = useState<string | null>(null);
+  const [editBusyCommentId, setEditBusyCommentId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [formatBarOpen, setFormatBarOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -972,6 +982,7 @@ export function DocumentWorkspace({
       }
 
       setTableControlsActive(editor.isActive("table"));
+      setDocStats(computeDocStats(editor.getText()));
       hasUnsavedChangesRef.current = true;
       setSaveState("saving");
       scheduleCollaborationFlush();
@@ -1222,6 +1233,24 @@ export function DocumentWorkspace({
       );
     });
 
+    stream.addEventListener("comment-updated", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data) as {
+        threadId: string;
+        comment: CommentView;
+      };
+      if (!payload?.threadId || !payload?.comment?.id) return;
+      setThreads((current) =>
+        current.map((t) =>
+          t.id === payload.threadId
+            ? {
+                ...t,
+                comments: t.comments.map((c) => (c.id === payload.comment.id ? payload.comment : c))
+              }
+            : t
+        )
+      );
+    });
+
     stream.addEventListener("comment-deleted", (event) => {
       const payload = JSON.parse((event as MessageEvent).data) as {
         threadId: string;
@@ -1293,6 +1322,30 @@ export function DocumentWorkspace({
       updateThreadOffsets();
     });
   }, [editor, threads, activeThreadId]);
+
+  // Initial word/character count once the editor is ready.
+  useEffect(() => {
+    if (editor) {
+      setDocStats(computeDocStats(editor.getText()));
+    }
+  }, [editor]);
+
+  // Warn before navigating away with unsaved local edits or a pending collab
+  // flush, so a tab close mid-save doesn't silently lose work.
+  useEffect(() => {
+    const handler = (event: BeforeUnloadEvent) => {
+      const pending =
+        hasUnsavedChangesRef.current ||
+        collaborationPushQueuedRef.current ||
+        (editor ? Boolean(sendableSteps(editor.state)) : false);
+      if (pending) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [editor]);
 
   useEffect(() => {
     function handleLayoutChange() {
@@ -2350,6 +2403,44 @@ export function DocumentWorkspace({
     setDeleteBusyCommentId(null);
   }
 
+  async function handleEditComment(commentId: string, nextBody: string) {
+    const trimmed = nextBody.trim();
+    if (!trimmed) return;
+    setEditBusyCommentId(commentId);
+    setGlobalError(null);
+
+    const response = await fetch(`/api/comments/comment/${commentId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body: trimmed, clientId: collabClientIdRef.current, shareToken })
+    });
+    const data = await response.json().catch(() => null);
+
+    if (!response.ok || !data?.comment) {
+      reportClientError(data?.error ?? "Unable to edit comment.", "comment-edit", {
+        documentId,
+        status: response.status,
+        serverError: typeof data?.error === "string" ? data.error : null
+      });
+      setEditBusyCommentId(null);
+      return;
+    }
+
+    setThreads((current) =>
+      current.map((thread) =>
+        thread.comments.some((comment) => comment.id === data.comment.id)
+          ? {
+              ...thread,
+              comments: thread.comments.map((comment) =>
+                comment.id === data.comment.id ? data.comment : comment
+              )
+            }
+          : thread
+      )
+    );
+    setEditBusyCommentId(null);
+  }
+
   const availableCommentTags = useMemo(() => {
     const tags = new Map<string, string>();
     DEFAULT_COMMENT_TAGS.forEach((tag) => tags.set(tag.toLowerCase(), tag));
@@ -2635,7 +2726,7 @@ export function DocumentWorkspace({
           </div>
 
           <div className="document-compact-status">
-            <span className="save-indicator" data-state={saveState}>
+            <span className="save-indicator" data-state={saveState} role="status" aria-live="polite">
               <span className="save-indicator-dot" aria-hidden="true" />
               {saveState === "saving"
                 ? "Saving"
@@ -2645,7 +2736,20 @@ export function DocumentWorkspace({
                     ? "Save failed"
                     : "Ready"}
             </span>
+            <span className="doc-word-count" title={`${docStats.characters} characters`}>
+              {docStats.words} {docStats.words === 1 ? "word" : "words"}
+            </span>
           </div>
+
+          <a
+            className="ghost-button header-toggle-button"
+            href={`/api/documents/${documentId}/export${
+              shareToken ? `?share=${encodeURIComponent(shareToken)}` : ""
+            }`}
+            download
+          >
+            Export
+          </a>
 
           <FileMenu currentDocumentId={documentId} onOpenVersionHistory={() => setHistoryOpen(true)} />
 
@@ -2946,6 +3050,7 @@ export function DocumentWorkspace({
           aiBusyThreadId={aiBusyThreadId}
           replyBusyThreadId={replyBusyThreadId}
           deleteBusyCommentId={deleteBusyCommentId}
+          editBusyCommentId={editBusyCommentId}
           canWriteComments={canWriteComments}
           isOwner={isOwner}
           currentUserId={currentUserId}
@@ -2968,6 +3073,7 @@ export function DocumentWorkspace({
           onSubmitReply={handleReply}
           onAskAi={handleAskAi}
           onDeleteComment={(commentId) => void handleDeleteComment(commentId)}
+          onEditComment={(commentId, commentBody) => void handleEditComment(commentId, commentBody)}
         />
         )}
       </div>

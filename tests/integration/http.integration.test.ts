@@ -211,3 +211,52 @@ itLive("ai-edit rejects unauthenticated and invalid requests without running the
   });
   assert.ok(noauth.status === 401 || noauth.status === 403, `expected 401/403, got ${noauth.status}`);
 });
+
+itLive("exports the document as Markdown with a download filename", async () => {
+  const cookie = await signUp();
+  const docId = await createDocument(cookie);
+  await authed(cookie, `/api/documents/${docId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title: "My Export Doc" })
+  });
+
+  const res = await authed(cookie, `/api/documents/${docId}/export`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") ?? "", /text\/markdown/);
+  assert.match(res.headers.get("content-disposition") ?? "", /attachment; filename="my-export-doc\.md"/);
+  const body = await res.text();
+  assert.match(body, /^# My Export Doc/);
+});
+
+itLive("a comment author can edit their comment; unauthenticated edits are rejected", async () => {
+  const cookie = await signUp();
+  const docId = await createDocument(cookie);
+  const create = await authed(cookie, `/api/documents/${docId}/comments`, {
+    method: "POST",
+    body: JSON.stringify({ body: "typo here", anchorText: "anchor" })
+  });
+  const commentId = (await create.json()).thread.comments[0].id as string;
+
+  const edit = await authed(cookie, `/api/comments/comment/${commentId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ body: "fixed now" })
+  });
+  assert.equal(edit.status, 200);
+  assert.equal((await edit.json()).comment.body, "fixed now");
+
+  // The edit is visible on reload.
+  const get = await authed(cookie, `/api/documents/${docId}`);
+  const data = await get.json();
+  const thread = data.threads.find((t: { comments: Array<{ id: string }> }) =>
+    t.comments.some((c) => c.id === commentId)
+  );
+  assert.equal(thread.comments.find((c: { id: string }) => c.id === commentId).body, "fixed now");
+
+  // Unauthenticated edit is refused.
+  const noauth = await fetch(`${BASE}/api/comments/comment/${commentId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ body: "hijack" })
+  });
+  assert.ok(noauth.status === 401 || noauth.status === 403, `expected 401/403, got ${noauth.status}`);
+});
