@@ -31,18 +31,25 @@ Tracked items intentionally deferred. Most recent context first.
 - The SSE-healthy polling backoff (P4c) — currently logic-reviewed + build-verified
   only.
 
-## Phase 5/6 remaining (not yet implemented)
-- Restore-from-version: DONE (restore through the collab pipeline + e2e). A side-
-  by-side DIFF view is still a nice-to-have.
-- Modal a11y: Escape-to-close + focus + aria-labelledby DONE (useDialogDismiss on
-  the 3 modals). Still TODO: a true focus TRAP, and aria-live on the error toast.
-- Find & replace.
-- Mobile: tab navigation + outline are hidden < 1080px, leaving tabbed docs
-  largely unusable on small screens.
-- @mentions + notification fan-out (persisted notifications for offline users).
+## Phase 5/6 status
+DONE (all with tests): restore-from-version, modal a11y (Escape/focus/
+aria-labelledby + error-toast aria-live), find & replace, mobile tab navigation,
+Markdown export, beforeunload guard, comment editing, word count.
+
+Decomposition DONE: `useCollaborationStream`, `usePresence` extracted from
+`document-workspace.tsx` (each behind the Playwright net).
+
+Decomposition DELIBERATELY STOPPED HERE (not forced further): `useComments` and
+`useAiRuns` are deeply coupled to editor/selection/many setters — extracting them
+is high-churn for low user value and risks the very stale-closure/effect bugs the
+original review flagged. The two extracted hooks already isolated the most
+complex, most-coupled-but-bounded concern (live transport). Revisit only if the
+component needs further change; do it one hook at a time against the e2e net.
+
+Still nice-to-have (not started):
+- Version DIFF view (side-by-side).
+- True focus TRAP in modals (currently Escape + initial focus only).
+- @mentions + notification fan-out (persisted notifications for offline users) —
+  a whole subsystem.
 - Orphaned-thread surfacing + fuzzy re-anchoring using stored
   `anchorText`/`anchorContext`.
-- Decompose `components/document-workspace.tsx` into domain hooks. DONE so far:
-  `useCollaborationStream`, `usePresence`. Remaining: `useComments`, `useAiRuns`,
-  `useTabs`, and splitting the JSX into `<DocumentTopbar>`/`<EditorStage>`/
-  `<Modals>`. Each step verified against the Playwright net.
