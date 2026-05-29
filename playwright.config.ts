@@ -13,17 +13,22 @@ export default defineConfig({
     video: "retain-on-failure"
   },
   webServer: {
-    command: "npm run dev -- --hostname 127.0.0.1 --port 3100",
+    // Run the production server (what actually deploys). `next dev`'s webpack
+    // trips on node-only imports (node:child_process via research-workspace in
+    // the instrumentation edge bundle); the prod build handles them correctly.
+    command: "npm run build && npm run start -- --hostname 127.0.0.1 --port 3100",
     url: "http://127.0.0.1:3100",
     reuseExistingServer: !process.env.CI,
-    timeout: 120_000
+    timeout: 240_000
   },
   projects: [
     {
-      name: "chrome",
+      name: "chromium",
+      // Bundled Chromium (no dependency on a system Chrome install) so e2e runs
+      // on CI and fresh dev machines.
       use: {
         ...devices["Desktop Chrome"],
-        channel: "chrome"
+        channel: undefined
       }
     }
   ]
