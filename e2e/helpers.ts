@@ -37,6 +37,25 @@ export async function createDocumentFixture(initialText: string) {
   return { user, document, shareLink };
 }
 
+export async function createTabbedDocumentFixture() {
+  const user = await db.user.create({
+    data: { email: `e2e-${crypto.randomUUID()}@example.com`, name: "E2E User", passwordHash: "not-used" }
+  });
+  const content = {
+    type: "doc",
+    content: [
+      { type: "tabBreak", attrs: { tabId: "tab-one", title: "Tab One" } },
+      { type: "paragraph", content: [{ type: "text", text: "first tab body" }] },
+      { type: "tabBreak", attrs: { tabId: "tab-two", title: "Tab Two" } },
+      { type: "paragraph", content: [{ type: "text", text: "second tab body" }] }
+    ]
+  };
+  const document = await db.document.create({
+    data: { title: "Tabbed document", content: serializeDocumentContent(content), ownerId: user.id }
+  });
+  return { user, document };
+}
+
 export async function cleanupFixture(userId: string, documentId: string) {
   await db.$executeRawUnsafe("DELETE FROM CollaborationStep WHERE documentId = ?", documentId).catch(() => undefined);
   await db.user.delete({ where: { id: userId } }).catch(() => undefined);

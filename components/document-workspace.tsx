@@ -2850,6 +2850,20 @@ export function DocumentWorkspace({
           />
         )}
         <div className="editor-page-shell">
+          {tabs.length > 1 ? (
+            <nav className="mobile-tab-strip" aria-label="Document tabs">
+              {tabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  className={`mobile-tab-chip${tab.id === activeTabId ? " mobile-tab-chip-active" : ""}`}
+                  onClick={() => handleSelectTab(tab.id)}
+                  type="button"
+                >
+                  {tab.title || "Untitled"}
+                </button>
+              ))}
+            </nav>
+          ) : null}
           <div className="editor-page" ref={editorPageRef}>
             {selection && selectionPopoverMode && (canWriteComments || canWriteDocument) ? (
               <SelectionPopover
