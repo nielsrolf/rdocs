@@ -197,6 +197,10 @@ export function DocumentWorkspace({
   const [activeAiRuns, setActiveAiRuns] = useState<ActiveAiRunView[]>([]);
   const [aiRuns, setAiRuns] = useState<ActiveAiRunView[]>([]);
   const aiEditRunStateRef = useRef<Map<string, "applying" | "applied" | "failed">>(new Map());
+  // The async ask-ai / agent-conversation run ids we're waiting on (cleared when
+  // they reach a terminal state in the polled aiRuns; see the completion effect).
+  const askAiRunIdRef = useRef<string | null>(null);
+  const agentRunIdRef = useRef<string | null>(null);
   const mountedAtRef = useRef<number>(Date.now());
   const [, setActiveAiTarget] = useState<ActiveAiTarget | null>(null);
   const [agentPanelOpen, setAgentPanelOpen] = useState(false);
@@ -1989,7 +1993,7 @@ export function DocumentWorkspace({
 
     const data = await response.json().catch(() => null);
 
-    if (!response.ok || !data?.comment) {
+    if (!response.ok || !data?.aiRunId) {
       reportClientError(data?.error ?? "AI reply failed.", "ask-ai", {
         threadId,
         documentId,
@@ -2009,25 +2013,11 @@ export function DocumentWorkspace({
       return;
     }
 
-    setThreads((current) =>
-      current.map((thread) =>
-        thread.id === threadId
-          ? {
-              ...thread,
-              comments: [...thread.comments, data.comment]
-            }
-          : thread
-      )
-    );
-    setActiveAiRun(null);
-    setActiveAiTarget(null);
-    setAiBusyThreadId(null);
-    notifyAgentCompleted({
-      id: data.comment.aiRunId ?? `finished-comment-reply-${Date.now()}`,
-      triggerType: "COMMENT_THREAD",
-      triggerId: threadId,
-      instruction: "Write the next assistant reply for this comment thread."
-    });
+    // Accepted (202). The agent now runs server-side (async, to dodge the
+    // Cloudflare 524). Remember which run we're waiting on; completion clears the
+    // busy state (effect below) and the posted comment arrives via the SSE
+    // `comment-created` broadcast + AiRun polling.
+    askAiRunIdRef.current = data.aiRunId;
   }
 
   async function updateThreadTags(thread: ThreadView, tags: string[], status?: ThreadStatusValue) {
@@ -2152,7 +2142,10 @@ export function DocumentWorkspace({
         : data.aiRun.id;
       setSelectedConversationId(resolvedRootId);
     }
-    setAgentBusy(false);
+    // Run accepted (202); it executes server-side now. Keep the input disabled
+    // until the run terminates — the completion effect clears agentBusy when the
+    // polled run reaches a terminal state.
+    agentRunIdRef.current = data.aiRun.id;
   }
 
   async function handleCreateShareLink(permission: PermissionLevelValue) {
@@ -2539,6 +2532,32 @@ export function DocumentWorkspace({
       })();
     }
   }, [aiRuns, editor, documentId, shareToken]);
+
+  // Clear async run busy-state once the run we kicked off reaches a terminal
+  // state in the polled runs. (The comment reply itself arrives via the SSE
+  // comment-created broadcast; conversation replies arrive as polled run events.)
+  useEffect(() => {
+    const waitingAskAi = askAiRunIdRef.current;
+    if (waitingAskAi) {
+      const run = aiRuns.find((candidate) => candidate.id === waitingAskAi);
+      if (run && run.status !== "RUNNING") {
+        askAiRunIdRef.current = null;
+        setAiBusyThreadId(null);
+        setActiveAiTarget((current) =>
+          current?.type === "comment-thread" && current.threadId === run.triggerId ? null : current
+        );
+      }
+    }
+
+    const waitingAgent = agentRunIdRef.current;
+    if (waitingAgent) {
+      const run = aiRuns.find((candidate) => candidate.id === waitingAgent);
+      if (run && run.status !== "RUNNING") {
+        agentRunIdRef.current = null;
+        setAgentBusy(false);
+      }
+    }
+  }, [aiRuns]);
 
   const aiEditMarkCleanupDoneRef = useRef(false);
   useEffect(() => {

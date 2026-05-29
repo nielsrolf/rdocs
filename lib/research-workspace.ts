@@ -33,6 +33,40 @@ export type CommitResult = {
 const WORKSPACE_ROOT = path.join(process.cwd(), ".research-workspaces");
 const MAX_OVERVIEW_FILES = 240;
 
+// Per-base-workspace mutex. Runs are isolated in their own worktree, but they
+// all share one base checkout for clone / fetch / worktree-add / merge-into-HEAD
+// / worktree-remove. Two concurrent runs that interleave there (each sees a
+// clean `git status`, then both `git merge`) corrupt the base tree. Serialize
+// every base-workspace git mutation per workspace path so only one runs at a
+// time. The long agent run itself happens in the isolated worktree and does NOT
+// hold this lock — only setup and teardown do.
+const workspaceLocks = new Map<string, Promise<void>>();
+
+export async function withWorkspaceLock<T>(workspace: string, task: () => Promise<T>): Promise<T> {
+  const key = path.resolve(workspace);
+  const previous = workspaceLocks.get(key) ?? Promise.resolve();
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.then(
+    () => gate,
+    () => gate
+  );
+  workspaceLocks.set(key, queued);
+
+  await previous.catch(() => undefined);
+
+  try {
+    return await task();
+  } finally {
+    release();
+    if (workspaceLocks.get(key) === queued) {
+      workspaceLocks.delete(key);
+    }
+  }
+}
+
 function buildGitEnv() {
   const env: NodeJS.ProcessEnv = { ...process.env };
   // Strip VS Code's askpass plumbing so background git doesn't try (and fail
@@ -180,32 +214,35 @@ export async function ensureLinkedRepository(
 
   await fs.mkdir(path.dirname(workspace), { recursive: true });
 
-  if (!hasCheckout) {
-    if (document.repoUrl) {
-      const cloneArgs = ["clone", document.repoUrl, workspace];
-      if (document.repoBranch) {
-        cloneArgs.splice(1, 0, "--branch", document.repoBranch);
+  // Serialize clone + pending-change commit on the shared base checkout.
+  await withWorkspaceLock(workspace, async () => {
+    if (!hasCheckout) {
+      if (document.repoUrl) {
+        const cloneArgs = ["clone", document.repoUrl, workspace];
+        if (document.repoBranch) {
+          cloneArgs.splice(1, 0, "--branch", document.repoBranch);
+        }
+        await runCommand("git", cloneArgs, { timeoutMs: 300_000 });
+      } else {
+        await initLocalWorkspace(workspace);
       }
-      await runCommand("git", cloneArgs, { timeoutMs: 300_000 });
-    } else {
-      await initLocalWorkspace(workspace);
     }
-  }
 
-  if (options.requireClean ?? true) {
-    const status = await runCommand("git", ["status", "--porcelain"], { cwd: workspace });
-    if (status.stdout.trim()) {
-      await commitWorkspaceChanges({
-        workspace,
-        repoUrl: document.repoUrl,
-        message: "Save pending AI workspace changes",
-        push:
-          (options.pushPendingChanges ?? true) &&
-          Boolean(document.repoUrl) &&
-          !isReadOnlyRepoUrl(document.repoUrl)
-      });
+    if (options.requireClean ?? true) {
+      const status = await runCommand("git", ["status", "--porcelain"], { cwd: workspace });
+      if (status.stdout.trim()) {
+        await commitWorkspaceChanges({
+          workspace,
+          repoUrl: document.repoUrl,
+          message: "Save pending AI workspace changes",
+          push:
+            (options.pushPendingChanges ?? true) &&
+            Boolean(document.repoUrl) &&
+            !isReadOnlyRepoUrl(document.repoUrl)
+        });
+      }
     }
-  }
+  });
 
   if (!document.repoWorkspace) {
     await db.document.update({
@@ -234,29 +271,34 @@ export async function ensureLinkedRepositoryWorktree(
     return null;
   }
 
-  if (linked.url) {
-    await runCommand("git", ["fetch", "--all", "--prune"], {
-      cwd: linked.workspace,
-      timeoutMs: 300_000
-    }).catch(() => null);
-  }
-
   const worktree = getWorktreePath(documentId, linked.url, runId);
   const branchName = `ai/${slugifyBranchPart(documentId)}/${slugifyBranchPart(runId)}`;
   const baseRef = linked.branch && linked.url ? `origin/${linked.branch}` : "HEAD";
-  const hasWorktree = await fs
-    .stat(path.join(worktree, ".git"))
-    .then((stat) => stat.isFile() || stat.isDirectory())
-    .catch(() => false);
 
-  await fs.mkdir(path.dirname(worktree), { recursive: true });
+  // fetch + worktree-add both mutate the shared base checkout's git metadata,
+  // so serialize them against other runs on the same base workspace.
+  await withWorkspaceLock(linked.workspace, async () => {
+    if (linked.url) {
+      await runCommand("git", ["fetch", "--all", "--prune"], {
+        cwd: linked.workspace,
+        timeoutMs: 300_000
+      }).catch(() => null);
+    }
 
-  if (!hasWorktree) {
-    await runCommand("git", ["worktree", "add", "-B", branchName, worktree, baseRef], {
-      cwd: linked.workspace,
-      timeoutMs: 300_000
-    });
-  }
+    const hasWorktree = await fs
+      .stat(path.join(worktree, ".git"))
+      .then((stat) => stat.isFile() || stat.isDirectory())
+      .catch(() => false);
+
+    await fs.mkdir(path.dirname(worktree), { recursive: true });
+
+    if (!hasWorktree) {
+      await runCommand("git", ["worktree", "add", "-B", branchName, worktree, baseRef], {
+        cwd: linked.workspace,
+        timeoutMs: 300_000
+      });
+    }
+  });
 
   return {
     ...linked,
@@ -276,18 +318,22 @@ export async function removeRunWorktree(worktree: {
   worktree: string;
   branchName: string;
 }) {
-  try {
-    await runCommand("git", ["worktree", "remove", "--force", worktree.worktree], {
+  // Serialize against other base-workspace git mutations (a concurrent run's
+  // merge/worktree-add) so the prune/remove can't race a merge in progress.
+  await withWorkspaceLock(worktree.baseWorkspace, async () => {
+    try {
+      await runCommand("git", ["worktree", "remove", "--force", worktree.worktree], {
+        cwd: worktree.baseWorkspace
+      });
+    } catch {
+      // Worktree may already be gone; fall back to pruning + direct rm.
+      await runCommand("git", ["worktree", "prune"], { cwd: worktree.baseWorkspace }).catch(() => null);
+      await fs.rm(worktree.worktree, { recursive: true, force: true }).catch(() => null);
+    }
+    await runCommand("git", ["branch", "-D", worktree.branchName], {
       cwd: worktree.baseWorkspace
-    });
-  } catch {
-    // Worktree may already be gone; fall back to pruning + direct rm.
-    await runCommand("git", ["worktree", "prune"], { cwd: worktree.baseWorkspace }).catch(() => null);
-    await fs.rm(worktree.worktree, { recursive: true, force: true }).catch(() => null);
-  }
-  await runCommand("git", ["branch", "-D", worktree.branchName], {
-    cwd: worktree.baseWorkspace
-  }).catch(() => null);
+    }).catch(() => null);
+  });
 }
 
 // Best-effort sweep of orphaned worktrees left behind by crashed/killed runs.
@@ -614,10 +660,16 @@ export async function commitWorkspaceChanges(input: {
     input.baseWorkspace &&
     path.resolve(input.baseWorkspace) !== path.resolve(input.workspace)
   ) {
-    await syncBranchToBaseWorkspace(
-      input.baseWorkspace,
-      commitSha,
-      input.push && !isReadOnlyRepoUrl(input.repoUrl)
+    // The merge into the base checkout's HEAD is the operation that corrupts
+    // when two runs interleave; serialize it (and any conflict-resolution agent
+    // it spawns) per base workspace.
+    const baseWorkspace = input.baseWorkspace;
+    await withWorkspaceLock(baseWorkspace, () =>
+      syncBranchToBaseWorkspace(
+        baseWorkspace,
+        commitSha,
+        input.push && !isReadOnlyRepoUrl(input.repoUrl)
+      )
     );
   }
 

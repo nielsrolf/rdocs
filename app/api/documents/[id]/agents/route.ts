@@ -64,6 +64,157 @@ type RouteContext = {
   }>;
 };
 
+// Runs the document-level conversation agent off the request path. The HTTP
+// handler returns 202 immediately; the client tracks the run (progress, the
+// agent reply event, terminal status) via AiRun polling. This avoids the
+// Cloudflare ~100s origin timeout (524) on long synchronous conversations.
+async function runAgentConversationInBackground(input: {
+  documentId: string;
+  aiRunId: string;
+  message: string;
+  previousRunId: string | null;
+  documentTitle: string;
+  documentContent: string;
+}) {
+  const { documentId, aiRunId, message, previousRunId, documentTitle, documentContent } = input;
+  let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
+
+  try {
+    const { history: conversationHistory } = await buildConversationHistory(documentId, previousRunId);
+
+    linkedRepo = await ensureLinkedRepositoryWorktree(documentId, aiRunId);
+    if (linkedRepo) {
+      await db.aiRun.update({
+        where: { id: aiRunId },
+        data: {
+          workspacePath: linkedRepo.workspace,
+          branchName: linkedRepo.branchName
+        }
+      });
+      await recordAiRunEvent({
+        aiRunId,
+        role: "system",
+        message: `Using isolated worktree ${linkedRepo.workspace} on branch ${linkedRepo.branchName}.`
+      });
+    }
+
+    const parsedContent = parseDocumentContent(documentContent);
+    const documentText = getDocumentPlainText(parsedContent);
+    const documentBlocks = getDocumentAiBlocks(parsedContent);
+    const unresolvedThreads = await db.commentThread.findMany({
+      where: {
+        documentId,
+        status: "OPEN"
+      },
+      orderBy: {
+        updatedAt: "desc"
+      },
+      select: {
+        id: true,
+        anchorText: true,
+        anchorContext: true,
+        comments: {
+          orderBy: { createdAt: "asc" },
+          select: {
+            body: true,
+            author: { select: { name: true } },
+            aiModel: true
+          }
+        }
+      }
+    });
+    const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null);
+    const result = await runClaudeResearchAgent({
+      mode: "conversation",
+      documentTitle,
+      documentText,
+      documentBlocks,
+      unresolvedThreads: unresolvedThreads.map((thread) => ({
+        id: thread.id,
+        anchorText: thread.anchorText,
+        anchorContext: thread.anchorContext,
+        comments: thread.comments.map((comment) => ({
+          author: comment.author?.name ?? comment.aiModel ?? "Claude",
+          body: comment.body
+        }))
+      })),
+      workspacePath: linkedRepo?.workspace ?? null,
+      workspaceOverview,
+      instruction: message,
+      conversationHistory
+    }, async (event) => {
+      await Promise.all([
+        db.aiRun.update({
+          where: { id: aiRunId },
+          data: { progress: event.message }
+        }),
+        recordAiRunEvent({
+          aiRunId,
+          role: event.role ?? "agent",
+          message: event.message
+        })
+      ]).catch(() => null);
+    });
+
+    const commit = linkedRepo
+      ? await commitWorkspaceChanges({
+          workspace: linkedRepo.workspace,
+          baseWorkspace: linkedRepo.baseWorkspace,
+          repoUrl: linkedRepo.url,
+          message: "AI research conversation changes",
+          push: true
+        })
+      : { commitSha: null, commitUrl: null, pushed: false };
+
+    await recordAiRunEvent({
+      aiRunId,
+      role: "agent",
+      message: result.reply ?? result.summary ?? "Finished agent conversation."
+    });
+    await db.aiRun.update({
+      where: { id: aiRunId },
+      data: {
+        status: "SUCCEEDED",
+        progress: result.summary ?? "Finished.",
+        model: result.model,
+        commitSha: commit.commitSha,
+        commitUrl: commit.commitUrl,
+        finishedAt: new Date()
+      }
+    });
+  } catch (error) {
+    if (linkedRepo) {
+      await commitWorkspaceChanges({
+        workspace: linkedRepo.workspace,
+        baseWorkspace: linkedRepo.baseWorkspace,
+        repoUrl: linkedRepo.url,
+        message: "Save failed AI conversation changes",
+        push: true
+      }).catch(() => null);
+    }
+
+    await recordAiRunEvent({
+      aiRunId,
+      role: "error",
+      message: error instanceof Error ? error.message : "Agent conversation failed."
+    }).catch(() => null);
+    await db.aiRun
+      .update({
+        where: { id: aiRunId },
+        data: {
+          status: "FAILED",
+          error: error instanceof Error ? error.message : "Agent conversation failed.",
+          finishedAt: new Date()
+        }
+      })
+      .catch(() => null);
+  } finally {
+    if (linkedRepo && linkedRepo.baseWorkspace !== linkedRepo.worktree) {
+      await removeRunWorktree(linkedRepo).catch(() => null);
+    }
+  }
+}
+
 export async function POST(request: Request, { params }: RouteContext) {
   const { id } = await params;
   const user = await getCurrentUser();
@@ -91,172 +242,45 @@ export async function POST(request: Request, { params }: RouteContext) {
     );
   }
 
-  let aiRunId: string | null = null;
-  let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
-
-  try {
-    const { history: conversationHistory } = await buildConversationHistory(
-      id,
-      parsed.data.previousRunId ?? null
-    );
-
-    const aiRun = await db.aiRun.create({
-      data: {
-        documentId: id,
-        triggerType: parsed.data.previousRunId ? "CONVERSATION_FOLLOWUP" : "CONVERSATION",
-        parentRunId: parsed.data.previousRunId ?? null,
-        instruction: parsed.data.message.trim(),
-        progress: "Starting Claude research agent."
-      }
-    });
-    aiRunId = aiRun.id;
-    await recordAiRunEvent({
-      aiRunId: aiRun.id,
-      role: "user",
-      message: parsed.data.message.trim()
-    });
-
-    linkedRepo = await ensureLinkedRepositoryWorktree(id, aiRun.id);
-    if (linkedRepo) {
-      await db.aiRun.update({
-        where: { id: aiRun.id },
-        data: {
-          workspacePath: linkedRepo.workspace,
-          branchName: linkedRepo.branchName
-        }
-      });
-      await recordAiRunEvent({
-        aiRunId: aiRun.id,
-        role: "system",
-        message: `Using isolated worktree ${linkedRepo.workspace} on branch ${linkedRepo.branchName}.`
-      });
-    }
-
-    const documentContent = parseDocumentContent(access.document.content);
-    const documentText = getDocumentPlainText(documentContent);
-    const documentBlocks = getDocumentAiBlocks(documentContent);
-    const unresolvedThreads = await db.commentThread.findMany({
-      where: {
-        documentId: id,
-        status: "OPEN"
-      },
-      orderBy: {
-        updatedAt: "desc"
-      },
-      select: {
-        id: true,
-        anchorText: true,
-        anchorContext: true,
-        comments: {
-          orderBy: { createdAt: "asc" },
-          select: {
-            body: true,
-            author: { select: { name: true } },
-            aiModel: true
-          }
-        }
-      }
-    });
-    const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null);
-    const result = await runClaudeResearchAgent({
-      mode: "conversation",
-      documentTitle: access.document.title,
-      documentText,
-      documentBlocks,
-      unresolvedThreads: unresolvedThreads.map((thread) => ({
-        id: thread.id,
-        anchorText: thread.anchorText,
-        anchorContext: thread.anchorContext,
-        comments: thread.comments.map((comment) => ({
-          author: comment.author?.name ?? comment.aiModel ?? "Claude",
-          body: comment.body
-        }))
-      })),
-      workspacePath: linkedRepo?.workspace ?? null,
-      workspaceOverview,
+  const aiRun = await db.aiRun.create({
+    data: {
+      documentId: id,
+      triggerType: parsed.data.previousRunId ? "CONVERSATION_FOLLOWUP" : "CONVERSATION",
+      parentRunId: parsed.data.previousRunId ?? null,
       instruction: parsed.data.message.trim(),
-      conversationHistory
-    }, async (event) => {
-      await Promise.all([
-        db.aiRun.update({
-          where: { id: aiRun.id },
-          data: { progress: event.message }
-        }),
-        recordAiRunEvent({
-          aiRunId: aiRun.id,
-          role: event.role ?? "agent",
-          message: event.message
-        })
-      ]).catch(() => null);
-    });
+      progress: "Starting Claude research agent."
+    }
+  });
+  await recordAiRunEvent({
+    aiRunId: aiRun.id,
+    role: "user",
+    message: parsed.data.message.trim()
+  });
 
-    const commit = linkedRepo
-      ? await commitWorkspaceChanges({
-          workspace: linkedRepo.workspace,
-          baseWorkspace: linkedRepo.baseWorkspace,
-          repoUrl: linkedRepo.url,
-          message: "AI research conversation changes",
-          push: true
-        })
-      : { commitSha: null, commitUrl: null, pushed: false };
-
-    await recordAiRunEvent({
+  // Kick the agent off in the background and return immediately; the client
+  // tracks the run via polling.
+  void runAgentConversationInBackground({
+    documentId: id,
+    aiRunId: aiRun.id,
+    message: parsed.data.message.trim(),
+    previousRunId: parsed.data.previousRunId ?? null,
+    documentTitle: access.document.title,
+    documentContent: access.document.content
+  }).catch((error) => {
+    console.error("[agents] background run threw", {
+      documentId: id,
       aiRunId: aiRun.id,
-      role: "agent",
-      message: result.reply ?? result.summary ?? "Finished agent conversation."
+      error: error instanceof Error ? error.message : error
     });
-    const updated = await db.aiRun.update({
-      where: { id: aiRun.id },
-      data: {
-        status: "SUCCEEDED",
-        progress: result.summary ?? "Finished.",
-        model: result.model,
-        commitSha: commit.commitSha,
-        commitUrl: commit.commitUrl,
-        finishedAt: new Date()
-      },
-      include: {
-        events: {
-          orderBy: { createdAt: "asc" }
-        }
-      }
-    });
+  });
 
-    return NextResponse.json({ aiRun: serializeAiRun(updated) });
-  } catch (error) {
-    if (linkedRepo) {
-      await commitWorkspaceChanges({
-        workspace: linkedRepo.workspace,
-        baseWorkspace: linkedRepo.baseWorkspace,
-        repoUrl: linkedRepo.url,
-        message: "Save failed AI conversation changes",
-        push: true
-      }).catch(() => null);
-    }
+  const created = await db.aiRun.findUnique({
+    where: { id: aiRun.id },
+    include: { events: { orderBy: { createdAt: "asc" } } }
+  });
 
-    if (aiRunId) {
-      await recordAiRunEvent({
-        aiRunId,
-        role: "error",
-        message: error instanceof Error ? error.message : "Agent conversation failed."
-      }).catch(() => null);
-      await db.aiRun.update({
-        where: { id: aiRunId },
-        data: {
-          status: "FAILED",
-          error: error instanceof Error ? error.message : "Agent conversation failed.",
-          finishedAt: new Date()
-        }
-      }).catch(() => null);
-    }
-
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Agent conversation failed." },
-      { status: 500 }
-    );
-  } finally {
-    if (linkedRepo && linkedRepo.baseWorkspace !== linkedRepo.worktree) {
-      await removeRunWorktree(linkedRepo).catch(() => null);
-    }
-  }
+  return NextResponse.json(
+    { aiRun: created ? serializeAiRun(created) : { id: aiRun.id, status: aiRun.status } },
+    { status: 202 }
+  );
 }
