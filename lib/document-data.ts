@@ -198,6 +198,56 @@ export async function listDocumentThreads(documentId: string, userId?: string | 
   );
 }
 
+// Per-document comment stats for the dashboard, aggregated in SQL instead of
+// loading every comment across every document into JS. "unread" matches the
+// dashboard rule: a comment in a non-resolved thread, not authored by the
+// viewer, created after the viewer last read that thread. SQLite stores
+// DateTime as integer epoch-ms, so the createdAt/lastReadAt comparison is a
+// plain integer comparison.
+export async function getDocumentCommentStats(userId: string, documentIds: string[]) {
+  const unreadByDoc = new Map<string, number>();
+  const lastCommentByDoc = new Map<string, Date>();
+  if (documentIds.length === 0) {
+    return { unreadByDoc, lastCommentByDoc };
+  }
+
+  const placeholders = documentIds.map(() => "?").join(", ");
+
+  const unreadRows = await db.$queryRawUnsafe<Array<{ documentId: string; unreadCount: number | bigint }>>(
+    `SELECT t.documentId AS documentId, COUNT(c.id) AS unreadCount
+     FROM CommentThread t
+     JOIN Comment c ON c.threadId = t.id
+     LEFT JOIN CommentThreadRead r ON r.threadId = t.id AND r.userId = ?
+     WHERE t.documentId IN (${placeholders})
+       AND t.status <> 'RESOLVED'
+       AND (c.authorId IS NULL OR c.authorId <> ?)
+       AND c.createdAt > COALESCE(r.lastReadAt, 0)
+     GROUP BY t.documentId`,
+    userId,
+    ...documentIds,
+    userId
+  );
+  for (const row of unreadRows) {
+    unreadByDoc.set(row.documentId, Number(row.unreadCount));
+  }
+
+  const lastRows = await db.$queryRawUnsafe<Array<{ documentId: string; lastCommentAt: number | bigint | null }>>(
+    `SELECT t.documentId AS documentId, MAX(c.createdAt) AS lastCommentAt
+     FROM CommentThread t
+     JOIN Comment c ON c.threadId = t.id
+     WHERE t.documentId IN (${placeholders})
+     GROUP BY t.documentId`,
+    ...documentIds
+  );
+  for (const row of lastRows) {
+    if (row.lastCommentAt != null) {
+      lastCommentByDoc.set(row.documentId, new Date(Number(row.lastCommentAt)));
+    }
+  }
+
+  return { unreadByDoc, lastCommentByDoc };
+}
+
 export async function listDocumentVersions(documentId: string) {
   const versions = await db.documentVersion.findMany({
     where: { documentId },

@@ -4,6 +4,7 @@ import { DocumentList } from "@/components/document-list";
 import { NewDocumentButton } from "@/components/new-document-button";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { getDocumentCommentStats } from "@/lib/document-data";
 
 export default async function DashboardPage() {
   const user = await getCurrentUser();
@@ -45,42 +46,8 @@ export default async function DashboardPage() {
     ...memberships.map((m) => m.document.id)
   ];
 
-  const threads = docIds.length
-    ? await db.commentThread.findMany({
-        where: { documentId: { in: docIds } },
-        select: {
-          id: true,
-          documentId: true,
-          status: true,
-          comments: {
-            select: { id: true, createdAt: true, authorId: true }
-          },
-          reads: {
-            where: { userId: user.id },
-            select: { lastReadAt: true }
-          }
-        }
-      })
-    : [];
-
-  const unreadByDoc = new Map<string, number>();
-  const lastCommentByDoc = new Map<string, Date>();
-  for (const thread of threads) {
-    const lastReadMs = thread.reads[0]?.lastReadAt
-      ? thread.reads[0].lastReadAt.getTime()
-      : 0;
-    for (const comment of thread.comments) {
-      const createdMs = comment.createdAt.getTime();
-      const prevLast = lastCommentByDoc.get(thread.documentId);
-      if (!prevLast || createdMs > prevLast.getTime()) {
-        lastCommentByDoc.set(thread.documentId, comment.createdAt);
-      }
-      if (thread.status === "RESOLVED") continue;
-      if (comment.authorId === user.id) continue;
-      if (createdMs <= lastReadMs) continue;
-      unreadByDoc.set(thread.documentId, (unreadByDoc.get(thread.documentId) ?? 0) + 1);
-    }
-  }
+  // Aggregated in SQL rather than loading every comment for every document.
+  const { unreadByDoc, lastCommentByDoc } = await getDocumentCommentStats(user.id, docIds);
 
   const owned = ownedDocuments.map((d) => ({
     id: d.id,

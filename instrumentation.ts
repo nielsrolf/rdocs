@@ -38,4 +38,18 @@ export async function register() {
       error: error instanceof Error ? error.message : error
     });
   });
+
+  // Periodically reap idle collaboration rooms (no subscribers, no presence) so
+  // the in-memory rooms map doesn't grow unbounded for the process lifetime.
+  // Also catches rooms created transiently by poll-only clients. unref() so it
+  // never keeps the process alive on its own.
+  const { reapIdleCollaborationRooms } = await import("@/lib/collaboration");
+  const reaper = setInterval(() => {
+    try {
+      reapIdleCollaborationRooms();
+    } catch {
+      // best-effort
+    }
+  }, 60_000);
+  reaper.unref?.();
 }

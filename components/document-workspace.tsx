@@ -269,6 +269,10 @@ export function DocumentWorkspace({
   const receivedMappingsRef = useRef<ReceivedMappingEntry[]>([]);
   const collabClientIdRef = useRef(createCollaborationClientId());
   const collabColorRef = useRef(createPresenceColor(collabClientIdRef.current));
+  // Last time the SSE stream delivered anything (incl. the 15s keepalive ping).
+  // While the stream is live, server pushes make the 500ms step/presence polls
+  // redundant, so we skip them — see SSE_HEALTHY_WINDOW_MS below.
+  const lastSseAtRef = useRef(0);
   const {
     ensurePermission: ensureAgentNotificationPermission,
     notifyDone: notifyAgentDone,
@@ -1155,7 +1159,18 @@ export function DocumentWorkspace({
       )}${shareQuery}`
     );
 
+    // Stream is considered healthy for SSE_HEALTHY_WINDOW_MS after any event.
+    // The server pings every 15s, so a window above that means "any received
+    // message keeps it healthy"; only a real stall (or onerror) reopens polling.
+    const SSE_HEALTHY_WINDOW_MS = 20_000;
+    const markSse = () => {
+      lastSseAtRef.current = Date.now();
+    };
+    const sseHealthy = () => Date.now() - lastSseAtRef.current < SSE_HEALTHY_WINDOW_MS;
+    stream.addEventListener("ping", markSse);
+
     stream.addEventListener("steps", (event) => {
+      markSse();
       const payload = JSON.parse((event as MessageEvent).data) as CollaborationStepResponse;
       applyCollaborationPayload(payload);
     });
@@ -1223,6 +1238,7 @@ export function DocumentWorkspace({
     });
 
     const handlePresence = (event: Event) => {
+      markSse();
       const payload = JSON.parse((event as MessageEvent).data) as { presence?: RemotePresenceView[] };
       const nextPresence = Array.isArray(payload.presence) ? payload.presence : [];
       setRemotePresence(nextPresence.filter((presence) => presence.clientId !== collabClientIdRef.current));
@@ -1231,13 +1247,20 @@ export function DocumentWorkspace({
     stream.addEventListener("presence", handlePresence);
     stream.addEventListener("ready", handlePresence);
     stream.onerror = () => {
+      // Stream dropped — force the polling fallback back on until it recovers.
+      lastSseAtRef.current = 0;
       setRemoteNotice("Reconnecting live collaboration...");
     };
     sendPresence(false, true);
+    // Poll only as a fallback: while the SSE stream is healthy the server pushes
+    // steps/presence, so these polls are skipped (no network hit). They resume
+    // within 500ms of a stream stall or onerror.
     const stepPull = window.setInterval(() => {
+      if (sseHealthy()) return;
       void pullCollaborationSteps();
     }, 500);
     const presencePoll = window.setInterval(async () => {
+      if (sseHealthy()) return;
       const presenceShareQuery = shareToken ? `?share=${encodeURIComponent(shareToken)}` : "";
       const response = await fetch(
         `/api/documents/${documentId}/collaboration/presence${presenceShareQuery}`,

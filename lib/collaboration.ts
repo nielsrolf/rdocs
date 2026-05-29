@@ -296,8 +296,42 @@ function broadcast(room: CollaborationRoom, event: string, payload: unknown, exc
       return;
     }
 
-    subscriber.send(event, payload);
+    // Fault-isolate each subscriber: a dead/closed SSE connection whose enqueue
+    // throws must not abort delivery to the other subscribers in the room. Drop
+    // the failing subscriber instead. (Deleting from a Set mid-forEach is safe.)
+    try {
+      subscriber.send(event, payload);
+    } catch {
+      room.subscribers.delete(subscriber);
+    }
   });
+}
+
+// Delete a room from the in-memory map when nobody is connected and no presence
+// remains. The room is fully reconstructible from the DB (content + durable step
+// log) on next access, so this is safe and prevents an unbounded leak of one
+// room per distinct document ever opened.
+function reapRoomIfIdle(documentId: string) {
+  const state = getGlobalState();
+  const room = state.rooms.get(documentId);
+  if (!room) return;
+  prunePresence(room);
+  if (room.subscribers.size === 0 && room.presence.size === 0) {
+    state.rooms.delete(documentId);
+  }
+}
+
+// Sweep all rooms (for the periodic reaper started in instrumentation.ts, and
+// for tests). Returns the number of rooms reaped.
+export function reapIdleCollaborationRooms() {
+  const state = getGlobalState();
+  let reaped = 0;
+  for (const documentId of Array.from(state.rooms.keys())) {
+    const before = state.rooms.size;
+    reapRoomIfIdle(documentId);
+    if (state.rooms.size < before) reaped += 1;
+  }
+  return reaped;
 }
 
 // Optional metadata attached to the version snapshot produced by a step push.
@@ -502,6 +536,12 @@ export function subscribeToCollaboration(input: {
 
   return () => {
     room.subscribers.delete(subscriber);
+    // Drop this client's presence so a hard disconnect doesn't leave a ghost
+    // cursor lingering for the full presence TTL, then tell the rest of the room.
+    if (room.presence.delete(subscriber.clientId)) {
+      broadcast(room, "presence", { presence: listPresence(room) });
+    }
+    reapRoomIfIdle(input.documentId);
   };
 }
 
