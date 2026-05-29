@@ -47,6 +47,7 @@ import {
   type RemotePresenceView
 } from "./document-workspace/collaboration";
 import { useCollaborationStream } from "./document-workspace/use-collaboration-stream";
+import { usePresence } from "./document-workspace/use-presence";
 import { buildConversations } from "./document-workspace/conversations";
 import { createLatexRenderExtension } from "./document-workspace/latex";
 import { EmbeddedWidget, RepoImage, TabBreak } from "./document-workspace/nodes";
@@ -244,7 +245,6 @@ export function DocumentWorkspace({
   const collaborationPushBusyRef = useRef(false);
   const collaborationPushQueuedRef = useRef(false);
   const collaborationPullBusyRef = useRef(false);
-  const presenceTimerRef = useRef<number | null>(null);
   const typingClearTimerRef = useRef<number | null>(null);
   const isApplyingRemoteUpdateRef = useRef(false);
   const hasUnsavedChangesRef = useRef(false);
@@ -677,57 +677,6 @@ export function DocumentWorkspace({
     }
   }
 
-  function getPresenceSelection() {
-    if (!editor) {
-      return null;
-    }
-
-    const { anchor, head, from, to } = editor.state.selection;
-    return { anchor, head, from, to, version: getVersion(editor.state) };
-  }
-
-  function sendPresence(typing: boolean, immediate = false) {
-    if (!editor) {
-      return;
-    }
-
-    const payload = {
-      clientId: collabClientIdRef.current,
-      userName: currentUserName || "Guest",
-      color: collabColorRef.current,
-      selection: getPresenceSelection(),
-      typing,
-      shareToken
-    };
-
-    const postPresence = () => {
-      void fetch(`/api/documents/${documentId}/collaboration/presence`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(payload)
-      }).catch(() => undefined);
-    };
-
-    if (immediate) {
-      if (presenceTimerRef.current) {
-        window.clearTimeout(presenceTimerRef.current);
-        presenceTimerRef.current = null;
-      }
-      postPresence();
-      return;
-    }
-
-    if (presenceTimerRef.current) {
-      return;
-    }
-
-    presenceTimerRef.current = window.setTimeout(() => {
-      presenceTimerRef.current = null;
-      postPresence();
-    }, 120);
-  }
 
   function normalizeCurrentEditorWidgets() {
     if (!editor) {
@@ -1054,6 +1003,15 @@ export function DocumentWorkspace({
     setActiveTab(editor, activeTabId);
   }, [editor, activeTabId, tabs.length]);
 
+  const { sendPresence } = usePresence({
+    editor,
+    documentId,
+    shareToken,
+    userName: currentUserName,
+    clientIdRef: collabClientIdRef,
+    colorRef: collabColorRef
+  });
+
   function handleSelectTab(tabId: string) {
     setActiveTabIdState(tabId);
   }
@@ -1233,9 +1191,6 @@ export function DocumentWorkspace({
       }
       if (collaborationFlushTimerRef.current) {
         window.clearTimeout(collaborationFlushTimerRef.current);
-      }
-      if (presenceTimerRef.current) {
-        window.clearTimeout(presenceTimerRef.current);
       }
       if (typingClearTimerRef.current) {
         window.clearTimeout(typingClearTimerRef.current);
