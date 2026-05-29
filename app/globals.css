@@ -1198,6 +1198,11 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   white-space: nowrap;
 }
 
+.version-restore-button {
+  margin-top: 0.5rem;
+  align-self: flex-start;
+}
+
 .save-indicator-dot {
   width: 0.45rem;
   height: 0.45rem;

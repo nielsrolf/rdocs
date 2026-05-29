@@ -7,14 +7,20 @@ export function VersionHistoryModal({
   loading,
   versions,
   selectedVersion,
+  canRestore,
+  restoring,
   onClose,
-  onSelectVersion
+  onSelectVersion,
+  onRestoreVersion
 }: {
   loading: boolean;
   versions: VersionView[];
   selectedVersion: VersionView | null;
+  canRestore: boolean;
+  restoring: boolean;
   onClose: () => void;
   onSelectVersion: (id: string) => void;
+  onRestoreVersion: (id: string) => void;
 }) {
   return (
     <div className="share-modal-backdrop" onClick={onClose} role="presentation">
@@ -87,6 +93,16 @@ export function VersionHistoryModal({
                       </a>
                     ) : selectedVersion.commitSha ? (
                       <span className="subtle-pill">Commit {selectedVersion.commitSha.slice(0, 7)}</span>
+                    ) : null}
+                    {canRestore ? (
+                      <button
+                        className="primary-button version-restore-button"
+                        disabled={restoring}
+                        onClick={() => onRestoreVersion(selectedVersion.id)}
+                        type="button"
+                      >
+                        {restoring ? "Restoring..." : "Restore this version"}
+                      </button>
                     ) : null}
                   </div>
                   <pre>{selectedVersion.plainText}</pre>

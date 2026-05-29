@@ -43,6 +43,37 @@ test("typed edits persist across a reload", async ({ baseURL, browser }) => {
   }
 });
 
+test("a previous version can be restored", async ({ baseURL, browser }) => {
+  if (!baseURL) throw new Error("baseURL is required");
+  const { user, document } = await createDocumentFixture("Original body text");
+  const context = await browser.newContext();
+  try {
+    await authenticate(context, baseURL, user.id);
+    const page = await context.newPage();
+    await page.goto(`/documents/${document.id}`);
+    await expect(editor(page)).toHaveText("Original body text");
+
+    // Make an edit — this archives a snapshot of the original content.
+    await placeCursorAtStart(page);
+    await page.keyboard.type("CHANGED ", { delay: 10 });
+    await expect(saveIndicator(page)).toHaveText("Saved", { timeout: 8_000 });
+    await expect.poll(() => visibleEditorText(page)).toContain("CHANGED Original body text");
+
+    // Open version history and restore the (latest) archived original.
+    await page.locator("summary").filter({ hasText: "File" }).click();
+    await page.getByRole("button", { name: "Version history" }).click();
+    await page.getByRole("button", { name: "Restore this version" }).click();
+
+    // Editor reverts to the original (the CHANGED prefix is gone) and persists.
+    await expect.poll(() => visibleEditorText(page), { timeout: 8_000 }).toBe("Original body text");
+    await expect(saveIndicator(page)).toHaveText("Saved", { timeout: 8_000 });
+
+    await context.close();
+  } finally {
+    await cleanupFixture(user.id, document.id);
+  }
+});
+
 test("a comment can be created and survives a reload", async ({ baseURL, browser }) => {
   if (!baseURL) throw new Error("baseURL is required");
   const { user, document } = await createDocumentFixture("Comment me please");

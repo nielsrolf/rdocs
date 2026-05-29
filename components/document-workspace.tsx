@@ -228,6 +228,7 @@ export function DocumentWorkspace({
   const [historyVersions, setHistoryVersions] = useState<VersionView[]>([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
+  const [restoringVersion, setRestoringVersion] = useState(false);
   const [widgetDialogOpen, setWidgetDialogOpen] = useState(false);
   const [widgetDraft, setWidgetDraft] = useState<WidgetDraft>({
     label: "",
@@ -834,6 +835,27 @@ export function DocumentWorkspace({
     setSelectedVersionId(data.versions[0]?.id ?? null);
     setHistoryLoaded(true);
     setHistoryLoading(false);
+  }
+
+  // Restore a past version by replacing the editor content with its snapshot and
+  // letting the normal collaboration flush persist it (NEVER a direct content
+  // PATCH — that would desync the collab room; see CLAUDE.md). onUpdate fires
+  // from setContent, marking unsaved and scheduling the flush.
+  function handleRestoreVersion(versionId: string) {
+    if (!editor || !canWriteDocument) return;
+    const version = historyVersions.find((candidate) => candidate.id === versionId);
+    if (!version) return;
+    setRestoringVersion(true);
+    try {
+      isApplyingRemoteUpdateRef.current = false;
+      editor.commands.setContent(version.content, true);
+      hasUnsavedChangesRef.current = true;
+      setSaveState("saving");
+      scheduleCollaborationFlush();
+      setHistoryOpen(false);
+    } finally {
+      setRestoringVersion(false);
+    }
   }
 
   const editor = useEditor({
@@ -3109,8 +3131,11 @@ export function DocumentWorkspace({
           loading={historyLoading}
           versions={historyVersions}
           selectedVersion={selectedVersion}
+          canRestore={canWriteDocument}
+          restoring={restoringVersion}
           onClose={() => setHistoryOpen(false)}
           onSelectVersion={setSelectedVersionId}
+          onRestoreVersion={handleRestoreVersion}
         />
       ) : null}
 

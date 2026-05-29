@@ -1,4 +1,5 @@
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import type { JSONContent } from "@tiptap/react";
 
 import type { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
 
@@ -72,6 +73,7 @@ export type DocumentWorkspaceProps = {
 export type VersionView = {
   id: string;
   title: string;
+  content: JSONContent;
   plainText: string;
   sourceLinks: string[];
   commitSha: string | null;
