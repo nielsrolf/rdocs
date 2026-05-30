@@ -1,6 +1,7 @@
 import MarkdownIt from "markdown-it";
 import { useMemo } from "react";
 
+import { renderCommentHtml, type MentionViewer } from "@/lib/mention-markdown";
 import { getSourceLabel } from "@/lib/sources";
 
 import { escapeHtml } from "./utils";
@@ -22,8 +23,20 @@ aiEditMarkdown.renderer.rules.link_open = (tokens, idx, options, env, self) => {
   return defaultLinkOpenRenderer(tokens, idx, options, env, self);
 };
 
-export function MarkdownBody({ body, className }: { body: string; className: string }) {
-  const renderedHtml = useMemo(() => aiEditMarkdown.render(body.trim() || ""), [body]);
+export function MarkdownBody({
+  body,
+  className,
+  viewer
+}: {
+  body: string;
+  className: string;
+  // When provided, recognized @mentions are highlighted (self vs. other).
+  viewer?: MentionViewer;
+}) {
+  const renderedHtml = useMemo(
+    () => (viewer ? renderCommentHtml(body, viewer) : aiEditMarkdown.render(body.trim() || "")),
+    [body, viewer]
+  );
 
   return <div className={className} dangerouslySetInnerHTML={{ __html: renderedHtml }} />;
 }

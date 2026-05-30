@@ -45,7 +45,13 @@ export function reanchorWithinBlock(
   blockText: string,
   blockStart: number,
   mappedPos: number,
-  ctx: PositionContext | undefined
+  ctx: PositionContext | undefined,
+  // True when the remote peer's presence is at a newer collab version than ours
+  // — i.e. they've made edits (typically the char they just typed at the cursor)
+  // that we haven't received yet. In that window `before` holds text absent from
+  // our block, so we pin the cursor to the still-stable text AFTER it instead of
+  // letting it render ahead of content that hasn't arrived.
+  remoteAhead = false
 ): number {
   if (!ctx) return mappedPos;
   const target = ctx.before + ctx.after;
@@ -65,6 +71,30 @@ export function reanchorWithinBlock(
       bestPos = candidate;
     }
   }
+  if (bestDist !== Infinity) return bestPos; // exact full-context match wins
+
+  if (remoteAhead) {
+    // The remote's just-typed char(s) aren't in our block yet, so the full
+    // context can't match. Anchor to the start of the stable `after` text (the
+    // cursor sits immediately before it) so we don't draw past missing content.
+    if (ctx.after) {
+      let bestAfter = -1;
+      let bestAfterDist = Infinity;
+      for (let idx = blockText.indexOf(ctx.after); idx !== -1; idx = blockText.indexOf(ctx.after, idx + 1)) {
+        const candidate = blockStart + idx;
+        const dist = Math.abs(candidate - mappedPos);
+        if (dist < bestAfterDist) {
+          bestAfterDist = dist;
+          bestAfter = candidate;
+        }
+      }
+      if (bestAfter !== -1) return bestAfter;
+    }
+    // Typing at the end of the block (no stable `after`): clamp to the current
+    // block end rather than one char past it.
+    return Math.min(mappedPos, blockStart + blockText.length);
+  }
+
   return bestPos;
 }
 
@@ -154,7 +184,7 @@ export function createRemotePresenceExtension(
               // Correct OT drift by re-finding the captured surrounding text in
               // the same block. A no-op when the mapped spot already matches, and
               // a safe fallback (returns the mapped position) when it doesn't.
-              const reanchor = (mappedPos: number, ctx?: PositionContext) => {
+              const reanchor = (mappedPos: number, ctx?: PositionContext, remoteAhead = false) => {
                 if (!ctx) return mappedPos;
                 const clamped = Math.max(0, Math.min(mappedPos, maxPos));
                 try {
@@ -162,7 +192,7 @@ export function createRemotePresenceExtension(
                   if (!resolved.parent.isTextblock) return clamped;
                   const blockStart = resolved.start();
                   const blockText = state.doc.textBetween(blockStart, resolved.end());
-                  return reanchorWithinBlock(blockText, blockStart, clamped, ctx);
+                  return reanchorWithinBlock(blockText, blockStart, clamped, ctx, remoteAhead);
                 } catch {
                   return clamped;
                 }
@@ -176,9 +206,14 @@ export function createRemotePresenceExtension(
 
                 const remoteVersion = selection.version;
                 const context = selection.context ?? undefined;
-                const mappedFrom = reanchor(mapPosition(selection.from, remoteVersion, -1), context?.from);
-                const mappedTo = reanchor(mapPosition(selection.to, remoteVersion, 1), context?.to);
-                const mappedHead = reanchor(mapPosition(selection.head, remoteVersion, -1), context?.head);
+                // The peer reports a newer version than we've applied: they've
+                // edited (usually typed at their cursor) ahead of the steps we've
+                // received, so pin positions to stable text instead of rendering
+                // ahead of not-yet-arrived content.
+                const remoteAhead = remoteVersion > localVersion;
+                const mappedFrom = reanchor(mapPosition(selection.from, remoteVersion, -1), context?.from, remoteAhead);
+                const mappedTo = reanchor(mapPosition(selection.to, remoteVersion, 1), context?.to, remoteAhead);
+                const mappedHead = reanchor(mapPosition(selection.head, remoteVersion, -1), context?.head, remoteAhead);
 
                 const from = Math.max(0, Math.min(mappedFrom, maxPos));
                 const to = Math.max(from, Math.min(mappedTo, maxPos));

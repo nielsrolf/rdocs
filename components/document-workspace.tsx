@@ -13,7 +13,7 @@ import { getVersion, receiveTransaction, sendableSteps } from "@tiptap/pm/collab
 import { NodeSelection } from "@tiptap/pm/state";
 import { Step } from "@tiptap/pm/transform";
 import type { Mapping } from "@tiptap/pm/transform";
-import { EditorContent, JSONContent, useEditor } from "@tiptap/react";
+import { EditorContent, JSONContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -45,7 +45,24 @@ import { SelectionPopover } from "./document-workspace/selection-popover";
 import { createSerialQueue } from "./document-workspace/serial-queue";
 import { LinkPopover } from "./document-workspace/link-popover";
 import { HeadingCopyOverlay } from "./document-workspace/heading-copy-overlay";
-import { CommentAnchor, createCommentHighlightExtension, resolveCommentAnchorRange } from "./document-workspace/comment-anchors";
+import {
+  buildCommentAnchorTransaction,
+  CommentAnchor,
+  createCommentHighlightExtension,
+  resolveCommentAnchorRange
+} from "./document-workspace/comment-anchors";
+import {
+  buildMentionInsertTransaction,
+  createMentionDecorationExtension,
+  Mention
+} from "./document-workspace/mention";
+import { MentionTextarea } from "./document-workspace/mention-textarea";
+import {
+  filterMentionCandidates,
+  findActiveMentionQuery,
+  mentionHandle,
+  type MentionCandidate
+} from "@/lib/mentions";
 import {
   createCollaborationExtension,
   createRemotePresenceExtension,
@@ -158,6 +175,8 @@ export function DocumentWorkspace({
   initialDocumentUpdatedAt,
   initialPermission,
   initialMembers,
+  mentionMembers,
+  initialMentionedCommentIds,
   initialThreads,
   initialShareLinks,
   initialRepoUrl,
@@ -180,6 +199,26 @@ export function DocumentWorkspace({
   const [agentEffort, setAgentEffort] = useState(initialAgentEffort ?? DEFAULT_AGENT_EFFORT);
   const [repoBusy, setRepoBusy] = useState(false);
   const [repoNotice, setRepoNotice] = useState<string | null>(null);
+  // Bumped on every doc-changing transaction (local or remote) so anchor-derived
+  // memos (e.g. visibleThreads) recompute when content — and its comment anchors —
+  // is deleted. Keeps orphaned comments from lingering after a select-all delete.
+  const [docRevision, setDocRevision] = useState(0);
+  // Comment ids to briefly flash-highlight (arrived via a mention notification).
+  const [flashCommentIds, setFlashCommentIds] = useState<Set<string>>(
+    () => new Set(initialMentionedCommentIds)
+  );
+  // In-editor @mention autocomplete (doc body). Null when not active.
+  const [docMention, setDocMention] = useState<{
+    query: string;
+    from: number;
+    to: number;
+    items: MentionCandidate[];
+    index: number;
+    left: number;
+    top: number;
+  } | null>(null);
+  const docMentionRef = useRef<typeof docMention>(null);
+  docMentionRef.current = docMention;
   const [documentUpdatedAt, setDocumentUpdatedAt] = useState(initialDocumentUpdatedAt);
   const [selection, setSelection] = useState<SelectionState | null>(null);
   const [selectionPopoverMode, setSelectionPopoverMode] = useState<SelectionPopoverMode | null>(null);
@@ -290,6 +329,8 @@ export function DocumentWorkspace({
   const previousAiRunsRef = useRef<Record<string, string>>({});
   const remotePresenceRef = useRef<RemotePresenceView[]>([]);
   const receivedMappingsRef = useRef<ReceivedMappingEntry[]>([]);
+  const currentUserIdRef = useRef<string | null>(currentUserId);
+  currentUserIdRef.current = currentUserId;
   const collabClientIdRef = useRef(createCollaborationClientId());
   const collabColorRef = useRef(createPresenceColor(collabClientIdRef.current));
   // Last time the SSE stream delivered anything (incl. the 15s keepalive ping).
@@ -313,6 +354,14 @@ export function DocumentWorkspace({
         setSelectionPopoverMode(null);
       }),
     []
+  );
+  const mentionDecorationExtension = useMemo(
+    () => createMentionDecorationExtension(currentUserIdRef),
+    []
+  );
+  const mentionViewer = useMemo(
+    () => ({ members: mentionMembers, currentUserId }),
+    [mentionMembers, currentUserId]
   );
   const latexRenderExtension = useMemo(() => createLatexRenderExtension(), []);
   const collaborationExtension = useMemo(
@@ -342,6 +391,28 @@ export function DocumentWorkspace({
   useEffect(() => {
     titleRef.current = title;
   }, [title]);
+
+  // Arrived from a mention notification: open the mentioning thread, scroll the
+  // flashed comment into view, then fade the highlight after a few seconds.
+  useEffect(() => {
+    if (initialMentionedCommentIds.length === 0) return;
+    const ids = new Set(initialMentionedCommentIds);
+    const targetThread = threads.find((thread) =>
+      thread.comments.some((comment) => ids.has(comment.id))
+    );
+    if (targetThread) {
+      setActiveThreadId(targetThread.id);
+      window.requestAnimationFrame(() => {
+        document
+          .querySelector(".comment-bubble-mention-flash")
+          ?.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+    }
+    const timer = window.setTimeout(() => setFlashCommentIds(new Set()), 6000);
+    return () => window.clearTimeout(timer);
+    // Mount-only: the notification context is fixed for this page load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const trimmed = title.trim();
@@ -837,6 +908,8 @@ export function DocumentWorkspace({
         inline: false
       }),
       CommentAnchor,
+      Mention,
+      mentionDecorationExtension,
       collaborationExtension,
       remotePresenceExtension,
       AiEditSelections,
@@ -870,6 +943,40 @@ export function DocumentWorkspace({
     editorProps: {
       attributes: {
         class: "gdocs-prosemirror"
+      },
+      handleKeyDown(_view, event) {
+        // Drive the @mention autocomplete dropdown from the keyboard when it's open.
+        const mention = docMentionRef.current;
+        if (!mention || mention.items.length === 0) {
+          return false;
+        }
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          setDocMention((current) =>
+            current ? { ...current, index: (current.index + 1) % current.items.length } : current
+          );
+          return true;
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          setDocMention((current) =>
+            current
+              ? { ...current, index: (current.index - 1 + current.items.length) % current.items.length }
+              : current
+          );
+          return true;
+        }
+        if (event.key === "Enter" || event.key === "Tab") {
+          event.preventDefault();
+          applyDocMention(mention.items[mention.index]);
+          return true;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          setDocMention(null);
+          return true;
+        }
+        return false;
       },
       handlePaste(view, event) {
         const imageFiles = Array.from(event.clipboardData?.files ?? []).filter((file) =>
@@ -921,6 +1028,7 @@ export function DocumentWorkspace({
     },
     onSelectionUpdate: ({ editor }) => {
       sendPresence(false);
+      refreshDocMention(editor);
       setTableControlsActive(editor.isActive("table"));
       const { selection } = editor.state;
       const { from, to } = selection;
@@ -986,6 +1094,16 @@ export function DocumentWorkspace({
       window.requestAnimationFrame(() => {
         updateThreadOffsets();
       });
+      refreshDocMention(editor);
+    },
+    onTransaction: ({ transaction }) => {
+      // Fires for every transaction including remote/collab applies and
+      // programmatic edits (which onUpdate skips while applying remote updates).
+      // Bump a revision only when the doc actually changed so anchor-derived
+      // memos recompute and orphaned comments disappear.
+      if (transaction.docChanged) {
+        setDocRevision((value) => value + 1);
+      }
     }
   });
 
@@ -1463,6 +1581,82 @@ export function DocumentWorkspace({
     setWidgetBusy(false);
   }
 
+  // Recompute the in-editor @mention autocomplete from the live editor state.
+  // Active only for editors, an empty (cursor) selection inside a text block.
+  function refreshDocMention(activeEditor: Editor) {
+    if (!canWriteDocument || mentionMembers.length === 0 || !editorPageRef.current) {
+      if (docMentionRef.current) setDocMention(null);
+      return;
+    }
+    const { selection: sel, doc } = activeEditor.state;
+    if (!sel.empty) {
+      if (docMentionRef.current) setDocMention(null);
+      return;
+    }
+    const head = sel.head;
+    const resolved = doc.resolve(head);
+    if (!resolved.parent.isTextblock) {
+      if (docMentionRef.current) setDocMention(null);
+      return;
+    }
+    const blockStart = resolved.start();
+    const textBefore = doc.textBetween(blockStart, head, "\n", "\n");
+    const active = findActiveMentionQuery(textBefore, textBefore.length);
+    if (!active) {
+      if (docMentionRef.current) setDocMention(null);
+      return;
+    }
+    const items = filterMentionCandidates(active.query, mentionMembers);
+    if (items.length === 0) {
+      if (docMentionRef.current) setDocMention(null);
+      return;
+    }
+    const from = blockStart + active.start;
+    const to = head;
+    let left = 0;
+    let top = 0;
+    try {
+      const coords = activeEditor.view.coordsAtPos(from);
+      const pageRect = editorPageRef.current.getBoundingClientRect();
+      left = coords.left - pageRect.left;
+      top = coords.bottom - pageRect.top + 4;
+    } catch {
+      // coordsAtPos can throw mid-transaction; skip this tick.
+      return;
+    }
+    setDocMention((current) => ({
+      query: active.query,
+      from,
+      to,
+      items,
+      // Preserve the highlighted index while the same query is being narrowed.
+      index: current && current.query && active.query.startsWith(current.query) ? Math.min(current.index, items.length - 1) : 0,
+      left,
+      top
+    }));
+  }
+
+  function applyDocMention(candidate: MentionCandidate) {
+    const mention = docMentionRef.current;
+    if (!editor || !mention) return;
+    const label = mentionHandle(candidate);
+    const tr = buildMentionInsertTransaction(
+      editor.state,
+      { from: mention.from, to: mention.to },
+      { userId: candidate.id, label }
+    );
+    setDocMention(null);
+    if (!tr) return;
+    editor.view.dispatch(tr);
+    editor.view.focus();
+    // Notify the mentioned member (skips self/non-members server-side).
+    void fetch(`/api/documents/${documentId}/mentions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mentionedUserId: candidate.id, shareToken })
+    }).catch(() => undefined);
+  }
+
   async function handleCreateComment() {
     if (!selection || !composerBody.trim() || !editor) {
       return;
@@ -1478,36 +1672,18 @@ export function DocumentWorkspace({
         : `comment-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const previousContent = editor.getJSON();
 
-    const editorSelectionBeforeAnchor = editor.state.selection;
-    const blockAnchorNode =
-      editorSelectionBeforeAnchor instanceof NodeSelection &&
-      ["embeddedWidget", "repoImage", "image"].includes(
-        editorSelectionBeforeAnchor.node.type?.name ?? ""
-      )
-        ? editorSelectionBeforeAnchor.node
-        : null;
-    const blockAnchorPos = blockAnchorNode ? editorSelectionBeforeAnchor.from : null;
-
-    let marked: boolean;
-    if (blockAnchorNode && blockAnchorPos !== null) {
-      const existingIds = Array.isArray(blockAnchorNode.attrs?.commentThreadIds)
-        ? (blockAnchorNode.attrs.commentThreadIds as string[])
-        : [];
-      const nextIds = existingIds.includes(threadId) ? existingIds : [...existingIds, threadId];
-      marked = editor
-        .chain()
-        .command(({ tr }) => {
-          tr.setNodeAttribute(blockAnchorPos, "commentThreadIds", nextIds);
-          return true;
-        })
-        .run();
-    } else {
-      marked = editor
-        .chain()
-        .setTextSelection({ from: selectedRange.from, to: selectedRange.to })
-        .setMark("commentAnchor", { threadId })
-        .setTextSelection({ from: selectedRange.to, to: selectedRange.to })
-        .run();
+    // Anchor the thread over the whole selection: text gets the inline
+    // commentAnchor mark, and every block atom (widget/repoImage/image) inside
+    // the range gets the thread id in its commentThreadIds attr. This handles
+    // "select all" over mixed content, which the old inline-only path could not.
+    const anchorTr = buildCommentAnchorTransaction(
+      editor.state,
+      { from: selectedRange.from, to: selectedRange.to },
+      threadId
+    );
+    const marked = !!anchorTr;
+    if (anchorTr) {
+      editor.view.dispatch(anchorTr);
     }
 
     if (!marked) {
@@ -2428,21 +2604,30 @@ export function DocumentWorkspace({
           }
         }
 
-        // When the doc has tabs, hide threads whose anchor falls outside the active tab.
-        if (editor && tabs.length > 0 && activeTabId) {
-          const activeTab = tabs.find((tab) => tab.id === activeTabId);
-          if (activeTab) {
-            const range = resolveCommentAnchorRange(editor.state.doc, thread);
-            if (!range) return false;
-            const anchorPos = range.fromPos;
-            if (anchorPos < activeTab.contentFrom || anchorPos > activeTab.contentTo) {
-              return false;
+        // Hide threads whose anchor no longer exists in the document. When the
+        // anchored text is deleted the inline commentAnchor mark goes with it;
+        // when an anchored block atom (widget/repoImage/image) is deleted its
+        // commentThreadIds attr goes with it. Either way the thread is orphaned
+        // and should disappear from the rail, just like a deleted-text comment.
+        if (editor) {
+          const range = resolveCommentAnchorRange(editor.state.doc, thread);
+          if (!range) return false;
+
+          // When the doc has tabs, also hide threads anchored outside the active tab.
+          if (tabs.length > 0 && activeTabId) {
+            const activeTab = tabs.find((tab) => tab.id === activeTabId);
+            if (activeTab) {
+              const anchorPos = range.fromPos;
+              if (anchorPos < activeTab.contentFrom || anchorPos > activeTab.contentTo) {
+                return false;
+              }
             }
           }
         }
         return true;
       }),
-    [availableCommentTags, commentTagFilters, threads, editor, tabs, activeTabId]
+    // docRevision forces recompute when the doc (and its comment anchors) changes.
+    [availableCommentTags, commentTagFilters, threads, editor, tabs, activeTabId, docRevision]
   );
 
   const orderedThreads = useMemo(() => {
@@ -2972,6 +3157,7 @@ export function DocumentWorkspace({
                 composerBody={composerBody}
                 commentBusy={commentBusy}
                 editInstruction={editInstruction}
+                mentionMembers={mentionMembers}
                 onModeChange={setSelectionPopoverMode}
                 onComposerBodyChange={setComposerBody}
                 onEditInstructionChange={setEditInstruction}
@@ -2993,6 +3179,33 @@ export function DocumentWorkspace({
               containerRef={editorPageRef}
               enabled={canWriteDocument}
             />
+            {docMention ? (
+              <div
+                className="mention-suggest"
+                role="listbox"
+                style={{ left: docMention.left, top: docMention.top }}
+                onMouseDown={(event) => event.preventDefault()}
+              >
+                {docMention.items.map((candidate, index) => (
+                  <button
+                    key={candidate.id}
+                    type="button"
+                    role="option"
+                    aria-selected={index === docMention.index}
+                    className={`mention-suggest-item${index === docMention.index ? " mention-suggest-item-active" : ""}`}
+                    onMouseEnter={() =>
+                      setDocMention((current) => (current ? { ...current, index } : current))
+                    }
+                    onClick={() => applyDocMention(candidate)}
+                  >
+                    <span className="mention-suggest-name">{candidate.name || candidate.email}</span>
+                    {candidate.name && candidate.email ? (
+                      <span className="mention-suggest-email">{candidate.email}</span>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -3012,6 +3225,8 @@ export function DocumentWorkspace({
           canWriteComments={canWriteComments}
           isOwner={isOwner}
           currentUserId={currentUserId}
+          mentionViewer={mentionViewer}
+          flashCommentIds={flashCommentIds}
           newTagThreadId={newTagThreadId}
           newTagDraft={newTagDraft}
           onFocusThread={focusThread}

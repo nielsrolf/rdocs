@@ -2,6 +2,7 @@ import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { JSONContent } from "@tiptap/react";
 
 import type { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
+import type { MentionCandidate } from "@/lib/mentions";
 import type { ReactionSummary } from "@/lib/reactions";
 
 export type CommentView = {
@@ -65,6 +66,13 @@ export type DocumentWorkspaceProps = {
   initialDocumentUpdatedAt: string;
   initialPermission: PermissionLevelValue;
   initialMembers: MemberView[];
+  // Everyone who can be @mentioned (owner + collaborators), for autocomplete and
+  // highlighting — passed to all viewers, unlike the owner-only initialMembers.
+  mentionMembers: MentionCandidate[];
+  // Comment ids that @mention the current user and are still unacknowledged,
+  // captured server-side before acknowledgement; used to flash-highlight the
+  // mentioning comment when arriving from a dashboard notification.
+  initialMentionedCommentIds: string[];
   initialThreads: ThreadView[];
   initialShareLinks: ShareLinkView[];
   initialRepoUrl: string | null;

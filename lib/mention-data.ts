@@ -6,8 +6,8 @@ export async function loadMentionCandidates(documentId: string): Promise<Mention
   const document = await db.document.findUnique({
     where: { id: documentId },
     select: {
-      owner: { select: { id: true, name: true } },
-      memberships: { select: { user: { select: { id: true, name: true } } } }
+      owner: { select: { id: true, name: true, email: true } },
+      memberships: { select: { user: { select: { id: true, name: true, email: true } } } }
     }
   });
   if (!document) return [];
@@ -54,29 +54,89 @@ export async function syncCommentMentions(input: {
   return newlyNotified;
 }
 
-/** Per-document count of unacknowledged mentions for a user (dashboard badge). */
+/**
+ * Comment ids in a document that @mention `userId` and haven't been seen yet.
+ * Used to deep-link + highlight the mentioning comment when the user opens the
+ * doc from their dashboard notification. Read before acknowledging.
+ */
+export async function listUnacknowledgedMentionCommentIds(
+  userId: string,
+  documentId: string
+): Promise<string[]> {
+  const rows = await db.commentMention.findMany({
+    where: { documentId, mentionedUserId: userId, acknowledged: false },
+    select: { commentId: true }
+  });
+  return [...new Set(rows.map((row) => row.commentId))];
+}
+
+/**
+ * Record that `mentionedUserId` was @mentioned in the BODY of `documentId`
+ * (via the editor autocomplete). Skips self-mentions and non-members. Upserts
+ * so repeat mentions re-surface as unacknowledged rather than piling up.
+ * Returns true if a (new or refreshed) notification was recorded.
+ */
+export async function recordDocumentMention(input: {
+  documentId: string;
+  mentionedUserId: string;
+  authorId: string | null;
+}): Promise<boolean> {
+  if (!input.mentionedUserId || input.mentionedUserId === input.authorId) return false;
+  const candidates = await loadMentionCandidates(input.documentId);
+  if (!candidates.some((candidate) => candidate.id === input.mentionedUserId)) return false;
+  await db.documentMention.upsert({
+    where: {
+      documentId_mentionedUserId: {
+        documentId: input.documentId,
+        mentionedUserId: input.mentionedUserId
+      }
+    },
+    create: {
+      documentId: input.documentId,
+      mentionedUserId: input.mentionedUserId,
+      acknowledged: false
+    },
+    update: { acknowledged: false }
+  });
+  return true;
+}
+
+/** Per-document count of unacknowledged mentions (comment + doc body) for a user. */
 export async function getDocumentMentionStats(
   userId: string,
   documentIds: string[]
 ): Promise<Map<string, number>> {
   const byDoc = new Map<string, number>();
   if (documentIds.length === 0) return byDoc;
-  const grouped = await db.commentMention.groupBy({
-    by: ["documentId"],
-    where: { mentionedUserId: userId, acknowledged: false, documentId: { in: documentIds } },
-    _count: { _all: true }
-  });
-  for (const row of grouped) {
-    byDoc.set(row.documentId, row._count._all);
+  const [commentGroups, docGroups] = await Promise.all([
+    db.commentMention.groupBy({
+      by: ["documentId"],
+      where: { mentionedUserId: userId, acknowledged: false, documentId: { in: documentIds } },
+      _count: { _all: true }
+    }),
+    db.documentMention.groupBy({
+      by: ["documentId"],
+      where: { mentionedUserId: userId, acknowledged: false, documentId: { in: documentIds } },
+      _count: { _all: true }
+    })
+  ]);
+  for (const row of [...commentGroups, ...docGroups]) {
+    byDoc.set(row.documentId, (byDoc.get(row.documentId) ?? 0) + row._count._all);
   }
   return byDoc;
 }
 
-/** Mark all of a user's mentions in a document acknowledged (on viewing it). */
+/** Mark all of a user's mentions (comment + doc body) in a document acknowledged. */
 export async function acknowledgeDocumentMentions(userId: string, documentId: string): Promise<number> {
-  const result = await db.commentMention.updateMany({
-    where: { documentId, mentionedUserId: userId, acknowledged: false },
-    data: { acknowledged: true }
-  });
-  return result.count;
+  const [comments, docs] = await Promise.all([
+    db.commentMention.updateMany({
+      where: { documentId, mentionedUserId: userId, acknowledged: false },
+      data: { acknowledged: true }
+    }),
+    db.documentMention.updateMany({
+      where: { documentId, mentionedUserId: userId, acknowledged: false },
+      data: { acknowledged: true }
+    })
+  ]);
+  return comments.count + docs.count;
 }

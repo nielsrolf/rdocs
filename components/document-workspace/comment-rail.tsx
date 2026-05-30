@@ -1,11 +1,13 @@
 import { useState } from "react";
 
+import type { MentionViewer } from "@/lib/mention-markdown";
 import { REACTION_EMOJIS } from "@/lib/reactions";
 import { getSourceLabel } from "@/lib/sources";
 import { formatDateTime, truncate } from "@/lib/utils";
 
 import { ClaudeWorkingInline, CommentAvatar } from "./atoms";
 import { MarkdownBody } from "./markdown";
+import { MentionTextarea } from "./mention-textarea";
 import {
   DEFAULT_COMMENT_TAGS,
   type ActiveAiRunView,
@@ -99,6 +101,8 @@ export function CommentRail({
   canWriteComments,
   isOwner,
   currentUserId,
+  mentionViewer,
+  flashCommentIds,
   newTagThreadId,
   newTagDraft,
   onFocusThread,
@@ -129,6 +133,9 @@ export function CommentRail({
   canWriteComments: boolean;
   isOwner: boolean;
   currentUserId: string | null;
+  mentionViewer: MentionViewer;
+  // Comment ids to briefly highlight (deep-linked from a mention notification).
+  flashCommentIds: Set<string>;
   newTagThreadId: string | null;
   newTagDraft: string;
   onFocusThread: (thread: ThreadView) => void;
@@ -192,7 +199,10 @@ export function CommentRail({
 
               <div className="comment-bubble-list">
                 {visibleComments.map((comment) => (
-                  <div className="comment-bubble" key={comment.id}>
+                  <div
+                    className={`comment-bubble${flashCommentIds.has(comment.id) ? " comment-bubble-mention-flash" : ""}`}
+                    key={comment.id}
+                  >
                     <div className="comment-bubble-header">
                       <div className="comment-author-chip">
                         <CommentAvatar comment={comment} />
@@ -232,11 +242,12 @@ export function CommentRail({
                     </div>
                     {editingCommentId === comment.id ? (
                       <div className="thread-actions" onMouseDown={(event) => event.stopPropagation()}>
-                        <textarea
+                        <MentionTextarea
                           autoFocus
-                          onChange={(event) => setEditDraft(event.target.value)}
-                          rows={3}
                           value={editDraft}
+                          onChange={setEditDraft}
+                          members={mentionViewer.members}
+                          rows={3}
                         />
                         <div className="comment-composer-actions">
                           <button
@@ -262,6 +273,7 @@ export function CommentRail({
                     ) : (
                       <MarkdownBody
                         body={comment.body}
+                        viewer={mentionViewer}
                         className={
                           isActive
                             ? "comment-bubble-body markdown-body"
@@ -397,11 +409,12 @@ export function CommentRail({
 
               {isActive && canWriteComments ? (
                 <div className="thread-actions">
-                  <textarea
-                    onChange={(event) => onChangeReplyDraft(thread.id, event.target.value)}
-                    placeholder="Reply"
-                    rows={3}
+                  <MentionTextarea
                     value={getReplyDraft(thread.id)}
+                    onChange={(value) => onChangeReplyDraft(thread.id, value)}
+                    members={mentionViewer.members}
+                    placeholder="Reply (type @ to mention)"
+                    rows={3}
                   />
                   <div className="comment-composer-actions">
                     <button

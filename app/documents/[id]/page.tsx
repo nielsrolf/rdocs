@@ -5,7 +5,11 @@ import { notFound, redirect } from "next/navigation";
 import { DocumentWorkspace } from "@/components/document-workspace";
 import { getCurrentUser } from "@/lib/auth";
 import { listDocumentThreads } from "@/lib/document-data";
-import { acknowledgeDocumentMentions } from "@/lib/mention-data";
+import {
+  acknowledgeDocumentMentions,
+  listUnacknowledgedMentionCommentIds,
+  loadMentionCandidates
+} from "@/lib/mention-data";
 import { parseDocumentContent } from "@/lib/content";
 import { getCollaborationVersion } from "@/lib/collaboration";
 import { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
@@ -47,9 +51,18 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
     notFound();
   }
 
-  // Opening the document counts as seeing any @mentions of you in it, clearing
-  // the dashboard badge. Fire-and-forget so it never blocks the page render.
+  // The list of who can be @mentioned (owner + collaborators) is shown to every
+  // viewer for autocomplete + highlighting.
+  const mentionMembers = await loadMentionCandidates(id);
+
+  // Capture which comments mention the current user BEFORE acknowledging, so we
+  // can deep-link + flash-highlight them, then clear the dashboard badge.
+  let initialMentionedCommentIds: string[] = [];
   if (user) {
+    initialMentionedCommentIds = await listUnacknowledgedMentionCommentIds(user.id, id).catch(
+      () => []
+    );
+    // Fire-and-forget so it never blocks the page render.
     void acknowledgeDocumentMentions(user.id, id).catch(() => undefined);
   }
 
@@ -125,6 +138,8 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         initialPermission={access.permission}
         initialShareLinks={normalizedShareLinks}
         initialMembers={normalizedMembers}
+        mentionMembers={mentionMembers}
+        initialMentionedCommentIds={initialMentionedCommentIds}
         initialRepoBranch={access.document.repoBranch}
         initialRepoUrl={access.document.repoUrl}
         initialAgentModel={access.document.agentModel}

@@ -12,6 +12,7 @@ import StarterKit from "@tiptap/starter-kit";
 
 import { AiEditRange } from "@/components/document-workspace/ai-edit-selections";
 import { CommentAnchor } from "@/components/document-workspace/comment-anchors";
+import { Mention } from "@/components/document-workspace/mention";
 import {
   EmbeddedWidgetSchemaNode,
   RepoImageSchemaNode,
@@ -41,6 +42,7 @@ export function createDocumentEditorSchema() {
       inline: false
     }),
     CommentAnchor,
+    Mention,
     AiEditRange,
     Link.configure({
       openOnClick: false,

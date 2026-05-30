@@ -1,5 +1,7 @@
+import type { MentionCandidate } from "@/lib/mentions";
 import { truncate } from "@/lib/utils";
 
+import { MentionTextarea } from "./mention-textarea";
 import type { SelectionPopoverMode, SelectionState } from "./types";
 
 export function SelectionPopover({
@@ -10,6 +12,7 @@ export function SelectionPopover({
   composerBody,
   commentBusy,
   editInstruction,
+  mentionMembers,
   onModeChange,
   onComposerBodyChange,
   onEditInstructionChange,
@@ -24,6 +27,7 @@ export function SelectionPopover({
   composerBody: string;
   commentBusy: boolean;
   editInstruction: string;
+  mentionMembers: MentionCandidate[];
   onModeChange: (next: SelectionPopoverMode) => void;
   onComposerBodyChange: (value: string) => void;
   onEditInstructionChange: (value: string) => void;
@@ -65,11 +69,13 @@ export function SelectionPopover({
       {mode === "comment" ? (
         <div className="comment-composer-popover">
           <div className="composer-selection-preview">“{truncate(selection.text, 80)}”</div>
-          <textarea
-            onChange={(event) => onComposerBodyChange(event.target.value)}
-            placeholder="Add a comment"
-            rows={4}
+          <MentionTextarea
             value={composerBody}
+            onChange={onComposerBodyChange}
+            members={mentionMembers}
+            placeholder="Add a comment (type @ to mention)"
+            rows={4}
+            onSubmit={onSubmitComment}
           />
           <div className="comment-composer-actions">
             <button className="ghost-button" onClick={onCancel} type="button">

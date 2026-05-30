@@ -22,6 +22,7 @@ model User {
   threadReads       CommentThreadRead[]
   commentReactions  CommentReaction[]
   mentions          CommentMention[]
+  documentMentions  DocumentMention[]
 }
 
 model Document {
@@ -45,6 +46,7 @@ model Document {
   aiRuns          AiRun[]
   embeddedWidgets EmbeddedWidget[]
   envVars         DocumentEnvVar[]
+  documentMentions DocumentMention[]
 }
 
 // Per-document secrets injected into the agent's environment (LLM API keys, GPU
@@ -151,6 +153,24 @@ model CommentMention {
   mentionedUser   User     @relation(fields: [mentionedUserId], references: [id], onDelete: Cascade)
 
   @@unique([commentId, mentionedUserId])
+  @@index([mentionedUserId, acknowledged])
+  @@index([documentId])
+}
+
+// An @mention typed into the document BODY (vs. a comment). Recorded when a
+// mention is inserted via the editor autocomplete so the mentioned member gets
+// the same dashboard badge as a comment mention. One row per (document, user)
+// — re-inserting refreshes its unacknowledged state via upsert.
+model DocumentMention {
+  id              String   @id @default(cuid())
+  documentId      String
+  mentionedUserId String
+  acknowledged    Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  document        Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  mentionedUser   User     @relation(fields: [mentionedUserId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, mentionedUserId])
   @@index([mentionedUserId, acknowledged])
   @@index([documentId])
 }

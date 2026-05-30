@@ -1,5 +1,6 @@
 import { Extension, Mark, mergeAttributes } from "@tiptap/core";
-import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
+import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type { MutableRefObject } from "react";
 
@@ -75,6 +76,61 @@ export function resolveCommentAnchorRange(
   thread: HighlightThread
 ) {
   return collectCommentAnchorRanges(doc).get(thread.id) ?? null;
+}
+
+// Builds a transaction that anchors `threadId` over the given range, handling
+// the mixed-content case that the old inline-only / single-node-only logic
+// could not: a selection (e.g. "select all") spanning text *and* block atoms.
+// Every block atom (widget / repoImage / image) fully inside the range gets the
+// thread id added to its `commentThreadIds` attr, and the inline `commentAnchor`
+// mark is applied to any text in the range. Returns null only when there is
+// nothing anchorable in the range (so the caller can surface a real error).
+export function buildCommentAnchorTransaction(
+  state: EditorState,
+  range: { from: number; to: number },
+  threadId: string
+): Transaction | null {
+  const from = Math.max(0, Math.min(range.from, state.doc.content.size));
+  const to = Math.max(from, Math.min(range.to, state.doc.content.size));
+  const markType = state.schema.marks.commentAnchor;
+
+  let tr = state.tr;
+  let anchored = false;
+  let hasInlineText = false;
+
+  state.doc.nodesBetween(from, to, (node, pos) => {
+    const typeName = node.type?.name ?? "";
+    if (BLOCK_ANCHOR_NODE_TYPES.has(typeName) && pos >= from && pos + node.nodeSize <= to) {
+      const existing = Array.isArray(node.attrs?.commentThreadIds)
+        ? (node.attrs.commentThreadIds as string[])
+        : [];
+      if (!existing.includes(threadId)) {
+        tr = tr.setNodeAttribute(pos, "commentThreadIds", [...existing, threadId]);
+      }
+      anchored = true;
+    }
+    if (node.isText) {
+      hasInlineText = true;
+    }
+    return true;
+  });
+
+  if (markType && hasInlineText) {
+    // addMark (unlike TextSelection-based setMark) tolerates range endpoints that
+    // fall on atom boundaries; it only marks inline content, skipping block atoms.
+    tr = tr.addMark(from, to, markType.create({ threadId }));
+    anchored = true;
+  }
+
+  if (!anchored) {
+    return null;
+  }
+
+  // Collapse the selection to a safe cursor near the range end. TextSelection.near
+  // avoids the "endpoint not pointing into a node with inline content" throw that
+  // a raw TextSelection at an atom boundary would raise.
+  tr = tr.setSelection(TextSelection.near(tr.doc.resolve(Math.min(to, tr.doc.content.size))));
+  return tr;
 }
 
 export function createCommentHighlightExtension(
