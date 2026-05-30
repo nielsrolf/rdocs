@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
+import { AGENT_EFFORTS, AGENT_MODELS } from "@/lib/agent-config";
 import { getCurrentUser } from "@/lib/auth";
 import { serializeAiRun } from "@/lib/ai-runs";
 import { listDocumentThreads, maybeCreateVersionSnapshot } from "@/lib/document-data";
@@ -8,6 +9,9 @@ import { parseDocumentContent, serializeDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
 import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
 import { normalizeSourceLinks } from "@/lib/sources";
+
+const agentModelValues = AGENT_MODELS.map((m) => m.value) as [string, ...string[]];
+const agentEffortValues = AGENT_EFFORTS.map((e) => e.value) as [string, ...string[]];
 
 const updateDocumentSchema = z.object({
   title: z.string().min(1).max(200),
@@ -17,7 +21,9 @@ const updateDocumentSchema = z.object({
   sourceLinks: z.array(z.string().url()).optional(),
   commitSha: z.string().optional().nullable(),
   commitUrl: z.string().url().optional().nullable(),
-  aiRunId: z.string().optional().nullable()
+  aiRunId: z.string().optional().nullable(),
+  agentModel: z.enum(agentModelValues).optional(),
+  agentEffort: z.enum(agentEffortValues).optional()
 });
 
 type RouteContext = {
@@ -94,7 +100,9 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       where: { id },
       data: {
         title: nextTitle,
-        ...(hasContentUpdate ? { content: nextContent } : {})
+        ...(hasContentUpdate ? { content: nextContent } : {}),
+        ...(parsed.data.agentModel !== undefined ? { agentModel: parsed.data.agentModel } : {}),
+        ...(parsed.data.agentEffort !== undefined ? { agentEffort: parsed.data.agentEffort } : {})
       },
       select: {
         updatedAt: true
@@ -234,6 +242,8 @@ export async function GET(request: Request, { params }: RouteContext) {
       content: parseDocumentContent(access.document.content),
       repoUrl: access.document.repoUrl,
       repoBranch: access.document.repoBranch,
+      agentModel: access.document.agentModel,
+      agentEffort: access.document.agentEffort,
       updatedAt: access.document.updatedAt
     },
     threads,

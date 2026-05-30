@@ -1,12 +1,19 @@
+import { realpathSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
+
 import {
   createSdkMcpServer,
   query,
   tool,
+  type HookCallback,
   type SDKMessage,
   type SDKUserMessage
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 
+import { parseMaxTurns, resolveAgentSdkConfig, type DocumentAgentConfig } from "@/lib/agent-config";
+import { buildAgentEnv, type DocumentEnv } from "@/lib/agent-env";
+import { evaluateToolPathAccess } from "@/lib/agent-sandbox";
 import { CLAUDE_AGENT_TOOLS } from "@/lib/ai-tools";
 import type { AiDocumentBlock } from "@/lib/content";
 
@@ -79,6 +86,10 @@ export type ClaudeAgentSubmissionValidator = (
 export type ClaudeAgentRunOptions = {
   onProgress?: (event: ClaudeAgentProgressEvent) => void | Promise<void>;
   validateSubmission?: ClaudeAgentSubmissionValidator;
+  /** Per-document model + thinking-effort selection (see lib/agent-config). */
+  agentConfig?: DocumentAgentConfig;
+  /** Per-document secrets injected into the agent env (see lib/agent-env). */
+  agentEnv?: DocumentEnv;
 };
 
 const SUBMIT_TOOL_NAME = "mcp__gdocs__submit_response";
@@ -584,7 +595,7 @@ async function runClaudeResearchAgentOnce(
   options: ClaudeAgentRunOptions = {}
 ): Promise<ClaudeResearchAgentOutput> {
   const { onProgress, validateSubmission } = options;
-  const model = process.env.CLAUDE_AGENT_MODEL || "sonnet";
+  const sdkConfig = resolveAgentSdkConfig(options.agentConfig, process.env.CLAUDE_AGENT_MODEL);
   if (!input.workspacePath) {
     throw new Error(
       "Claude research agent requires an isolated workspace path. Refusing to run with the server's working directory as cwd — that would let the agent write into the r-docs repo."
@@ -638,6 +649,43 @@ async function runClaudeResearchAgentOnce(
     alwaysLoad: true
   });
 
+  // Deterministic workspace confinement (defense-in-depth alongside the kernel
+  // Seatbelt sandbox below): deny any tool call that reaches outside the
+  // document's worktree into the server repo / other documents' workspaces.
+  // Canonicalise (realpath) both roots so symlinked path components — e.g. macOS
+  // /tmp -> /private/tmp — don't cause legitimate in-workspace reads to be
+  // rejected (the agent reports canonical absolute paths).
+  const canonical = (p: string) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return resolvePath(p);
+    }
+  };
+  const guardWorkspace = canonical(cwd);
+  const protectedRoots = [canonical(process.cwd())];
+  const preToolUseGuard: HookCallback = async (hookInput) => {
+    if (hookInput.hook_event_name !== "PreToolUse") return {};
+    const decision = evaluateToolPathAccess({
+      workspace: guardWorkspace,
+      protectedRoots,
+      toolName: hookInput.tool_name,
+      toolInput: (hookInput.tool_input ?? null) as Record<string, unknown> | null
+    });
+    if (decision.allowed) return {};
+    emitProgress(onProgress, {
+      role: "system",
+      message: `Blocked out-of-workspace access (${hookInput.tool_name}): ${decision.blockedPath}`
+    });
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: decision.reason
+      }
+    };
+  };
+
   const agentQuery = query({
     prompt: buildUserMessageStream(input),
     options: {
@@ -654,9 +702,24 @@ async function runClaudeResearchAgentOnce(
         "ToolSearch"
       ],
       mcpServers: { gdocs: mcpServer },
-      maxTurns: Number.parseInt(process.env.CLAUDE_AGENT_MAX_TURNS || "1000000", 10),
-      model,
-      thinking: { type: "disabled" },
+      maxTurns: parseMaxTurns(process.env.CLAUDE_AGENT_MAX_TURNS),
+      model: sdkConfig.model,
+      thinking: sdkConfig.thinking,
+      ...(sdkConfig.effort ? { effort: sdkConfig.effort } : {}),
+      // Scrub the host environment and inject only the document's own secrets;
+      // the agent must not inherit unrelated host vars.
+      env: buildAgentEnv(process.env, options.agentEnv),
+      // Kernel sandbox (macOS Seatbelt / Linux bubblewrap) as the authoritative
+      // workspace boundary. Degrade gracefully where unavailable rather than
+      // refusing to run; the PreToolUse guard still applies either way.
+      sandbox: {
+        enabled: true,
+        failIfUnavailable: false,
+        autoAllowBashIfSandboxed: true
+      },
+      hooks: {
+        PreToolUse: [{ hooks: [preToolUseGuard] }]
+      },
       abortController
     }
   });
@@ -708,7 +771,7 @@ async function runClaudeResearchAgentOnce(
     ...fallback,
     images: fallback.images ?? [],
     widgets: fallback.widgets ?? [],
-    model: `claude-agent-sdk:${model}`
+    model: sdkConfig.label
   };
 }
 

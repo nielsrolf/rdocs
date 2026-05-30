@@ -13,6 +13,7 @@ import {
   parseDocumentContent
 } from "@/lib/content";
 import { db } from "@/lib/db";
+import { loadDocumentEnv } from "@/lib/document-env";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 import { rateLimit } from "@/lib/rate-limit";
 import { normalizeSourceLinks, serializeSourceLinks } from "@/lib/sources";
@@ -40,7 +41,14 @@ type ThreadForReply = {
   anchorText: string;
   anchorContext: string | null;
   documentId: string;
-  document: { id: string; title: string; content: string; repoUrl: string | null };
+  document: {
+    id: string;
+    title: string;
+    content: string;
+    repoUrl: string | null;
+    agentModel: string | null;
+    agentEffort: string | null;
+  };
   comments: Array<{ body: string; author: { name: string } | null; aiModel: string | null }>;
 };
 
@@ -102,6 +110,7 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
       });
     }
     const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null);
+    const agentEnv = await loadDocumentEnv(thread.documentId);
 
     const aiReply = await runClaudeResearchAgent({
       mode: "comment_reply",
@@ -126,18 +135,22 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
         author: comment.author?.name ?? comment.aiModel ?? "Claude",
         body: comment.body
       }))
-    }, async (event) => {
-      await Promise.all([
-        db.aiRun.update({
-          where: { id: aiRunId },
-          data: { progress: event.message }
-        }),
-        recordAiRunEvent({
-          aiRunId,
-          role: event.role ?? "agent",
-          message: event.message
-        })
-      ]).catch(() => null);
+    }, {
+      agentConfig: { model: thread.document.agentModel, effort: thread.document.agentEffort },
+      agentEnv,
+      onProgress: async (event) => {
+        await Promise.all([
+          db.aiRun.update({
+            where: { id: aiRunId },
+            data: { progress: event.message }
+          }),
+          recordAiRunEvent({
+            aiRunId,
+            role: event.role ?? "agent",
+            message: event.message
+          })
+        ]).catch(() => null);
+      }
     });
     const commit = linkedRepo
       ? await commitWorkspaceChanges({
@@ -278,7 +291,9 @@ export async function POST(request: Request, { params }: RouteContext) {
           id: true,
           title: true,
           content: true,
-          repoUrl: true
+          repoUrl: true,
+          agentModel: true,
+          agentEffort: true
         }
       },
       comments: {

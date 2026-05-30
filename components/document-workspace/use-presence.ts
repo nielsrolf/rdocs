@@ -18,12 +18,44 @@ export function usePresence(params: {
   const { editor, documentId, shareToken, userName, clientIdRef, colorRef } = params;
   const presenceTimerRef = useRef<number | null>(null);
 
+  // A few chars on each side of a position, clamped to its text block so plain-
+  // text offsets stay aligned with ProseMirror positions. Lets remote clients
+  // re-anchor the cursor/selection if OT mapping drifts during sync.
+  const CONTEXT_WINDOW = 12;
+  function capturePositionContext(pos: number): { before: string; after: string } {
+    if (!editor) return { before: "", after: "" };
+    try {
+      const { doc } = editor.state;
+      const resolved = doc.resolve(Math.max(0, Math.min(pos, doc.content.size)));
+      if (!resolved.parent.isTextblock) return { before: "", after: "" };
+      const blockStart = resolved.start();
+      const blockEnd = resolved.end();
+      return {
+        before: doc.textBetween(Math.max(blockStart, pos - CONTEXT_WINDOW), pos),
+        after: doc.textBetween(pos, Math.min(blockEnd, pos + CONTEXT_WINDOW))
+      };
+    } catch {
+      return { before: "", after: "" };
+    }
+  }
+
   function getPresenceSelection() {
     if (!editor) {
       return null;
     }
     const { anchor, head, from, to } = editor.state.selection;
-    return { anchor, head, from, to, version: getVersion(editor.state) };
+    return {
+      anchor,
+      head,
+      from,
+      to,
+      version: getVersion(editor.state),
+      context: {
+        from: capturePositionContext(from),
+        to: capturePositionContext(to),
+        head: capturePositionContext(head)
+      }
+    };
   }
 
   function sendPresence(typing: boolean, immediate = false) {

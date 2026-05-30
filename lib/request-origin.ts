@@ -31,11 +31,15 @@ function parseAllowedHosts(): { hosts: Set<string>; canonical: string | null } {
   return { hosts, canonical };
 }
 
-export function getRequestOrigin(request: Request): string {
-  const headers = request.headers;
+// Origin to trust for in-request redirects (sign-out, share-token landing).
+// Keeps the user on whichever allow-listed host they actually arrived on so
+// local dev redirects stay local; only falls back to canonical when the
+// forwarded host isn't trusted.
+function resolveRequestOrigin(headers: Headers, fallbackUrl?: string): string {
   const forwardedHost = headers.get("x-forwarded-host") ?? headers.get("host");
   const forwardedProto =
-    headers.get("x-forwarded-proto") ?? new URL(request.url).protocol.replace(":", "");
+    headers.get("x-forwarded-proto") ??
+    (fallbackUrl ? new URL(fallbackUrl).protocol.replace(":", "") : "https");
 
   const { hosts, canonical } = parseAllowedHosts();
 
@@ -45,11 +49,33 @@ export function getRequestOrigin(request: Request): string {
   }
 
   // No allow-list configured: fall back to the request's own origin (derived
-  // from the URL Next.js resolved, not the spoofable header).
+  // from the URL Next.js resolved, not the spoofable header), then the host.
   if (hosts.size === 0) {
-    return new URL(request.url).origin;
+    if (fallbackUrl) {
+      return new URL(fallbackUrl).origin;
+    }
+    if (forwardedHost) {
+      return `${forwardedProto}://${forwardedHost}`;
+    }
   }
 
   // Allow-list configured but the forwarded host didn't match — use canonical.
-  return canonical ?? new URL(request.url).origin;
+  return canonical ?? (fallbackUrl ? new URL(fallbackUrl).origin : "");
+}
+
+export function getRequestOrigin(request: Request): string {
+  return resolveRequestOrigin(request.headers, request.url);
+}
+
+// Canonical public origin for absolute URLs that get shared/sent out of band
+// (share links, invites). Unlike getRequestOrigin this prefers the configured
+// APP_URL over the request's host, so links always point at the public domain
+// (e.g. https://docs.nielsrolf.com) even when the page was opened on localhost.
+// Falls back to the request origin when APP_URL is not configured.
+export function getPublicOrigin(headers: Headers, fallbackUrl?: string): string {
+  const { canonical } = parseAllowedHosts();
+  if (canonical) {
+    return canonical;
+  }
+  return resolveRequestOrigin(headers, fallbackUrl);
 }

@@ -7,6 +7,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { resolveDocumentAccess } from "@/lib/permissions";
 import { ensureLinkedRepository } from "@/lib/research-workspace";
+import { repairSvgMarkup } from "@/lib/svg-repair";
 
 export const runtime = "nodejs";
 
@@ -118,7 +119,13 @@ export async function GET(request: Request, { params }: RouteContext) {
   }
 
   if (bytes) {
-    return new NextResponse(bytes, {
+    // SVGs are parsed strictly as XML by the browser. Agents that generate plots
+    // via a shell/Python one-liner sometimes over-escape `!`, leaving `<\!--`
+    // comment markers that abort XML parsing — the figure then renders as bare alt
+    // text. Repair that markup on the way out so the plot actually shows.
+    const body =
+      contentType === "image/svg+xml" ? Buffer.from(repairSvgMarkup(bytes.toString("utf8")), "utf8") : bytes;
+    return new NextResponse(body, {
       headers: {
         "Cache-Control": "private, max-age=60",
         "Content-Type": contentType

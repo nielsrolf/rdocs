@@ -17,7 +17,9 @@ import { EditorContent, JSONContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { DEFAULT_AGENT_EFFORT, DEFAULT_AGENT_MODEL } from "@/lib/agent-config";
 import type { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
+import { toggleReactionLocal, type ReactionSummary } from "@/lib/reactions";
 
 import { AgentPanel } from "./document-workspace/agent-panel";
 import { ToolbarButton, insertImagesAtPosition } from "./document-workspace/atoms";
@@ -28,14 +30,19 @@ import {
   describeAiEditSelectionPresence,
   getAiEditSelectionRange,
   removeAiEditSelection,
+  reseedAiEditSelectionsFromDoc,
   syncAiEditSelectionRuns,
   upsertAiEditSelection
 } from "./document-workspace/ai-edit-selections";
+import { buildAiEditRemountTransaction } from "./document-workspace/ai-edit-remount";
 import { CommentRail } from "./document-workspace/comment-rail";
 import { DocOutline, OUTLINE_MAX_WIDTH, OUTLINE_MIN_WIDTH } from "./document-workspace/doc-outline";
 import { MoveBlock, SlashTab, StrikeShortcut, TaskItem } from "./document-workspace/editor-extras";
+import { EnvironmentMenu } from "./document-workspace/environment-menu";
+import { ExportMenu } from "./document-workspace/export-menu";
 import { FileMenu } from "./document-workspace/file-menu";
 import { SelectionPopover } from "./document-workspace/selection-popover";
+import { createSerialQueue } from "./document-workspace/serial-queue";
 import { LinkPopover } from "./document-workspace/link-popover";
 import { HeadingCopyOverlay } from "./document-workspace/heading-copy-overlay";
 import { CommentAnchor, createCommentHighlightExtension, resolveCommentAnchorRange } from "./document-workspace/comment-anchors";
@@ -62,13 +69,14 @@ import {
   setActiveTab,
   type TabSummary
 } from "./document-workspace/tabs";
-import { commentThreadIdsAttributeSpec } from "@/lib/document-schema-nodes";
+import { aiEditSelectionIdsAttributeSpec, commentThreadIdsAttributeSpec } from "@/lib/document-schema-nodes";
 
 const Image = ImageExtension.extend({
   addAttributes() {
     return {
       ...this.parent?.(),
-      ...commentThreadIdsAttributeSpec
+      ...commentThreadIdsAttributeSpec,
+      ...aiEditSelectionIdsAttributeSpec
     };
   }
 });
@@ -154,6 +162,8 @@ export function DocumentWorkspace({
   initialShareLinks,
   initialRepoUrl,
   initialRepoBranch,
+  initialAgentModel,
+  initialAgentEffort,
   isAuthenticated,
   isOwner,
   shareToken,
@@ -166,6 +176,8 @@ export function DocumentWorkspace({
   const [shareLinks, setShareLinks] = useState<ShareLinkView[]>(initialShareLinks);
   const [repoUrl, setRepoUrl] = useState(initialRepoUrl ?? "");
   const [repoBranch, setRepoBranch] = useState(initialRepoBranch ?? "");
+  const [agentModel, setAgentModel] = useState(initialAgentModel ?? DEFAULT_AGENT_MODEL);
+  const [agentEffort, setAgentEffort] = useState(initialAgentEffort ?? DEFAULT_AGENT_EFFORT);
   const [repoBusy, setRepoBusy] = useState(false);
   const [repoNotice, setRepoNotice] = useState<string | null>(null);
   const [documentUpdatedAt, setDocumentUpdatedAt] = useState(initialDocumentUpdatedAt);
@@ -201,6 +213,11 @@ export function DocumentWorkspace({
   const [activeAiRuns, setActiveAiRuns] = useState<ActiveAiRunView[]>([]);
   const [aiRuns, setAiRuns] = useState<ActiveAiRunView[]>([]);
   const aiEditRunStateRef = useRef<Map<string, "applying" | "applied" | "failed">>(new Map());
+  // Serializes AI-run applies. Two runs finishing in the same poll cycle must not
+  // apply concurrently: each apply ends by remounting the editor via setContent of a
+  // snapshot taken mid-apply, so an overlapping apply would reset the doc to a stale
+  // snapshot and drop the other run's content. See serial-queue.ts.
+  const aiApplyQueueRef = useRef(createSerialQueue());
   // The async ask-ai / agent-conversation run ids we're waiting on (cleared when
   // they reach a terminal state in the polled aiRuns; see the completion effect).
   const askAiRunIdRef = useRef<string | null>(null);
@@ -690,6 +707,10 @@ export function DocumentWorkspace({
     if (normalized.changed) {
       isApplyingRemoteUpdateRef.current = true;
       editor.commands.setContent(normalized.content, false);
+      // This full-document setContent collapses other in-flight AI selections to the
+      // doc end; re-pin them from the surviving marks so their results stay in place.
+      const reseed = reseedAiEditSelectionsFromDoc(editor.state);
+      if (reseed) editor.view.dispatch(reseed);
       window.requestAnimationFrame(() => {
         isApplyingRemoteUpdateRef.current = false;
       });
@@ -1138,6 +1159,7 @@ export function DocumentWorkspace({
     documentId,
     editor,
     shareToken,
+    currentUserId,
     collabClientIdRef,
     lastSseAtRef,
     applyCollaborationPayload,
@@ -1288,6 +1310,42 @@ export function DocumentWorkspace({
     }
 
     setSaveState("error");
+  }
+
+  async function handleSaveAgentConfig(next: { model?: string; effort?: string }) {
+    if (!canWriteDocument) {
+      return;
+    }
+    // Optimistic local update so the dropdown reflects the choice immediately.
+    const previous = { model: agentModel, effort: agentEffort };
+    if (next.model !== undefined) setAgentModel(next.model);
+    if (next.effort !== undefined) setAgentEffort(next.effort);
+
+    setSaveState("saving");
+    const response = await fetch(`/api/documents/${documentId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title,
+        shareToken,
+        ...(next.model !== undefined ? { agentModel: next.model } : {}),
+        ...(next.effort !== undefined ? { agentEffort: next.effort } : {})
+      })
+    });
+    const data = await response.json().catch(() => null);
+    if (response.ok && typeof data?.updatedAt === "string") {
+      setDocumentUpdatedAt(data.updatedAt);
+      setSaveState("saved");
+      return;
+    }
+
+    // Roll back the optimistic change on failure.
+    setAgentModel(previous.model);
+    setAgentEffort(previous.effort);
+    setSaveState("error");
+    reportClientError("Failed to save agent settings.", "agent-config", {
+      status: response.status
+    });
   }
 
   async function handleSaveRepository() {
@@ -1701,7 +1759,6 @@ export function DocumentWorkspace({
     const docSizeBefore = editor.state.doc.content.size;
     let docSizeAfter = docSizeBefore;
     let insertedContent: ReturnType<typeof buildAiEditInsertContent> | null = null;
-    let contentToSave: JSONContent | null = null;
 
     try {
       insertedContent = buildAiEditInsertContent({
@@ -1763,7 +1820,6 @@ export function DocumentWorkspace({
         commitUrl,
         aiRunId
       };
-      contentToSave = editor.getJSON();
       await flushCollaborationSteps();
       if (pendingCollabVersionMetaRef.current) {
         // Flush had nothing to send (no sendable steps) or did not get accepted,
@@ -1812,12 +1868,17 @@ export function DocumentWorkspace({
       body: JSON.stringify({ action: "markApplied", shareToken })
     }).catch(() => null);
 
-    // Force node-view remount so freshly inserted widgets/tables render
-    // cleanly. Without this, iframes and tables sometimes paint in a
-    // half-initialized state until the user refreshes the page.
-    if (contentToSave) {
+    // Force a node-view remount so freshly inserted widgets/images/tables render
+    // cleanly (iframes/tables otherwise sometimes paint half-initialized until the
+    // page is refreshed). This used to call editor.commands.setContent(contentToSave),
+    // a full-document replace — but that collapsed other in-flight AI selections to
+    // the doc end (results landed at the bottom) and, pushed through collaboration,
+    // clobbered other clients' concurrent edits. The targeted version re-renders only
+    // the atom/table nodes in place, disturbing nothing else.
+    const remount = buildAiEditRemountTransaction(editor.state);
+    if (remount) {
       isApplyingRemoteUpdateRef.current = true;
-      editor.commands.setContent(contentToSave, false);
+      editor.view.dispatch(remount);
       window.requestAnimationFrame(() => {
         isApplyingRemoteUpdateRef.current = false;
       });
@@ -2283,6 +2344,47 @@ export function DocumentWorkspace({
     setEditBusyCommentId(null);
   }
 
+  function applyReactionsToComment(commentId: string, map: (reactions: ReactionSummary[]) => ReactionSummary[]) {
+    setThreads((current) =>
+      current.map((thread) =>
+        thread.comments.some((comment) => comment.id === commentId)
+          ? {
+              ...thread,
+              comments: thread.comments.map((comment) =>
+                comment.id === commentId ? { ...comment, reactions: map(comment.reactions ?? []) } : comment
+              )
+            }
+          : thread
+      )
+    );
+  }
+
+  async function handleToggleReaction(commentId: string, emoji: string) {
+    if (!canWriteComments) return;
+    // Optimistic toggle; toggleReactionLocal is its own inverse, so we revert by
+    // re-applying it if the request fails.
+    applyReactionsToComment(commentId, (reactions) => toggleReactionLocal(reactions ?? [], emoji, currentUserName));
+
+    const response = await fetch(`/api/comments/comment/${commentId}/reactions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ emoji, clientId: collabClientIdRef.current, shareToken })
+    });
+    const data = await response.json().catch(() => null);
+
+    if (!response.ok || !Array.isArray(data?.reactions)) {
+      applyReactionsToComment(commentId, (reactions) => toggleReactionLocal(reactions ?? [], emoji, currentUserName));
+      reportClientError(data?.error ?? "Unable to react.", "comment-reaction", {
+        documentId,
+        status: response.status
+      });
+      return;
+    }
+
+    // Reconcile with the server's authoritative aggregation.
+    applyReactionsToComment(commentId, () => data.reactions);
+  }
+
   const availableCommentTags = useMemo(() => {
     const tags = new Map<string, string>();
     DEFAULT_COMMENT_TAGS.forEach((tag) => tags.set(tag.toLowerCase(), tag));
@@ -2430,7 +2532,7 @@ export function DocumentWorkspace({
       }
 
       aiEditRunStateRef.current.set(run.id, "applying");
-      void (async () => {
+      void aiApplyQueueRef.current.run(async () => {
         const shareQuery = shareToken ? `?share=${encodeURIComponent(shareToken)}` : "";
         const response = await fetch(
           `/api/documents/${documentId}/ai-runs/${run.id}${shareQuery}`,
@@ -2485,7 +2587,7 @@ export function DocumentWorkspace({
           commitUrl: typeof fetched.commitUrl === "string" ? fetched.commitUrl : null
         });
         aiEditRunStateRef.current.set(run.id, "applied");
-      })();
+      });
     }
   }, [aiRuns, editor, documentId, shareToken]);
 
@@ -2587,15 +2689,7 @@ export function DocumentWorkspace({
             </span>
           </div>
 
-          <a
-            className="ghost-button header-toggle-button"
-            href={`/api/documents/${documentId}/export${
-              shareToken ? `?share=${encodeURIComponent(shareToken)}` : ""
-            }`}
-            download
-          >
-            Export
-          </a>
+          <ExportMenu documentId={documentId} shareToken={shareToken} />
 
           <FileMenu currentDocumentId={documentId} onOpenVersionHistory={() => setHistoryOpen(true)} />
 
@@ -2778,6 +2872,10 @@ export function DocumentWorkspace({
             </div>
           </details>
 
+          {canWriteDocument ? (
+            <EnvironmentMenu documentId={documentId} shareToken={shareToken} />
+          ) : null}
+
           <div className="document-topbar-actions">
             {remoteNotice ? <span className="subtle-pill">{remoteNotice}</span> : null}
             {remotePresence.length > 0 ? (
@@ -2934,6 +3032,7 @@ export function DocumentWorkspace({
           onAskAi={handleAskAi}
           onDeleteComment={(commentId) => void handleDeleteComment(commentId)}
           onEditComment={(commentId, commentBody) => void handleEditComment(commentId, commentBody)}
+          onToggleReaction={(commentId, emoji) => void handleToggleReaction(commentId, emoji)}
         />
         )}
       </div>
@@ -2950,6 +3049,11 @@ export function DocumentWorkspace({
           agentMessage={agentMessage}
           agentBusy={agentBusy}
           canWriteComments={canWriteComments}
+          canWriteDocument={canWriteDocument}
+          agentModel={agentModel}
+          agentEffort={agentEffort}
+          onAgentModelChange={(model) => void handleSaveAgentConfig({ model })}
+          onAgentEffortChange={(effort) => void handleSaveAgentConfig({ effort })}
           onClose={() => setAgentPanelOpen(false)}
           onSelectConversation={(rootId) => {
             setComposeMode("selected");

@@ -6,6 +6,7 @@ import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth";
 import { permissionLevels } from "@/lib/contracts";
 import { db } from "@/lib/db";
+import { getPublicOrigin } from "@/lib/request-origin";
 
 const createShareLinkSchema = z.object({
   documentId: z.string().min(1),
@@ -52,5 +53,7 @@ export async function POST(request: Request) {
     }
   });
 
-  return NextResponse.json({ shareLink });
+  const url = `${getPublicOrigin(request.headers)}/share/${shareLink.token}`;
+
+  return NextResponse.json({ shareLink: { ...shareLink, url } });
 }

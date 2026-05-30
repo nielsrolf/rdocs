@@ -2,6 +2,8 @@ import { useEffect } from "react";
 import type { MutableRefObject } from "react";
 import type { Editor } from "@tiptap/react";
 
+import { aggregateReactions, type RawReaction } from "@/lib/reactions";
+
 import type { CollaborationStepResponse, RemotePresenceView } from "./collaboration";
 import type { CommentView, ThreadView } from "./types";
 
@@ -13,6 +15,7 @@ export function useCollaborationStream(params: {
   documentId: string;
   editor: Editor | null;
   shareToken: string | null;
+  currentUserId: string | null;
   collabClientIdRef: MutableRefObject<string>;
   lastSseAtRef: MutableRefObject<number>;
   applyCollaborationPayload: (payload: CollaborationStepResponse) => boolean;
@@ -27,6 +30,7 @@ export function useCollaborationStream(params: {
     documentId,
     editor,
     shareToken,
+    currentUserId,
     collabClientIdRef,
     lastSseAtRef,
     applyCollaborationPayload,
@@ -125,6 +129,30 @@ export function useCollaborationStream(params: {
             ? {
                 ...t,
                 comments: t.comments.map((c) => (c.id === payload.comment.id ? payload.comment : c))
+              }
+            : t
+        )
+      );
+    });
+
+    // Reactions are per-user: the server sends the raw rows and each client
+    // recomputes "reactedByMe" against its own viewer.
+    stream.addEventListener("comment-reaction", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data) as {
+        threadId: string;
+        commentId: string;
+        reactions: RawReaction[];
+      };
+      if (!payload?.threadId || !payload?.commentId) return;
+      const summary = aggregateReactions(payload.reactions ?? [], currentUserId);
+      setThreads((current) =>
+        current.map((t) =>
+          t.id === payload.threadId
+            ? {
+                ...t,
+                comments: t.comments.map((c) =>
+                  c.id === payload.commentId ? { ...c, reactions: summary } : c
+                )
               }
             : t
         )

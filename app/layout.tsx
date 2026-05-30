@@ -34,9 +34,6 @@ export default async function RootLayout({
             <nav className="topbar-nav">
               {user ? (
                 <>
-                  <Link href="/dashboard" className="ghost-button">
-                    Dashboard
-                  </Link>
                   <span className="user-chip">{user.name}</span>
                   <form action="/api/auth/sign-out" method="post">
                     <button className="ghost-button" type="submit">

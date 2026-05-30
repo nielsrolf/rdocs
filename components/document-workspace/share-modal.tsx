@@ -122,20 +122,21 @@ export function ShareModal({
               <p className="muted-copy">No active share links yet.</p>
             ) : (
               shareLinks.map((link) => {
-                const path = `/share/${link.token}`;
+                // Prefer the canonical absolute URL resolved server-side (points at
+                // the public domain even when this page is open on localhost); fall
+                // back to the current origin for any link lacking one.
+                const shareUrl = link.url || `${window.location.origin}/share/${link.token}`;
 
                 return (
                   <div className="share-link-row" key={link.id}>
                     <div>
                       <strong>{permissionLabel(link.permission)}</strong>
-                      <span>{path}</span>
+                      <span>{shareUrl}</span>
                     </div>
                     <div className="share-link-actions">
                       <button
                         className="ghost-button"
-                        onClick={() =>
-                          navigator.clipboard.writeText(`${window.location.origin}${path}`)
-                        }
+                        onClick={() => navigator.clipboard.writeText(shareUrl)}
                         type="button"
                       >
                         Copy

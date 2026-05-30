@@ -25,6 +25,11 @@ export type CollaborationPresence = {
     from: number;
     to: number;
     version: number;
+    context?: {
+      from: { before: string; after: string };
+      to: { before: string; after: string };
+      head: { before: string; after: string };
+    } | null;
   } | null;
   typing: boolean;
   lastSeen: number;

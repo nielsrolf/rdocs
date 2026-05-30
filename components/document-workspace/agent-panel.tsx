@@ -1,3 +1,4 @@
+import { AGENT_EFFORTS, AGENT_MODELS } from "@/lib/agent-config";
 import { cn, truncate } from "@/lib/utils";
 
 import { AgentTimeline } from "./agent-timeline";
@@ -21,6 +22,11 @@ export function AgentPanel({
   agentMessage,
   agentBusy,
   canWriteComments,
+  canWriteDocument,
+  agentModel,
+  agentEffort,
+  onAgentModelChange,
+  onAgentEffortChange,
   onClose,
   onSelectConversation,
   onStartNewConversation,
@@ -35,6 +41,11 @@ export function AgentPanel({
   agentMessage: string;
   agentBusy: boolean;
   canWriteComments: boolean;
+  canWriteDocument: boolean;
+  agentModel: string;
+  agentEffort: string;
+  onAgentModelChange: (model: string) => void;
+  onAgentEffortChange: (effort: string) => void;
   onClose: () => void;
   onSelectConversation: (rootId: string) => void;
   onStartNewConversation: () => void;
@@ -50,6 +61,40 @@ export function AgentPanel({
         <div className="agent-screen-title">
           <span className="agent-screen-title-eyebrow">Agents</span>
           <span className="agent-screen-title-doc">{title}</span>
+        </div>
+        <div className="agent-config" role="group" aria-label="Agent configuration">
+          <label className="agent-config-field">
+            <span className="agent-config-label">Model</span>
+            <select
+              className="agent-config-select"
+              disabled={!canWriteDocument}
+              onChange={(event) => onAgentModelChange(event.target.value)}
+              title={canWriteDocument ? "Model the agent runs as" : "Only editors can change the model"}
+              value={agentModel}
+            >
+              {AGENT_MODELS.map((model) => (
+                <option key={model.value} value={model.value}>
+                  {model.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="agent-config-field">
+            <span className="agent-config-label">Thinking</span>
+            <select
+              className="agent-config-select"
+              disabled={!canWriteDocument}
+              onChange={(event) => onAgentEffortChange(event.target.value)}
+              title={canWriteDocument ? "Extended-thinking effort" : "Only editors can change thinking effort"}
+              value={agentEffort}
+            >
+              {AGENT_EFFORTS.map((effort) => (
+                <option key={effort.value} value={effort.value}>
+                  {effort.label}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
         <span className="agent-screen-topbar-status">
           {activeAiRuns.length > 0

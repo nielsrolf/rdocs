@@ -5,6 +5,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { serializeComment } from "@/lib/document-data";
 import { db } from "@/lib/db";
+import { syncCommentMentions } from "@/lib/mention-data";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 
 const createReplySchema = z.object({
@@ -88,6 +89,13 @@ export async function POST(request: Request, { params }: RouteContext) {
     where: { threadId_userId: { threadId, userId: user.id } },
     create: { threadId, userId: user.id, lastReadAt: now },
     update: { lastReadAt: now }
+  });
+
+  await syncCommentMentions({
+    commentId: comment.id,
+    documentId: thread.documentId,
+    body: parsed.data.body,
+    authorId: user.id
   });
 
   const serialized = serializeComment(comment);

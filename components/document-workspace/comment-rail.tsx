@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { REACTION_EMOJIS } from "@/lib/reactions";
 import { getSourceLabel } from "@/lib/sources";
 import { formatDateTime, truncate } from "@/lib/utils";
 
@@ -8,9 +9,80 @@ import { MarkdownBody } from "./markdown";
 import {
   DEFAULT_COMMENT_TAGS,
   type ActiveAiRunView,
+  type CommentView,
   type ThreadView
 } from "./types";
 import { getThreadTags, isThreadUnread } from "./utils";
+
+// Existing reaction pills plus an "add reaction" picker. Reacting requires
+// comment access; the pills (with counts) are shown to everyone.
+function CommentReactions({
+  comment,
+  canReact,
+  onToggleReaction
+}: {
+  comment: CommentView;
+  canReact: boolean;
+  onToggleReaction: (commentId: string, emoji: string) => void;
+}) {
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const reactions = comment.reactions ?? [];
+  if (reactions.length === 0 && !canReact) return null;
+
+  return (
+    <div className="comment-reactions" onMouseDown={(event) => event.stopPropagation()}>
+      {reactions.map((reaction) => (
+        <button
+          className={`comment-reaction-pill${reaction.reactedByMe ? " comment-reaction-pill-mine" : ""}`}
+          disabled={!canReact}
+          key={reaction.emoji}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleReaction(comment.id, reaction.emoji);
+          }}
+          title={reaction.users.join(", ")}
+          type="button"
+        >
+          <span className="comment-reaction-emoji">{reaction.emoji}</span>
+          <span className="comment-reaction-count">{reaction.count}</span>
+        </button>
+      ))}
+      {canReact ? (
+        <div className="comment-reaction-add-wrap">
+          <button
+            aria-label="Add reaction"
+            className="comment-reaction-add"
+            onClick={(event) => {
+              event.stopPropagation();
+              setPickerOpen((open) => !open);
+            }}
+            type="button"
+          >
+            ☺+
+          </button>
+          {pickerOpen ? (
+            <div className="comment-reaction-picker" role="menu">
+              {REACTION_EMOJIS.map((emoji) => (
+                <button
+                  className="comment-reaction-option"
+                  key={emoji}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onToggleReaction(comment.id, emoji);
+                    setPickerOpen(false);
+                  }}
+                  type="button"
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 export function CommentRail({
   threads,
@@ -40,7 +112,8 @@ export function CommentRail({
   onSubmitReply,
   onAskAi,
   onDeleteComment,
-  onEditComment
+  onEditComment,
+  onToggleReaction
 }: {
   threads: ThreadView[];
   orderedThreads: ThreadView[];
@@ -70,6 +143,7 @@ export function CommentRail({
   onAskAi: (threadId: string) => void;
   onDeleteComment: (commentId: string) => void;
   onEditComment: (commentId: string, body: string) => void;
+  onToggleReaction: (commentId: string, emoji: string) => void;
 }) {
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
@@ -195,6 +269,13 @@ export function CommentRail({
                         }
                       />
                     )}
+                    {editingCommentId !== comment.id ? (
+                      <CommentReactions
+                        comment={comment}
+                        canReact={canWriteComments && isActive}
+                        onToggleReaction={onToggleReaction}
+                      />
+                    ) : null}
                     {isActive && comment.aiModel ? (
                       <div className="comment-ai-meta">
                         <span className="subtle-pill">{comment.aiModel}</span>

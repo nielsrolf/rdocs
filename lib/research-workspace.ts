@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
+import { parseMaxTurns } from "@/lib/agent-config";
 import { CLAUDE_AGENT_TOOLS } from "@/lib/ai-tools";
 import { db } from "@/lib/db";
 
@@ -537,10 +538,77 @@ export async function runWidgetBuild(buildCmd: string, cwd: string): Promise<{ o
   });
 }
 
-async function syncBranchToBaseWorkspace(baseWorkspace: string, commitSha: string, push: boolean) {
+async function isMergeInProgress(baseWorkspace: string): Promise<boolean> {
+  try {
+    await runCommand("git", ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { cwd: baseWorkspace });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Restores the base checkout to a clean state at HEAD. The base workspace is purely
+// a merge target the app manages — it is never edited directly — so any pending
+// changes are residue from a merge that did not finish (e.g. the conflict-resolver
+// agent timed out mid-merge). Previously that residue made every later run throw
+// "Cannot merge … because it has pending changes", permanently wedging the document.
+// Recovering here makes the merge self-heal instead.
+export async function ensureBaseWorkspaceClean(baseWorkspace: string): Promise<void> {
+  if (await isMergeInProgress(baseWorkspace)) {
+    await runCommand("git", ["merge", "--abort"], { cwd: baseWorkspace }).catch(() => null);
+  }
   const status = await runCommand("git", ["status", "--porcelain"], { cwd: baseWorkspace });
   if (status.stdout.trim()) {
-    throw new Error(`Cannot merge AI changes into the linked repository because it has pending changes:\n${status.stdout}`);
+    await runCommand("git", ["reset", "--hard", "HEAD"], { cwd: baseWorkspace }).catch(() => null);
+    await runCommand("git", ["clean", "-fd"], { cwd: baseWorkspace }).catch(() => null);
+  }
+}
+
+async function listUnmergedPaths(baseWorkspace: string): Promise<string[]> {
+  const result = await runCommand("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: baseWorkspace });
+  return result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+// Binary assets (generated PNGs, etc.) can't be textually merged and Claude can't
+// edit them, so an add/add conflict on one used to dead-end with "could not resolve
+// merge conflicts". Two parallel runs each generating assets/sine_plot.png is
+// exactly that. Resolve such conflicts deterministically by taking the INCOMING
+// run's version (--theirs == MERGE_HEAD == the commit being merged): each run's
+// asset is self-consistent and the most-recently-merged run wins.
+async function resolveBinaryConflictsTakingTheirs(baseWorkspace: string, commitSha: string) {
+  for (const filePath of await listUnmergedPaths(baseWorkspace)) {
+    const numstat = await runCommand("git", ["diff", "--numstat", "HEAD", commitSha, "--", filePath], {
+      cwd: baseWorkspace
+    }).catch(() => null);
+    // `git diff --numstat` reports "-\t-\t<path>" for binary files.
+    if (!numstat || !/^-\t-\t/.test(numstat.stdout)) continue;
+    const tookTheirs = await runCommand("git", ["checkout", "--theirs", "--", filePath], { cwd: baseWorkspace })
+      .then(() => true)
+      .catch(() => false);
+    // If the incoming side deleted it, fall back to our version so the path resolves.
+    if (!tookTheirs) {
+      await runCommand("git", ["checkout", "--ours", "--", filePath], { cwd: baseWorkspace }).catch(() => null);
+    }
+    await runCommand("git", ["add", "--", filePath], { cwd: baseWorkspace }).catch(() => null);
+  }
+}
+
+export async function syncBranchToBaseWorkspace(
+  baseWorkspace: string,
+  commitSha: string,
+  push: boolean,
+  resolveConflicts: (baseWorkspace: string, commitSha: string) => Promise<void> = resolveMergeConflictsWithClaude
+) {
+  // Self-heal from a prior run that left a merge half-done before refusing to merge.
+  await ensureBaseWorkspaceClean(baseWorkspace);
+  const status = await runCommand("git", ["status", "--porcelain"], { cwd: baseWorkspace });
+  if (status.stdout.trim()) {
+    throw new Error(
+      `Cannot merge AI changes into the linked repository: it still has pending changes after recovery:\n${status.stdout}`
+    );
   }
 
   try {
@@ -549,20 +617,26 @@ async function syncBranchToBaseWorkspace(baseWorkspace: string, commitSha: strin
     try {
       await runCommand("git", ["merge", "--no-edit", commitSha], { cwd: baseWorkspace });
     } catch (mergeError) {
-      await resolveMergeConflictsWithClaude(baseWorkspace, commitSha);
-      const unmerged = await runCommand("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: baseWorkspace });
-      if (unmerged.stdout.trim()) {
-        await runCommand("git", ["merge", "--abort"], { cwd: baseWorkspace }).catch(() => null);
-        throw new Error(
-          `Claude could not resolve merge conflicts for ${commitSha}. Unmerged paths:\n${unmerged.stdout.trim()}`
-        );
-      }
-      await runCommand("git", ["add", "-A"], { cwd: baseWorkspace });
       try {
+        // Deterministically resolve binary conflicts first (Claude can't merge
+        // binaries); only call the text resolver if textual conflicts remain.
+        await resolveBinaryConflictsTakingTheirs(baseWorkspace, commitSha);
+        if ((await listUnmergedPaths(baseWorkspace)).length > 0) {
+          await resolveConflicts(baseWorkspace, commitSha);
+        }
+        const stillUnmerged = await listUnmergedPaths(baseWorkspace);
+        if (stillUnmerged.length > 0) {
+          throw new Error(
+            `Could not resolve merge conflicts for ${commitSha}. Unmerged paths:\n${stillUnmerged.join("\n")}`
+          );
+        }
+        await runCommand("git", ["add", "-A"], { cwd: baseWorkspace });
         await runCommand("git", ["commit", "--no-edit"], { cwd: baseWorkspace });
-      } catch (commitError) {
-        await runCommand("git", ["merge", "--abort"], { cwd: baseWorkspace }).catch(() => null);
-        throw commitError instanceof Error ? commitError : mergeError;
+      } catch (resolveError) {
+        // Whatever went wrong (resolver threw/timed out, unresolved paths, commit
+        // failed), never leave the base mid-merge — that wedges every future run.
+        await ensureBaseWorkspaceClean(baseWorkspace);
+        throw resolveError instanceof Error ? resolveError : mergeError;
       }
     }
   }
@@ -600,7 +674,7 @@ Return only JSON:
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       allowedTools: CLAUDE_AGENT_TOOLS,
-      maxTurns: Number.parseInt(process.env.CLAUDE_MERGE_MAX_TURNS || "8", 10),
+      maxTurns: parseMaxTurns(process.env.CLAUDE_MERGE_MAX_TURNS),
       model,
       thinking: { type: "disabled" },
       abortController

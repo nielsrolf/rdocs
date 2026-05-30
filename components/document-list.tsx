@@ -15,6 +15,7 @@ type DashboardDoc = {
   ownerName: string;
   permission: string;
   unreadCount: number;
+  mentionCount: number;
   lastCommentAt: string | null;
 };
 
@@ -127,7 +128,7 @@ export function DocumentList({
               return (
                 <div
                   className={`doc-row doc-row-unified${
-                    document.unreadCount > 0 ? " doc-row-has-unread" : ""
+                    document.unreadCount > 0 || document.mentionCount > 0 ? " doc-row-has-unread" : ""
                   }`}
                   key={document.id}
                 >
@@ -141,6 +142,16 @@ export function DocumentList({
                       </span>
                     </div>
                     <div className="doc-row-aside">
+                      {document.mentionCount > 0 ? (
+                        <span
+                          className="mention-badge"
+                          title={`${document.mentionCount} unacknowledged mention${
+                            document.mentionCount === 1 ? "" : "s"
+                          }`}
+                        >
+                          @ {document.mentionCount}
+                        </span>
+                      ) : null}
                       {document.unreadCount > 0 ? (
                         <span
                           className="unread-badge"

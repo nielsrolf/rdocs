@@ -16,6 +16,7 @@ import {
   EmbeddedWidgetSchemaNode,
   RepoImageSchemaNode,
   TabBreakSchemaNode,
+  aiEditSelectionIdsAttributeSpec,
   commentThreadIdsAttributeSpec
 } from "@/lib/document-schema-nodes";
 
@@ -23,7 +24,8 @@ const Image = ImageExtension.extend({
   addAttributes() {
     return {
       ...this.parent?.(),
-      ...commentThreadIdsAttributeSpec
+      ...commentThreadIdsAttributeSpec,
+      ...aiEditSelectionIdsAttributeSpec
     };
   }
 });

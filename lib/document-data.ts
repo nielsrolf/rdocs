@@ -1,5 +1,6 @@
 import { getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
+import { aggregateReactions, type RawReaction } from "@/lib/reactions";
 import { parseSourceLinks, serializeSourceLinks } from "@/lib/sources";
 
 const VERSION_SNAPSHOT_COOLDOWN_MS = 45_000;
@@ -49,20 +50,24 @@ export function getDefaultThreadTags() {
   return DEFAULT_THREAD_TAGS;
 }
 
-export function serializeComment(comment: {
-  id: string;
-  body: string;
-  aiModel: string | null;
-  sourceLinks?: string | null;
-  commitSha?: string | null;
-  commitUrl?: string | null;
-  aiRunId?: string | null;
-  createdAt: Date;
-  author: {
+export function serializeComment(
+  comment: {
     id: string;
-    name: string;
-  } | null;
-}) {
+    body: string;
+    aiModel: string | null;
+    sourceLinks?: string | null;
+    commitSha?: string | null;
+    commitUrl?: string | null;
+    aiRunId?: string | null;
+    createdAt: Date;
+    author: {
+      id: string;
+      name: string;
+    } | null;
+    reactions?: RawReaction[];
+  },
+  options?: { currentUserId?: string | null }
+) {
   return {
     id: comment.id,
     body: comment.body,
@@ -72,7 +77,8 @@ export function serializeComment(comment: {
     commitUrl: comment.commitUrl ?? null,
     aiRunId: comment.aiRunId ?? null,
     createdAt: comment.createdAt,
-    author: comment.author
+    author: comment.author,
+    reactions: aggregateReactions(comment.reactions ?? [], options?.currentUserId ?? null)
   };
 }
 
@@ -101,9 +107,10 @@ export function serializeThread(
         id: string;
         name: string;
       } | null;
+      reactions?: RawReaction[];
     }>;
   },
-  options?: { lastReadAt?: Date | null }
+  options?: { lastReadAt?: Date | null; currentUserId?: string | null }
 ) {
   return {
     id: thread.id,
@@ -114,7 +121,9 @@ export function serializeThread(
     createdAt: thread.createdAt,
     createdBy: thread.createdBy,
     lastReadAt: options?.lastReadAt ?? null,
-    comments: thread.comments.map(serializeComment)
+    comments: thread.comments.map((comment) =>
+      serializeComment(comment, { currentUserId: options?.currentUserId ?? null })
+    )
   };
 }
 
@@ -174,6 +183,9 @@ export async function listDocumentThreads(documentId: string, userId?: string | 
               id: true,
               name: true
             }
+          },
+          reactions: {
+            select: { emoji: true, userId: true, user: { select: { name: true } } }
           }
         }
       }
@@ -181,7 +193,7 @@ export async function listDocumentThreads(documentId: string, userId?: string | 
   });
 
   if (!userId) {
-    return threads.map((thread) => serializeThread(thread));
+    return threads.map((thread) => serializeThread(thread, { currentUserId: null }));
   }
 
   const reads = await db.commentThreadRead.findMany({
@@ -194,7 +206,10 @@ export async function listDocumentThreads(documentId: string, userId?: string | 
   const lastReadByThread = new Map(reads.map((row) => [row.threadId, row.lastReadAt]));
 
   return threads.map((thread) =>
-    serializeThread(thread, { lastReadAt: lastReadByThread.get(thread.id) ?? null })
+    serializeThread(thread, {
+      lastReadAt: lastReadByThread.get(thread.id) ?? null,
+      currentUserId: userId
+    })
   );
 }
 

@@ -1,14 +1,17 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 
 import { DocumentWorkspace } from "@/components/document-workspace";
 import { getCurrentUser } from "@/lib/auth";
 import { listDocumentThreads } from "@/lib/document-data";
+import { acknowledgeDocumentMentions } from "@/lib/mention-data";
 import { parseDocumentContent } from "@/lib/content";
 import { getCollaborationVersion } from "@/lib/collaboration";
 import { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
 import { db } from "@/lib/db";
 import { resolveDocumentAccess } from "@/lib/permissions";
+import { getPublicOrigin } from "@/lib/request-origin";
 
 type PageProps = {
   params: Promise<{
@@ -42,6 +45,12 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
   const access = await resolveDocumentAccess(id, user?.id, shareToken);
   if (!access) {
     notFound();
+  }
+
+  // Opening the document counts as seeing any @mentions of you in it, clearing
+  // the dashboard badge. Fire-and-forget so it never blocks the page render.
+  if (user) {
+    void acknowledgeDocumentMentions(user.id, id).catch(() => undefined);
   }
 
   const [threads, shareLinks, members] = await Promise.all([
@@ -88,9 +97,11 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
     ...thread,
     status: thread.status as ThreadStatusValue
   }));
+  const shareOrigin = getPublicOrigin(await headers());
   const normalizedShareLinks = shareLinks.map((link) => ({
     ...link,
-    permission: link.permission as PermissionLevelValue
+    permission: link.permission as PermissionLevelValue,
+    url: `${shareOrigin}/share/${link.token}`
   }));
   const normalizedMembers = members.map((member) => ({
     ...member,
@@ -116,6 +127,8 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         initialMembers={normalizedMembers}
         initialRepoBranch={access.document.repoBranch}
         initialRepoUrl={access.document.repoUrl}
+        initialAgentModel={access.document.agentModel}
+        initialAgentEffort={access.document.agentEffort}
         initialThreads={normalizedThreads}
         initialTitle={access.document.title}
         isAuthenticated={Boolean(user)}

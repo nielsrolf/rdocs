@@ -20,6 +20,8 @@ model User {
   createdShareLinks ShareLink[]
   createdThreads    CommentThread[]
   threadReads       CommentThreadRead[]
+  commentReactions  CommentReaction[]
+  mentions          CommentMention[]
 }
 
 model Document {
@@ -31,6 +33,8 @@ model Document {
   repoBranch      String?
   repoWorkspace   String?
   activeAiRunId   String?
+  agentModel      String?
+  agentEffort     String?
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt
   owner           User                 @relation("DocumentOwner", fields: [ownerId], references: [id], onDelete: Cascade)
@@ -40,6 +44,22 @@ model Document {
   versions        DocumentVersion[]
   aiRuns          AiRun[]
   embeddedWidgets EmbeddedWidget[]
+  envVars         DocumentEnvVar[]
+}
+
+// Per-document secrets injected into the agent's environment (LLM API keys, GPU
+// provisioning tokens, etc.). Values are write-only over the API — listed back
+// masked, never in full. See lib/agent-env.ts for how they reach the agent.
+model DocumentEnvVar {
+  id         String   @id @default(cuid())
+  documentId String
+  key        String
+  value      String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, key])
 }
 
 model DocumentMembership {
@@ -98,6 +118,41 @@ model Comment {
   thread      CommentThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
   author      User?         @relation(fields: [authorId], references: [id], onDelete: SetNull)
   aiRun       AiRun?        @relation(fields: [aiRunId], references: [id], onDelete: SetNull)
+  reactions   CommentReaction[]
+  mentions    CommentMention[]
+}
+
+// Emoji reactions on a comment. One row per (comment, user, emoji); toggling a
+// reaction the user already has removes it.
+model CommentReaction {
+  id        String   @id @default(cuid())
+  commentId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+  comment   Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([commentId, userId, emoji])
+  @@index([commentId])
+}
+
+// A user @mentioned in a comment. `acknowledged` flips true once the mentioned
+// user has seen it (opening the document); the dashboard surfaces unacknowledged
+// mentions per document, mirroring unread comments.
+model CommentMention {
+  id              String   @id @default(cuid())
+  commentId       String
+  documentId      String
+  mentionedUserId String
+  acknowledged    Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  comment         Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  mentionedUser   User     @relation(fields: [mentionedUserId], references: [id], onDelete: Cascade)
+
+  @@unique([commentId, mentionedUserId])
+  @@index([mentionedUserId, acknowledged])
+  @@index([documentId])
 }
 
 model DocumentVersion {

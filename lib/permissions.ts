@@ -11,6 +11,8 @@ type AccessResult = {
     repoBranch: string | null;
     repoWorkspace: string | null;
     activeAiRunId: string | null;
+    agentModel: string | null;
+    agentEffort: string | null;
     updatedAt: Date;
   };
   permission: PermissionLevelValue;
@@ -34,6 +36,8 @@ export async function resolveDocumentAccess(
       repoBranch: true,
       repoWorkspace: true,
       activeAiRunId: true,
+      agentModel: true,
+      agentEffort: true,
       updatedAt: true
     }
   });

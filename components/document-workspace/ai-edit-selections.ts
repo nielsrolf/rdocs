@@ -31,6 +31,7 @@ type AiEditSelectionMeta =
       to: number;
     }
   | { type: "removeMetadata"; id: string }
+  | { type: "reseed"; entries: Array<{ id: string; from: number; to: number }> }
   | { type: "syncRuns"; entries: Array<{ id: string; metadata: AiEditSelectionMetadata }> };
 
 export const aiEditSelectionPluginKey = new PluginKey<AiEditSelectionState>("ai-edit-selections");
@@ -40,49 +41,110 @@ export const AiEditRange = Mark.create({
   inclusive: false,
   spanning: true,
   addAttributes() {
+    // A single text run can be covered by MORE THAN ONE pending AI selection (the
+    // user selects overlapping ranges, or two run on adjacent text). A node holds
+    // at most one mark of a given type, so the mark carries an ARRAY of selection
+    // ids; upsert/remove union and subtract rather than clobbering each other.
     return {
-      selectionId: {
-        default: null,
-        parseHTML: (element) => element.getAttribute("data-ai-edit-id"),
-        renderHTML: (attributes) =>
-          typeof attributes.selectionId === "string" && attributes.selectionId
-            ? { "data-ai-edit-id": attributes.selectionId }
-            : {}
+      selectionIds: {
+        default: [] as string[],
+        parseHTML: (element) => {
+          const multi = element.getAttribute("data-ai-edit-ids");
+          if (multi) return multi.split(",").map((value) => value.trim()).filter(Boolean);
+          const single = element.getAttribute("data-ai-edit-id");
+          return single ? [single] : [];
+        },
+        renderHTML: (attributes) => {
+          const ids = Array.isArray(attributes.selectionIds) ? attributes.selectionIds : [];
+          if (ids.length === 0) return {};
+          return { "data-ai-edit-ids": ids.join(",") };
+        }
       }
     };
   },
   parseHTML() {
-    return [{ tag: "span[data-ai-edit-id]" }];
+    return [{ tag: "span[data-ai-edit-ids]" }, { tag: "span[data-ai-edit-id]" }];
   },
   renderHTML({ HTMLAttributes }) {
     return ["span", mergeAttributes(HTMLAttributes), 0];
   }
 });
 
+function markSelectionIds(mark: { attrs?: Record<string, unknown> }): string[] {
+  const raw = mark.attrs?.selectionIds;
+  return Array.isArray(raw) ? raw.filter((value): value is string => typeof value === "string" && !!value) : [];
+}
+
+// Block atoms (repoImage / embeddedWidget / image) cannot carry the inline
+// aiEditRange mark, so a selection covering one is anchored by the
+// aiEditSelectionIds node attribute instead. Both anchors are collected here so
+// getAiEditSelectionRange recovers either kind after an editor rebuild.
+const ATOM_ANCHOR_NODE_TYPES = new Set(["repoImage", "embeddedWidget", "image"]);
+
+function nodeAiEditSelectionIds(node: { attrs?: Record<string, unknown> }): string[] {
+  const raw = node.attrs?.aiEditSelectionIds;
+  return Array.isArray(raw) ? raw.filter((value): value is string => typeof value === "string" && !!value) : [];
+}
+
 export function collectAiEditSelectionRanges(doc: EditorState["doc"]) {
   const ranges = new Map<string, { from: number; to: number }>();
 
+  const extend = (selectionId: string, from: number, to: number) => {
+    const current = ranges.get(selectionId);
+    ranges.set(selectionId, {
+      from: current ? Math.min(current.from, from) : from,
+      to: current ? Math.max(current.to, to) : to
+    });
+  };
+
   doc.descendants((node, pos) => {
-    if (!node.isText) {
+    if (node.isText) {
+      for (const mark of node.marks) {
+        if (mark.type.name !== "aiEditRange") continue;
+        for (const selectionId of markSelectionIds(mark)) {
+          extend(selectionId, pos, pos + node.nodeSize);
+        }
+      }
       return;
     }
 
-    for (const mark of node.marks) {
-      if (mark.type.name !== "aiEditRange") continue;
-      const selectionId = mark.attrs.selectionId;
-      if (typeof selectionId !== "string" || !selectionId) continue;
-
-      const from = pos;
-      const to = pos + node.nodeSize;
-      const current = ranges.get(selectionId);
-      ranges.set(selectionId, {
-        from: current ? Math.min(current.from, from) : from,
-        to: current ? Math.max(current.to, to) : to
-      });
+    if (ATOM_ANCHOR_NODE_TYPES.has(node.type.name)) {
+      for (const selectionId of nodeAiEditSelectionIds(node)) {
+        extend(selectionId, pos, pos + node.nodeSize);
+      }
     }
   });
 
   return ranges;
+}
+
+// Sets/clears the aiEditSelectionIds anchor on every atom node within [from, to].
+// `add === false` removes the id (used by removeAiEditSelection / cleanup).
+function setAtomAnchorsInRange(
+  tr: Transaction,
+  id: string,
+  from: number,
+  to: number,
+  add: boolean
+) {
+  tr.doc.nodesBetween(from, to, (node, pos) => {
+    if (!ATOM_ANCHOR_NODE_TYPES.has(node.type.name)) return;
+    const current = nodeAiEditSelectionIds(node);
+    const has = current.includes(id);
+    if (add === has) return;
+    const next = add ? [...current, id] : current.filter((value) => value !== id);
+    tr.setNodeAttribute(pos, "aiEditSelectionIds", next);
+  });
+}
+
+// Removes an AI-edit selection id from every atom node in the document.
+function clearAtomAnchor(tr: Transaction, id: string) {
+  tr.doc.descendants((node, pos) => {
+    if (!ATOM_ANCHOR_NODE_TYPES.has(node.type.name)) return;
+    const current = nodeAiEditSelectionIds(node);
+    if (!current.includes(id)) return;
+    tr.setNodeAttribute(pos, "aiEditSelectionIds", current.filter((value) => value !== id));
+  });
 }
 
 function mapMetadata(
@@ -128,6 +190,21 @@ function applyMeta(
       from: meta.from,
       to: meta.to
     });
+    return next;
+  }
+  if (meta.type === "reseed") {
+    // Re-pin each entry's range to a freshly-measured document position, keeping
+    // whatever metadata it already had. Used after a full-doc setContent remount,
+    // whose replace-everything step otherwise collapses every other pending
+    // selection's anchor to the document end.
+    for (const entry of meta.entries) {
+      const current = next.get(entry.id);
+      next.set(entry.id, {
+        metadata: current?.metadata ?? { runId: null, progress: null, source: "local" },
+        from: entry.from,
+        to: entry.to
+      });
+    }
     return next;
   }
 
@@ -242,6 +319,25 @@ export function getAiEditSelectionRange(state: EditorState, id: string) {
   return collectAiEditSelectionRanges(state.doc).get(id) ?? null;
 }
 
+// Re-pins every tracked selection's plugin entry to its true document position
+// (from the surviving marks/atom attributes). Call this right after a full-doc
+// `editor.commands.setContent(...)` remount: that remount's replace-everything
+// step collapses every OTHER in-flight selection's anchor to the document end, so
+// without this their results would be inserted at the bottom of the document
+// instead of in place. Returns null when nothing needs re-pinning.
+export function reseedAiEditSelectionsFromDoc(state: EditorState): Transaction | null {
+  const ranges = collectAiEditSelectionRanges(state.doc);
+  const pluginState = aiEditSelectionPluginKey.getState(state);
+  const entries: Array<{ id: string; from: number; to: number }> = [];
+  for (const [id, range] of ranges) {
+    const current = pluginState?.metadata.get(id);
+    if (current && current.from === range.from && current.to === range.to) continue;
+    entries.push({ id, from: range.from, to: range.to });
+  }
+  if (entries.length === 0) return null;
+  return state.tr.setMeta(aiEditSelectionPluginKey, { type: "reseed", entries } satisfies AiEditSelectionMeta);
+}
+
 export function describeAiEditSelectionPresence(state: EditorState, id: string) {
   const pluginState = aiEditSelectionPluginKey.getState(state);
   const pluginEntry = pluginState?.metadata.get(id) ?? null;
@@ -275,12 +371,58 @@ function findAiEditRangeMark(state: EditorState, selectionId: string) {
   state.doc.descendants((node, pos) => {
     if (!node.isText) return;
     for (const mark of node.marks) {
-      if (mark.type.name === "aiEditRange" && mark.attrs.selectionId === selectionId) {
+      if (mark.type.name === "aiEditRange" && markSelectionIds(mark).includes(selectionId)) {
         ranges.push({ from: pos, to: pos + node.nodeSize });
       }
     }
   });
   return ranges.length > 0 ? { markType, ranges } : null;
+}
+
+// Adds `id` to the aiEditRange mark over [from, to], UNIONING with any selection
+// ids already there (so overlapping selections coexist instead of clobbering).
+// Marks never shift positions, so capturing segments then rewriting them is safe.
+function addMarkSelectionId(
+  tr: Transaction,
+  markType: NonNullable<EditorState["schema"]["marks"]["aiEditRange"]>,
+  from: number,
+  to: number,
+  id: string
+) {
+  const segments: Array<{ from: number; to: number; ids: string[] }> = [];
+  tr.doc.nodesBetween(from, to, (node, pos) => {
+    if (!node.isText) return;
+    const segFrom = Math.max(from, pos);
+    const segTo = Math.min(to, pos + node.nodeSize);
+    if (segTo <= segFrom) return;
+    const existing = node.marks.find((mark) => mark.type === markType);
+    const ids = existing ? markSelectionIds(existing) : [];
+    if (!ids.includes(id)) segments.push({ from: segFrom, to: segTo, ids: [...ids, id] });
+  });
+  for (const seg of segments) {
+    tr.removeMark(seg.from, seg.to, markType);
+    tr.addMark(seg.from, seg.to, markType.create({ selectionIds: seg.ids }));
+  }
+}
+
+// Removes `id` from every aiEditRange mark; a mark left with other ids keeps them.
+function removeMarkSelectionId(
+  tr: Transaction,
+  markType: NonNullable<EditorState["schema"]["marks"]["aiEditRange"]>,
+  id: string
+) {
+  const segments: Array<{ from: number; to: number; rest: string[] }> = [];
+  tr.doc.descendants((node, pos) => {
+    if (!node.isText) return;
+    const existing = node.marks.find((mark) => mark.type === markType);
+    if (!existing) return;
+    const ids = markSelectionIds(existing);
+    if (ids.includes(id)) segments.push({ from: pos, to: pos + node.nodeSize, rest: ids.filter((value) => value !== id) });
+  });
+  for (const seg of segments) {
+    tr.removeMark(seg.from, seg.to, markType);
+    if (seg.rest.length > 0) tr.addMark(seg.from, seg.to, markType.create({ selectionIds: seg.rest }));
+  }
 }
 
 export function upsertAiEditSelection(
@@ -302,15 +444,12 @@ export function upsertAiEditSelection(
   if (to > from) {
     const markType = state.schema.marks.aiEditRange;
     if (markType) {
-      const existing = findAiEditRangeMark(state, marker.id);
-      if (existing) {
-        for (let i = existing.ranges.length - 1; i >= 0; i--) {
-          const range = existing.ranges[i];
-          tr.removeMark(range.from, range.to, markType);
-        }
-      }
-      tr.addMark(from, to, markType.create({ selectionId: marker.id }));
+      addMarkSelectionId(tr, markType, from, to, marker.id);
     }
+    // The inline mark cannot attach to block atoms in the range, so also anchor
+    // any atoms (repoImage / embeddedWidget / image) via a node attribute that
+    // survives an editor rebuild.
+    setAtomAnchorsInRange(tr, marker.id, from, to, true);
   }
 
   tr.setMeta(aiEditSelectionPluginKey, {
@@ -332,14 +471,9 @@ export function removeAiEditSelection(state: EditorState, id: string) {
   const tr = state.tr;
   const markType = state.schema.marks.aiEditRange;
   if (markType) {
-    const existing = findAiEditRangeMark(state, id);
-    if (existing) {
-      for (let i = existing.ranges.length - 1; i >= 0; i--) {
-        const range = existing.ranges[i];
-        tr.removeMark(range.from, range.to, markType);
-      }
-    }
+    removeMarkSelectionId(tr, markType, id);
   }
+  clearAtomAnchor(tr, id);
   tr.setMeta(aiEditSelectionPluginKey, {
     type: "removeMetadata",
     id
@@ -373,16 +507,14 @@ export function cleanupStaleAiEditRangeMarks(state: EditorState, activeSelection
     }
   }
   if (stale.length === 0) return null;
-  const markType = state.schema.marks.aiEditRange;
-  if (!markType) return null;
   const tr = state.tr;
+  const markType = state.schema.marks.aiEditRange;
   for (const id of stale) {
-    const existing = findAiEditRangeMark(state, id);
-    if (!existing) continue;
-    for (let i = existing.ranges.length - 1; i >= 0; i--) {
-      const range = existing.ranges[i];
-      tr.removeMark(range.from, range.to, markType);
-    }
+    // Subtract just this id; a mark shared with a still-active selection keeps it.
+    if (markType) removeMarkSelectionId(tr, markType, id);
+    // Strip the atom anchor too, so a reload after an interrupted run doesn't leave
+    // a stale selection id baked into a repoImage / widget / image node.
+    clearAtomAnchor(tr, id);
   }
   return tr.docChanged ? tr : null;
 }

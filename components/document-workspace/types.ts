@@ -2,6 +2,7 @@ import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { JSONContent } from "@tiptap/react";
 
 import type { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
+import type { ReactionSummary } from "@/lib/reactions";
 
 export type CommentView = {
   id: string;
@@ -16,6 +17,7 @@ export type CommentView = {
     id: string;
     name: string;
   } | null;
+  reactions?: ReactionSummary[];
 };
 
 export type ThreadView = {
@@ -38,6 +40,9 @@ export type ShareLinkView = {
   token: string;
   permission: PermissionLevelValue;
   createdAt: string | Date;
+  // Absolute, canonical share URL built server-side (prefers APP_URL) so the
+  // copied link points at the public domain regardless of the current host.
+  url: string;
 };
 
 export type MemberView = {
@@ -64,6 +69,8 @@ export type DocumentWorkspaceProps = {
   initialShareLinks: ShareLinkView[];
   initialRepoUrl: string | null;
   initialRepoBranch: string | null;
+  initialAgentModel: string | null;
+  initialAgentEffort: string | null;
   isAuthenticated: boolean;
   isOwner: boolean;
   shareToken: string | null;

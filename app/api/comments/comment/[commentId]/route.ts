@@ -5,6 +5,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { serializeComment } from "@/lib/document-data";
 import { db } from "@/lib/db";
+import { syncCommentMentions } from "@/lib/mention-data";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 
 export const runtime = "nodejs";
@@ -72,6 +73,13 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       aiRunId: true,
       author: { select: { id: true, name: true } }
     }
+  });
+
+  await syncCommentMentions({
+    commentId: comment.id,
+    documentId: comment.thread.documentId,
+    body: parsed.data.body,
+    authorId: user.id
   });
 
   const serialized = serializeComment(updated);

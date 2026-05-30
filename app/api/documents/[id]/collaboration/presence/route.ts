@@ -9,13 +9,26 @@ import {
 } from "@/lib/collaboration";
 import { resolveDocumentAccess } from "@/lib/permissions";
 
+const positionContextSchema = z.object({
+  before: z.string().max(64),
+  after: z.string().max(64)
+});
+
 const selectionSchema = z
   .object({
     anchor: z.number().int().nonnegative(),
     head: z.number().int().nonnegative(),
     from: z.number().int().nonnegative(),
     to: z.number().int().nonnegative(),
-    version: z.number().int().nonnegative()
+    version: z.number().int().nonnegative(),
+    context: z
+      .object({
+        from: positionContextSchema,
+        to: positionContextSchema,
+        head: positionContextSchema
+      })
+      .optional()
+      .nullable()
   })
   .nullable();
 

@@ -2,7 +2,7 @@ import { Node, mergeAttributes } from "@tiptap/core";
 import { NodeViewProps, NodeViewWrapper, ReactNodeViewRenderer } from "@tiptap/react";
 import { useEffect, useRef, useState } from "react";
 
-import { commentThreadIdsAttributeSpec } from "@/lib/document-schema-nodes";
+import { aiEditSelectionIdsAttributeSpec, commentThreadIdsAttributeSpec } from "@/lib/document-schema-nodes";
 
 function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttributes }: NodeViewProps) {
   const [refreshing, setRefreshing] = useState(false);
@@ -250,7 +250,8 @@ export const RepoImage = Node.create({
         default: null,
         parseHTML: (element) => element.getAttribute("path") || null
       },
-      ...commentThreadIdsAttributeSpec
+      ...commentThreadIdsAttributeSpec,
+      ...aiEditSelectionIdsAttributeSpec
     };
   },
   parseHTML() {
@@ -350,7 +351,8 @@ export const EmbeddedWidget = Node.create({
           collapsed: attributes.collapsed === false ? "false" : "true"
         })
       },
-      ...commentThreadIdsAttributeSpec
+      ...commentThreadIdsAttributeSpec,
+      ...aiEditSelectionIdsAttributeSpec
     };
   },
   parseHTML() {

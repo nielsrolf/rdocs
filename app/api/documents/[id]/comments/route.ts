@@ -6,6 +6,7 @@ import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { documentHasAnchorForThread, parseDocumentContent } from "@/lib/content";
 import { serializeThread } from "@/lib/document-data";
 import { db } from "@/lib/db";
+import { syncCommentMentions } from "@/lib/mention-data";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 
 const createThreadSchema = z.object({
@@ -129,6 +130,16 @@ export async function POST(request: Request, { params }: RouteContext) {
     create: { threadId: thread.id, userId: user.id, lastReadAt: now },
     update: { lastReadAt: now }
   });
+
+  const firstComment = thread.comments[0];
+  if (firstComment) {
+    await syncCommentMentions({
+      commentId: firstComment.id,
+      documentId: id,
+      body: parsed.data.body,
+      authorId: user.id
+    });
+  }
 
   const updated = await db.document.findUnique({
     where: { id },

@@ -16,6 +16,30 @@ export const commentThreadIdsAttributeSpec = {
   }
 };
 
+// Pending AI-edit selections are normally anchored by the inline `aiEditRange`
+// mark, but inline marks cannot attach to block atoms (repoImage / embeddedWidget /
+// image). When the editor is rebuilt mid-run (reload, remount, remote snapshot) an
+// atom selection would otherwise lose its only anchor and fail with "The edited
+// range was deleted before the AI run finished." Persisting the selection ids on the
+// node — exactly like commentThreadIds — gives atom selections a document-level
+// anchor that survives a rebuild. These ids are transient: removeAiEditSelection and
+// cleanupStaleAiEditRangeMarks clear them.
+export const aiEditSelectionIdsAttributeSpec = {
+  aiEditSelectionIds: {
+    default: [] as string[],
+    parseHTML: (element: HTMLElement) => {
+      const raw = element.getAttribute("data-ai-edit-selection-ids");
+      if (!raw) return [];
+      return raw.split(",").map((value) => value.trim()).filter(Boolean);
+    },
+    renderHTML: (attributes: { aiEditSelectionIds?: unknown }) => {
+      const ids = Array.isArray(attributes.aiEditSelectionIds) ? attributes.aiEditSelectionIds : [];
+      if (ids.length === 0) return {};
+      return { "data-ai-edit-selection-ids": ids.join(",") };
+    }
+  }
+};
+
 export const RepoImageSchemaNode = Node.create({
   name: "repoImage",
   group: "block",
@@ -34,7 +58,8 @@ export const RepoImageSchemaNode = Node.create({
         default: null,
         parseHTML: (element) => element.getAttribute("path") || null
       },
-      ...commentThreadIdsAttributeSpec
+      ...commentThreadIdsAttributeSpec,
+      ...aiEditSelectionIdsAttributeSpec
     };
   },
   parseHTML() {
@@ -117,7 +142,8 @@ export const EmbeddedWidgetSchemaNode = Node.create({
           collapsed: attributes.collapsed === false ? "false" : "true"
         })
       },
-      ...commentThreadIdsAttributeSpec
+      ...commentThreadIdsAttributeSpec,
+      ...aiEditSelectionIdsAttributeSpec
     };
   },
   parseHTML() {

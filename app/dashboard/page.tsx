@@ -5,6 +5,7 @@ import { NewDocumentButton } from "@/components/new-document-button";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { getDocumentCommentStats } from "@/lib/document-data";
+import { getDocumentMentionStats } from "@/lib/mention-data";
 
 export default async function DashboardPage() {
   const user = await getCurrentUser();
@@ -47,7 +48,10 @@ export default async function DashboardPage() {
   ];
 
   // Aggregated in SQL rather than loading every comment for every document.
-  const { unreadByDoc, lastCommentByDoc } = await getDocumentCommentStats(user.id, docIds);
+  const [{ unreadByDoc, lastCommentByDoc }, mentionByDoc] = await Promise.all([
+    getDocumentCommentStats(user.id, docIds),
+    getDocumentMentionStats(user.id, docIds)
+  ]);
 
   const owned = ownedDocuments.map((d) => ({
     id: d.id,
@@ -58,6 +62,7 @@ export default async function DashboardPage() {
     ownerName: d.owner.name,
     permission: "EDIT",
     unreadCount: unreadByDoc.get(d.id) ?? 0,
+    mentionCount: mentionByDoc.get(d.id) ?? 0,
     lastCommentAt: lastCommentByDoc.get(d.id)?.toISOString() ?? null
   }));
   const shared = memberships.map(({ document, permission }) => ({
@@ -69,6 +74,7 @@ export default async function DashboardPage() {
     ownerName: document.owner.name,
     permission,
     unreadCount: unreadByDoc.get(document.id) ?? 0,
+    mentionCount: mentionByDoc.get(document.id) ?? 0,
     lastCommentAt: lastCommentByDoc.get(document.id)?.toISOString() ?? null
   }));
 

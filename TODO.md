@@ -1,55 +1,58 @@
-# TODO / deferred work
+# TODO: 
 
-Tracked items intentionally deferred. Most recent context first.
+# UI
+- [x] The outline sidebar is a bit ugly with how we display tabs: the tab edit/delete buttons on the left were introduced because on the right they were often invisible when the titles were too long, but now it just looks weird. The buttons should be displayed on hover in a way that ensures that the buttons are always visible
+  - DONE: tab actions moved back to the right, absolutely positioned and revealed only on hover/focus with a gradient fade over the (truncated) title so they're always fully visible. Regression test: `e2e/outline-tab-actions.spec.ts`.
+  - FOLLOW-UP FIX: long titles were overflowing the sidebar (the flex column item `.doc-outline-tab-group` had the default `min-width:auto`, so a no-wrap title grew the row to its full width and pushed the action buttons off-screen to the right). Added `min-width:0` down the flex chain (`.doc-outline-list-tabbed` / `.doc-outline-tab-group` / `.doc-outline-tab-headings`) so the title ellipsis-truncates and the row fits the sidebar — the actions now stay pinned to the visible right edge. Regression test strengthened to assert no horizontal overflow and that the actions stay within the sidebar bounds for a long title.
+- [x] we can remove the dashboard button in the top right since we already have the logo that links to the dashboard
+  - DONE: removed the redundant "Dashboard" ghost-button from the topbar (`app/layout.tsx`); the brand logo links to `/`, which redirects logged-in users to `/dashboard`.
+- [x] the "Export" button is weirdly not aligned with the other menu buttons
+  - DONE: the Export `<a>` was an inline element ignoring `min-height`; topbar buttons are now `inline-flex` + centered so anchors and `<button>`s align identically (`app/globals.css`).
+- [x] in collab mode, when I am typing in an early section of the document then the cursor or the selected section by a collaborator jumps around a bit - it goes back to selecting the correct section but it's distracting that it moves so much. Perhaps we can have some error correction and broadcast also the content of the selected text, or in the case of a cursor position a short string before and after the cursor position - then we can use that to avoid showing wrong positions while the collaborators sync. Maybe there are other ways to do it though, not sure
+  - DONE: implemented exactly that error-correction. Presence now broadcasts a short before/after text context for the cursor head and selection ends (`use-presence.ts`, captured within the text block so offsets stay exact). On the receiving side, after the existing OT position mapping, `reanchorWithinBlock` (pure, in `collaboration.ts`) re-finds that context in the same block and snaps the position onto it — but only when the mapped spot's text doesn't already match, and it falls back to the OT result if the context isn't found, so it's a safe corrective layer that can only fix the transient jump, never make placement worse. The root cause was a brief mis-map when the local user's *own* steps get confirmed (unconfirmed maps clear before the next presence packet arrives). Tests: `tests/collab-reanchor.test.ts`; `e2e/remote-presence.spec.ts` still green.
 
-## Database maintenance / retention
-- **`dev.db` has grown very large (~3 GB).** Likely dominated by `AiRunEvent`,
-  `DocumentVersion`, and `CollaborationStep` rows plus accumulated test data.
-  - Add a retention sweep (cron / startup): prune `AiRunEvent` older than N days,
-    cap `DocumentVersion` history per document, drop `CollaborationStep` rows well
-    below the latest durable version (the in-memory room only needs a recent
-    window; older steps are only for cold catch-up).
-  - Run `VACUUM` after large deletes to reclaim space.
-  - Consider a separate test database so `npm test` / `test:integration` don't
-    accumulate rows in the dev DB.
+# Security
 
-## Security (Phase 3 — discuss before implementing)
-- Session revocation (`sessionVersion` on User, checked in `getCurrentUser`).
-- CSRF: Origin/Referer check on mutating routes; consider SameSite=Strict.
-- Comment authz holes: any commenter can resolve/retag any thread and delete any
-  AI comment (see code review). Gate behind owner/author/editor.
-- Share tokens travel in URLs (history/logs/Referer) — exchange for a scoped
-  cookie at `/share/[token]`.
-- Agent child env scrubbing (deferred per product decision): `runWidgetBuild` and
-  the SDK inherit full `process.env` incl. `GITHUB_TOKEN`. Keep bypass mode +
-  slacki-ai auth, but scrub other secrets. Also reconsider `canComment` vs
-  `canEdit` for triggering agent runs.
+## Document environments — DONE
+Many projects need access to some secrets. E.g. research code may need LLM API calls or provision GPUs. Each document should have its own environment and that environment should be used for all agent contexts. Only contributors with edit access can access the environment tab of a document, and we only display env's as "abc*****123", never the full envs. The agent environment should not inherit the host environment.
+Tests:
+- run the service with a host environment of FOO=bar and ask in a document that claude prints the value of FOO (this should fail)
+- add tests that check that different docs have their own env's
+- add tests that check that only collaborators can overwrite or add new envs
+- DONE: new `DocumentEnvVar` model (per-doc key/value, write-only over the API). `lib/agent-env.ts` builds the agent env from an allow-list of host vars the agent needs (PATH/HOME/locale/TLS/XDG + `ANTHROPIC_*`/`CLAUDE_*`/`GITHUB_TOKEN`/`PYTHON_BIN`) plus the document's own vars layered on top — everything else (e.g. host `FOO`) is dropped; passed to the SDK via the `env` query option in `lib/ai.ts`, threaded through all three agent routes. Edit-gated CRUD API at `/api/documents/:id/environment` (values masked as `abc*****123` on read, never returned in full). UI: an "Env" topbar dropdown shown only to editors (`components/document-workspace/environment-menu.tsx`).
+  - VERIFIED with a live agent run: with host `FOO=bar-host-secret` set, the agent's `echo $FOO` returned empty while a doc-configured `MY_DOC_SECRET` was visible — so host env is not inherited and per-doc env is. Tests: `tests/agent-env.test.ts` (scrubbing/masking/validation), `e2e/document-env.spec.ts` (UI add/mask/delete, per-doc isolation, editor-only 403 gating).
+  - Note: the merge-conflict resolver in `lib/research-workspace.ts` still runs with the host env (not yet scrubbed); only the three main agent routes inject the scrubbed/per-doc env.
 
-## Test coverage gaps (need a browser: Playwright or jsdom)
-- In-editor AI-edit apply (`insertContentAt`) and decoration rendering.
-- Remote cursor/selection decoration placement end-to-end.
-- The SSE-healthy polling backoff (P4c) — currently logic-reviewed + build-verified
-  only.
+## Isolated workspaces — DONE (practical confinement)
+An agent should be sandboxed to its document's workspace, i.e. it should not be able to read files from outside of that. (Maybe this is already the case? Not sure)
+- It was NOT the case before (bypassPermissions + full Bash, reads unrestricted). Implemented the chosen "SDK Seatbelt + path guard" approach:
+  - Deterministic PreToolUse guard (`lib/agent-sandbox.ts`): structured file tools (Read/Write/Edit/MultiEdit/Grep/Glob/LS) are confined to the document's worktree, and Bash may not reference absolute paths inside a protected root (the gdocs-ai server repo, under which other documents' `.research-workspaces` worktrees live). Roots are realpath-canonicalised so symlinked components (macOS /tmp→/private/tmp) don't reject legitimate in-workspace reads. Wired as a `PreToolUse` hook in `lib/ai.ts`.
+  - Kernel Seatbelt sandbox enabled (`sandbox: { enabled, failIfUnavailable:false, autoAllowBashIfSandboxed }`).
+  - VERIFIED with a live agent run: in-workspace read succeeds; reading the gdocs-ai repo / a sibling doc's worktree is blocked; the agent still functions.
+  - Tests: `tests/agent-sandbox.test.ts` (guard logic).
+  - KNOWN LIMITATION: the SDK's Seatbelt *filesystem-read* restriction is driven by permission rules, which `permissionMode: "bypassPermissions"` skips — so the kernel layer does not restrict reads under our trust model, and harmless system paths (e.g. `/etc/hosts`, `/usr`) remain readable via Bash. The PreToolUse guard is therefore the effective boundary: it reliably blocks the sensitive targets (app repo + other documents' workspaces) but does not fully jail Bash from all of the host filesystem. Tightening that would require dropping bypassPermissions (conflicts with the agent-trust-model) or a custom Seatbelt profile.
 
-## Phase 5/6 status
-DONE (all with tests): restore-from-version, modal a11y (Escape/focus/
-aria-labelledby + error-toast aria-live), find & replace, mobile tab navigation,
-Markdown export, beforeunload guard, comment editing, word count.
 
-Decomposition DONE: `useCollaborationStream`, `usePresence` extracted from
-`document-workspace.tsx` (each behind the Playwright net).
+# Features
 
-Decomposition DELIBERATELY STOPPED HERE (not forced further): `useComments` and
-`useAiRuns` are deeply coupled to editor/selection/many setters — extracting them
-is high-churn for low user value and risks the very stale-closure/effect bugs the
-original review flagged. The two extracted hooks already isolated the most
-complex, most-coupled-but-bounded concern (live transport). Revisit only if the
-component needs further change; do it one hook at a time against the e2e net.
+## Emoji reacts to comments and text sections
+Like in google docs
+- DONE (comments): emoji reactions on comments. New `CommentReaction` model (`@@unique([commentId,userId,emoji])`); fixed palette + pure aggregation/optimistic-toggle in `lib/reactions.ts`. Toggle endpoint `POST /api/comments/comment/:id/reactions` (comment-access gated; anonymous share visitors can't react). Reactions are per-user, so the SSE broadcast (`comment-reaction`) carries raw rows and each client recomputes "reactedByMe" (`use-collaboration-stream.ts`). UI: reaction pills + an emoji picker under each active comment (`comment-rail.tsx`), optimistic add/remove with rollback. Tests: `tests/reactions.test.ts`, `e2e/comment-reactions.spec.ts`.
+- TODO (text sections): reacting to a selected text range (Google-Docs margin-emoji style) is not yet done — it needs a new anchored-reaction model + selection-popover action + margin rendering that persists through the collab step pipeline (cf. collab-content-invariant). Comparable in size to comment threads; deferred.
 
-Still nice-to-have (not started):
-- Version DIFF view (side-by-side).
-- True focus TRAP in modals (currently Escape + initial focus only).
-- @mentions + notification fan-out (persisted notifications for offline users) —
-  a whole subsystem.
-- Orphaned-thread surfacing + fuzzy re-anchoring using stored
-  `anchorText`/`anchorContext`.
+## @username Mentions in the doc and in comments
+- we also need some way of notifying the mentioned user somewhere in the dashboard (highlight docs with unacknowledged mentions, similar to unacknowledged comments?)
+- DONE (comments + dashboard notification): @mentioning a document member (owner or collaborator) in a comment/reply/edit records a `CommentMention` (pure matcher `lib/mentions.ts`, server sync `lib/mention-data.ts`; matches member names case-insensitively, longest-first, skips self). The dashboard shows a per-document "@ N" badge for unacknowledged mentions (mirrors unread comments, aggregated in SQL via `getDocumentMentionStats`); opening the document acknowledges them. Tests: `tests/mentions.test.ts`, `e2e/mentions.spec.ts`.
+- TODO (doc body): mentions typed into the document body itself (vs. comments) aren't detected yet — that needs parsing the collab-managed TipTap content (ideally a TipTap Mention autocomplete inserting a canonical token) and is deferred. Comment-body @mention highlighting was also left out to avoid expanding the markdown HTML surface.
+
+## Configuring agents — DONE
+Currently we always use sonnet 4.6 (?) - but for some use cases it would be great to use even smarter models like opus 4.8, and control the thinking effort.
+- DONE: per-document agent config (model + thinking effort). New `Document.agentModel` / `Document.agentEffort` columns; pure resolver `lib/agent-config.ts` maps them to Claude Agent SDK options (`model` alias + adaptive `thinking`/`effort`, or disabled when "off"). Threaded through all three agent routes (ai-edit, comment ask-ai, agents conversation) via `resolveDocumentAccess` + `ClaudeAgentRunOptions.agentConfig`. Editable from a Model/Thinking selector in the Agents panel topbar (edit-gated), persisted via PATCH `/api/documents/:id`. Tests: `tests/agent-config.test.ts` (resolver), `e2e/agent-config.spec.ts` (UI persistence + permission gating). Note: the merge-conflict resolver in `lib/research-workspace.ts` still uses the env default model — not document-scoped.
+
+## Using user provided claude tokens — DEFERRED (needs a design discussion)
+Currently, all claude usage runs through my account. I want people to be able to use this without paying, so they need to bring their own tokens. Therefore, all AI features should only be available to logged-in users that have connected their claude:
+- Deferred per discussion (2026-05-29). Ideal is reusing the `claude login` subscription OAuth flow (open URL, paste code back) so usage draws on the user's Claude Code subscription budget; "paste an API key" is an acceptable fallback. The Agent SDK exposes Claude OAuth control requests (SDKControlClaudeAuthenticate / SDKControlClaudeOAuthCallback / SDKControlClaudeOAuthWaitForCompletion) that may support this — to be scoped in a dedicated session.
+
+## Export to overleaf — DONE
+It would be great if we could export to overleaf - i.e. download a zipfile that can be uploaded to overleaf and be a working latex version of the document.
+- DONE: `GET /api/documents/:id/export?format=latex` returns an Overleaf-ready `.zip` (main.tex + README + bundled images). `lib/latex-export.ts` converts the TipTap doc to LaTeX (headings/tabs→sections, lists, task lists, blockquotes, code→verbatim, tables, marks→\textbf/\emph/\texttt/\sout/\href, full special-char escaping); `lib/zip.ts` is a dependency-free STORE-method zip writer. Images are embedded: data URLs decoded, http(s) fetched (bounded 8MB/10s), repoImages read from the linked workspace + recent run worktrees; anything unresolved (or widgets) renders as a framed placeholder so the doc still compiles. UI: the topbar "Export" button is now a dropdown (Markdown / Overleaf) — `components/document-workspace/export-menu.tsx`. Tests: `tests/zip.test.ts` (validated by system `unzip`), `tests/latex-export.test.ts` (structure + escaping + skip-guarded `pdflatex` compile), `e2e/export-latex.spec.ts` (downloads + unzips + checks embedded PNG). Note: math is escaped as literal text (no math node type exists in the schema); a real LaTeX engine wasn't installable locally so the compile test is skip-guarded.

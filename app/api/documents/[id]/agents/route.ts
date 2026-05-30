@@ -6,6 +6,7 @@ import { runClaudeResearchAgent } from "@/lib/ai";
 import { getCurrentUser } from "@/lib/auth";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
+import { loadDocumentEnv } from "@/lib/document-env";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 import { rateLimit } from "@/lib/rate-limit";
 import {
@@ -75,8 +76,10 @@ async function runAgentConversationInBackground(input: {
   previousRunId: string | null;
   documentTitle: string;
   documentContent: string;
+  agentConfig: { model: string | null; effort: string | null };
 }) {
-  const { documentId, aiRunId, message, previousRunId, documentTitle, documentContent } = input;
+  const { documentId, aiRunId, message, previousRunId, documentTitle, documentContent, agentConfig } =
+    input;
   let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
 
   try {
@@ -124,6 +127,7 @@ async function runAgentConversationInBackground(input: {
       }
     });
     const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null);
+    const agentEnv = await loadDocumentEnv(documentId);
     const result = await runClaudeResearchAgent({
       mode: "conversation",
       documentTitle,
@@ -142,18 +146,22 @@ async function runAgentConversationInBackground(input: {
       workspaceOverview,
       instruction: message,
       conversationHistory
-    }, async (event) => {
-      await Promise.all([
-        db.aiRun.update({
-          where: { id: aiRunId },
-          data: { progress: event.message }
-        }),
-        recordAiRunEvent({
-          aiRunId,
-          role: event.role ?? "agent",
-          message: event.message
-        })
-      ]).catch(() => null);
+    }, {
+      agentConfig: { model: agentConfig.model, effort: agentConfig.effort },
+      agentEnv,
+      onProgress: async (event) => {
+        await Promise.all([
+          db.aiRun.update({
+            where: { id: aiRunId },
+            data: { progress: event.message }
+          }),
+          recordAiRunEvent({
+            aiRunId,
+            role: event.role ?? "agent",
+            message: event.message
+          })
+        ]).catch(() => null);
+      }
     });
 
     const commit = linkedRepo
@@ -265,7 +273,8 @@ export async function POST(request: Request, { params }: RouteContext) {
     message: parsed.data.message.trim(),
     previousRunId: parsed.data.previousRunId ?? null,
     documentTitle: access.document.title,
-    documentContent: access.document.content
+    documentContent: access.document.content,
+    agentConfig: { model: access.document.agentModel, effort: access.document.agentEffort }
   }).catch((error) => {
     console.error("[agents] background run threw", {
       documentId: id,

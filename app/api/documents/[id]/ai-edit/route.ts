@@ -15,6 +15,7 @@ import {
   type NormalizedSubmittedWidget
 } from "@/lib/ai-edit-submission";
 import { db } from "@/lib/db";
+import { loadDocumentEnv } from "@/lib/document-env";
 import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
 import { getClientIp, rateLimit } from "@/lib/rate-limit";
 import {
@@ -119,8 +120,9 @@ async function runAiEditInBackground(input: {
   parsed: AiEditPayload;
   documentTitle: string;
   documentContentRaw: string;
+  agentConfig: { model: string | null; effort: string | null };
 }) {
-  const { documentId, aiRunId, parsed, documentTitle, documentContentRaw } = input;
+  const { documentId, aiRunId, parsed, documentTitle, documentContentRaw, agentConfig } = input;
   let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
   try {
     const documentContent = parseDocumentContent(documentContentRaw);
@@ -154,6 +156,7 @@ async function runAiEditInBackground(input: {
     }
     const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null);
     const assetIntent = detectEditAssetIntent(parsed.instruction);
+    const agentEnv = await loadDocumentEnv(documentId);
 
     const result = await runClaudeResearchAgent(
       {
@@ -178,6 +181,8 @@ async function runAiEditInBackground(input: {
         instruction: parsed.instruction.trim()
       },
       {
+        agentConfig: { model: agentConfig.model, effort: agentConfig.effort },
+        agentEnv,
         onProgress: async (event) => {
           await Promise.all([
             db.aiRun.update({ where: { id: aiRunId }, data: { progress: event.message } }),
@@ -419,7 +424,8 @@ export async function POST(request: Request, { params }: RouteContext) {
     aiRunId: aiRun.id,
     parsed: parsed.data,
     documentTitle: access.document.title,
-    documentContentRaw: access.document.content
+    documentContentRaw: access.document.content,
+    agentConfig: { model: access.document.agentModel, effort: access.document.agentEffort }
   }).catch((error) => {
     console.error("[ai-edit] background run threw", {
       aiRunId: aiRun.id,

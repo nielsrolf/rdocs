@@ -274,6 +274,43 @@ body.public-view-shell .document-page-shell {
   color: var(--text);
 }
 
+.agent-config {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.agent-config-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.agent-config-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.agent-config-select {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.agent-config-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .agent-screen-topbar-status {
   flex: 0 0 auto;
   font-size: 0.78rem;
@@ -1467,6 +1504,18 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   color: #fff;
 }
 
+.mention-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  border-radius: 999px;
+  padding: 0.22rem 0.6rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  background: #f9ab00;
+  color: #3c2d00;
+}
+
 .surface-card {
   border-radius: 24px;
   padding: 1.2rem;
@@ -1680,11 +1729,15 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
 
 .document-topbar .ghost-button,
 .document-topbar .primary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-height: 2.1rem;
   padding: 0.35rem 0.8rem;
   border-radius: 8px;
   font-size: 0.88rem;
   font-weight: 500;
+  line-height: 1.2;
   transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 
@@ -1890,6 +1943,94 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   padding: 0.58rem 0.7rem;
 }
 
+.env-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  min-width: 360px;
+}
+
+.env-panel p {
+  margin: 0.18rem 0 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.env-var-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.env-empty {
+  color: var(--muted);
+  font-size: 0.86rem;
+  padding: 0.3rem 0;
+}
+
+.env-var-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.env-var-key {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.84rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.env-var-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.env-var-delete {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.85rem;
+}
+
+.env-var-delete:hover:not(:disabled) {
+  background: rgba(217, 48, 37, 0.12);
+  color: #d93025;
+}
+
+.env-add-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.env-add-row input {
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  font: inherit;
+}
+
+.env-error {
+  color: #d93025;
+}
+
 .editor-toolbar-group {
   display: flex;
   align-items: center;
@@ -2057,19 +2198,28 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
+  /* Constrain the column so its flex items can shrink to the sidebar width. */
+  min-width: 0;
 }
 
+/* Flex items default to min-width:auto, which would let a long, no-wrap tab
+   title grow the row past the sidebar (pushing the hover action buttons
+   off-screen to the right). min-width:0 lets the row shrink so the title
+   ellipsis-truncates and the actions stay pinned to the visible right edge. */
 .doc-outline-tab-group {
   list-style: none;
+  min-width: 0;
 }
 
 .doc-outline-tab-headings {
   list-style: none;
   margin: 0.1rem 0 0;
   padding: 0;
+  min-width: 0;
 }
 
 .doc-tab-row {
+  position: relative;
   display: flex;
   flex-direction: row;
   align-items: center;
@@ -2079,10 +2229,18 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   width: 100%;
   min-width: 0;
   box-sizing: border-box;
+  /* Surface colour the action overlay fades into; overridden per row state. */
+  --tab-row-surface: var(--surface-strong);
+}
+
+.doc-tab-row:hover {
+  background: rgba(0, 0, 0, 0.04);
+  --tab-row-surface: #eceef0;
 }
 
 .doc-tab-row-active {
   background: rgba(26, 115, 232, 0.1);
+  --tab-row-surface: #e7f0fd;
 }
 
 .doc-tab-button {
@@ -2108,8 +2266,8 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   font-weight: 600;
 }
 
-.doc-tab-button:hover {
-  background: rgba(0, 0, 0, 0.04);
+.doc-tab-row:hover .doc-tab-button {
+  background: transparent;
 }
 
 .doc-tab-title {
@@ -2131,17 +2289,27 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
 }
 
 .doc-tab-actions {
+  position: absolute;
+  top: 0;
+  right: 0.2rem;
+  bottom: 0;
   display: inline-flex;
-  flex-shrink: 0;
+  align-items: center;
   gap: 2px;
-  opacity: 0.55;
+  padding-left: 18px;
+  /* Fade the (possibly truncated) title out beneath the buttons so they stay
+     fully legible no matter how long the tab name is. */
+  background: linear-gradient(to right, transparent, var(--tab-row-surface) 16px);
+  border-radius: 4px;
+  opacity: 0;
+  pointer-events: none;
   transition: opacity 120ms ease;
 }
 
 .doc-tab-row:hover .doc-tab-actions,
-.doc-tab-row-active .doc-tab-actions,
-.doc-tab-actions:focus-within {
+.doc-tab-row:focus-within .doc-tab-actions {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .doc-tab-action {
@@ -2618,6 +2786,98 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
 .comment-tag-chip:disabled {
   opacity: 0.7;
   cursor: default;
+}
+
+.comment-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.4rem;
+}
+
+.comment-reaction-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.9);
+  font-size: 0.82rem;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.comment-reaction-pill:hover:not(:disabled) {
+  background: rgba(60, 64, 67, 0.06);
+}
+
+.comment-reaction-pill-mine {
+  background: var(--accent-soft, rgba(26, 115, 232, 0.12));
+  border-color: rgba(26, 115, 232, 0.45);
+}
+
+.comment-reaction-pill:disabled {
+  cursor: default;
+}
+
+.comment-reaction-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.comment-reaction-pill-mine .comment-reaction-count {
+  color: var(--accent-strong, #1a73e8);
+}
+
+.comment-reaction-add-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.comment-reaction-add {
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  padding: 0.1rem 0.45rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.comment-reaction-add:hover {
+  background: rgba(60, 64, 67, 0.06);
+  color: var(--text);
+}
+
+.comment-reaction-picker {
+  position: absolute;
+  bottom: calc(100% + 0.3rem);
+  left: 0;
+  z-index: 20;
+  display: flex;
+  gap: 0.15rem;
+  padding: 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: white;
+  box-shadow: var(--shadow);
+}
+
+.comment-reaction-option {
+  border: none;
+  background: transparent;
+  font-size: 1.05rem;
+  line-height: 1;
+  padding: 0.2rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.comment-reaction-option:hover {
+  background: rgba(60, 64, 67, 0.1);
 }
 
 .comment-tag-add {

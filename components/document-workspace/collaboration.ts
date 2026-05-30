@@ -5,6 +5,17 @@ import type { Mappable, Mapping } from "@tiptap/pm/transform";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type { MutableRefObject } from "react";
 
+// A few characters of text immediately before/after a position, captured within
+// the position's text block. Used to re-anchor a remote cursor/selection if OT
+// mapping drifts during sync (the "jumping cursor" fix).
+export type PositionContext = { before: string; after: string };
+
+export type SelectionContext = {
+  from: PositionContext;
+  to: PositionContext;
+  head: PositionContext;
+};
+
 export type RemotePresenceView = {
   clientId: string;
   userId: string | null;
@@ -16,10 +27,46 @@ export type RemotePresenceView = {
     from: number;
     to: number;
     version: number;
+    context?: SelectionContext | null;
   } | null;
   typing: boolean;
   lastSeen: number;
 };
+
+// Correct a mapped remote position by locating its captured surrounding text
+// within the SAME text block. ProseMirror positions and plain-text offsets line
+// up 1:1 inside a single text block, so `blockStart + textIndex` is an exact
+// position. If the text at the mapped spot already matches the context it's a
+// no-op; if the context can't be found we keep the mapped position. This makes
+// the function a safe corrective layer over OT mapping — it only moves a cursor
+// when it can prove the better spot, eliminating the transient "jump" without
+// risking worse placement. Pure, so it's unit-testable with plain strings.
+export function reanchorWithinBlock(
+  blockText: string,
+  blockStart: number,
+  mappedPos: number,
+  ctx: PositionContext | undefined
+): number {
+  if (!ctx) return mappedPos;
+  const target = ctx.before + ctx.after;
+  if (!target) return mappedPos;
+
+  const guess = mappedPos - blockStart; // text index the OT mapping points at
+  const here = blockText.slice(Math.max(0, guess - ctx.before.length), guess + ctx.after.length);
+  if (here === target) return mappedPos; // already correct — no jump needed
+
+  let bestPos = mappedPos;
+  let bestDist = Infinity;
+  for (let idx = blockText.indexOf(target); idx !== -1; idx = blockText.indexOf(target, idx + 1)) {
+    const candidate = blockStart + idx + ctx.before.length;
+    const dist = Math.abs(candidate - mappedPos);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestPos = candidate;
+    }
+  }
+  return bestPos;
+}
 
 export type ReceivedMappingEntry = {
   versionBefore: number;
@@ -104,6 +151,23 @@ export function createRemotePresenceExtension(
               const mapPosition = (pos: number, remoteVersion: number, bias: number) =>
                 mapRemotePosition(pos, remoteVersion, bias, localVersion, buffer, unconfirmedMaps);
 
+              // Correct OT drift by re-finding the captured surrounding text in
+              // the same block. A no-op when the mapped spot already matches, and
+              // a safe fallback (returns the mapped position) when it doesn't.
+              const reanchor = (mappedPos: number, ctx?: PositionContext) => {
+                if (!ctx) return mappedPos;
+                const clamped = Math.max(0, Math.min(mappedPos, maxPos));
+                try {
+                  const resolved = state.doc.resolve(clamped);
+                  if (!resolved.parent.isTextblock) return clamped;
+                  const blockStart = resolved.start();
+                  const blockText = state.doc.textBetween(blockStart, resolved.end());
+                  return reanchorWithinBlock(blockText, blockStart, clamped, ctx);
+                } catch {
+                  return clamped;
+                }
+              };
+
               remotePresenceRef.current.forEach((presence) => {
                 const selection = presence.selection;
                 if (!selection) {
@@ -111,9 +175,10 @@ export function createRemotePresenceExtension(
                 }
 
                 const remoteVersion = selection.version;
-                const mappedFrom = mapPosition(selection.from, remoteVersion, -1);
-                const mappedTo = mapPosition(selection.to, remoteVersion, 1);
-                const mappedHead = mapPosition(selection.head, remoteVersion, -1);
+                const context = selection.context ?? undefined;
+                const mappedFrom = reanchor(mapPosition(selection.from, remoteVersion, -1), context?.from);
+                const mappedTo = reanchor(mapPosition(selection.to, remoteVersion, 1), context?.to);
+                const mappedHead = reanchor(mapPosition(selection.head, remoteVersion, -1), context?.head);
 
                 const from = Math.max(0, Math.min(mappedFrom, maxPos));
                 const to = Math.max(from, Math.min(mappedTo, maxPos));
