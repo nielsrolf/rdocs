@@ -5,7 +5,7 @@ import { recordAiRunEvent } from "@/lib/ai-runs";
 import { getCurrentUser } from "@/lib/auth";
 import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { serializeComment } from "@/lib/document-data";
-import { runClaudeResearchAgent } from "@/lib/ai";
+import { getAgentRunner } from "@/lib/agent-runner";
 import {
   getContextAroundMatch,
   getDocumentAiBlocks,
@@ -112,7 +112,7 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
     const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null);
     const agentEnv = await loadDocumentEnv(thread.documentId);
 
-    const aiReply = await runClaudeResearchAgent({
+    const aiReply = await getAgentRunner().run({
       mode: "comment_reply",
       documentTitle: thread.document.title,
       documentText,

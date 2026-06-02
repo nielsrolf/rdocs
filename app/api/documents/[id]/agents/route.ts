@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { recordAiRunEvent, serializeAiRun } from "@/lib/ai-runs";
-import { runClaudeResearchAgent } from "@/lib/ai";
+import { getAgentRunner } from "@/lib/agent-runner";
 import { getCurrentUser } from "@/lib/auth";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
@@ -128,7 +128,7 @@ async function runAgentConversationInBackground(input: {
     });
     const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null);
     const agentEnv = await loadDocumentEnv(documentId);
-    const result = await runClaudeResearchAgent({
+    const result = await getAgentRunner().run({
       mode: "conversation",
       documentTitle,
       documentText,

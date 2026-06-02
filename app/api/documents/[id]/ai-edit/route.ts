@@ -4,7 +4,7 @@ import { z } from "zod";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { getCurrentUser } from "@/lib/auth";
 import { recordAiRunEvent } from "@/lib/ai-runs";
-import { runClaudeResearchAgent } from "@/lib/ai";
+import { getAgentRunner } from "@/lib/agent-runner";
 import { detectEditAssetIntent } from "@/lib/ai-asset-intent";
 import {
   embedSourceExists,
@@ -158,7 +158,7 @@ async function runAiEditInBackground(input: {
     const assetIntent = detectEditAssetIntent(parsed.instruction);
     const agentEnv = await loadDocumentEnv(documentId);
 
-    const result = await runClaudeResearchAgent(
+    const result = await getAgentRunner().run(
       {
         mode: "edit_selection",
         documentTitle,
