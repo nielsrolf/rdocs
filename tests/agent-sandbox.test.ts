@@ -6,6 +6,12 @@ import { evaluateToolPathAccess, extractAbsolutePaths, isPathWithinWorkspace } f
 const WS = "/work/.research-workspaces/doc-1/worktrees/run-1";
 const PROTECTED = ["/srv/gdocs-ai"];
 
+// The guard expands ~ / $HOME using process.env.HOME; pin it to a path that is
+// clearly outside the workspace and outside the system allowlist so the
+// home-directory tests are deterministic.
+const HOME = "/home/victim";
+process.env.HOME = HOME;
+
 test("isPathWithinWorkspace handles absolute, relative, and traversal paths", () => {
   assert.equal(isPathWithinWorkspace(WS, `${WS}/src/index.ts`), true);
   assert.equal(isPathWithinWorkspace(WS, "src/index.ts"), true); // relative to workspace
@@ -44,6 +50,69 @@ test("extractAbsolutePaths finds absolute and home tokens", () => {
   assert.deepEqual(extractAbsolutePaths("cat /etc/hosts && ls ~/.ssh"), ["/etc/hosts", "~/.ssh"]);
   assert.deepEqual(extractAbsolutePaths("echo hi"), []);
   assert.deepEqual(extractAbsolutePaths('grep x "/srv/gdocs-ai/.env"'), ["/srv/gdocs-ai/.env"]);
+  // A bare `~` (as in `ls ~`) must be extracted too — otherwise it slips past
+  // the guard entirely.
+  assert.deepEqual(extractAbsolutePaths("ls ~"), ["~"]);
+  assert.deepEqual(extractAbsolutePaths("cd ~ && cat foo"), ["~"]);
+});
+
+test("Bash accessing the host home directory is denied", () => {
+  // The exact reproduction from the user's bug report: the agent ran `ls ~` and
+  // listed the host home directory. The workspace lives *inside* the server
+  // repo, but the home dir is the repo's parent — a denylist of protected roots
+  // never covered it. Confinement must deny it.
+  const bareTilde = evaluateToolPathAccess({
+    workspace: WS,
+    protectedRoots: PROTECTED,
+    toolName: "Bash",
+    toolInput: { command: "ls ~" }
+  });
+  assert.equal(bareTilde.allowed, false);
+
+  const sshKey = evaluateToolPathAccess({
+    workspace: WS,
+    protectedRoots: PROTECTED,
+    toolName: "Bash",
+    toolInput: { command: "cat ~/.ssh/id_rsa" }
+  });
+  assert.equal(sshKey.allowed, false);
+
+  const homeVar = evaluateToolPathAccess({
+    workspace: WS,
+    protectedRoots: PROTECTED,
+    toolName: "Bash",
+    toolInput: { command: "cat $HOME/.aws/credentials" }
+  });
+  assert.equal(homeVar.allowed, false);
+
+  const homeBraceVar = evaluateToolPathAccess({
+    workspace: WS,
+    protectedRoots: PROTECTED,
+    toolName: "Bash",
+    toolInput: { command: "ls ${HOME}/Documents" }
+  });
+  assert.equal(homeBraceVar.allowed, false);
+
+  // An absolute path to the home directory by its real path is denied too.
+  const absHome = evaluateToolPathAccess({
+    workspace: WS,
+    protectedRoots: PROTECTED,
+    toolName: "Bash",
+    toolInput: { command: `cat ${HOME}/.bash_history` }
+  });
+  assert.equal(absHome.allowed, false);
+});
+
+test("Bash accessing an arbitrary out-of-workspace path is denied", () => {
+  // Anything outside the workspace and outside the system allowlist is denied —
+  // not just the previously-enumerated protected roots.
+  const otherProject = evaluateToolPathAccess({
+    workspace: WS,
+    protectedRoots: PROTECTED,
+    toolName: "Bash",
+    toolInput: { command: "cat /data/other-project/secret.txt" }
+  });
+  assert.equal(otherProject.allowed, false);
 });
 
 test("Bash referencing a protected root is denied; workspace + system paths are allowed", () => {

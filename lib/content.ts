@@ -8,31 +8,11 @@ export type DocumentContent = {
   content: ParagraphNode[];
 };
 
-export type AiDocumentBlock =
-  | {
-      type: "text";
-      text: string;
-    }
-  | {
-      type: "image";
-      src: string;
-      alt: string | null;
-    }
-  | {
-      type: "repoImage";
-      src: string | null;
-      path: string | null;
-      alt: string | null;
-      caption: string | null;
-    }
-  | {
-      type: "widget";
-      widgetId: string | null;
-      label: string;
-      buildCmd: string | null;
-      embedSource: string | null;
-      src: string | null;
-    };
+// AiDocumentBlock now lives in agent-core/ so the framework-free agent runtime
+// can use it; imported for local use and re-exported to preserve the
+// `@/lib/content` import path.
+import type { AiDocumentBlock } from "../agent-core/types";
+export type { AiDocumentBlock };
 
 export const defaultDocumentContent: DocumentContent = {
   type: "doc",

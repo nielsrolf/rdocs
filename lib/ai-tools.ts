@@ -1,12 +1,2 @@
-export const CLAUDE_AGENT_TOOLS = [
-  "Read",
-  "Write",
-  "Edit",
-  "MultiEdit",
-  "Grep",
-  "Glob",
-  "LS",
-  "Bash",
-  "WebSearch",
-  "WebFetch"
-];
+// Moved to agent-core/. Shim preserves the `@/lib/ai-tools` import path.
+export * from "../agent-core/ai-tools";
