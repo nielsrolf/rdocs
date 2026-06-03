@@ -54,6 +54,10 @@ export function buildContainerEnv(
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(base)) {
     if (HOST_FS_ENV_VARS.has(key)) continue;
+    // Drop empty/blank values. Crucially this prevents an empty ANTHROPIC_API_KEY
+    // (e.g. `ANTHROPIC_API_KEY=` in .env) from shadowing the injected
+    // CLAUDE_CODE_OAUTH_TOKEN — the container has no ~/.claude fallback.
+    if (!value.trim()) continue;
     out[key] = value;
   }
   return out;

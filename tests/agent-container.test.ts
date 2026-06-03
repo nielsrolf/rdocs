@@ -90,6 +90,16 @@ test("buildContainerEnv keeps secrets/tokens but drops host filesystem vars", ()
   assert.ok(!("AWS_SECRET_ACCESS_KEY" in env));
 });
 
+test("buildContainerEnv drops empty values (so an empty ANTHROPIC_API_KEY can't shadow the OAuth token)", () => {
+  const env = buildContainerEnv(
+    { ANTHROPIC_API_KEY: "", CLAUDE_CODE_OAUTH_TOKEN: "tok", LANG: "  " },
+    {}
+  );
+  assert.ok(!("ANTHROPIC_API_KEY" in env));
+  assert.ok(!("LANG" in env));
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "tok");
+});
+
 test("serializeEnvFile emits VAR=VALUE lines and skips multiline values", () => {
   const text = serializeEnvFile({ A: "1", B: "two words", BAD: "line1\nline2" });
   const lines = text.trimEnd().split("\n");
