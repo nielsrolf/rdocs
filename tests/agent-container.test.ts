@@ -54,6 +54,16 @@ test("egress is allowed (never --network none)", () => {
   assert.notEqual(network, "none");
 });
 
+test("ociRuntime selects --runtime when set (e.g. gVisor), and is absent otherwise", () => {
+  assert.ok(!args().includes("--runtime"));
+  const a = args({ ociRuntime: "runsc" });
+  const i = a.indexOf("--runtime");
+  assert.ok(i >= 0, "--runtime present");
+  assert.equal(a[i + 1], "runsc");
+  // It must come before the image (a run flag, not an arg to the container).
+  assert.ok(i < a.indexOf("gdocs-agent:local"));
+});
+
 test("read-only can be disabled but tmpfs scratch only appears when read-only", () => {
   assert.ok(!args({ readOnly: false }).includes("--read-only"));
   assert.ok(!args({ readOnly: false }).join(" ").includes("--tmpfs"));

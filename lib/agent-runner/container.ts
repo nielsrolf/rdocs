@@ -87,7 +87,9 @@ export class ContainerRunner implements AgentRunner {
         memory: process.env.AGENT_CONTAINER_MEMORY || "4g",
         cpus: process.env.AGENT_CONTAINER_CPUS || undefined,
         pidsLimit: 512,
-        readOnly
+        readOnly,
+        // e.g. AGENT_CONTAINER_OCI_RUNTIME=runsc to run under gVisor (Linux).
+        ociRuntime: process.env.AGENT_CONTAINER_OCI_RUNTIME || undefined
       });
 
       return await this.spawnContainer(runtime, args, opts.job, opts.onProgress);

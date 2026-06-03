@@ -18,6 +18,11 @@ export type ContainerRunSpec = {
   readOnly?: boolean; // read-only rootfs + tmpfs scratch (default true)
   containerWorkspace?: string; // default "/workspace"
   homeDir?: string; // default "/home/agent"
+  // OCI runtime to select with `--runtime` (e.g. "runsc" for gVisor, which runs
+  // a user-space kernel so the agent's syscalls don't hit the host kernel —
+  // a stronger boundary for untrusted code). Unset → the engine default (runc).
+  // Linux-only; register the runtime with the engine before using it.
+  ociRuntime?: string;
 };
 
 // Host env vars that are meaningless or actively wrong inside the container
@@ -81,6 +86,12 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
   const readOnly = spec.readOnly ?? true;
 
   const args = ["run", "--rm", "-i"];
+
+  // Stronger isolation runtime (e.g. gVisor's runsc) when configured. An extra
+  // layer on top of the flags below, not a replacement for them.
+  if (spec.ociRuntime) {
+    args.push("--runtime", spec.ociRuntime);
+  }
 
   // Run as the host user so bind-mounted files stay host-owned (lets the app
   // commit/serve them afterward).
