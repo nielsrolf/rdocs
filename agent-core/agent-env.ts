@@ -42,7 +42,23 @@ const ALLOWLIST_EXACT = new Set([
 // auth + config the SDK and CLI read).
 const ALLOWLIST_PREFIXES = ["ANTHROPIC_", "CLAUDE_", "AWS_BEDROCK_", "GOOGLE_VERTEX_"];
 
+// Names that match a prefix above but must NOT propagate: these are the IPC /
+// session control vars a PARENT Claude Code process sets for itself. Inheriting
+// them makes the agent's own bundled `claude` CLI try to attach to a
+// non-existent parent session (SSE port, session id) and exit 1. The auth token
+// (CLAUDE_CODE_OAUTH_TOKEN) and our own CLAUDE_AGENT_* config are deliberately
+// not in this list.
+const DENYLIST_EXACT = new Set([
+  "CLAUDECODE",
+  "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_EXECPATH",
+  "CLAUDE_CODE_SSE_PORT",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_TMPDIR"
+]);
+
 function isAllowlisted(name: string): boolean {
+  if (DENYLIST_EXACT.has(name)) return false;
   if (ALLOWLIST_EXACT.has(name)) return true;
   return ALLOWLIST_PREFIXES.some((prefix) => name.startsWith(prefix));
 }

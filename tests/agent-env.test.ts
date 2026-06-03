@@ -30,6 +30,35 @@ test("allowlisted toolchain + auth variables pass through", () => {
   assert.equal(env.FOO, undefined);
 });
 
+test("parent Claude Code IPC/session vars are scrubbed, but auth + our config pass", () => {
+  const env = buildAgentEnv({
+    // Auth + our own config must survive:
+    CLAUDE_CODE_OAUTH_TOKEN: "oauth-xyz",
+    CLAUDE_AGENT_MODEL: "opus",
+    ANTHROPIC_API_KEY: "sk-ant-123",
+    // A parent Claude Code's control vars must NOT leak to the nested agent CLI:
+    CLAUDECODE: "1",
+    CLAUDE_CODE_ENTRYPOINT: "cli",
+    CLAUDE_CODE_SSE_PORT: "54321",
+    CLAUDE_CODE_SESSION_ID: "abc",
+    CLAUDE_CODE_EXECPATH: "/usr/bin/claude",
+    CLAUDE_CODE_TMPDIR: "/tmp/claude"
+  });
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "oauth-xyz");
+  assert.equal(env.CLAUDE_AGENT_MODEL, "opus");
+  assert.equal(env.ANTHROPIC_API_KEY, "sk-ant-123");
+  for (const denied of [
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_TMPDIR"
+  ]) {
+    assert.equal(env[denied], undefined, `${denied} must be scrubbed`);
+  }
+});
+
 test("document variables are injected and override host values", () => {
   const env = buildAgentEnv({ PATH: "/bin", FOO: "bar" }, { OPENAI_API_KEY: "doc-key", PATH: "/custom" });
   assert.equal(env.OPENAI_API_KEY, "doc-key");

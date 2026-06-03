@@ -12,6 +12,7 @@ import type {
 import type { AgentRunner, AgentRunOptions } from "./index";
 import { toAgentJob } from "./index";
 import { buildContainerEnv, buildContainerRunArgs, serializeEnvFile } from "./container-args";
+import { resolveAgentCredentialEnv } from "./agent-credential";
 
 // Runs the agent in a hardened local container with the document worktree
 // bind-mounted at /workspace. The agent's tools are confined to the container's
@@ -43,6 +44,11 @@ export class ContainerRunner implements AgentRunner {
 
     try {
       const containerEnv = buildContainerEnv(process.env, job.agentEnv ?? {});
+      // Supply an Anthropic credential the scrubbed env wouldn't otherwise carry
+      // (falls back to the host ~/.claude OAuth session). See agent-credential.ts.
+      const { added, warning } = resolveAgentCredentialEnv(containerEnv, { homeDir: process.env.HOME });
+      Object.assign(containerEnv, added);
+      if (warning) console.warn(`[agent-runner] ${warning}`);
       await writeFile(envFile, serializeEnvFile(containerEnv), { mode: 0o600 });
 
       const args = buildContainerRunArgs({
