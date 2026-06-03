@@ -1,10 +1,9 @@
 import type {
-  ClaudeAgentRunOptions,
   ClaudeResearchAgentInput,
   ClaudeResearchAgentOutput
 } from "@/agent-core";
 
-import type { AgentRunner } from "./index";
+import type { AgentRunner, AgentRunOptions } from "./index";
 
 // Client for the standalone container runner service. It will serialize the
 // AgentJob (input + agentConfig + agentEnv), POST it to RUNNER_URL, stream NDJSON
@@ -19,7 +18,7 @@ export class HttpRunner implements AgentRunner {
 
   async run(
     _input: ClaudeResearchAgentInput,
-    _options?: ClaudeAgentRunOptions
+    _options?: AgentRunOptions
   ): Promise<ClaudeResearchAgentOutput> {
     throw new Error(
       "[agent-runner] HTTP runner is not implemented yet (planned for P2: containerized runner). " +

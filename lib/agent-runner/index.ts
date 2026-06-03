@@ -15,42 +15,53 @@ import type {
   ClaudeResearchAgentInput,
   ClaudeResearchAgentOutput,
   DocumentAgentConfig,
-  DocumentEnv
+  DocumentEnv,
+  SubmissionValidationSpec
 } from "@/agent-core";
 
 import { InProcessRunner } from "./inprocess";
 import { HttpRunner } from "./http";
+
+// run() options. Unlike ClaudeAgentRunOptions, validation is expressed as a
+// SERIALIZABLE spec rather than a closure, so it can be shipped to a remote
+// runner and reconstructed there. onProgress stays a runtime callback (bridged
+// over the wire by HttpRunner).
+export type AgentRunOptions = {
+  onProgress?: ClaudeAgentRunOptions["onProgress"];
+  validation?: SubmissionValidationSpec;
+  agentConfig?: DocumentAgentConfig;
+  agentEnv?: DocumentEnv;
+};
 
 /** The serializable half of an agent run — safe to JSON-encode and ship. */
 export type AgentJob = {
   input: ClaudeResearchAgentInput;
   agentConfig?: DocumentAgentConfig;
   agentEnv?: DocumentEnv;
+  validation?: SubmissionValidationSpec;
 };
-
-/** The non-serializable half — runtime callbacks that stay app-side. */
-export type AgentRunHandlers = Pick<ClaudeAgentRunOptions, "onProgress" | "validateSubmission">;
 
 export interface AgentRunner {
   /** Stable identifier of the execution backend, for logging/tests. */
   readonly mode: AgentRunnerMode;
   run(
     input: ClaudeResearchAgentInput,
-    options?: ClaudeAgentRunOptions
+    options?: AgentRunOptions
   ): Promise<ClaudeResearchAgentOutput>;
 }
 
 export type AgentRunnerMode = "inprocess" | "http";
 
-/** Split an options bag into the serializable job payload + runtime handlers. */
+/** Extract the serializable job payload from an options bag (drops onProgress). */
 export function toAgentJob(
   input: ClaudeResearchAgentInput,
-  options?: ClaudeAgentRunOptions
+  options?: AgentRunOptions
 ): AgentJob {
   return {
     input,
     agentConfig: options?.agentConfig,
-    agentEnv: options?.agentEnv
+    agentEnv: options?.agentEnv,
+    validation: options?.validation
   };
 }
 

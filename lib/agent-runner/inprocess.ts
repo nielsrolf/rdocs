@@ -1,11 +1,11 @@
 import {
+  buildSubmissionValidator,
   runClaudeResearchAgent,
-  type ClaudeAgentRunOptions,
   type ClaudeResearchAgentInput,
   type ClaudeResearchAgentOutput
 } from "@/agent-core";
 
-import type { AgentRunner } from "./index";
+import type { AgentRunner, AgentRunOptions } from "./index";
 
 // Runs the agent loop IN THE SERVER PROCESS — today's behavior. This provides
 // NO OS-level sandbox: the agent's Bash/Read/Write tools run as subprocesses of
@@ -20,7 +20,7 @@ export class InProcessRunner implements AgentRunner {
 
   run(
     input: ClaudeResearchAgentInput,
-    options?: ClaudeAgentRunOptions
+    options?: AgentRunOptions
   ): Promise<ClaudeResearchAgentOutput> {
     if (!InProcessRunner.warned) {
       InProcessRunner.warned = true;
@@ -29,6 +29,14 @@ export class InProcessRunner implements AgentRunner {
           "Set AGENT_RUNNER_MODE=http to use the containerized runner."
       );
     }
-    return runClaudeResearchAgent(input, options);
+    const validateSubmission = options?.validation
+      ? buildSubmissionValidator(options.validation, { workspacePath: input.workspacePath })
+      : undefined;
+    return runClaudeResearchAgent(input, {
+      onProgress: options?.onProgress,
+      agentConfig: options?.agentConfig,
+      agentEnv: options?.agentEnv,
+      validateSubmission
+    });
   }
 }

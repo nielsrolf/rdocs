@@ -7,4 +7,8 @@ export * from "./agent-config";
 export * from "./agent-env";
 export * from "./agent-sandbox";
 export * from "./ai-tools";
+export * from "./ai-asset-intent";
+export * from "./ai-edit-submission";
+export * from "./widget-build";
+export * from "./edit-validation";
 export * from "./agent";

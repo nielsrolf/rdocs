@@ -4,15 +4,14 @@ import { z } from "zod";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { getCurrentUser } from "@/lib/auth";
 import { recordAiRunEvent } from "@/lib/ai-runs";
+import { buildAndVerifyWidget } from "@/agent-core";
 import { getAgentRunner } from "@/lib/agent-runner";
 import { detectEditAssetIntent } from "@/lib/ai-asset-intent";
 import {
   embedSourceExists,
   hasMarkdownImage,
   normalizeAgentImages,
-  normalizeSubmittedWidget,
-  validateAiEditAssets,
-  type NormalizedSubmittedWidget
+  normalizeSubmittedWidget
 } from "@/lib/ai-edit-submission";
 import { db } from "@/lib/db";
 import { loadDocumentEnv } from "@/lib/document-env";
@@ -22,8 +21,7 @@ import {
   commitWorkspaceChanges,
   ensureLinkedRepositoryWorktree,
   getWorkspaceOverview,
-  removeRunWorktree,
-  runWidgetBuild
+  removeRunWorktree
 } from "@/lib/research-workspace";
 import { normalizeSourceLinks } from "@/lib/sources";
 
@@ -36,30 +34,16 @@ const aiEditSchema = z.object({
   shareToken: z.string().optional().nullable()
 });
 
-async function buildAndVerifyWidget(
-  widget: NormalizedSubmittedWidget,
-  workspace: string
-): Promise<{ ok: true; lastBuiltAt: Date } | { ok: false; error: string }> {
-  const result = await runWidgetBuild(widget.buildCmd, workspace);
-  if (!result.ok) {
-    return { ok: false, error: result.error };
-  }
-  const exists = await embedSourceExists(workspace, widget.embedSource);
-  if (!exists) {
-    return {
-      ok: false,
-      error: `Build command succeeded but embed_source "${widget.embedSource}" was not produced in the workspace.`
-    };
-  }
-  return { ok: true, lastBuiltAt: new Date() };
-}
-
 async function createAgentWidgets(input: {
   widgets: unknown;
   documentId: string;
   shareToken: string | null;
   workspace: string | null;
   aiRunId: string | null;
+  // When the agent ran in the container runner, widgets were already built and
+  // verified IN-SANDBOX during submission validation. Re-building here would run
+  // untrusted code on the host, so we only confirm the embed_source exists.
+  verifyOnly: boolean;
 }) {
   if (!Array.isArray(input.widgets)) {
     return { created: [] as Array<Record<string, unknown>>, buildErrors: [] as string[] };
@@ -75,7 +59,15 @@ async function createAgentWidgets(input: {
     let lastError: string | null = null;
     let lastBuiltAt: Date | null = null;
     if (input.workspace) {
-      const result = await buildAndVerifyWidget(normalized, input.workspace);
+      let result: { ok: true; lastBuiltAt: Date } | { ok: false; error: string };
+      if (input.verifyOnly) {
+        const exists = await embedSourceExists(input.workspace, embedSource);
+        result = exists
+          ? { ok: true, lastBuiltAt: new Date() }
+          : { ok: false, error: `embed_source "${embedSource}" was not found in the workspace.` };
+      } else {
+        result = await buildAndVerifyWidget(normalized, input.workspace);
+      }
       if (!result.ok) {
         lastError = result.error.slice(0, 6000);
         buildErrors.push(`Widget "${label}" failed to build: ${lastError}`);
@@ -193,44 +185,13 @@ async function runAiEditInBackground(input: {
             })
           ]).catch(() => null);
         },
-        validateSubmission: async (submission) => {
-          const submittedImages = Array.isArray(submission.images) ? submission.images : [];
-          const submittedWidgets = Array.isArray(submission.widgets) ? submission.widgets : [];
-          const hasImage =
-            submittedImages.length > 0 || hasMarkdownImage(submission.replacementText ?? "");
-          const hasWidget = submittedWidgets.length > 0;
-          const assetError = validateAiEditAssets({
-            replacementText: submission.replacementText,
-            selectedText: parsed.selectedText,
-            hasImage,
-            hasWidget,
-            assetIntent
-          });
-          if (assetError) {
-            return assetError;
-          }
-          if (hasWidget) {
-            const workspace = linkedRepo?.workspace ?? null;
-            if (!workspace) {
-              return "You submitted a widget but no isolated workspace is available. Remove the widget from the submission.";
-            }
-            for (let i = 0; i < submittedWidgets.length; i += 1) {
-              const normalized = normalizeSubmittedWidget(submittedWidgets[i]);
-              if (!normalized) {
-                return `Widget #${i + 1} is missing label, build_cmd, or embed_source. Provide all three and resubmit.`;
-              }
-              const result = await buildAndVerifyWidget(normalized, workspace);
-              if (!result.ok) {
-                const truncated = result.error.length > 4000 ? `${result.error.slice(0, 4000)}…` : result.error;
-                return (
-                  `Widget "${normalized.label}" (build_cmd: ${normalized.buildCmd}, embed_source: ${normalized.embedSource}) is not ready:\n` +
-                  `${truncated}\n\n` +
-                  `Fix the cause — create or repair the build script under widgets/, run it from the repo root (cwd is the workspace), confirm it writes ${normalized.embedSource}, then resubmit.`
-                );
-              }
-            }
-          }
-          return null;
+        // Serializable validation spec — reconstructed into a validator wherever
+        // the agent actually runs (in-process, or inside the container, where
+        // the untrusted widget build is sandboxed).
+        validation: {
+          kind: "edit_selection",
+          selectedText: parsed.selectedText,
+          assetIntent
         }
       }
     );
@@ -245,7 +206,8 @@ async function runAiEditInBackground(input: {
       documentId,
       shareToken: parsed.shareToken ?? null,
       workspace: linkedRepo?.workspace ?? null,
-      aiRunId
+      aiRunId,
+      verifyOnly: getAgentRunner().mode === "http"
     });
     const widgets = widgetResult.created;
     for (const buildError of widgetResult.buildErrors) {

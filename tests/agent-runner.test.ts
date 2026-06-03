@@ -64,16 +64,20 @@ test("toAgentJob splits serializable job data from runtime handlers and round-tr
   const job = toAgentJob(input, {
     agentConfig: { model: "claude-opus-4-8", effort: "high" },
     agentEnv: { MY_DOC_SECRET: "s3cret" },
-    // Handlers must NOT leak into the serializable job:
-    onProgress: () => {},
-    validateSubmission: async () => null
+    validation: {
+      kind: "edit_selection",
+      selectedText: "old",
+      assetIntent: { requiresImage: false, requiresWidget: false, requiresAnyAsset: false }
+    },
+    // The runtime callback must NOT leak into the serializable job:
+    onProgress: () => {}
   });
 
   assert.deepEqual(job.agentConfig, { model: "claude-opus-4-8", effort: "high" });
   assert.deepEqual(job.agentEnv, { MY_DOC_SECRET: "s3cret" });
   assert.equal(job.input.instruction, "rewrite");
+  assert.equal(job.validation?.kind, "edit_selection");
   assert.ok(!("onProgress" in job));
-  assert.ok(!("validateSubmission" in job));
 
   const roundTripped = JSON.parse(JSON.stringify(job)) as AgentJob;
   assert.deepEqual(roundTripped, job);
