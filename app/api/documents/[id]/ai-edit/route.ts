@@ -207,7 +207,7 @@ async function runAiEditInBackground(input: {
       shareToken: parsed.shareToken ?? null,
       workspace: linkedRepo?.workspace ?? null,
       aiRunId,
-      verifyOnly: getAgentRunner().mode === "http"
+      verifyOnly: getAgentRunner().mode !== "inprocess"
     });
     const widgets = widgetResult.created;
     for (const buildError of widgetResult.buildErrors) {

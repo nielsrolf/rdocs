@@ -8,6 +8,7 @@ import {
   type AgentJob
 } from "../lib/agent-runner";
 import { InProcessRunner } from "../lib/agent-runner/inprocess";
+import { ContainerRunner } from "../lib/agent-runner/container";
 import { HttpRunner } from "../lib/agent-runner/http";
 
 test("resolveAgentRunnerMode defaults to inprocess and honors AGENT_RUNNER_MODE", () => {
@@ -16,6 +17,7 @@ test("resolveAgentRunnerMode defaults to inprocess and honors AGENT_RUNNER_MODE"
   assert.equal(resolveAgentRunnerMode({ AGENT_RUNNER_MODE: "http" }), "http");
   assert.equal(resolveAgentRunnerMode({ AGENT_RUNNER_MODE: "HTTP" }), "http");
   assert.equal(resolveAgentRunnerMode({ AGENT_RUNNER_MODE: " http " }), "http");
+  assert.equal(resolveAgentRunnerMode({ AGENT_RUNNER_MODE: "container" }), "container");
   // Unknown values fall back to the safe (working) default rather than erroring.
   assert.equal(resolveAgentRunnerMode({ AGENT_RUNNER_MODE: "docker" }), "inprocess");
 });
@@ -24,6 +26,10 @@ test("createAgentRunner returns the backend matching the mode", () => {
   const inproc = createAgentRunner("inprocess");
   assert.ok(inproc instanceof InProcessRunner);
   assert.equal(inproc.mode, "inprocess");
+
+  const container = createAgentRunner("container");
+  assert.ok(container instanceof ContainerRunner);
+  assert.equal(container.mode, "container");
 
   const http = createAgentRunner("http");
   assert.ok(http instanceof HttpRunner);

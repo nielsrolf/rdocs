@@ -1,0 +1,35 @@
+# Agent runtime image. Runs agent-core (the Claude Agent SDK loop) inside a
+# container so the agent's Bash/Read/Write tools are confined by the kernel to
+# the container's mount namespace — the host home, the app repo, and sibling
+# documents' worktrees simply do not exist here.
+#
+# Build context is the gdocs-ai repo ROOT (so agent-core/ can be COPYed):
+#   docker build -f runner/Dockerfile.agent -t gdocs-agent:local .
+FROM node:22-bookworm
+
+# Toolchain the agent commonly needs: python (+venv/pip), git, ripgrep, CA certs.
+# bookworm + apt keeps prebuilt Python wheels and compiled binaries working.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3 python3-venv python3-pip git ca-certificates ripgrep curl \
+ && rm -rf /var/lib/apt/lists/*
+
+# A home dir usable by an arbitrary --user uid (the runner runs the container as
+# the host user so bind-mounted files stay host-owned). Mounted over by a tmpfs
+# at runtime; created here so HOME resolves even without the tmpfs.
+ENV HOME=/home/agent
+RUN mkdir -p /home/agent /workspace && chmod 1777 /home/agent
+
+WORKDIR /agent
+# Install only the agent's runtime deps (SDK + tsx + zod). Cached unless
+# runner/package.json changes.
+COPY runner/package.json /agent/package.json
+RUN npm install --omit=dev --no-audit --no-fund
+
+# The framework-free agent runtime + the entrypoint. agent-core imports only the
+# SDK, zod, and node builtins — all resolvable from /agent/node_modules.
+COPY agent-core /agent/agent-core
+COPY runner/agent-entrypoint.ts /agent/agent-entrypoint.ts
+
+# Reads a JSON job on stdin, streams NDJSON frames on stdout.
+ENTRYPOINT ["/agent/node_modules/.bin/tsx", "/agent/agent-entrypoint.ts"]

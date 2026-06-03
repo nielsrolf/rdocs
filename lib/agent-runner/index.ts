@@ -20,6 +20,7 @@ import type {
 } from "@/agent-core";
 
 import { InProcessRunner } from "./inprocess";
+import { ContainerRunner } from "./container";
 import { HttpRunner } from "./http";
 
 // run() options. Unlike ClaudeAgentRunOptions, validation is expressed as a
@@ -50,7 +51,10 @@ export interface AgentRunner {
   ): Promise<ClaudeResearchAgentOutput>;
 }
 
-export type AgentRunnerMode = "inprocess" | "http";
+// inprocess: run in the server process (no OS sandbox; dev fallback).
+// container: spawn a hardened local container, worktree bind-mounted (P2).
+// http:      POST to a remote runner service (P3).
+export type AgentRunnerMode = "inprocess" | "container" | "http";
 
 /** Extract the serializable job payload from an options bag (drops onProgress). */
 export function toAgentJob(
@@ -69,13 +73,17 @@ export function resolveAgentRunnerMode(
   env: Record<string, string | undefined> = process.env
 ): AgentRunnerMode {
   const raw = (env.AGENT_RUNNER_MODE ?? "").trim().toLowerCase();
-  return raw === "http" ? "http" : "inprocess";
+  if (raw === "http") return "http";
+  if (raw === "container") return "container";
+  return "inprocess";
 }
 
 export function createAgentRunner(mode: AgentRunnerMode): AgentRunner {
   switch (mode) {
     case "http":
       return new HttpRunner();
+    case "container":
+      return new ContainerRunner();
     case "inprocess":
     default:
       return new InProcessRunner();
