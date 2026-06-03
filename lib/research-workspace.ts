@@ -2,10 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { query } from "@anthropic-ai/claude-agent-sdk";
-
-import { parseMaxTurns } from "@/lib/agent-config";
-import { CLAUDE_AGENT_TOOLS } from "@/lib/ai-tools";
+import { getAgentRunner } from "@/lib/agent-runner";
 import { db } from "@/lib/db";
 
 export type LinkedRepository = {
@@ -532,54 +529,13 @@ export async function syncBranchToBaseWorkspace(
   }
 }
 
+// Resolve textual merge conflicts in the base checkout via Claude. Routed
+// through the agent runner so it runs IN-SANDBOX under container mode (the base
+// checkout is bind-mounted) — closing the last host-side untrusted-code path —
+// and in-process (env-scrubbed, path-guarded) under the dev fallback. The agent
+// edits files but does not commit; syncBranchToBaseWorkspace commits the result.
 async function resolveMergeConflictsWithClaude(baseWorkspace: string, commitSha: string) {
-  const model = process.env.CLAUDE_AGENT_MODEL || "sonnet";
-  const abortController = new AbortController();
-  const timeout = setTimeout(() => abortController.abort(), 300_000);
-  const prompt = `A git merge is currently in progress in this repository.
-
-The commit being merged is ${commitSha}.
-
-Resolve all merge conflicts in the working tree. Preserve both the base branch intent and the incoming AI agent changes whenever they are compatible. If a real semantic conflict exists, make the smallest coherent implementation that keeps the repository buildable.
-
-Do not commit. After editing, run \`git status --porcelain\` and report whether any unmerged paths remain.
-
-Return only JSON:
-{"summary":"what you resolved","unresolved":false}
-`;
-
-  const mergeQuery = query({
-    prompt,
-    options: {
-      cwd: baseWorkspace,
-      systemPrompt:
-        "You are resolving git merge conflicts for a collaborative document app. Edit files directly, remove conflict markers, and keep the result coherent. Do not run background processes and do not commit.",
-      permissionMode: "bypassPermissions",
-      allowDangerouslySkipPermissions: true,
-      allowedTools: CLAUDE_AGENT_TOOLS,
-      maxTurns: parseMaxTurns(process.env.CLAUDE_MERGE_MAX_TURNS),
-      model,
-      thinking: { type: "disabled" },
-      abortController
-    }
-  });
-
-  try {
-    for await (const message of mergeQuery) {
-      if (message.type === "result" && message.is_error) {
-        const errors = "errors" in message ? message.errors : ["Claude merge conflict resolution failed."];
-        throw new Error(errors.join("\n"));
-      }
-    }
-  } catch (error) {
-    if (abortController.signal.aborted) {
-      throw new Error("Claude merge conflict resolution timed out after 300 seconds.");
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-    mergeQuery.close();
-  }
+  await getAgentRunner().resolveMergeConflicts({ workspacePath: baseWorkspace, commitSha });
 }
 
 export async function commitWorkspaceChanges(input: {

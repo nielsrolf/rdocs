@@ -1,11 +1,12 @@
 import {
   buildSubmissionValidator,
   runClaudeResearchAgent,
+  runMergeConflictResolver,
   type ClaudeResearchAgentInput,
   type ClaudeResearchAgentOutput
 } from "@/agent-core";
 
-import type { AgentRunner, AgentRunOptions } from "./index";
+import type { AgentRunner, AgentRunOptions, MergeResolveJob } from "./index";
 
 // Runs the agent loop IN THE SERVER PROCESS — today's behavior. This provides
 // NO OS-level sandbox: the agent's Bash/Read/Write tools run as subprocesses of
@@ -37,6 +38,15 @@ export class InProcessRunner implements AgentRunner {
       agentConfig: options?.agentConfig,
       agentEnv: options?.agentEnv,
       validateSubmission
+    });
+  }
+
+  resolveMergeConflicts(job: MergeResolveJob): Promise<void> {
+    return runMergeConflictResolver({
+      workspacePath: job.workspacePath,
+      commitSha: job.commitSha,
+      model: job.agentConfig?.model,
+      agentEnv: job.agentEnv
     });
   }
 }

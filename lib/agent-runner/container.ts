@@ -6,15 +6,16 @@ import path from "node:path";
 import type {
   ClaudeAgentProgressEvent,
   ClaudeResearchAgentInput,
-  ClaudeResearchAgentOutput
+  ClaudeResearchAgentOutput,
+  DocumentEnv
 } from "@/agent-core";
 
-import type { AgentRunner, AgentRunOptions } from "./index";
+import type { AgentRunner, AgentRunOptions, MergeResolveJob } from "./index";
 import { toAgentJob } from "./index";
 import { buildContainerEnv, buildContainerRunArgs, serializeEnvFile } from "./container-args";
 import { resolveAgentCredentialEnv } from "./agent-credential";
 
-// Runs the agent in a hardened local container with the document worktree
+// Runs the agent in a hardened local container with the relevant worktree
 // bind-mounted at /workspace. The agent's tools are confined to the container's
 // mount namespace, so the host home / app repo / sibling worktrees are
 // unreachable — the real boundary the in-process path lacked.
@@ -34,18 +35,44 @@ export class ContainerRunner implements AgentRunner {
         "[agent-runner] container mode requires an isolated workspace path; refusing to run without one."
       );
     }
+    const output = await this.spawnJob({
+      job,
+      workspaceHostPath: job.input.workspacePath,
+      agentEnv: job.agentEnv,
+      onProgress: options?.onProgress
+    });
+    return output as ClaudeResearchAgentOutput;
+  }
 
+  // Resolve an in-progress git merge inside the sandbox (the base checkout is
+  // bind-mounted). Closes the last host-side untrusted-code path.
+  async resolveMergeConflicts(job: MergeResolveJob): Promise<void> {
+    await this.spawnJob({
+      job: {
+        kind: "merge_resolve",
+        commitSha: job.commitSha,
+        agentConfig: job.agentConfig,
+        agentEnv: job.agentEnv
+      },
+      workspaceHostPath: job.workspacePath,
+      agentEnv: job.agentEnv
+    });
+  }
+
+  private async spawnJob(opts: {
+    job: unknown;
+    workspaceHostPath: string;
+    agentEnv?: DocumentEnv;
+    onProgress?: AgentRunOptions["onProgress"];
+  }): Promise<Record<string, unknown>> {
     const runtime = process.env.AGENT_CONTAINER_RUNTIME || "docker";
     const image = process.env.AGENT_CONTAINER_IMAGE || "gdocs-agent:local";
     const readOnly = process.env.AGENT_CONTAINER_READONLY !== "false";
 
     const tmpDir = await mkdtemp(path.join(os.tmpdir(), "gdocs-agent-"));
     const envFile = path.join(tmpDir, "env");
-
     try {
-      const containerEnv = buildContainerEnv(process.env, job.agentEnv ?? {});
-      // Supply an Anthropic credential the scrubbed env wouldn't otherwise carry
-      // (falls back to the host ~/.claude OAuth session). See agent-credential.ts.
+      const containerEnv = buildContainerEnv(process.env, opts.agentEnv ?? {});
       const { added, warning } = resolveAgentCredentialEnv(containerEnv, { homeDir: process.env.HOME });
       Object.assign(containerEnv, added);
       if (warning) console.warn(`[agent-runner] ${warning}`);
@@ -53,7 +80,7 @@ export class ContainerRunner implements AgentRunner {
 
       const args = buildContainerRunArgs({
         image,
-        workspaceHostPath: job.input.workspacePath,
+        workspaceHostPath: opts.workspaceHostPath,
         envFileHostPath: envFile,
         uid: process.getuid?.(),
         gid: process.getgid?.(),
@@ -63,7 +90,7 @@ export class ContainerRunner implements AgentRunner {
         readOnly
       });
 
-      return await this.spawnContainer(runtime, args, job, options?.onProgress);
+      return await this.spawnContainer(runtime, args, opts.job, opts.onProgress);
     } finally {
       await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     }
@@ -72,13 +99,13 @@ export class ContainerRunner implements AgentRunner {
   private spawnContainer(
     runtime: string,
     args: string[],
-    job: ReturnType<typeof toAgentJob>,
+    job: unknown,
     onProgress?: AgentRunOptions["onProgress"]
-  ): Promise<ClaudeResearchAgentOutput> {
+  ): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       const child = spawn(runtime, args, { stdio: ["pipe", "pipe", "pipe"] });
 
-      let result: ClaudeResearchAgentOutput | null = null;
+      let result: Record<string, unknown> | null = null;
       let frameError: string | null = null;
       let stdoutBuffer = "";
       let stderrTail = "";
@@ -87,11 +114,15 @@ export class ContainerRunner implements AgentRunner {
       const handleFrame = (line: string) => {
         const trimmed = line.trim();
         if (!trimmed) return;
-        let frame: { type?: string; event?: ClaudeAgentProgressEvent; output?: ClaudeResearchAgentOutput; message?: string };
+        let frame: {
+          type?: string;
+          event?: ClaudeAgentProgressEvent;
+          output?: Record<string, unknown>;
+          message?: string;
+        };
         try {
           frame = JSON.parse(trimmed);
         } catch {
-          // Non-NDJSON noise on stdout — treat as a log line, don't crash.
           process.stderr.write(`[agent-container] non-JSON stdout: ${trimmed}\n`);
           return;
         }

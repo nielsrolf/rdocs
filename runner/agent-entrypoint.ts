@@ -13,6 +13,7 @@
 import {
   buildSubmissionValidator,
   runClaudeResearchAgent,
+  runMergeConflictResolver,
   type ClaudeAgentProgressEvent
 } from "./agent-core/index";
 
@@ -44,14 +45,24 @@ function readStdin(): Promise<string> {
   });
 }
 
+type EntrypointJob =
+  | {
+      kind?: "agent_turn";
+      input: Record<string, unknown> & { workspacePath: string | null };
+      agentConfig?: { model?: string | null; effort?: string | null };
+      agentEnv?: Record<string, string>;
+      validation?: Parameters<typeof buildSubmissionValidator>[0];
+    }
+  | {
+      kind: "merge_resolve";
+      commitSha: string;
+      agentConfig?: { model?: string | null };
+      agentEnv?: Record<string, string>;
+    };
+
 async function main() {
   const raw = await readStdin();
-  let job: {
-    input: Record<string, unknown> & { workspacePath: string | null };
-    agentConfig?: unknown;
-    agentEnv?: Record<string, string>;
-    validation?: Parameters<typeof buildSubmissionValidator>[0];
-  };
+  let job: EntrypointJob;
   try {
     job = JSON.parse(raw);
   } catch (error) {
@@ -60,14 +71,24 @@ async function main() {
     return;
   }
 
-  // The agent runs against the in-container mount, not the host path.
-  job.input.workspacePath = CONTAINER_WORKSPACE;
-
-  const validateSubmission = job.validation
-    ? buildSubmissionValidator(job.validation, { workspacePath: CONTAINER_WORKSPACE })
-    : undefined;
-
   try {
+    if (job.kind === "merge_resolve") {
+      // Resolve a git merge in the bind-mounted base checkout — IN-SANDBOX.
+      await runMergeConflictResolver({
+        workspacePath: CONTAINER_WORKSPACE,
+        commitSha: job.commitSha,
+        model: job.agentConfig?.model,
+        agentEnv: job.agentEnv
+      });
+      emit({ type: "result", output: { kind: "merge_resolve", ok: true } });
+      return;
+    }
+
+    // The agent runs against the in-container mount, not the host path.
+    job.input.workspacePath = CONTAINER_WORKSPACE;
+    const validateSubmission = job.validation
+      ? buildSubmissionValidator(job.validation, { workspacePath: CONTAINER_WORKSPACE })
+      : undefined;
     const output = await runClaudeResearchAgent(job.input as never, {
       onProgress: (event: ClaudeAgentProgressEvent) => emit({ type: "progress", event }),
       agentConfig: job.agentConfig as never,

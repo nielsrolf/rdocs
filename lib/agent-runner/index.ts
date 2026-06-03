@@ -42,6 +42,16 @@ export type AgentJob = {
   validation?: SubmissionValidationSpec;
 };
 
+// A git-merge-conflict resolution turn — a different, simpler agent than a
+// document turn (no submit_response), run wherever the backend runs.
+export type MergeResolveJob = {
+  /** Host path of the base checkout with an in-progress merge. */
+  workspacePath: string;
+  commitSha: string;
+  agentConfig?: { model?: string | null };
+  agentEnv?: DocumentEnv;
+};
+
 export interface AgentRunner {
   /** Stable identifier of the execution backend, for logging/tests. */
   readonly mode: AgentRunnerMode;
@@ -49,6 +59,8 @@ export interface AgentRunner {
     input: ClaudeResearchAgentInput,
     options?: AgentRunOptions
   ): Promise<ClaudeResearchAgentOutput>;
+  /** Resolve an in-progress git merge in the given workspace (resolves on success). */
+  resolveMergeConflicts(job: MergeResolveJob): Promise<void>;
 }
 
 // inprocess: run in the server process (no OS sandbox; dev fallback).

@@ -11,4 +11,5 @@ export * from "./ai-asset-intent";
 export * from "./ai-edit-submission";
 export * from "./widget-build";
 export * from "./edit-validation";
+export * from "./merge-resolver";
 export * from "./agent";
