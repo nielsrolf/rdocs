@@ -2,8 +2,24 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getCurrentUser } from "@/lib/auth";
-import { pullCollaborationSteps, StepApplyError, submitCollaborationSteps } from "@/lib/collaboration";
+import {
+  forcePushDocument,
+  pullCollaborationSteps,
+  StepApplyError,
+  submitCollaborationSteps
+} from "@/lib/collaboration";
 import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
+
+// Sole-client "force push": when a tab's local doc has diverged so far that
+// prosemirror-collab can no longer rebase its pending steps, and it is the only
+// client connected, it overwrites the server document with its own state (git
+// push --force semantics). Refused server-side when anyone else is connected.
+const forcePushSchema = z.object({
+  force: z.literal(true),
+  content: z.unknown(),
+  clientId: z.string().min(1).max(120),
+  shareToken: z.string().optional().nullable()
+});
 
 const submitStepsSchema = z.object({
   version: z.number().int().nonnegative(),
@@ -73,6 +89,54 @@ export async function POST(request: Request, { params }: RouteContext) {
   const { id } = await params;
   const user = await getCurrentUser();
   const body = await request.json().catch(() => null);
+
+  // Sole-client force-push path (distinct from the normal step push below).
+  if (body && typeof body === "object" && (body as { force?: unknown }).force === true) {
+    const parsedForce = forcePushSchema.safeParse(body);
+    if (!parsedForce.success) {
+      return NextResponse.json({ error: "Invalid force-push payload." }, { status: 400 });
+    }
+    const forceAccess = await resolveDocumentAccess(id, user?.id, parsedForce.data.shareToken ?? null);
+    if (!forceAccess || !canEdit(forceAccess.permission)) {
+      return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+    }
+    try {
+      const result = await forcePushDocument({
+        documentId: id,
+        rawContent: forceAccess.document.content,
+        currentTitle: forceAccess.document.title,
+        currentUpdatedAt: forceAccess.document.updatedAt,
+        clientId: parsedForce.data.clientId,
+        content: parsedForce.data.content
+      });
+      console.warn("[collab-force-push]", {
+        documentId: id,
+        userId: user?.id ?? null,
+        clientId: parsedForce.data.clientId,
+        forced: result.forced,
+        reason: result.forced ? null : result.reason,
+        connectedClientIds: result.forced ? undefined : result.connectedClientIds,
+        elapsedMs: Date.now() - startedAt
+      });
+      // 409 when refused (another client is connected) so the client falls back
+      // to the normal "Save failed" conflict behavior.
+      return NextResponse.json(result, { status: result.forced ? 200 : 409 });
+    } catch (error) {
+      const applyFailed = error instanceof StepApplyError;
+      console.error("[collab-force-push] failed", {
+        documentId: id,
+        userId: user?.id ?? null,
+        clientId: parsedForce.data.clientId,
+        applyFailed,
+        error: error instanceof Error ? error.message : error
+      });
+      return NextResponse.json(
+        { error: "Unable to force-push document." },
+        { status: applyFailed ? 422 : 500 }
+      );
+    }
+  }
+
   const parsed = submitStepsSchema.safeParse(body);
 
   if (!parsed.success) {

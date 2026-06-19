@@ -490,6 +490,120 @@ export async function submitCollaborationSteps(input: {
   });
 }
 
+// Count the OTHER clients connected to a room — a live SSE subscriber or a
+// non-stale presence entry whose clientId differs from `exceptClientId`. Used
+// to gate the sole-client force-push: if anyone else is here, refuse.
+function otherConnectedClientIds(room: CollaborationRoom, exceptClientId: string): string[] {
+  prunePresence(room);
+  const others = new Set<string>();
+  room.subscribers.forEach((subscriber) => {
+    if (subscriber.clientId !== exceptClientId) others.add(subscriber.clientId);
+  });
+  room.presence.forEach((_presence, clientId) => {
+    if (clientId !== exceptClientId) others.add(clientId);
+  });
+  return Array.from(others);
+}
+
+// Force-push: let the SOLE connected client overwrite the server document with
+// its own state, the way `git push --force` overwrites a remote branch. This is
+// the escape hatch for an unrecoverable divergence (the client's local doc no
+// longer matches the server's confirmed version, so prosemirror-collab can't
+// rebase its pending steps — see the client's applyCollaborationPayload catch).
+//
+// Guard: it is only permitted when no OTHER client is connected, so it can never
+// silently clobber a concurrent collaborator's edits. With multiple clients, the
+// caller keeps the normal conflict behavior ("Save failed").
+//
+// Effect: overwrite Document.content, archive the overwritten server state to
+// version history (so the force-push is reversible), and reset the durable step
+// log to empty (durableVersion → 0). The sole client then re-seeds from the new
+// baseline at version 0.
+export async function forcePushDocument(input: {
+  documentId: string;
+  rawContent: string;
+  currentTitle: string;
+  currentUpdatedAt?: Date | string | null;
+  clientId: string;
+  content: unknown;
+}): Promise<
+  | { forced: true; version: number; updatedAt: string | null }
+  | { forced: false; reason: "other-clients"; connectedClientIds: string[] }
+> {
+  return withDocumentQueue(input.documentId, async () => {
+    const persistedDocument = await db.document.findUnique({
+      where: { id: input.documentId },
+      select: { content: true, title: true, updatedAt: true }
+    });
+
+    if (!persistedDocument) {
+      throw new Error("Document not found.");
+    }
+
+    const room = getCollaborationRoom(
+      input.documentId,
+      persistedDocument.content,
+      persistedDocument.updatedAt
+    );
+
+    const others = otherConnectedClientIds(room, input.clientId);
+    if (others.length > 0) {
+      return { forced: false, reason: "other-clients", connectedClientIds: others };
+    }
+
+    // Validate the incoming content against the server schema before committing
+    // — a corrupt force-push must not be able to brick the document.
+    let nextDoc: ProseMirrorNode;
+    try {
+      nextDoc = schema.nodeFromJSON(input.content);
+    } catch (error) {
+      throw new StepApplyError(
+        error instanceof Error ? `Invalid force-push content: ${error.message}` : "Invalid force-push content."
+      );
+    }
+
+    const nextContent = serializeDocumentContent(nextDoc.toJSON());
+    const previousContent = persistedDocument.content;
+
+    // Archive the overwritten server state so the discarded edits stay
+    // recoverable from version history.
+    await maybeCreateVersionSnapshot({
+      documentId: input.documentId,
+      currentTitle: persistedDocument.title,
+      currentContent: previousContent,
+      nextTitle: persistedDocument.title,
+      nextContent,
+      force: true
+    });
+
+    // Overwrite content AND reset the durable step log in ONE transaction so the
+    // log can never disagree with Document.content. Clearing the steps resets
+    // durableVersion (MAX(version)+1) to 0.
+    const updated = await db.$transaction(async (tx) => {
+      const result = await tx.document.update({
+        where: { id: input.documentId },
+        data: { content: nextContent },
+        select: { updatedAt: true }
+      });
+      await tx.$executeRawUnsafe("DELETE FROM CollaborationStep WHERE documentId = ?", input.documentId);
+      return result;
+    });
+
+    // Reset the in-memory room to the new authoritative baseline (version 0).
+    room.doc = nextDoc;
+    room.version = 0;
+    room.steps = [];
+    room.updatedAt = updated.updatedAt.toISOString();
+
+    // Tell any straggler subscribers to re-seed from the server. There should be
+    // none other than the requester (we checked), but a reset is authoritative
+    // and harmless: clients reload to the new version-0 baseline.
+    broadcast(room, "reset", { version: 0, updatedAt: room.updatedAt });
+
+    return { forced: true, version: 0, updatedAt: room.updatedAt };
+  });
+}
+
 export async function pullCollaborationSteps(input: {
   documentId: string;
   rawContent: string;

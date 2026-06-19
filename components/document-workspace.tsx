@@ -304,6 +304,9 @@ export function DocumentWorkspace({
   const collaborationPushBusyRef = useRef(false);
   const collaborationPushQueuedRef = useRef(false);
   const collaborationPullBusyRef = useRef(false);
+  // Guards the sole-client force-push recovery so a divergence can't fire it
+  // concurrently or repeatedly while a previous attempt is still in flight.
+  const forcePushBusyRef = useRef(false);
   const typingClearTimerRef = useRef<number | null>(null);
   const isApplyingRemoteUpdateRef = useRef(false);
   const hasUnsavedChangesRef = useRef(false);
@@ -692,6 +695,13 @@ export function DocumentWorkspace({
             setSaveState(sendableSteps(editor.state) ? "saving" : "saved");
             return;
           }
+
+          // The rebase failed — our local doc has diverged from the server's
+          // confirmed version. If we're the sole client, force-push our state
+          // and reload; otherwise fall through to the normal conflict handling.
+          if (await attemptForcePushRecovery()) {
+            return;
+          }
         }
 
         // A 422 means the server could not apply our steps at all (corrupt step
@@ -765,6 +775,68 @@ export function DocumentWorkspace({
       }
     } finally {
       collaborationPullBusyRef.current = false;
+    }
+  }
+
+  // Last-resort recovery for an unrecoverable divergence: this tab's local doc
+  // no longer matches the server's confirmed version, so prosemirror-collab
+  // can't rebase the pending steps (applyCollaborationPayload threw). If we are
+  // the ONLY client connected, force-push our state — the server overwrites its
+  // document with ours (archiving the old state) and resets to version 0, then
+  // we reload to re-seed the collab plugin at that baseline. No local edits are
+  // lost. When other clients are connected the server refuses (returns 409) and
+  // we keep the normal "Save failed" conflict behavior.
+  async function attemptForcePushRecovery(): Promise<boolean> {
+    if (!editor || forcePushBusyRef.current) {
+      return false;
+    }
+    // Skip the upload entirely if we already know another client is here; the
+    // server would refuse anyway. (The server re-checks authoritatively.)
+    if (remotePresenceRef.current.length > 0) {
+      return false;
+    }
+
+    forcePushBusyRef.current = true;
+    try {
+      const response = await fetch(`/api/documents/${documentId}/collaboration`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          force: true,
+          content: editor.getJSON(),
+          clientId: collabClientIdRef.current,
+          shareToken
+        })
+      });
+      const data = (await response.json().catch(() => null)) as
+        | { forced?: boolean; reason?: string }
+        | null;
+
+      if (response.ok && data?.forced) {
+        logClientEvent({
+          scope: "collaboration-force-push",
+          level: "warn",
+          message: "force-pushed diverged state; reloading to re-seed at version 0",
+          data: { documentId }
+        });
+        // The collab plugin's version is fixed at editor creation, so a reload is
+        // the clean way to adopt the new version-0 baseline (which now holds the
+        // content we just pushed).
+        window.location.reload();
+        return true;
+      }
+
+      logClientEvent({
+        scope: "collaboration-force-push",
+        level: "error",
+        message: "force-push refused (other clients connected) or failed",
+        data: { documentId, status: response.status, reason: data?.reason ?? null }
+      });
+      return false;
+    } catch {
+      return false;
+    } finally {
+      forcePushBusyRef.current = false;
     }
   }
 

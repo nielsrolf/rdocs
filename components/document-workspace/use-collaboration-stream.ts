@@ -70,6 +70,15 @@ export function useCollaborationStream(params: {
       applyCollaborationPayload(payload);
     });
 
+    // A sole-client force-push reset the room to a new version-0 baseline. The
+    // collab plugin's version is fixed at editor creation, so any other tab still
+    // attached to the old version can only re-seed by reloading. (The tab that
+    // performed the force-push reloads itself; this covers stragglers.)
+    stream.addEventListener("reset", () => {
+      markSse();
+      window.location.reload();
+    });
+
     // Live thread sync — server broadcasts comment-create/reply/update/delete
     // so collaborators see new comments without reloading.
     stream.addEventListener("thread-created", (event) => {
