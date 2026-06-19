@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { getAgentRunner } from "@/lib/agent-runner";
+import { describeAttachmentsForOverview, syncAttachmentsIntoWorktree } from "@/lib/attachments";
 import { db } from "@/lib/db";
 
 export type LinkedRepository = {
@@ -298,6 +299,9 @@ export async function ensureLinkedRepositoryWorktree(
     }
   });
 
+  // Make user-uploaded attachments available to the agent inside the worktree.
+  await syncAttachmentsIntoWorktree(documentId, worktree);
+
   return {
     ...linked,
     baseWorkspace: linked.workspace,
@@ -387,9 +391,13 @@ export async function gcStaleWorktrees(maxAgeMs = 6 * 60 * 60 * 1000) {
   }
 }
 
-export async function getWorkspaceOverview(workspace: string | null) {
+export async function getWorkspaceOverview(workspace: string | null, documentId?: string) {
+  const attachmentsNote = documentId ? await describeAttachmentsForOverview(documentId) : "";
+  const withAttachments = (overview: string) =>
+    attachmentsNote ? `${overview}\n\n${attachmentsNote}` : overview;
+
   if (!workspace) {
-    return "No repository is linked to this document.";
+    return withAttachments("No repository is linked to this document.");
   }
 
   try {
@@ -404,11 +412,11 @@ export async function getWorkspaceOverview(workspace: string | null) {
       .filter(Boolean)
       .slice(0, MAX_OVERVIEW_FILES);
 
-    return files.length > 0
-      ? files.join("\n")
-      : "The linked repository has no tracked or untracked files.";
+    return withAttachments(
+      files.length > 0 ? files.join("\n") : "The linked repository has no tracked or untracked files."
+    );
   } catch {
-    return "Unable to list workspace files.";
+    return withAttachments("Unable to list workspace files.");
   }
 }
 

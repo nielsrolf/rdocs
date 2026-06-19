@@ -109,7 +109,7 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
         message: `Using isolated worktree ${linkedRepo.workspace} on branch ${linkedRepo.branchName}.`
       });
     }
-    const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null);
+    const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, thread.documentId);
     const agentEnv = await loadDocumentEnv(thread.documentId);
 
     const aiReply = await getAgentRunner().run({

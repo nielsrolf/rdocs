@@ -47,6 +47,26 @@ model Document {
   embeddedWidgets EmbeddedWidget[]
   envVars         DocumentEnvVar[]
   documentMentions DocumentMention[]
+  attachments     Attachment[]
+}
+
+// User-uploaded files attached to a document. The bytes live on disk under the
+// per-document attachments dir (see lib/attachments.ts); this row holds the
+// metadata. Each attachment is rendered as a draggable chip in the document and
+// copied into the agent's worktree at `attachments/<storedName>` so the agent can
+// read it. `storedName` is sanitized + unique within the document.
+model Attachment {
+  id          String   @id @default(cuid())
+  documentId  String
+  fileName    String
+  storedName  String
+  mimeType    String
+  size        Int
+  createdById String?
+  createdAt   DateTime @default(now())
+  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId, createdAt])
 }
 
 // Per-document secrets injected into the agent's environment (LLM API keys, GPU

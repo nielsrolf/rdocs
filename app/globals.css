@@ -2087,8 +2087,11 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   --outline-width: 36px;
 }
 
+/* Public/view-only renders no outline, so the grid children are just
+   [editor-page-shell, CommentRail]. Don't reserve a leading outline track —
+   otherwise the editor lands in a 0-width column and wraps one char per line. */
 .editor-stage[data-public-view="true"] {
-  grid-template-columns: 0 minmax(0, 980px) 320px;
+  grid-template-columns: minmax(0, 980px) 320px;
 }
 
 .editor-stage[data-public-view="true"][data-comments-hidden="true"] {
@@ -2934,6 +2937,77 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   font-style: italic;
 }
 
+.attachment-chip-node {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0.75rem 0;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  max-width: 100%;
+  padding: 0.5rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-strong);
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.attachment-chip:hover {
+  border-color: rgba(26, 115, 232, 0.5);
+  background: rgba(26, 115, 232, 0.08);
+}
+
+.attachment-chip-icon {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.attachment-chip-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.attachment-chip-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 28rem;
+}
+
+.attachment-chip-meta {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.attachment-chip-remove {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0.15rem 0.35rem;
+  border-radius: 4px;
+}
+
+.attachment-chip-remove:hover {
+  color: var(--danger, #d33);
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.attachment-chip-node-selected .attachment-chip {
+  box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.22);
+}
+
 .remote-collab-selection {
   border-radius: 2px;
 }
@@ -3043,6 +3117,7 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
 
 .ProseMirror-selectednode.embedded-widget-node,
 .ProseMirror-selectednode.repo-image-node,
+.ProseMirror-selectednode.attachment-chip-node,
 .gdocs-prosemirror .ProseMirror-selectednode img {
   outline: 3px solid rgba(26, 115, 232, 0.36);
   outline-offset: 3px;

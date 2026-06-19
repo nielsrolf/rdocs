@@ -21,6 +21,18 @@ const MAX_PROGRESS_MESSAGE_LENGTH = 1400;
 const CLAUDE_AGENT_TIMEOUT_MS = 600_000;
 const MAX_PASTED_IMAGE_BYTES = 4 * 1024 * 1024;
 
+// Replace any unpaired UTF-16 surrogate with U+FFFD. Document/selection text can
+// reach us with a half of an emoji surrogate pair when an upstream slice (e.g.
+// the selection-context window `from-500..to+500`, or a length-based truncation)
+// lands between the two code units. The Claude Agent SDK JSON-encodes the prompt
+// to build its API request body, and Anthropic rejects a lone surrogate with
+// `400 ... invalid high surrogate in string`, failing the whole run. Scrubbing
+// here — the single chokepoint every prompt string flows through — keeps one bad
+// character from sinking the request, regardless of which upstream slice produced it.
+export function stripLoneSurrogates(value: string): string {
+  return value.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "�");
+}
+
 export type ClaudeResearchAgentInput = {
   mode: "comment_reply" | "edit_selection" | "conversation";
   documentTitle: string;
@@ -245,7 +257,7 @@ function documentContextForPrompt(input: ClaudeResearchAgentInput) {
 }
 
 export function buildSystemPrompt(input: ClaudeResearchAgentInput) {
-  return `You are an AI research agent working inside a collaborative document application.
+  return stripLoneSurrogates(`You are an AI research agent working inside a collaborative document application.
 
 App environment:
 - A document can be linked to one Git repository.
@@ -290,7 +302,7 @@ ${formatUnresolvedThreadsForPrompt(input)}
 
 Workspace files:
 ${input.workspaceOverview || "No workspace files were listed."}
-`;
+`);
 }
 
 function formatConversationHistory(history: ClaudeResearchAgentInput["conversationHistory"]) {
@@ -317,6 +329,10 @@ function formatConversationHistory(history: ClaudeResearchAgentInput["conversati
 }
 
 export function buildUserPrompt(input: ClaudeResearchAgentInput) {
+  return stripLoneSurrogates(buildUserPromptRaw(input));
+}
+
+function buildUserPromptRaw(input: ClaudeResearchAgentInput) {
   const instruction = input.instruction || "";
 
   if (input.mode === "conversation") {

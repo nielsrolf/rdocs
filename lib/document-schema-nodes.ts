@@ -70,6 +70,75 @@ export const RepoImageSchemaNode = Node.create({
   }
 });
 
+// Shared attribute spec for the user-uploaded attachment chip. A block atom that
+// behaves like an image (draggable/selectable); clicking it downloads the file.
+// The bytes live in the per-document attachment store and are copied into the
+// agent's worktree at `workspacePath` (attachments/<storedName>).
+export const attachmentChipAttributesSpec = {
+  attachmentId: {
+    default: null as string | null,
+    parseHTML: (element: HTMLElement) =>
+      element.getAttribute("attachmentid") || element.getAttribute("attachmentId")
+  },
+  documentId: {
+    default: null as string | null,
+    parseHTML: (element: HTMLElement) =>
+      element.getAttribute("documentid") || element.getAttribute("documentId")
+  },
+  shareToken: {
+    default: null as string | null,
+    parseHTML: (element: HTMLElement) =>
+      element.getAttribute("sharetoken") || element.getAttribute("shareToken")
+  },
+  fileName: {
+    default: "Attachment",
+    parseHTML: (element: HTMLElement) =>
+      element.getAttribute("filename") || element.getAttribute("fileName") || "Attachment"
+  },
+  mimeType: {
+    default: "",
+    parseHTML: (element: HTMLElement) =>
+      element.getAttribute("mimetype") || element.getAttribute("mimeType") || ""
+  },
+  size: {
+    default: 0,
+    parseHTML: (element: HTMLElement) => {
+      const raw = element.getAttribute("size");
+      const parsed = raw ? Number.parseInt(raw, 10) : 0;
+      return Number.isFinite(parsed) ? parsed : 0;
+    },
+    renderHTML: (attributes: { size?: unknown }) => ({
+      size: typeof attributes.size === "number" ? String(attributes.size) : "0"
+    })
+  },
+  workspacePath: {
+    default: "",
+    parseHTML: (element: HTMLElement) =>
+      element.getAttribute("workspacepath") || element.getAttribute("workspacePath") || ""
+  }
+} as const;
+
+export const AttachmentChipSchemaNode = Node.create({
+  name: "attachmentChip",
+  group: "block",
+  atom: true,
+  selectable: true,
+  draggable: true,
+  addAttributes() {
+    return {
+      ...attachmentChipAttributesSpec,
+      ...commentThreadIdsAttributeSpec,
+      ...aiEditSelectionIdsAttributeSpec
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div[data-attachment-chip]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", mergeAttributes(HTMLAttributes, { "data-attachment-chip": "" })];
+  }
+});
+
 export const TabBreakSchemaNode = Node.create({
   name: "tabBreak",
   group: "block",

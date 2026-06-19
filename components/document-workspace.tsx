@@ -43,6 +43,7 @@ import { ExportMenu } from "./document-workspace/export-menu";
 import { FileMenu } from "./document-workspace/file-menu";
 import { SelectionPopover } from "./document-workspace/selection-popover";
 import { createSerialQueue } from "./document-workspace/serial-queue";
+import { deferToForeground } from "./document-workspace/remote-update-guard";
 import { LinkPopover } from "./document-workspace/link-popover";
 import { HeadingCopyOverlay } from "./document-workspace/heading-copy-overlay";
 import {
@@ -76,7 +77,7 @@ import { FindBar } from "./document-workspace/find-bar";
 import { SearchExtension } from "./document-workspace/search";
 import { buildConversations } from "./document-workspace/conversations";
 import { createLatexRenderExtension } from "./document-workspace/latex";
-import { EmbeddedWidget, RepoImage, TabBreak } from "./document-workspace/nodes";
+import { AttachmentChip, EmbeddedWidget, RepoImage, TabBreak } from "./document-workspace/nodes";
 import {
   createTabId,
   createTabsVisibilityExtension,
@@ -87,6 +88,15 @@ import {
   type TabSummary
 } from "./document-workspace/tabs";
 import { aiEditSelectionIdsAttributeSpec, commentThreadIdsAttributeSpec } from "@/lib/document-schema-nodes";
+
+// Upper bound on a single collaboration push. A push that never settles (e.g.
+// the laptop sleeping mid-request) must not be allowed to wedge the in-flight
+// lock forever — that silently disables every future save. Well under
+// Cloudflare's ~100s origin cutoff; pushes are tiny and normally finish in ms.
+const COLLAB_PUSH_TIMEOUT_MS = 45_000;
+// After a network failure / timed-out push, wait this long before retrying so a
+// transient outage recovers on its own without hammering the server.
+const COLLAB_PUSH_RETRY_DELAY_MS = 3_000;
 
 const Image = ImageExtension.extend({
   addAttributes() {
@@ -288,6 +298,8 @@ export function DocumentWorkspace({
     embedSource: ""
   });
   const [widgetBusy, setWidgetBusy] = useState(false);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const [remoteNotice, setRemoteNotice] = useState<string | null>(null);
   const [remotePresence, setRemotePresence] = useState<RemotePresenceView[]>([]);
   const [threadOffsets, setThreadOffsets] = useState<Record<string, number>>({});
@@ -625,8 +637,14 @@ export function DocumentWorkspace({
       setRemoteNotice("Live collaboration lost sync. Refresh this document to reconnect.");
       return false;
     } finally {
-      window.requestAnimationFrame(() => {
+      // Reset the guard via a microtask, NOT requestAnimationFrame: rAF is
+      // frozen in backgrounded tabs, which previously left this guard stuck
+      // `true` and silently disabled saving ("forever Saving"). The layout-only
+      // updateThreadOffsets can stay on rAF.
+      deferToForeground(() => {
         isApplyingRemoteUpdateRef.current = false;
+      });
+      window.requestAnimationFrame(() => {
         updateThreadOffsets();
       });
     }
@@ -652,6 +670,13 @@ export function DocumentWorkspace({
     // push is accepted (a 409 rebase + re-flush must still carry it).
     const versionMeta = pendingCollabVersionMetaRef.current;
 
+    // Bound the push so a never-settling request cannot leave
+    // collaborationPushBusyRef stuck `true` forever (which silently disables
+    // every future save). AbortController guarantees the fetch promise settles,
+    // so the finally below always releases the lock.
+    const pushAbort = new AbortController();
+    const pushTimeout = window.setTimeout(() => pushAbort.abort(), COLLAB_PUSH_TIMEOUT_MS);
+
     try {
       const response = await fetch(`/api/documents/${documentId}/collaboration`, {
         method: "POST",
@@ -664,7 +689,8 @@ export function DocumentWorkspace({
           clientId: collabClientIdRef.current,
           shareToken,
           ...(versionMeta ? { versionMeta } : {})
-        })
+        }),
+        signal: pushAbort.signal
       });
       const data = (await response.json().catch(() => null)) as
         | (CollaborationStepResponse & { error?: string })
@@ -733,8 +759,25 @@ export function DocumentWorkspace({
 
       setSaveState(response.ok && !sendableSteps(editor.state) ? "saved" : "saving");
     } catch {
+      // Network failure or a push that hit COLLAB_PUSH_TIMEOUT_MS. The lock is
+      // released in the finally, then we schedule a delayed retry so a transient
+      // hang recovers without requiring the user to edit again. Use a delayed
+      // re-flush (not the immediate queued one below) to avoid a hot loop while
+      // offline.
       setSaveState("error");
+      logClientEvent({
+        scope: "collaboration-push",
+        level: "error",
+        message: "collaboration POST failed (network/timeout)",
+        data: {
+          documentId,
+          sentVersion: sendable.version,
+          sentStepCount: sendable.steps.length
+        }
+      });
+      scheduleCollaborationFlush(COLLAB_PUSH_RETRY_DELAY_MS);
     } finally {
+      window.clearTimeout(pushTimeout);
       collaborationPushBusyRef.current = false;
     }
 
@@ -854,7 +897,9 @@ export function DocumentWorkspace({
       // doc end; re-pin them from the surviving marks so their results stay in place.
       const reseed = reseedAiEditSelectionsFromDoc(editor.state);
       if (reseed) editor.view.dispatch(reseed);
-      window.requestAnimationFrame(() => {
+      // Microtask, not rAF: rAF is frozen in backgrounded tabs and would leave
+      // this guard stuck `true`, silently disabling saving.
+      deferToForeground(() => {
         isApplyingRemoteUpdateRef.current = false;
       });
     }
@@ -1006,6 +1051,7 @@ export function DocumentWorkspace({
       TableCell,
       RepoImage,
       EmbeddedWidget,
+      AttachmentChip,
       TabBreak,
       tabsVisibilityExtension
     ],
@@ -1653,6 +1699,72 @@ export function DocumentWorkspace({
     setWidgetBusy(false);
   }
 
+  function handleAttachClick() {
+    if (!editor || !canWriteDocument || attachmentBusy) {
+      return;
+    }
+    attachmentInputRef.current?.click();
+  }
+
+  async function handleAttachmentSelected(event: React.ChangeEvent<HTMLInputElement>) {
+    const input = event.target;
+    const file = input.files?.[0] ?? null;
+    // Reset immediately so selecting the same file again re-fires the change event.
+    input.value = "";
+    if (!file || !editor || !canWriteDocument) {
+      return;
+    }
+
+    setAttachmentBusy(true);
+    setGlobalError(null);
+
+    const body = new FormData();
+    body.append("file", file);
+    if (shareToken) {
+      body.append("share", shareToken);
+    }
+
+    const response = await fetch(`/api/documents/${documentId}/attachments`, {
+      method: "POST",
+      body
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data?.attachment) {
+      reportClientError(data?.error ?? "Unable to upload attachment.", "attachment-upload", {
+        documentId,
+        status: response.status,
+        serverError: typeof data?.error === "string" ? data.error : null
+      });
+      setAttachmentBusy(false);
+      return;
+    }
+
+    const attachment = data.attachment as {
+      id: string;
+      fileName: string;
+      mimeType: string;
+      size: number;
+      workspacePath: string;
+    };
+    editor
+      .chain()
+      .focus()
+      .insertContent({
+        type: "attachmentChip",
+        attrs: {
+          attachmentId: attachment.id,
+          documentId,
+          shareToken,
+          fileName: attachment.fileName,
+          mimeType: attachment.mimeType,
+          size: attachment.size,
+          workspacePath: attachment.workspacePath
+        }
+      })
+      .run();
+    setAttachmentBusy(false);
+  }
+
   // Recompute the in-editor @mention autocomplete from the live editor state.
   // Active only for editors, an empty (cursor) selection inside a text block.
   function refreshDocMention(activeEditor: Editor) {
@@ -2127,7 +2239,9 @@ export function DocumentWorkspace({
     if (remount) {
       isApplyingRemoteUpdateRef.current = true;
       editor.view.dispatch(remount);
-      window.requestAnimationFrame(() => {
+      // Microtask, not rAF: rAF is frozen in backgrounded tabs and would leave
+      // this guard stuck `true`, silently disabling saving.
+      deferToForeground(() => {
         isApplyingRemoteUpdateRef.current = false;
       });
     }
@@ -3026,6 +3140,18 @@ export function DocumentWorkspace({
                   disabled={!canWriteDocument || !editor}
                   label="Widget"
                   onClick={handleInsertWidget}
+                />
+                <ToolbarButton
+                  disabled={!canWriteDocument || !editor || attachmentBusy}
+                  label={attachmentBusy ? "Uploading…" : "Attach"}
+                  onClick={handleAttachClick}
+                />
+                <input
+                  ref={attachmentInputRef}
+                  className="visually-hidden-input"
+                  onChange={handleAttachmentSelected}
+                  style={{ display: "none" }}
+                  type="file"
                 />
               </div>
 

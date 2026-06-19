@@ -126,7 +126,7 @@ async function runAgentConversationInBackground(input: {
         }
       }
     });
-    const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null);
+    const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, documentId);
     const agentEnv = await loadDocumentEnv(documentId);
     const result = await getAgentRunner().run({
       mode: "conversation",

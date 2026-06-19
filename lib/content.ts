@@ -102,6 +102,12 @@ function extractTextFromNode(node: unknown): string {
     return `[Repository image: ${alt}${caption ? `; ${caption}` : ""}]\n\n`;
   }
 
+  if (typedNode.type === "attachmentChip") {
+    const attrs = (typedNode as { attrs?: { fileName?: unknown } }).attrs;
+    const fileName = typeof attrs?.fileName === "string" ? attrs.fileName : "Attachment";
+    return `[Attachment: ${fileName}]\n\n`;
+  }
+
   const childText = Array.isArray(typedNode.content)
     ? typedNode.content.map((child) => extractTextFromNode(child)).join("")
     : "";
@@ -365,6 +371,14 @@ function visitNodeForAiBlocks(node: unknown, blocks: AiDocumentBlock[]) {
     return;
   }
 
+  if (nodeType === "attachmentChip") {
+    const attrs = getNodeAttrs(node) as { fileName?: unknown; workspacePath?: unknown } | null;
+    const fileName = typeof attrs?.fileName === "string" ? attrs.fileName : "Attachment";
+    const workspacePath = typeof attrs?.workspacePath === "string" ? attrs.workspacePath : "";
+    appendTextBlock(blocks, `[Attachment: ${fileName}${workspacePath ? ` (${workspacePath})` : ""}]\n`);
+    return;
+  }
+
   const children = getNodeContent(node);
   children.forEach((child) => visitNodeForAiBlocks(child, blocks));
 
@@ -491,6 +505,13 @@ function serializeNodeToMarkdown(node: unknown, context: MarkdownContext): strin
     const source = typeof attrs?.embedSource === "string" ? attrs.embedSource : "";
     const buildCmd = typeof attrs?.buildCmd === "string" ? attrs.buildCmd : "";
     return `[Interactive widget: ${label}](${source})${buildCmd ? ` <!-- build: ${buildCmd} -->` : ""}\n\n`;
+  }
+
+  if (nodeType === "attachmentChip") {
+    const attrs = getNodeAttrs(node) as { fileName?: unknown; workspacePath?: unknown } | null;
+    const fileName = typeof attrs?.fileName === "string" ? attrs.fileName : "Attachment";
+    const workspacePath = typeof attrs?.workspacePath === "string" ? attrs.workspacePath : "";
+    return `[Attachment: ${fileName}](${workspacePath})\n\n`;
   }
 
   if (nodeType === "heading") {

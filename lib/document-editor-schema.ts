@@ -14,6 +14,7 @@ import { AiEditRange } from "@/components/document-workspace/ai-edit-selections"
 import { CommentAnchor } from "@/components/document-workspace/comment-anchors";
 import { Mention } from "@/components/document-workspace/mention";
 import {
+  AttachmentChipSchemaNode,
   EmbeddedWidgetSchemaNode,
   RepoImageSchemaNode,
   TabBreakSchemaNode,
@@ -57,6 +58,7 @@ export function createDocumentEditorSchema() {
     TableCell,
     RepoImageSchemaNode,
     EmbeddedWidgetSchemaNode,
+    AttachmentChipSchemaNode,
     TabBreakSchemaNode
   ]);
 }

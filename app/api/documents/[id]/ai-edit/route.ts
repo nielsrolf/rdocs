@@ -146,7 +146,7 @@ async function runAiEditInBackground(input: {
         message: `Using isolated worktree ${linkedRepo.workspace} on branch ${linkedRepo.branchName}.`
       });
     }
-    const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null);
+    const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, documentId);
     const assetIntent = detectEditAssetIntent(parsed.instruction);
     const agentEnv = await loadDocumentEnv(documentId);
 

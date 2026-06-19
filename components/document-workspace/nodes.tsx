@@ -2,7 +2,24 @@ import { Node, mergeAttributes } from "@tiptap/core";
 import { NodeViewProps, NodeViewWrapper, ReactNodeViewRenderer } from "@tiptap/react";
 import { useEffect, useRef, useState } from "react";
 
-import { aiEditSelectionIdsAttributeSpec, commentThreadIdsAttributeSpec } from "@/lib/document-schema-nodes";
+import {
+  aiEditSelectionIdsAttributeSpec,
+  attachmentChipAttributesSpec,
+  commentThreadIdsAttributeSpec
+} from "@/lib/document-schema-nodes";
+
+function formatAttachmentSize(bytes: number) {
+  if (!bytes || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
 
 function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttributes }: NodeViewProps) {
   const [refreshing, setRefreshing] = useState(false);
@@ -262,6 +279,87 @@ export const RepoImage = Node.create({
   },
   addNodeView() {
     return ReactNodeViewRenderer(RepoImageView);
+  }
+});
+
+function AttachmentChipView({ deleteNode, editor, node, selected }: NodeViewProps) {
+  const attachmentId = (node.attrs.attachmentId as string | null) || null;
+  const documentId = (node.attrs.documentId as string | null) || null;
+  const fileName = (node.attrs.fileName as string) || "Attachment";
+  const size = typeof node.attrs.size === "number" ? node.attrs.size : 0;
+  const sizeLabel = formatAttachmentSize(size);
+
+  // Prefer the explicit shareToken attr; fall back to the page's ?share param so
+  // a guest viewing a shared link can still download (parity with RepoImageView).
+  let shareToken = (node.attrs.shareToken as string | null) || null;
+  if (!shareToken && typeof window !== "undefined") {
+    shareToken = new URLSearchParams(window.location.search).get("share");
+  }
+
+  const href =
+    attachmentId && documentId
+      ? `/api/documents/${documentId}/attachments/${attachmentId}${
+          shareToken ? `?share=${encodeURIComponent(shareToken)}` : ""
+        }`
+      : undefined;
+
+  return (
+    <NodeViewWrapper
+      className={`attachment-chip-node ${selected ? "attachment-chip-node-selected" : ""}`}
+      contentEditable={false}
+      draggable
+    >
+      <a
+        className="attachment-chip"
+        download={fileName}
+        href={href}
+        rel="noreferrer"
+        target="_blank"
+        title={`Download ${fileName}`}
+      >
+        <span className="attachment-chip-icon" aria-hidden="true">
+          📎
+        </span>
+        <span className="attachment-chip-body">
+          <span className="attachment-chip-name">{fileName}</span>
+          {sizeLabel ? <span className="attachment-chip-meta">{sizeLabel}</span> : null}
+        </span>
+      </a>
+      {editor.isEditable ? (
+        <button
+          className="attachment-chip-remove"
+          onClick={deleteNode}
+          title="Remove attachment"
+          type="button"
+        >
+          ×
+        </button>
+      ) : null}
+    </NodeViewWrapper>
+  );
+}
+
+export const AttachmentChip = Node.create({
+  name: "attachmentChip",
+  group: "block",
+  atom: true,
+  selectable: true,
+  draggable: true,
+  addAttributes() {
+    return {
+      ...attachmentChipAttributesSpec,
+      ...commentThreadIdsAttributeSpec,
+      ...aiEditSelectionIdsAttributeSpec
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div[data-attachment-chip]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", mergeAttributes(HTMLAttributes, { "data-attachment-chip": "" })];
+  },
+  addNodeView() {
+    return ReactNodeViewRenderer(AttachmentChipView);
   }
 });
 
