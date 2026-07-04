@@ -46,7 +46,23 @@ export function getSelectionContextFromEditor(
 ) {
   const start = Math.max(0, from - 500);
   const end = Math.min(editor.state.doc.content.size, to + 500);
-  return editor.state.doc.textBetween(start, end, " ").replace(/\s+/g, " ").trim();
+  // Split the ±500-char window into the text immediately BEFORE and AFTER the
+  // selection, with explicit sentinels, so the agent can write a replacement that
+  // reads continuously with its surroundings instead of guessing where the
+  // selection sits inside an unlabeled blob.
+  const before = editor.state.doc.textBetween(start, from, " ").replace(/\s+/g, " ").trim();
+  const after = editor.state.doc.textBetween(to, end, " ").replace(/\s+/g, " ").trim();
+  if (!before && !after) {
+    return "";
+  }
+  return [
+    "<text_before_selection>",
+    before || "(start of document)",
+    "</text_before_selection>",
+    "<text_after_selection>",
+    after || "(end of document)",
+    "</text_after_selection>"
+  ].join("\n");
 }
 
 export function getSelectionMarkdownFromEditor(

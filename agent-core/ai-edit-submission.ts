@@ -64,6 +64,18 @@ export function hasMarkdownImage(text: string) {
   return /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/.test(text);
 }
 
+// A legacy [Interactive widget: <label>](src) link — the old serialization form.
+// Agents should place widgets via the ![widget: <label>](widget://<id>) placeholder
+// (existing widgets they were shown) or the widgets array (new widgets); echoing
+// the legacy prose form is what put literal widget metadata into documents.
+const LEGACY_WIDGET_LINK = /\[Interactive widget:[^\]]*\]\([^)]*\)/i;
+
+// Chat-mode openers we reject at the START of a replacement. The list is kept
+// tight (each anchored, high-signal phrase) to avoid tripping on legitimate prose
+// that merely contains "changed"/"updated" mid-sentence.
+const META_COMMENTARY_PREFIX =
+  /^\s*(?:as (?:requested|instructed|asked)|here(?:'s| is) (?:the|your|an? )|i(?:'ve| have)? (?:changed|updated|revised|rewrote|rewritten|removed|added|made|replaced|adjusted|reworded)|i (?:changed|updated|revised|removed|added|replaced|adjusted|reworded)|unlike (?:before|the (?:previous|original))|per your (?:request|instruction))\b/i;
+
 export type NormalizedSubmittedWidget = {
   label: string;
   buildCmd: string;
@@ -279,6 +291,22 @@ export function validateAiEditAssets(input: {
   }
   if (trimmedReplacement && trimmedReplacement === trimmedSelected) {
     return "Your replacementText is identical to the user's selected text — no change was made. Apply the requested edit to the text and resubmit, or return the modified Markdown that reflects the instruction.";
+  }
+  if (LEGACY_WIDGET_LINK.test(replacement)) {
+    return (
+      "Your replacementText contains literal widget-metadata prose in the form " +
+      "[Interactive widget: ...](...). That is NOT how widgets are placed and it renders as broken text in the document. " +
+      "To place an EXISTING widget, echo its placeholder unchanged: ![widget: <label>](widget://<widgetId>) (the widgetId is shown in the document context). " +
+      "To place a NEW widget, add it to the widgets array and reference it inline with ![widget: <label>](widget://new). " +
+      "Remove the literal [Interactive widget: ...] text and resubmit."
+    );
+  }
+  if (META_COMMENTARY_PREFIX.test(replacement)) {
+    return (
+      "Your replacementText begins with chat-style meta-commentary (e.g. \"As requested\", \"I changed…\", \"Here is…\"). " +
+      "replacementText is spliced verbatim into the document in place of the selection — write ONLY the finished document prose a reader should see. " +
+      "Do not address the user, announce or describe the change, or reference the instruction or the previous version. Rewrite the replacement as drop-in document content and resubmit."
+    );
   }
   if (input.assetIntent.requiresAnyAsset && !input.hasImage && !input.hasWidget) {
     return "The edit request asked for a figure or widget, but the submission included neither. Add an image (via the images array, after committing the file to the repo) or a widget (via the widgets array) and resubmit.";

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { aiEditMarkdown } from "../components/document-workspace/markdown";
 import { getDocumentAiBlocks, getDocumentMarkdown, getDocumentPlainText } from "../lib/content";
+import { buildAiEditInsertContent } from "../components/document-workspace/ai-edit-insert";
 
 const tableDoc = {
   type: "doc",
@@ -98,7 +99,42 @@ test("getDocumentMarkdown serializes headings, lists, marks, and links", () => {
 test("getDocumentMarkdown preserves repo image and widget references", () => {
   const md = getDocumentMarkdown(richDoc);
   assert.match(md, /!\[Accuracy plot\]\(assets\/accuracy\.png "Comparison"\)/);
-  assert.match(md, /\[Interactive widget: Rollout explorer\]\(assets\/rollout\.html\)/);
+  // Widgets now serialize to a scannable placeholder carrying the widgetId, so
+  // an agent that echoes the selection round-trips back to a widget node instead
+  // of pasting literal metadata text/links into the document.
+  assert.match(md, /!\[widget: Rollout explorer\]\(widget:\/\/widget-1\)/);
+});
+
+test("embeddedWidget placeholder round-trips markdown-it -> embedded-widget node markup", () => {
+  const md = getDocumentMarkdown(richDoc);
+  const placeholderMatch = md.match(/!\[widget:[^\]]*\]\(widget:\/\/[^)]+\)/);
+  assert.ok(placeholderMatch, "widget placeholder present in serialized markdown");
+
+  // Feeding that placeholder back through the insert builder (which the client
+  // uses when applying an edit) must resolve it to the SAME existing widget node,
+  // not a literal image/link.
+  const html = buildAiEditInsertContent({
+    replacementText: placeholderMatch![0],
+    sourceLinks: [],
+    images: [],
+    widgets: [],
+    documentId: "doc-1",
+    shareToken: null,
+    existingWidgets: [
+      {
+        widgetId: "widget-1",
+        label: "Rollout explorer",
+        buildCmd: "python widgets/build_rollout.py",
+        embedSource: "assets/rollout.html",
+        src: "/api/documents/doc-1/widgets/widget-1/source"
+      }
+    ]
+  });
+  assert.match(html, /data-embedded-widget/);
+  assert.match(html, /widgetId="widget-1"/);
+  assert.match(html, /embedSource="assets\/rollout\.html"/);
+  // No literal "widget://" junk survives.
+  assert.doesNotMatch(html, /widget:\/\//);
 });
 
 test("getDocumentMarkdown handles code blocks without escaping their content", () => {

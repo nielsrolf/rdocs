@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildAiEditInsertContent, normalizeWidgetsOutsideTables } from "../components/document-workspace/ai-edit-insert";
+import {
+  aiEditRunHasApplicableContent,
+  buildAiEditInsertContent,
+  normalizeWidgetsOutsideTables
+} from "../components/document-workspace/ai-edit-insert";
 import type { AiEditImage, AiEditWidget } from "../components/document-workspace/types";
 
 // Regression coverage for: "AI edits sometimes failed to update the content" and
@@ -87,6 +91,110 @@ test("a widget becomes an embedded-widget node with embedSource and src preserve
   assert.match(html, /embedSource="assets\/fft\.html"/);
   assert.match(html, /src="\/api\/documents\/doc1\/widgets\/w1\/source"/);
   assert.match(html, /buildCmd="python widgets\/build\.py"/);
+});
+
+test("a widget:// placeholder places a NEW array widget INLINE at that position", () => {
+  const html = buildAiEditInsertContent({
+    replacementText: "Intro paragraph.\n\n![widget: FFT Explorer](widget://new)\n\nOutro paragraph.",
+    sourceLinks: [],
+    images: [],
+    widgets: [widget()],
+    documentId: "doc1",
+    shareToken: null
+  });
+  // Widget lands between the two paragraphs, not appended after everything.
+  const introIdx = html.indexOf("Intro paragraph");
+  const widgetIdx = html.indexOf("data-embedded-widget");
+  const outroIdx = html.indexOf("Outro paragraph");
+  assert.ok(introIdx >= 0 && widgetIdx >= 0 && outroIdx >= 0);
+  assert.ok(introIdx < widgetIdx && widgetIdx < outroIdx, "widget is inline between the paragraphs");
+  // The array widget was consumed by the placeholder — not ALSO appended at the end.
+  assert.equal((html.match(/data-embedded-widget/g) ?? []).length, 1);
+  // No literal placeholder junk survives.
+  assert.doesNotMatch(html, /widget:\/\//);
+});
+
+test("a widget:// placeholder resolves an EXISTING document widget by id", () => {
+  const html = buildAiEditInsertContent({
+    replacementText: "Keep this explorer:\n\n![widget: Kept](widget://ew1)",
+    sourceLinks: [],
+    images: [],
+    widgets: [],
+    documentId: "doc1",
+    shareToken: null,
+    existingWidgets: [
+      {
+        widgetId: "ew1",
+        label: "Kept",
+        buildCmd: "python widgets/kept.py",
+        embedSource: "assets/kept.html",
+        src: "/api/documents/doc1/widgets/ew1/source"
+      }
+    ]
+  });
+  assert.match(html, /data-embedded-widget/);
+  assert.match(html, /widgetId="ew1"/);
+  assert.match(html, /embedSource="assets\/kept\.html"/);
+  assert.doesNotMatch(html, /widget:\/\//);
+});
+
+test("legacy [Interactive widget: ...](src) link is healed into a widget node", () => {
+  const html = buildAiEditInsertContent({
+    replacementText:
+      "Before.\n\n[Interactive widget: FFT Explorer](assets/fft.html) <!-- build: python widgets/build.py -->\n\nAfter.",
+    sourceLinks: [],
+    images: [],
+    widgets: [widget()], // label "FFT Explorer" matches the legacy link
+    documentId: "doc1",
+    shareToken: null
+  });
+  assert.match(html, /data-embedded-widget/);
+  // The literal metadata text and build comment must NOT leak into the document.
+  assert.doesNotMatch(html, /Interactive widget:/);
+  assert.doesNotMatch(html, /<!--\s*build/);
+  assert.match(html, /Before\./);
+  assert.match(html, /After\./);
+});
+
+test("empty replacementText with a widget still yields the widget (not dropped, no <p></p>)", () => {
+  const html = buildAiEditInsertContent({
+    replacementText: "",
+    sourceLinks: [],
+    images: [],
+    widgets: [widget()],
+    documentId: "doc1",
+    shareToken: null
+  });
+  assert.match(html, /data-embedded-widget/);
+  assert.notEqual(html, "<p></p>");
+});
+
+test("an array widget NOT referenced by any placeholder is still appended (back-compat)", () => {
+  const html = buildAiEditInsertContent({
+    replacementText: "Some prose with no widget placeholder.",
+    sourceLinks: [],
+    images: [],
+    widgets: [widget()],
+    documentId: "doc1",
+    shareToken: null
+  });
+  assert.match(html, /Some prose/);
+  assert.match(html, /data-embedded-widget/);
+  assert.equal((html.match(/data-embedded-widget/g) ?? []).length, 1);
+});
+
+test("aiEditRunHasApplicableContent: empty text + widget is applicable; empty everything is not", () => {
+  assert.equal(
+    aiEditRunHasApplicableContent({ replacementText: "", images: [], widgets: [widget()] }),
+    true
+  );
+  assert.equal(
+    aiEditRunHasApplicableContent({ replacementText: "", images: [image()], widgets: [] }),
+    true
+  );
+  assert.equal(aiEditRunHasApplicableContent({ replacementText: "text", images: [], widgets: [] }), true);
+  assert.equal(aiEditRunHasApplicableContent({ replacementText: "", images: [], widgets: [] }), false);
+  assert.equal(aiEditRunHasApplicableContent({ replacementText: null, images: [], widgets: [] }), false);
 });
 
 test("source links are appended", () => {

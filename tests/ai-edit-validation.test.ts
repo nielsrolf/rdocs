@@ -160,6 +160,65 @@ test("validateAiEditAssets accepts a genuine edit and NEVER throws", () => {
   );
 });
 
+test("validateAiEditAssets accepts empty replacementText when a widget is present", () => {
+  // A widget-only edit (replace the selection with just an interactive widget) is
+  // legitimate: the empty text is fine because the widget carries the content.
+  assert.equal(
+    validateAiEditAssets({
+      replacementText: "",
+      selectedText: "the old selection",
+      hasImage: false,
+      hasWidget: true,
+      assetIntent: NO_INTENT
+    }),
+    null
+  );
+});
+
+test("validateAiEditAssets rejects echoed legacy widget-metadata prose with a retry message", () => {
+  const error = validateAiEditAssets({
+    replacementText:
+      "The selected text was [Interactive widget: War vs Peace](assets/wp.html) <!-- build: python w.py --> which I kept.",
+    selectedText: "something else",
+    hasImage: false,
+    hasWidget: true,
+    assetIntent: NO_INTENT
+  });
+  assert.ok(error, "legacy metadata prose is rejected");
+  assert.match(error!, /placeholder/i);
+  assert.match(error!, /widget:\/\//);
+});
+
+test("validateAiEditAssets rejects a replacement that BEGINS with chat-style meta-commentary", () => {
+  for (const replacement of [
+    "As requested, here is the rewritten section about foo.",
+    "I've updated the paragraph to be clearer.",
+    "I changed the wording to match the new tone."
+  ]) {
+    const error = validateAiEditAssets({
+      replacementText: replacement,
+      selectedText: "old",
+      hasImage: false,
+      hasWidget: false,
+      assetIntent: NO_INTENT
+    });
+    assert.ok(error, `meta-commentary rejected: ${replacement}`);
+    assert.match(error!, /document|reader|drop-in|verbatim/i);
+  }
+
+  // Legitimate prose that merely contains "changed" mid-sentence is NOT rejected.
+  assert.equal(
+    validateAiEditAssets({
+      replacementText: "The climate has changed dramatically over the past century.",
+      selectedText: "old",
+      hasImage: false,
+      hasWidget: false,
+      assetIntent: NO_INTENT
+    }),
+    null
+  );
+});
+
 test("hasMarkdownImage detects inline figures (counts as an image asset)", () => {
   assert.equal(hasMarkdownImage("see ![A plot](assets/plot.png) above"), true);
   assert.equal(hasMarkdownImage("just a [link](https://x.com) not an image"), false);

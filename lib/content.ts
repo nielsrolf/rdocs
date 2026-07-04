@@ -561,11 +561,15 @@ function serializeNodeToMarkdown(node: unknown, context: MarkdownContext): strin
   }
 
   if (nodeType === "embeddedWidget") {
-    const attrs = getNodeAttrs(node) as { label?: unknown; embedSource?: unknown; buildCmd?: unknown } | null;
+    const attrs = getNodeAttrs(node) as { widgetId?: unknown; label?: unknown } | null;
     const label = typeof attrs?.label === "string" ? attrs.label : "Interactive widget";
-    const source = typeof attrs?.embedSource === "string" ? attrs.embedSource : "";
-    const buildCmd = typeof attrs?.buildCmd === "string" ? attrs.buildCmd : "";
-    return `[Interactive widget: ${label}](${source})${buildCmd ? ` <!-- build: ${buildCmd} -->` : ""}\n\n`;
+    const widgetId = typeof attrs?.widgetId === "string" ? attrs.widgetId : "";
+    // Scannable, round-trippable placeholder (mirrors the ![alt](path) image
+    // scan): buildAiEditInsertContent resolves widget://<id> back to the existing
+    // widget node, so an agent that echoes a selected widget preserves it instead
+    // of pasting literal metadata/link text into the document. Widgets with no id
+    // fall back to the widget://new scheme (a freshly-created array widget).
+    return `![widget: ${label}](widget://${widgetId || "new"})\n\n`;
   }
 
   if (nodeType === "attachmentChip") {

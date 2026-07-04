@@ -23,7 +23,12 @@ import { toggleReactionLocal, type ReactionSummary } from "@/lib/reactions";
 
 import { AgentPanel } from "./document-workspace/agent-panel";
 import { ToolbarButton, insertImagesAtPosition } from "./document-workspace/atoms";
-import { buildAiEditInsertContent, normalizeWidgetsOutsideTables } from "./document-workspace/ai-edit-insert";
+import {
+  aiEditRunHasApplicableContent,
+  buildAiEditInsertContent,
+  normalizeWidgetsOutsideTables,
+  type ExistingWidget
+} from "./document-workspace/ai-edit-insert";
 import {
   AiEditSelections,
   cleanupStaleAiEditRangeMarks,
@@ -2255,6 +2260,29 @@ export function DocumentWorkspace({
     // result when the agent finishes. No further work here.
   }
 
+  // Snapshot the widgets already in the live document so widget://<widgetId>
+  // placeholders an agent echoed from a selection resolve back to the same node.
+  function collectExistingWidgets(): ExistingWidget[] {
+    if (!editor) return [];
+    const widgets: ExistingWidget[] = [];
+    editor.state.doc.descendants((node) => {
+      if (node.type.name === "embeddedWidget") {
+        const attrs = node.attrs as Record<string, unknown>;
+        if (typeof attrs.widgetId === "string" && attrs.widgetId) {
+          widgets.push({
+            widgetId: attrs.widgetId,
+            label: typeof attrs.label === "string" ? attrs.label : "Interactive widget",
+            buildCmd: typeof attrs.buildCmd === "string" ? attrs.buildCmd : "",
+            embedSource: typeof attrs.embedSource === "string" ? attrs.embedSource : "",
+            src: typeof attrs.src === "string" ? attrs.src : ""
+          });
+        }
+      }
+      return true;
+    });
+    return widgets;
+  }
+
   async function applyAiEditRun(input: {
     aiRunId: string;
     selectionId: string;
@@ -2312,7 +2340,8 @@ export function DocumentWorkspace({
         images,
         widgets,
         documentId,
-        shareToken
+        shareToken,
+        existingWidgets: collectExistingWidgets()
       });
       const applied = editor
         .chain()
@@ -2472,6 +2501,7 @@ export function DocumentWorkspace({
         widgets: [],
         documentId,
         shareToken,
+        existingWidgets: collectExistingWidgets(),
         appendUnusedImages: false
       });
       const sizeBefore = editor.state.doc.content.size;
@@ -3297,14 +3327,24 @@ export function DocumentWorkspace({
           aiEditRunStateRef.current.delete(run.id);
           return;
         }
-        if (typeof fetched.replacementText !== "string" || !fetched.replacementText) {
+        const fetchedWidgets = Array.isArray(fetched.widgets) ? (fetched.widgets as AiEditWidget[]) : [];
+        const fetchedImages = Array.isArray(fetched.images) ? (fetched.images as AiEditImage[]) : [];
+        if (
+          !aiEditRunHasApplicableContent({
+            replacementText: typeof fetched.replacementText === "string" ? fetched.replacementText : null,
+            images: fetchedImages,
+            widgets: fetchedWidgets
+          })
+        ) {
           // Legacy run that completed before the replacement column existed, or
-          // any other "succeeded with no payload" state. Claim it so we stop
-          // re-fetching it every 2s.
+          // any other "succeeded with no payload" state (no text AND no
+          // images/widgets). Claim it so we stop re-fetching it every 2s. A run
+          // with an empty replacement but images/widgets is NOT dropped here — it
+          // falls through and inserts the assets (replacing the selection).
           logClientEvent({
             scope: "ai-edit-fetch-result",
             level: "warn",
-            message: "succeeded run has no replacementText; claiming to stop retry",
+            message: "succeeded run has no applicable content; claiming to stop retry",
             data: { documentId, selectionId, aiRunId: run.id }
           });
           await fetch(`/api/documents/${documentId}/ai-runs/${run.id}`, {
@@ -3331,7 +3371,13 @@ export function DocumentWorkspace({
           const runImages = Array.isArray(fetched.images) ? (fetched.images as AiEditImage[]) : [];
           const runSources = Array.isArray(fetched.sources) ? (fetched.sources as string[]) : [];
           if (range) {
-            applyRichTrackedReplacement(range, fetched.replacementText, author, runImages, runSources);
+            applyRichTrackedReplacement(
+              range,
+              typeof fetched.replacementText === "string" ? fetched.replacementText : "",
+              author,
+              runImages,
+              runSources
+            );
           }
           applyAgentSuggestions(run.id, agentSuggestions, fetched.model, runImages, runSources);
           if (Array.isArray(fetched.agentComments)) {
@@ -3353,9 +3399,9 @@ export function DocumentWorkspace({
           aiRunId: run.id,
           selectionId,
           instruction: run.instruction,
-          replacementText: fetched.replacementText,
-          images: Array.isArray(fetched.images) ? (fetched.images as AiEditImage[]) : [],
-          widgets: Array.isArray(fetched.widgets) ? (fetched.widgets as AiEditWidget[]) : [],
+          replacementText: typeof fetched.replacementText === "string" ? fetched.replacementText : "",
+          images: fetchedImages,
+          widgets: fetchedWidgets,
           sources: Array.isArray(fetched.sources) ? (fetched.sources as string[]) : [],
           commitSha: typeof fetched.commitSha === "string" ? fetched.commitSha : null,
           commitUrl: typeof fetched.commitUrl === "string" ? fetched.commitUrl : null

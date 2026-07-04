@@ -102,7 +102,8 @@ test("edit user prompt instructs the agent to call submit_response", () => {
 
 test("edit user prompt prefers the markdown serialization of the selection when provided", () => {
   const promptWithoutMd = buildUserPrompt(baseInput);
-  assert.match(promptWithoutMd, /Selected text:\nIntro text/);
+  // The selection is now fenced in a <selection> block (data, not instructions).
+  assert.match(promptWithoutMd, /<selection>\nIntro text\n<\/selection>/);
 
   const promptWithMd = buildUserPrompt({
     ...baseInput,
@@ -110,6 +111,13 @@ test("edit user prompt prefers the markdown serialization of the selection when 
   });
   assert.match(promptWithMd, /Markdown serialization that preserves headings/);
   assert.match(promptWithMd, /## Heading/);
+});
+
+test("edit user prompt states the drop-in contract for replacementText", () => {
+  const prompt = buildUserPrompt(baseInput);
+  assert.match(prompt, /spliced VERBATIM/);
+  assert.match(prompt, /As requested/); // named as a forbidden phrase
+  assert.match(prompt, /widget:\/\/new/); // widget placement documented
 });
 
 test("comment user prompt routes the reply through submit_response", () => {

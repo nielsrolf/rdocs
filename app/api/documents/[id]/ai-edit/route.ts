@@ -263,10 +263,13 @@ async function runAiEditInBackground(input: {
     const replacementIsEmpty = !trimmedReplacement;
     const replacementEqualsSelection =
       !replacementIsEmpty && trimmedReplacement === trimmedSelected;
+    // Empty replacementText is legitimate when the run produced images/widgets
+    // (the validator already rejects empty-with-no-assets). We NEVER substitute
+    // the agent's chat-style `summary` or the original selection into the
+    // document body — that is what leaked meta-commentary / stale text into docs.
+    // The client inserts the images/widgets and simply removes the selection.
     const fallbackFired = replacementIsEmpty;
-    const finalReplacement = trimmedReplacement
-      ? rawReplacement
-      : result.summary || parsed.selectedText;
+    const finalReplacement = rawReplacement;
     const diagnostics = {
       aiRunId,
       documentId,
@@ -285,7 +288,7 @@ async function runAiEditInBackground(input: {
     console.log(`[ai-edit] finished ${JSON.stringify(diagnostics)}`);
     if (fallbackFired || replacementEqualsSelection) {
       const note = fallbackFired
-        ? "Diagnostics: agent submitted empty replacementText; the document will fall back to the agent's summary or the original selection."
+        ? "Diagnostics: agent submitted empty replacementText; the selection will be replaced by the run's images/widgets only (no text substitution)."
         : "Diagnostics: agent submitted replacementText identical to the original selection; the document will not visibly change.";
       console.warn(`[ai-edit] suspect ${JSON.stringify(diagnostics)}`);
       await recordAiRunEvent({ aiRunId, role: "system", message: note }).catch(() => null);
