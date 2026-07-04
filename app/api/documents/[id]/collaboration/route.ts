@@ -4,11 +4,13 @@ import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth";
 import {
   forcePushDocument,
+  mergeCommitDocument,
   pullCollaborationSteps,
   StepApplyError,
-  submitCollaborationSteps
+  submitCollaborationSteps,
+  SuggestionOnlyError
 } from "@/lib/collaboration";
-import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import { canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
 
 // Sole-client "force push": when a tab's local doc has diverged so far that
 // prosemirror-collab can no longer rebase its pending steps, and it is the only
@@ -21,8 +23,25 @@ const forcePushSchema = z.object({
   shareToken: z.string().optional().nullable()
 });
 
+// Multi-client merge commit: when a divergence can't auto-rebase AND another
+// client is connected (so a force-push is refused), the user resolves the
+// conflict in the merge dialog and the merged document is committed here as a
+// version-checked successor of `baseVersion` (parallel to the force-push branch).
+const mergeCommitSchema = z.object({
+  merge: z.literal(true),
+  baseVersion: z.number().int().nonnegative(),
+  content: z.unknown(),
+  clientId: z.string().min(1).max(120),
+  shareToken: z.string().optional().nullable()
+});
+
 const submitStepsSchema = z.object({
   version: z.number().int().nonnegative(),
+  // Hard cap on steps per push. The client chunks large flushes to stay at or
+  // under this (COLLAB_MAX_STEPS_PER_PUSH in document-workspace/collaboration.ts)
+  // — keep the two in lockstep. A push above the cap is rejected as a
+  // non-recoverable 400 ("steps:too_big"); the client treats that as a desync
+  // and (when sole client) force-pushes its copy rather than retrying.
   steps: z.array(z.unknown()).max(200),
   clientId: z.string().min(1).max(120),
   shareToken: z.string().optional().nullable(),
@@ -137,6 +156,52 @@ export async function POST(request: Request, { params }: RouteContext) {
     }
   }
 
+  // Merge-commit path (multi-client manual merge resolution).
+  if (body && typeof body === "object" && (body as { merge?: unknown }).merge === true) {
+    const parsedMerge = mergeCommitSchema.safeParse(body);
+    if (!parsedMerge.success) {
+      return NextResponse.json({ error: "Invalid merge payload." }, { status: 400 });
+    }
+    const mergeAccess = await resolveDocumentAccess(id, user?.id, parsedMerge.data.shareToken ?? null);
+    if (!mergeAccess || !canEdit(mergeAccess.permission)) {
+      return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+    }
+    try {
+      const result = await mergeCommitDocument({
+        documentId: id,
+        currentUpdatedAt: mergeAccess.document.updatedAt,
+        clientId: parsedMerge.data.clientId,
+        baseVersion: parsedMerge.data.baseVersion,
+        content: parsedMerge.data.content
+      });
+      console.warn("[collab-merge-commit]", {
+        documentId: id,
+        userId: user?.id ?? null,
+        clientId: parsedMerge.data.clientId,
+        baseVersion: parsedMerge.data.baseVersion,
+        committed: result.committed,
+        version: result.version,
+        elapsedMs: Date.now() - startedAt
+      });
+      // 409 when stale (server advanced since the merge was resolved) so the
+      // client re-merges against the fresh server doc.
+      return NextResponse.json(result, { status: result.committed ? 200 : 409 });
+    } catch (error) {
+      const applyFailed = error instanceof StepApplyError;
+      console.error("[collab-merge-commit] failed", {
+        documentId: id,
+        userId: user?.id ?? null,
+        clientId: parsedMerge.data.clientId,
+        applyFailed,
+        error: error instanceof Error ? error.message : error
+      });
+      return NextResponse.json(
+        { error: "Unable to commit merge." },
+        { status: applyFailed ? 422 : 500 }
+      );
+    }
+  }
+
   const parsed = submitStepsSchema.safeParse(body);
 
   if (!parsed.success) {
@@ -149,7 +214,11 @@ export async function POST(request: Request, { params }: RouteContext) {
   }
 
   const access = await resolveDocumentAccess(id, user?.id, parsed.data.shareToken ?? null);
-  if (!access || !canEdit(access.permission)) {
+  // Comment-access users may push, but only suggestion-only changes (enforced in
+  // submitCollaborationSteps via the committed-view guard). Editors push freely.
+  const canPushEdits = Boolean(access) && canEdit(access!.permission);
+  const canPushSuggestions = Boolean(access) && canComment(access!.permission);
+  if (!access || (!canPushEdits && !canPushSuggestions)) {
     console.warn("[collab-push] forbidden", {
       documentId: id,
       userId: user?.id ?? null,
@@ -169,7 +238,8 @@ export async function POST(request: Request, { params }: RouteContext) {
       version: parsed.data.version,
       steps: parsed.data.steps,
       clientId: parsed.data.clientId,
-      versionMeta: parsed.data.versionMeta
+      versionMeta: parsed.data.versionMeta,
+      suggestionOnly: !canPushEdits
     });
 
     console.log("[collab-push]", {
@@ -189,6 +259,18 @@ export async function POST(request: Request, { params }: RouteContext) {
       status: result.accepted ? 200 : 409
     });
   } catch (error) {
+    if (error instanceof SuggestionOnlyError) {
+      console.warn("[collab-push] suggestion-only violation", {
+        documentId: id,
+        userId: user?.id ?? null,
+        clientId: parsed.data.clientId,
+        permission: access?.permission ?? null
+      });
+      return NextResponse.json(
+        { error: error.message, code: "suggestion-only-violation" },
+        { status: 403 }
+      );
+    }
     const applyFailed = error instanceof StepApplyError;
     console.error("[collab-push] step merge failed", {
       documentId: id,

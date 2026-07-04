@@ -9,6 +9,9 @@ import { db } from "@/lib/db";
 import { loadDocumentEnv } from "@/lib/document-env";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 import { rateLimit } from "@/lib/rate-limit";
+import { normalizeAgentImages } from "@/lib/ai-edit-submission";
+import { createAgentCommentThreads } from "@/lib/agent-comments";
+import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
 import {
   commitWorkspaceChanges,
   ensureLinkedRepositoryWorktree,
@@ -76,9 +79,10 @@ async function runAgentConversationInBackground(input: {
   previousRunId: string | null;
   documentTitle: string;
   documentContent: string;
+  createdById: string;
   agentConfig: { model: string | null; effort: string | null };
 }) {
-  const { documentId, aiRunId, message, previousRunId, documentTitle, documentContent, agentConfig } =
+  const { documentId, aiRunId, message, previousRunId, documentTitle, documentContent, createdById, agentConfig } =
     input;
   let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
 
@@ -103,6 +107,7 @@ async function runAgentConversationInBackground(input: {
 
     const parsedContent = parseDocumentContent(documentContent);
     const documentText = getDocumentPlainText(parsedContent);
+    const suggestionAnchorText = flattenDocumentTextNodes(parsedContent);
     const documentBlocks = getDocumentAiBlocks(parsedContent);
     const unresolvedThreads = await db.commentThread.findMany({
       where: {
@@ -149,6 +154,7 @@ async function runAgentConversationInBackground(input: {
     }, {
       agentConfig: { model: agentConfig.model, effort: agentConfig.effort },
       agentEnv,
+      validation: { kind: "conversation", documentText: suggestionAnchorText },
       onProgress: async (event) => {
         await Promise.all([
           db.aiRun.update({
@@ -173,12 +179,29 @@ async function runAgentConversationInBackground(input: {
           push: true
         })
       : { commitSha: null, commitUrl: null, pushed: false };
+    if (commit.pushError) {
+      await recordAiRunEvent({
+        aiRunId,
+        role: "error",
+        message: `Changes were committed locally but could not be pushed to the linked repository: ${commit.pushError}`
+      }).catch(() => null);
+    }
 
     await recordAiRunEvent({
       aiRunId,
       role: "agent",
       message: result.reply ?? result.summary ?? "Finished agent conversation."
     });
+
+    const agentComments = await createAgentCommentThreads({
+      documentId,
+      aiRunId,
+      createdById,
+      model: result.model,
+      comments: Array.isArray(result.comments) ? result.comments : [],
+      documentText
+    });
+
     await db.aiRun.update({
       where: { id: aiRunId },
       data: {
@@ -187,7 +210,10 @@ async function runAgentConversationInBackground(input: {
         model: result.model,
         commitSha: commit.commitSha,
         commitUrl: commit.commitUrl,
-        finishedAt: new Date()
+        finishedAt: new Date(),
+        suggestions: JSON.stringify(Array.isArray(result.suggestions) ? result.suggestions : []),
+        agentComments: JSON.stringify(agentComments),
+        replacementImages: JSON.stringify(normalizeAgentImages(result.images, documentId, null, aiRunId))
       }
     });
   } catch (error) {
@@ -256,7 +282,9 @@ export async function POST(request: Request, { params }: RouteContext) {
       triggerType: parsed.data.previousRunId ? "CONVERSATION_FOLLOWUP" : "CONVERSATION",
       parentRunId: parsed.data.previousRunId ?? null,
       instruction: parsed.data.message.trim(),
-      progress: "Starting Claude research agent."
+      progress: "Starting Claude research agent.",
+      // Conversation runs only ever propose suggestions, never commit content.
+      suggestOnly: true
     }
   });
   await recordAiRunEvent({
@@ -274,6 +302,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     previousRunId: parsed.data.previousRunId ?? null,
     documentTitle: access.document.title,
     documentContent: access.document.content,
+    createdById: user.id,
     agentConfig: { model: access.document.agentModel, effort: access.document.agentEffort }
   }).catch((error) => {
     console.error("[agents] background run threw", {

@@ -78,7 +78,9 @@ async function main() {
         workspacePath: CONTAINER_WORKSPACE,
         commitSha: job.commitSha,
         model: job.agentConfig?.model,
-        agentEnv: job.agentEnv
+        agentEnv: job.agentEnv,
+        // Inside the container: the mount namespace is the boundary.
+        isolatedRuntime: true
       });
       emit({ type: "result", output: { kind: "merge_resolve", ok: true } });
       return;
@@ -93,7 +95,11 @@ async function main() {
       onProgress: (event: ClaudeAgentProgressEvent) => emit({ type: "progress", event }),
       agentConfig: job.agentConfig as never,
       agentEnv: job.agentEnv,
-      validateSubmission
+      validateSubmission,
+      // We are inside the hardened container: its mount namespace is the
+      // filesystem boundary, so skip the in-process workspace guard / kernel
+      // sandbox that would otherwise block legitimate reads outside /workspace.
+      isolatedRuntime: true
     });
     emit({ type: "result", output });
   } catch (error) {

@@ -1,5 +1,44 @@
 import { Node, mergeAttributes } from "@tiptap/core";
 
+import {
+  SUGGESTION_DELETE_RECORDS_ATTR,
+  SUGGESTION_INSERT_RECORDS_ATTR
+} from "@/lib/suggestion-content";
+
+// Tracked-change suggestions on block atoms (repoImage / embeddedWidget / image /
+// attachmentChip). Inline text uses the `suggestedInsertion`/`suggestedDeletion`
+// MARKS (see components/document-workspace/suggestions.ts), but atoms can't carry
+// inline marks, so a suggested insertion/deletion of a whole atom is recorded as
+// an array of suggestion records on the node. JSON-encoded for the HTML round-trip
+// the server schema performs; stored as a plain array in document JSON / collab steps.
+function suggestionRecordsAttributeSpec(attrKey: string, dataName: string) {
+  return {
+    [attrKey]: {
+      default: [] as unknown[],
+      parseHTML: (element: HTMLElement) => {
+        const raw = element.getAttribute(dataName);
+        if (!raw) return [];
+        try {
+          const parsed = JSON.parse(raw);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      },
+      renderHTML: (attributes: Record<string, unknown>) => {
+        const records = attributes[attrKey];
+        if (!Array.isArray(records) || records.length === 0) return {};
+        return { [dataName]: JSON.stringify(records) };
+      }
+    }
+  };
+}
+
+export const suggestionRecordsAttributesSpec = {
+  ...suggestionRecordsAttributeSpec(SUGGESTION_INSERT_RECORDS_ATTR, "data-suggestion-inserts"),
+  ...suggestionRecordsAttributeSpec(SUGGESTION_DELETE_RECORDS_ATTR, "data-suggestion-deletes")
+};
+
 export const commentThreadIdsAttributeSpec = {
   commentThreadIds: {
     default: [] as string[],
@@ -59,7 +98,8 @@ export const RepoImageSchemaNode = Node.create({
         parseHTML: (element) => element.getAttribute("path") || null
       },
       ...commentThreadIdsAttributeSpec,
-      ...aiEditSelectionIdsAttributeSpec
+      ...aiEditSelectionIdsAttributeSpec,
+      ...suggestionRecordsAttributesSpec
     };
   },
   parseHTML() {
@@ -128,7 +168,8 @@ export const AttachmentChipSchemaNode = Node.create({
     return {
       ...attachmentChipAttributesSpec,
       ...commentThreadIdsAttributeSpec,
-      ...aiEditSelectionIdsAttributeSpec
+      ...aiEditSelectionIdsAttributeSpec,
+      ...suggestionRecordsAttributesSpec
     };
   },
   parseHTML() {
@@ -212,7 +253,8 @@ export const EmbeddedWidgetSchemaNode = Node.create({
         })
       },
       ...commentThreadIdsAttributeSpec,
-      ...aiEditSelectionIdsAttributeSpec
+      ...aiEditSelectionIdsAttributeSpec,
+      ...suggestionRecordsAttributesSpec
     };
   },
   parseHTML() {

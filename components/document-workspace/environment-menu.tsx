@@ -6,10 +6,13 @@ type EnvVar = { key: string; masked: string; updatedAt: string };
 
 export function EnvironmentMenu({
   documentId,
-  shareToken
+  shareToken,
+  onKeysChanged
 }: {
   documentId: string;
   shareToken: string | null;
+  /** Fires with the current key names after every successful load/add/delete. */
+  onKeysChanged?: (keys: string[]) => void;
 }) {
   const detailsRef = useRef<HTMLDetailsElement | null>(null);
   const [vars, setVars] = useState<EnvVar[] | null>(null);
@@ -20,6 +23,11 @@ export function EnvironmentMenu({
   const [busy, setBusy] = useState(false);
 
   const shareBody = shareToken ? { shareToken } : {};
+
+  function applyVars(next: EnvVar[]) {
+    setVars(next);
+    onKeysChanged?.(next.map((entry) => entry.key));
+  }
 
   async function loadVars() {
     setLoading(true);
@@ -34,7 +42,7 @@ export function EnvironmentMenu({
         setError(data?.error ?? "Failed to load environment.");
         return;
       }
-      setVars(data.vars ?? []);
+      applyVars(data.vars ?? []);
     } catch {
       setError("Failed to load environment.");
     } finally {
@@ -70,7 +78,7 @@ export function EnvironmentMenu({
         setError(data?.error ?? "Failed to save variable.");
         return;
       }
-      setVars(data.vars ?? []);
+      applyVars(data.vars ?? []);
       setKeyDraft("");
       setValueDraft("");
     } finally {
@@ -93,7 +101,7 @@ export function EnvironmentMenu({
         setError(data?.error ?? "Failed to delete variable.");
         return;
       }
-      setVars(data.vars ?? []);
+      applyVars(data.vars ?? []);
     } finally {
       setBusy(false);
     }

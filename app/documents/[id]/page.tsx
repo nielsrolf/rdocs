@@ -12,6 +12,7 @@ import {
 } from "@/lib/mention-data";
 import { parseDocumentContent } from "@/lib/content";
 import { getCollaborationVersion } from "@/lib/collaboration";
+import { hasDocumentEnvKey } from "@/lib/document-env";
 import { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
 import { db } from "@/lib/db";
 import { resolveDocumentAccess } from "@/lib/permissions";
@@ -120,6 +121,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
     ...member,
     permission: member.permission as PermissionLevelValue
   }));
+  const initialHasOpenRouterKey = await hasDocumentEnvKey(id, "OPENROUTER_API_KEY");
   const initialCollaborationVersion = await getCollaborationVersion(
     access.document.id,
     access.document.content,
@@ -144,6 +146,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         initialRepoUrl={access.document.repoUrl}
         initialAgentModel={access.document.agentModel}
         initialAgentEffort={access.document.agentEffort}
+        initialHasOpenRouterKey={initialHasOpenRouterKey}
         initialThreads={normalizedThreads}
         initialTitle={access.document.title}
         isAuthenticated={Boolean(user)}

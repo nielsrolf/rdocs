@@ -3,8 +3,8 @@ import { resolve as resolvePath } from "node:path";
 
 import { type HookCallback, query } from "@anthropic-ai/claude-agent-sdk";
 
-import { parseMaxTurns } from "./agent-config";
-import { type DocumentEnv, buildAgentEnv } from "./agent-env";
+import { parseMaxTurns, resolveAgentSdkConfig } from "./agent-config";
+import { type DocumentEnv, applyProviderEnv, buildAgentEnv } from "./agent-env";
 import { evaluateToolPathAccess } from "./agent-sandbox";
 import { CLAUDE_AGENT_TOOLS } from "./ai-tools";
 
@@ -22,8 +22,14 @@ export async function runMergeConflictResolver(input: {
   model?: string | null;
   maxTurns?: number;
   agentEnv?: DocumentEnv;
+  /** See ClaudeAgentRunOptions.isolatedRuntime — true inside the container. */
+  isolatedRuntime?: boolean;
 }): Promise<void> {
-  const model = input.model || "sonnet";
+  // Callers today don't pass a model, so this resolves to the default
+  // Anthropic model; resolving through the shared config keeps the resolver
+  // provider-correct if a model (possibly an OpenRouter one) is ever plumbed in.
+  const sdkConfig = resolveAgentSdkConfig({ model: input.model }, process.env.CLAUDE_AGENT_MODEL);
+  const isolatedRuntime = input.isolatedRuntime ?? false;
   const abortController = new AbortController();
   const timeout = setTimeout(() => abortController.abort(), 300_000);
 
@@ -75,11 +81,16 @@ Return only JSON:
       allowDangerouslySkipPermissions: true,
       allowedTools: CLAUDE_AGENT_TOOLS,
       maxTurns: parseMaxTurns(input.maxTurns != null ? String(input.maxTurns) : process.env.CLAUDE_MERGE_MAX_TURNS),
-      model,
+      model: sdkConfig.model,
       thinking: { type: "disabled" },
-      env: buildAgentEnv(process.env, input.agentEnv),
-      sandbox: { enabled: true, failIfUnavailable: false, autoAllowBashIfSandboxed: true },
-      hooks: { PreToolUse: [{ hooks: [preToolUseGuard] }] },
+      env: applyProviderEnv(buildAgentEnv(process.env, input.agentEnv), sdkConfig.provider),
+      // In-process: kernel sandbox + guard are the boundary. Inside the container
+      // (isolatedRuntime) the mount namespace already is — skip both so the
+      // resolver isn't blocked from legitimate paths outside /workspace.
+      sandbox: isolatedRuntime
+        ? { enabled: false }
+        : { enabled: true, failIfUnavailable: false, autoAllowBashIfSandboxed: true },
+      hooks: isolatedRuntime ? {} : { PreToolUse: [{ hooks: [preToolUseGuard] }] },
       abortController
     }
   });

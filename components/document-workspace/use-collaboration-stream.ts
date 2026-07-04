@@ -20,6 +20,9 @@ export function useCollaborationStream(params: {
   lastSseAtRef: MutableRefObject<number>;
   applyCollaborationPayload: (payload: CollaborationStepResponse) => boolean;
   pullCollaborationSteps: () => Promise<void> | void;
+  // Called when a live "steps" event can't be applied (unrecoverable divergence):
+  // the component decides between a sole-client force-push and a manual merge.
+  onUnrecoverableDivergence: () => Promise<void> | void;
   sendPresence: (typing: boolean, immediate?: boolean) => void;
   setThreads: (updater: (current: ThreadView[]) => ThreadView[]) => void;
   setDocumentUpdatedAt: (value: string) => void;
@@ -35,6 +38,7 @@ export function useCollaborationStream(params: {
     lastSseAtRef,
     applyCollaborationPayload,
     pullCollaborationSteps,
+    onUnrecoverableDivergence,
     sendPresence,
     setThreads,
     setDocumentUpdatedAt,
@@ -67,7 +71,9 @@ export function useCollaborationStream(params: {
     stream.addEventListener("steps", (event) => {
       markSse();
       const payload = JSON.parse((event as MessageEvent).data) as CollaborationStepResponse;
-      applyCollaborationPayload(payload);
+      if (!applyCollaborationPayload(payload)) {
+        void onUnrecoverableDivergence();
+      }
     });
 
     // A sole-client force-push reset the room to a new version-0 baseline. The
@@ -198,6 +204,19 @@ export function useCollaborationStream(params: {
       setRemoteNotice("Reconnecting live collaboration...");
     };
     sendPresence(false, true);
+
+    // Catch up the backlog once on connect. The SSE room streams only FUTURE
+    // steps (the "ready" event carries the current version but no backlog), and
+    // the fallback poll below runs only while the stream is UNHEALTHY. Without
+    // this pull, an editor seeded from a stale SSR snapshot never converges:
+    // soft-navigating back to a document you edited earlier replays Next.js's
+    // cached RSC payload, re-seeding the editor at the pre-edit content+version,
+    // and it would stay stale until a hard refresh or a fresh edit. A pull from
+    // the seeded version fetches exactly the missed steps; it's a no-op when the
+    // seed is already current (applyCollaborationPayload ignores a stale
+    // fromVersion), and is safe to race with the stream (same version guard).
+    void pullCollaborationSteps();
+
     // Poll only as a fallback: while the SSE stream is healthy the server pushes
     // steps/presence, so these polls are skipped (no network hit). They resume
     // within 500ms of a stream stall or onerror.

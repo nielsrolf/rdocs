@@ -23,16 +23,14 @@ type RouteContext = {
 export async function PATCH(request: Request, { params }: RouteContext) {
   const startedAt = Date.now();
   const { threadId } = await params;
+  // Anonymous share-link visitors may resolve/tag threads too — access is
+  // resolved from the share token below, matching the create/reply routes.
   const user = await getCurrentUser();
-  if (!user) {
-    console.warn("[thread-update] unauthenticated", { threadId });
-    return NextResponse.json({ error: "You must be signed in to update comments." }, { status: 401 });
-  }
 
   const body = await request.json().catch(() => null);
   const parsed = updateThreadSchema.safeParse(body);
   if (!parsed.success) {
-    console.warn("[thread-update] invalid payload", { threadId, userId: user.id, issues: parsed.error.issues.map((i) => i.path.join(".") + ":" + i.code) });
+    console.warn("[thread-update] invalid payload", { threadId, userId: user?.id ?? null, issues: parsed.error.issues.map((i) => i.path.join(".") + ":" + i.code) });
     return NextResponse.json({ error: "Invalid thread update payload." }, { status: 400 });
   }
 
@@ -44,13 +42,17 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   });
 
   if (!existing) {
-    console.warn("[thread-update] not found", { threadId, userId: user.id });
+    console.warn("[thread-update] not found", { threadId, userId: user?.id ?? null });
     return NextResponse.json({ error: "Thread not found." }, { status: 404 });
   }
 
-  const access = await resolveDocumentAccess(existing.documentId, user.id, parsed.data.shareToken ?? null);
+  const access = await resolveDocumentAccess(existing.documentId, user?.id, parsed.data.shareToken ?? null);
   if (!access || !canComment(access.permission)) {
-    console.warn("[thread-update] forbidden", { threadId, documentId: existing.documentId, userId: user.id, permission: access?.permission ?? null });
+    if (!user && !parsed.data.shareToken) {
+      console.warn("[thread-update] unauthenticated", { threadId });
+      return NextResponse.json({ error: "You must be signed in to update comments." }, { status: 401 });
+    }
+    console.warn("[thread-update] forbidden", { threadId, documentId: existing.documentId, userId: user?.id ?? null, permission: access?.permission ?? null });
     return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
   }
 
@@ -91,6 +93,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
           id: true,
           body: true,
           aiModel: true,
+          guestName: true,
           sourceLinks: true,
           commitSha: true,
           commitUrl: true,
@@ -118,7 +121,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   console.log("[thread-update]", {
     threadId,
     documentId: existing.documentId,
-    userId: user.id,
+    userId: user?.id ?? null,
     status,
     tagCount: nextTags.length,
     elapsedMs: Date.now() - startedAt

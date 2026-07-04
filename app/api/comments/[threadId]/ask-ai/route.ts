@@ -15,7 +15,10 @@ import {
 import { db } from "@/lib/db";
 import { loadDocumentEnv } from "@/lib/document-env";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
-import { rateLimit } from "@/lib/rate-limit";
+import { normalizeAgentImages } from "@/lib/ai-edit-submission";
+import { createAgentCommentThreads } from "@/lib/agent-comments";
+import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
+import { getClientIp, rateLimit } from "@/lib/rate-limit";
 import { normalizeSourceLinks, serializeSourceLinks } from "@/lib/sources";
 import {
   commitWorkspaceChanges,
@@ -56,13 +59,14 @@ type ThreadForReply = {
 // 202 immediately; the client tracks completion via AiRun polling and receives
 // the posted comment over the SSE `comment-created` broadcast. This avoids the
 // Cloudflare ~100s origin timeout (524) that killed long synchronous replies.
-async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForReply }) {
-  const { aiRunId, thread } = input;
+async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForReply; createdById: string | null }) {
+  const { aiRunId, thread, createdById } = input;
   let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
 
   try {
     const documentContent = parseDocumentContent(thread.document.content);
     const documentText = getDocumentPlainText(documentContent);
+    const suggestionAnchorText = flattenDocumentTextNodes(documentContent);
     const documentBlocks = getDocumentAiBlocks(documentContent);
     const derivedAnchorContext =
       thread.anchorContext || getContextAroundMatch(documentText, thread.anchorText);
@@ -138,6 +142,7 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
     }, {
       agentConfig: { model: thread.document.agentModel, effort: thread.document.agentEffort },
       agentEnv,
+      validation: { kind: "comment_reply", documentText: suggestionAnchorText },
       onProgress: async (event) => {
         await Promise.all([
           db.aiRun.update({
@@ -161,6 +166,13 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
           push: true
         })
       : { commitSha: null, commitUrl: null, pushed: false };
+    if (commit.pushError) {
+      await recordAiRunEvent({
+        aiRunId,
+        role: "error",
+        message: `Changes were committed locally but could not be pushed to the linked repository: ${commit.pushError}`
+      }).catch(() => null);
+    }
     const sourceLinks = normalizeSourceLinks([
       ...(Array.isArray(aiReply.sources) ? aiReply.sources : []),
       ...(Array.isArray(aiReply.sourceLinks) ? aiReply.sourceLinks : [])
@@ -200,6 +212,19 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
         updatedAt: new Date()
       }
     });
+
+    // Create any standalone review comments the agent anchored on the document.
+    // Threads are created here (correctly AI-authored); the client adds the
+    // commentAnchor mark when it processes this run.
+    const agentComments = await createAgentCommentThreads({
+      documentId: thread.documentId,
+      aiRunId,
+      createdById,
+      model: aiReply.model,
+      comments: Array.isArray(aiReply.comments) ? aiReply.comments : [],
+      documentText
+    });
+
     await db.aiRun.update({
       where: { id: aiRunId },
       data: {
@@ -207,7 +232,14 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
         model: aiReply.model,
         commitSha: commit.commitSha,
         commitUrl: commit.commitUrl,
-        finishedAt: new Date()
+        finishedAt: new Date(),
+        suggestions: JSON.stringify(Array.isArray(aiReply.suggestions) ? aiReply.suggestions : []),
+        agentComments: JSON.stringify(agentComments),
+        // Persist any repo images the agent committed so suggestions that cite
+        // them with markdown can resolve the image when applied client-side.
+        replacementImages: JSON.stringify(
+          normalizeAgentImages(aiReply.images, thread.documentId, null, aiRunId)
+        )
       }
     });
     await recordAiRunEvent({
@@ -268,10 +300,9 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
 
 export async function POST(request: Request, { params }: RouteContext) {
   const { threadId } = await params;
+  // Anonymous share-link visitors may ask AI too (they can already trigger AI
+  // edits); access is resolved from the share token below.
   const user = await getCurrentUser();
-  if (!user) {
-    return NextResponse.json({ error: "You must be signed in to ask AI." }, { status: 401 });
-  }
 
   const body = await request.json().catch(() => null);
   const parsed = askAiSchema.safeParse(body);
@@ -319,16 +350,21 @@ export async function POST(request: Request, { params }: RouteContext) {
 
   const access = await resolveDocumentAccess(
     thread.documentId,
-    user.id,
+    user?.id,
     parsed.data.shareToken ?? null
   );
   if (!access || !canComment(access.permission)) {
+    if (!user && !parsed.data.shareToken) {
+      return NextResponse.json({ error: "You must be signed in to ask AI." }, { status: 401 });
+    }
     return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
   }
 
   // Agent runs are expensive; cap how many a single user can kick off per minute
-  // to prevent cost-amplification / DoS.
-  const runLimit = rateLimit(`ai-run:user:${user.id}`, 10, 60_000);
+  // to prevent cost-amplification / DoS. Anonymous visitors are keyed by IP,
+  // matching the ai-edit route.
+  const runLimitKey = user ? `ai-run:user:${user.id}` : `ai-run:ip:${getClientIp(request)}`;
+  const runLimit = rateLimit(runLimitKey, 10, 60_000);
   if (!runLimit.allowed) {
     return NextResponse.json(
       { error: "You're starting AI runs too quickly. Try again shortly." },
@@ -342,7 +378,10 @@ export async function POST(request: Request, { params }: RouteContext) {
       triggerType: "COMMENT_THREAD",
       triggerId: thread.id,
       instruction: "Write the next assistant reply for this comment thread.",
-      progress: "Starting Claude research agent."
+      progress: "Starting Claude research agent.",
+      // Comment-reply runs never commit content; any document edits they make are
+      // tracked-change suggestions, so a comment-access user may mark them applied.
+      suggestOnly: true
     }
   });
   await recordAiRunEvent({
@@ -353,7 +392,7 @@ export async function POST(request: Request, { params }: RouteContext) {
 
   // Kick the agent off in the background and return immediately. The client
   // tracks the run via polling and gets the posted comment over SSE.
-  void runAskAiInBackground({ aiRunId: aiRun.id, thread }).catch((error) => {
+  void runAskAiInBackground({ aiRunId: aiRun.id, thread, createdById: user?.id ?? null }).catch((error) => {
     console.error("[ask-ai] background run threw", {
       threadId: thread.id,
       aiRunId: aiRun.id,

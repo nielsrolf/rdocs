@@ -63,7 +63,45 @@ function isAllowlisted(name: string): boolean {
   return ALLOWLIST_PREFIXES.some((prefix) => name.startsWith(prefix));
 }
 
+import type { AgentModelProvider } from "./agent-config";
+
 export type DocumentEnv = Record<string, string>;
+
+export const OPENROUTER_BASE_URL = "https://openrouter.ai/api";
+
+/**
+ * Rewrite an already-built agent env for the selected provider. No-op for
+ * "anthropic". For "openrouter" the Claude Agent SDK is pointed at
+ * OpenRouter's Anthropic-compatible endpoint:
+ *   - requires OPENROUTER_API_KEY (from the document env) — throws a clear
+ *     error when missing rather than silently running on the host's Anthropic
+ *     credential and billing the wrong account;
+ *   - sets ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN (sent as a Bearer token);
+ *   - clears ANTHROPIC_API_KEY and removes CLAUDE_CODE_OAUTH_TOKEN so no
+ *     host Anthropic credential can win the SDK's auth precedence.
+ * Runs after buildAgentEnv in both runner modes (agent-core executes inside
+ * the container too), so this is the single translation point.
+ */
+export function applyProviderEnv(
+  env: Record<string, string>,
+  provider: AgentModelProvider
+): Record<string, string> {
+  if (provider !== "openrouter") return env;
+  const key = env.OPENROUTER_API_KEY?.trim();
+  if (!key) {
+    throw new Error(
+      "OpenRouter model selected but OPENROUTER_API_KEY is not set in the document environment. Add it via the Env menu."
+    );
+  }
+  const result = { ...env };
+  result.ANTHROPIC_BASE_URL = OPENROUTER_BASE_URL;
+  result.ANTHROPIC_AUTH_TOKEN = key;
+  // Empty string is treated as unset by the CLI (verified); keeping the key
+  // present-but-empty guarantees a host ANTHROPIC_API_KEY cannot leak through.
+  result.ANTHROPIC_API_KEY = "";
+  delete result.CLAUDE_CODE_OAUTH_TOKEN;
+  return result;
+}
 
 /**
  * Produce the agent's environment: allow-listed host vars + the document's own

@@ -206,7 +206,7 @@ export function CommentRail({
                     <div className="comment-bubble-header">
                       <div className="comment-author-chip">
                         <CommentAvatar comment={comment} />
-                        <strong>{comment.author?.name ?? "Claude"}</strong>
+                        <strong>{comment.author?.name ?? comment.guestName ?? "Claude"}</strong>
                       </div>
                       <div className="comment-bubble-meta">
                         <span>{formatDateTime(comment.createdAt)}</span>
@@ -284,7 +284,9 @@ export function CommentRail({
                     {editingCommentId !== comment.id ? (
                       <CommentReactions
                         comment={comment}
-                        canReact={canWriteComments && isActive}
+                        // Reactions are stored per user, so anonymous share-link
+                        // visitors (currentUserId null) cannot react.
+                        canReact={canWriteComments && isActive && currentUserId !== null}
                         onToggleReaction={onToggleReaction}
                       />
                     ) : null}

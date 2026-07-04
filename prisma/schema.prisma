@@ -100,7 +100,8 @@ model DocumentMembership {
 model CommentThread {
   id            String    @id @default(cuid())
   documentId    String
-  createdById   String
+  // Null when the thread was started by an anonymous share-link visitor.
+  createdById   String?
   anchorText    String
   anchorContext String?
   status        String    @default("OPEN")
@@ -108,7 +109,7 @@ model CommentThread {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   document      Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  createdBy     User      @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  createdBy     User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
   comments      Comment[]
   reads         CommentThreadRead[]
 }
@@ -129,6 +130,8 @@ model Comment {
   id          String        @id @default(cuid())
   threadId    String
   authorId    String?
+  // Display name for anonymous share-link commenters (authorId null, no aiModel).
+  guestName   String?
   body        String
   aiModel     String?
   sourceLinks String?
@@ -233,6 +236,9 @@ model AiRun {
   replacementImages  String?
   replacementWidgets String?
   replacementSources String?
+  suggestions        String?
+  agentComments      String?
+  suggestOnly        Boolean           @default(false)
   appliedAt          DateTime?
   document      Document          @relation(fields: [documentId], references: [id], onDelete: Cascade)
   parentRun     AiRun?            @relation("AiRunFollowUps", fields: [parentRunId], references: [id], onDelete: SetNull)

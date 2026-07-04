@@ -121,7 +121,9 @@ test("comment user prompt routes the reply through submit_response", () => {
     comments: [{ author: "Niels", body: "What should this say?" }]
   });
 
-  assert.match(prompt, /comment request can only post a comment reply/);
+  assert.match(prompt, /A comment request posts a comment reply/);
+  // Comment-reply agents may now ALSO propose tracked-change suggestions.
+  assert.match(prompt, /propose them via the suggestions array/);
   assert.match(prompt, /call submit_response with reply set to the comment text/);
   assert.match(prompt, /Anchor: Intro text/);
 });

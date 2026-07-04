@@ -12,17 +12,26 @@ import {
   embedSourceExists,
   hasMarkdownImage,
   normalizeSubmittedWidget,
+  validateAgentComments,
   validateAiEditAssets,
+  validateSuggestions,
   type EditAssetIntent,
   type NormalizedSubmittedWidget
 } from "./ai-edit-submission";
 import { runWidgetBuild } from "./widget-build";
 
-export type SubmissionValidationSpec = {
-  kind: "edit_selection";
-  selectedText: string;
-  assetIntent: EditAssetIntent;
-};
+// `documentText` is the flattened text-node basis (lib/suggestion-content.
+// flattenDocumentTextNodes) the client resolves anchors against — present on
+// every kind so suggestion anchors can be validated wherever the agent runs.
+export type SubmissionValidationSpec =
+  | {
+      kind: "edit_selection";
+      selectedText: string;
+      assetIntent: EditAssetIntent;
+      documentText: string;
+    }
+  | { kind: "comment_reply"; documentText: string }
+  | { kind: "conversation"; documentText: string };
 
 /** Build the agent's widget, then confirm it produced its embed_source. */
 export async function buildAndVerifyWidget(
@@ -49,6 +58,23 @@ export function buildSubmissionValidator(
   ctx: { workspacePath: string | null }
 ): ClaudeAgentSubmissionValidator {
   return async (submission) => {
+    // Suggestion anchors are validated in every mode (edit_selection, comment_reply,
+    // conversation) — agents may propose tracked-change edits anywhere.
+    const suggestionError = validateSuggestions(submission.suggestions, spec.documentText);
+    if (suggestionError) {
+      return suggestionError;
+    }
+    const commentError = validateAgentComments(submission.comments, spec.documentText);
+    if (commentError) {
+      return commentError;
+    }
+
+    // The remaining checks (replacement no-op, required assets, widget build) only
+    // apply to the selection-edit replacement payload.
+    if (spec.kind !== "edit_selection") {
+      return null;
+    }
+
     const submittedImages = Array.isArray(submission.images) ? submission.images : [];
     const submittedWidgets = Array.isArray(submission.widgets) ? submission.widgets : [];
     const hasImage =

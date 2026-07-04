@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import { canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
 
 type RouteContext = {
   params: Promise<{
@@ -53,7 +53,10 @@ export async function GET(request: Request, { params }: RouteContext) {
       replacementText: true,
       replacementImages: true,
       replacementWidgets: true,
-      replacementSources: true
+      replacementSources: true,
+      suggestions: true,
+      agentComments: true,
+      suggestOnly: true
     }
   });
 
@@ -67,6 +70,10 @@ export async function GET(request: Request, { params }: RouteContext) {
   const images = isSucceeded ? parseJsonArray<Record<string, unknown>>(run.replacementImages) : [];
   const widgets = isSucceeded ? parseJsonArray<Record<string, unknown>>(run.replacementWidgets) : [];
   const sources = isSucceeded ? parseJsonArray<string>(run.replacementSources) : [];
+  const suggestions = isSucceeded ? parseJsonArray<Record<string, unknown>>(run.suggestions) : [];
+  const agentComments = isSucceeded
+    ? parseJsonArray<{ threadId: string; findText: string }>(run.agentComments)
+    : [];
 
   return NextResponse.json({
     aiRun: {
@@ -88,7 +95,10 @@ export async function GET(request: Request, { params }: RouteContext) {
       replacementText,
       images,
       widgets,
-      sources
+      sources,
+      suggestions,
+      agentComments,
+      suggestOnly: run.suggestOnly
     }
   });
 }
@@ -112,7 +122,15 @@ export async function POST(request: Request, { params }: RouteContext) {
     user?.id,
     typeof shareToken === "string" ? shareToken : null
   );
-  if (!access || !canEdit(access.permission)) {
+  // Suggest-only runs land as tracked changes (not committed content), so a
+  // comment-access user is allowed to mark them applied; committed edits remain
+  // edit-only.
+  const run = await db.aiRun.findFirst({
+    where: { id: runId, documentId: id },
+    select: { suggestOnly: true }
+  });
+  const allowed = Boolean(access) && (canEdit(access!.permission) || (run?.suggestOnly === true && canComment(access!.permission)));
+  if (!allowed) {
     return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
   }
 

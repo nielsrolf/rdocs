@@ -15,7 +15,9 @@ import {
 } from "@/lib/ai-edit-submission";
 import { db } from "@/lib/db";
 import { loadDocumentEnv } from "@/lib/document-env";
-import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import { canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import { createAgentCommentThreads } from "@/lib/agent-comments";
+import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
 import { getClientIp, rateLimit } from "@/lib/rate-limit";
 import {
   commitWorkspaceChanges,
@@ -31,7 +33,10 @@ const aiEditSchema = z.object({
   selectedContext: z.string().max(50000).optional().nullable(),
   instruction: z.string().min(1).max(4000),
   selectionId: z.string().min(1).max(120).regex(/^[A-Za-z0-9_-]+$/).optional().nullable(),
-  shareToken: z.string().optional().nullable()
+  shareToken: z.string().optional().nullable(),
+  // Set by comment-access users: the selection edit and any out-of-selection
+  // edits are applied as tracked-change suggestions instead of committed content.
+  suggest: z.boolean().optional()
 });
 
 async function createAgentWidgets(input: {
@@ -112,13 +117,15 @@ async function runAiEditInBackground(input: {
   parsed: AiEditPayload;
   documentTitle: string;
   documentContentRaw: string;
+  createdById: string | null;
   agentConfig: { model: string | null; effort: string | null };
 }) {
-  const { documentId, aiRunId, parsed, documentTitle, documentContentRaw, agentConfig } = input;
+  const { documentId, aiRunId, parsed, documentTitle, documentContentRaw, createdById, agentConfig } = input;
   let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
   try {
     const documentContent = parseDocumentContent(documentContentRaw);
     const documentText = getDocumentPlainText(documentContent);
+    const suggestionAnchorText = flattenDocumentTextNodes(documentContent);
     const documentBlocks = getDocumentAiBlocks(documentContent);
     const unresolvedThreads = await db.commentThread.findMany({
       where: { documentId, status: "OPEN" },
@@ -191,7 +198,8 @@ async function runAiEditInBackground(input: {
         validation: {
           kind: "edit_selection",
           selectedText: parsed.selectedText,
-          assetIntent
+          assetIntent,
+          documentText: suggestionAnchorText
         }
       }
     );
@@ -241,6 +249,13 @@ async function runAiEditInBackground(input: {
           push: true
         })
       : { commitSha: null, commitUrl: null, pushed: false };
+    if (commit.pushError) {
+      await recordAiRunEvent({
+        aiRunId,
+        role: "error",
+        message: `Changes were committed locally but could not be pushed to the linked repository: ${commit.pushError}`
+      }).catch(() => null);
+    }
 
     const rawReplacement = typeof result.replacementText === "string" ? result.replacementText : "";
     const trimmedReplacement = rawReplacement.trim();
@@ -287,7 +302,20 @@ async function runAiEditInBackground(input: {
         replacementText: finalReplacement,
         replacementImages: JSON.stringify(images),
         replacementWidgets: JSON.stringify(widgets),
-        replacementSources: JSON.stringify(sourceLinks)
+        replacementSources: JSON.stringify(sourceLinks),
+        suggestions: JSON.stringify(Array.isArray(result.suggestions) ? result.suggestions : []),
+        agentComments: JSON.stringify(
+          createdById
+            ? await createAgentCommentThreads({
+                documentId,
+                aiRunId,
+                createdById,
+                model: result.model,
+                comments: Array.isArray(result.comments) ? result.comments : [],
+                documentText
+              })
+            : []
+        )
       }
     });
     await recordAiRunEvent({
@@ -350,9 +378,15 @@ export async function POST(request: Request, { params }: RouteContext) {
   }
 
   const access = await resolveDocumentAccess(id, user?.id, parsed.data.shareToken ?? null);
-  if (!access || !canEdit(access.permission)) {
+  // Editors may commit edits directly; comment-access users may run the agent
+  // only in suggestion mode (suggest: true), where the result lands as tracked
+  // changes they cannot commit on their own.
+  const editorAccess = Boolean(access) && canEdit(access!.permission);
+  const suggestAccess = Boolean(access) && parsed.data.suggest === true && canComment(access!.permission);
+  if (!access || (!editorAccess && !suggestAccess)) {
     return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
   }
+  const suggestOnly = !editorAccess;
 
   // Agent runs are expensive; cap per-user (or per-IP for share-token editors).
   const runLimitKey = user ? `ai-run:user:${user.id}` : `ai-run:ip:${getClientIp(request)}`;
@@ -371,7 +405,8 @@ export async function POST(request: Request, { params }: RouteContext) {
       triggerId: parsed.data.selectionId ? `selection:${parsed.data.selectionId}` : null,
       selectionId: parsed.data.selectionId ?? null,
       instruction: parsed.data.instruction.trim(),
-      progress: "Starting Claude research agent."
+      progress: "Starting Claude research agent.",
+      suggestOnly
     }
   });
 
@@ -387,6 +422,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     parsed: parsed.data,
     documentTitle: access.document.title,
     documentContentRaw: access.document.content,
+    createdById: user?.id ?? null,
     agentConfig: { model: access.document.agentModel, effort: access.document.agentEffort }
   }).catch((error) => {
     console.error("[ai-edit] background run threw", {

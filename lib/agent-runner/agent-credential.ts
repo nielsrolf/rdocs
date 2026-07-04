@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { isOpenRouterAgentModel } from "../../agent-core/agent-config";
+
 // Resolving the Anthropic credential the sandboxed agent uses. The sandbox
 // scrubs the host env and excludes the host filesystem, so a credential must be
 // passed in explicitly. Precedence (highest first):
@@ -75,4 +77,22 @@ export function resolveAgentCredentialEnv(
       ? "host ~/.claude OAuth access token appears expired; the agent may fail to authenticate until you refresh it (run `claude`)."
       : null;
   return { added: { CLAUDE_CODE_OAUTH_TOKEN: oauth.token }, warning };
+}
+
+// Model-aware wrapper: OpenRouter jobs authenticate with the document's
+// OPENROUTER_API_KEY, so the host's Claude OAuth token must NOT be injected
+// into those containers (it would be readable by untrusted agent code and is
+// unnecessary). Anthropic jobs keep the resolveAgentCredentialEnv behavior.
+export function resolveContainerCredentialEnv(
+  containerEnv: Record<string, string | undefined>,
+  agentModel: string | null | undefined,
+  opts: { homeDir?: string | undefined; credentialsPath?: string; now?: number } = {}
+): { added: Record<string, string>; warning: string | null } {
+  if (isOpenRouterAgentModel(agentModel)) {
+    const warning = containerEnv.OPENROUTER_API_KEY?.trim()
+      ? null
+      : "OpenRouter model selected but OPENROUTER_API_KEY is missing from the container env; the run will fail inside the sandbox.";
+    return { added: {}, warning };
+  }
+  return resolveAgentCredentialEnv(containerEnv, opts);
 }

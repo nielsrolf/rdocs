@@ -110,6 +110,16 @@ test("buildContainerEnv drops empty values (so an empty ANTHROPIC_API_KEY can't 
   assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "tok");
 });
 
+test("a document OPENROUTER_API_KEY reaches the container env file intact", () => {
+  // The in-container agent translates OPENROUTER_API_KEY into the SDK's
+  // ANTHROPIC_* vars (applyProviderEnv), so the key itself must survive the
+  // host-side env-file path.
+  const env = buildContainerEnv({ LANG: "C" }, { OPENROUTER_API_KEY: "sk-or-v1-abc" });
+  assert.equal(env.OPENROUTER_API_KEY, "sk-or-v1-abc");
+  const lines = serializeEnvFile(env).trimEnd().split("\n");
+  assert.ok(lines.includes("OPENROUTER_API_KEY=sk-or-v1-abc"));
+});
+
 test("serializeEnvFile emits VAR=VALUE lines and skips multiline values", () => {
   const text = serializeEnvFile({ A: "1", B: "two words", BAD: "line1\nline2" });
   const lines = text.trimEnd().split("\n");

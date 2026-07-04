@@ -14,6 +14,12 @@ export async function loadDocumentEnv(documentId: string): Promise<DocumentEnv> 
   return env;
 }
 
+/** Whether a document has a given env key configured, without loading values. */
+export async function hasDocumentEnvKey(documentId: string, key: string): Promise<boolean> {
+  const count = await db.documentEnvVar.count({ where: { documentId, key } });
+  return count > 0;
+}
+
 export type MaskedEnvVar = { key: string; masked: string; updatedAt: string };
 
 /** Keys with masked values — safe to return over the API / show in the UI. */

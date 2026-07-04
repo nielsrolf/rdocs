@@ -25,8 +25,8 @@ export function ToolbarButton({ active = false, disabled = false, label, onClick
   );
 }
 
-export function CommentAvatar({ comment }: { comment: Pick<CommentView, "aiModel" | "author"> }) {
-  const authorName = comment.author?.name ?? "Claude";
+export function CommentAvatar({ comment }: { comment: Pick<CommentView, "aiModel" | "author" | "guestName"> }) {
+  const authorName = comment.author?.name ?? comment.guestName ?? "Claude";
 
   if (comment.aiModel) {
     return <img alt="" className="avatar-dot avatar-dot-image" src={CLAUDE_COMMENT_ICON_SRC} />;

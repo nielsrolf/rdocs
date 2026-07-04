@@ -1,10 +1,11 @@
-import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { Step } from "@tiptap/pm/transform";
+import { Slice, type Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { ReplaceStep, Step } from "@tiptap/pm/transform";
 
 import { defaultDocumentContent, parseDocumentContent, serializeDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
 import { createDocumentEditorSchema } from "@/lib/document-editor-schema";
 import { maybeCreateVersionSnapshot } from "@/lib/document-data";
+import { computeCommittedContent } from "@/lib/suggestion-content";
 
 export type CollaborationStepPayload = {
   steps: unknown[];
@@ -80,6 +81,16 @@ export class StepApplyError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "StepApplyError";
+  }
+}
+
+// Thrown when a comment-access ("suggestion only") push would change the
+// committed view of the document — i.e. it does more than add/edit/withdraw
+// tracked-change suggestions. Mapped to a 403 by the collaboration route.
+export class SuggestionOnlyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SuggestionOnlyError";
   }
 }
 
@@ -360,6 +371,10 @@ export async function submitCollaborationSteps(input: {
   steps: unknown[];
   clientId: string;
   versionMeta?: CollaborationVersionMeta;
+  // When true (comment-access pusher), the push may only add/modify/withdraw
+  // tracked-change suggestions — the committed view of the document must not
+  // change. Enforced below; a violation throws SuggestionOnlyError (403).
+  suggestionOnly?: boolean;
 }) {
   return withDocumentQueue(input.documentId, async () => {
     const persistedDocument = await db.document.findUnique({
@@ -439,6 +454,21 @@ export async function submitCollaborationSteps(input: {
     }
 
     const nextContent = serializeDocumentContent(nextDoc.toJSON());
+
+    // Suggestion-only guard: a comment-access push must leave the committed view
+    // (the document with every suggestion rejected) byte-identical. This is the
+    // security boundary that lets commenters persist tracked changes via the same
+    // step pipeline without being able to commit content.
+    if (input.suggestionOnly) {
+      const baseCommitted = JSON.stringify(computeCommittedContent(baseDoc.toJSON()));
+      const nextCommitted = JSON.stringify(computeCommittedContent(nextDoc.toJSON()));
+      if (baseCommitted !== nextCommitted) {
+        throw new SuggestionOnlyError(
+          "Comment access can only add suggestions, not change committed content."
+        );
+      }
+    }
+
     // Snapshot the pre-edit content for version history before overwriting.
     // When the push carries AI-run metadata, attach it to the post-edit version
     // (and force a snapshot) so AI edits remain attributable in version history.
@@ -601,6 +631,115 @@ export async function forcePushDocument(input: {
     broadcast(room, "reset", { version: 0, updatedAt: room.updatedAt });
 
     return { forced: true, version: 0, updatedAt: room.updatedAt };
+  });
+}
+
+// Commit a manually-resolved merge. This is the multi-client counterpart to the
+// sole-client force-push: when a tab's local doc has diverged unrecoverably AND
+// another client is connected (so a force-push is refused, since it would clobber
+// the collaborator), the user resolves the conflict in the merge dialog and the
+// resulting document is committed here.
+//
+// Unlike a force-push it is VERSION-CHECKED and applied as a normal successor of
+// the current server version: the merge was resolved against `baseVersion`, so if
+// the server has advanced since (another client committed in the meantime) we
+// refuse with `stale` and the client re-merges against the fresh server doc. On
+// success the merge lands as ONE whole-document replace step, broadcast to the
+// other clients so they apply it through the normal collab path. (Their
+// unconfirmed in-flight edits rebase over the whole-doc replace and may be
+// dropped — acceptable for an authoritative human merge resolution.)
+export async function mergeCommitDocument(input: {
+  documentId: string;
+  currentUpdatedAt?: Date | string | null;
+  clientId: string;
+  baseVersion: number;
+  content: unknown;
+}): Promise<
+  | { committed: true; version: number; updatedAt: string | null }
+  | { committed: false; reason: "stale"; version: number }
+> {
+  return withDocumentQueue(input.documentId, async () => {
+    const persistedDocument = await db.document.findUnique({
+      where: { id: input.documentId },
+      select: { content: true, title: true, updatedAt: true }
+    });
+
+    if (!persistedDocument) {
+      throw new Error("Document not found.");
+    }
+
+    const room = getCollaborationRoom(
+      input.documentId,
+      persistedDocument.content,
+      persistedDocument.updatedAt
+    );
+    const durableVersion = await getDurableVersion(input.documentId);
+    alignColdRoomVersion(room, durableVersion);
+
+    if (input.baseVersion !== durableVersion) {
+      return { committed: false, reason: "stale", version: durableVersion };
+    }
+
+    const baseDoc = parseStoredDoc(persistedDocument.content);
+
+    // Validate the resolved content against the server schema before committing —
+    // a corrupt merge must not be able to brick the document.
+    let nextDoc: ProseMirrorNode;
+    try {
+      nextDoc = schema.nodeFromJSON(input.content);
+    } catch (error) {
+      throw new StepApplyError(
+        error instanceof Error ? `Invalid merge content: ${error.message}` : "Invalid merge content."
+      );
+    }
+
+    const step = new ReplaceStep(0, baseDoc.content.size, new Slice(nextDoc.content, 0, 0));
+    const applied = step.apply(baseDoc);
+    if (applied.failed || !applied.doc) {
+      throw new StepApplyError(applied.failed ?? "Unable to apply merge step.");
+    }
+
+    const previousContent = serializeDocumentContent(baseDoc.toJSON());
+    const nextContent = serializeDocumentContent(applied.doc.toJSON());
+
+    // Archive the overwritten server state so a bad merge stays recoverable.
+    await maybeCreateVersionSnapshot({
+      documentId: input.documentId,
+      currentTitle: persistedDocument.title,
+      currentContent: previousContent,
+      nextTitle: persistedDocument.title,
+      nextContent,
+      force: true
+    });
+
+    const record: StepRecord = {
+      version: durableVersion,
+      step: step.toJSON(),
+      clientId: input.clientId
+    };
+
+    const updated = await db.$transaction(async (tx) => {
+      const result = await tx.document.update({
+        where: { id: input.documentId },
+        data: { content: nextContent },
+        select: { updatedAt: true }
+      });
+      await insertDurableSteps(tx, input.documentId, [record]);
+      return result;
+    });
+
+    room.doc = applied.doc;
+    room.version = durableVersion + 1;
+    room.updatedAt = updated.updatedAt.toISOString();
+    room.steps.push(record);
+    if (room.steps.length > MAX_ROOM_STEPS) {
+      room.steps.splice(0, room.steps.length - MAX_ROOM_STEPS);
+    }
+
+    const payload = buildStepPayload([record], durableVersion, room.version, room.updatedAt);
+    broadcast(room, "steps", payload, input.clientId);
+
+    return { committed: true, version: room.version, updatedAt: room.updatedAt };
   });
 }
 

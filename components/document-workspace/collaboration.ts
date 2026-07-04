@@ -98,6 +98,45 @@ export function reanchorWithinBlock(
   return bestPos;
 }
 
+// Maximum collaboration steps allowed in a single /collaboration push. A large
+// edit (a big AI reformat, a paste of a long document) can produce hundreds of
+// ProseMirror steps at once; the server caps a single POST at this many steps
+// (the zod `.max()` in app/api/documents/[id]/collaboration/route.ts), so the
+// client MUST chunk a large flush into batches no larger than this. A push that
+// exceeds the cap is rejected with a non-recoverable 400 ("steps:too_big"), and
+// because the buffer never drains the tab is stranded on "Save failed" forever.
+// Keep this value in lockstep with the server cap in that route.
+export const COLLAB_MAX_STEPS_PER_PUSH = 200;
+
+// Decide what a single push should send from the current unconfirmed-step
+// buffer. Sends at most `max` steps; once those are confirmed the collab plugin
+// advances its version and the next flush picks up where this one left off, so
+// an arbitrarily large edit drains over several round-trips without ever
+// tripping the server cap. `isFinalBatch` is true when this push drains the
+// whole buffer — the caller attaches one-shot AI-edit version metadata only
+// then, so the version snapshot captures the complete post-edit content rather
+// than an intermediate chunk.
+export function planCollaborationPush<T>(
+  steps: readonly T[],
+  max: number = COLLAB_MAX_STEPS_PER_PUSH
+): { batch: T[]; isFinalBatch: boolean } {
+  const batch = steps.slice(0, max);
+  return { batch, isFinalBatch: batch.length === steps.length };
+}
+
+// Decide how to recover from an UNRECOVERABLE divergence — the local doc has
+// drifted so far from the server's confirmed version that prosemirror-collab can
+// no longer rebase the pending steps (applyCollaborationPayload threw). Mirrors
+// `git`: a sole editor force-pushes its branch; with collaborators present we
+// must not clobber their work, so the user resolves a manual merge instead. The
+// server re-checks presence authoritatively, so a force-push it refuses falls
+// back to the merge path. Pure so it is unit-testable.
+export function planDivergenceRecovery(input: {
+  otherClientsPresent: boolean;
+}): "force-push" | "manual-merge" {
+  return input.otherClientsPresent ? "manual-merge" : "force-push";
+}
+
 export type ReceivedMappingEntry = {
   versionBefore: number;
   mapping: Mapping;

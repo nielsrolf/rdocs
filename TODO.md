@@ -1,5 +1,11 @@
 # TODO: 
 
+# Bugs
+
+[Potentially resolved, need to test] When two people collaborate in real-time on a document, the cursor of the other person often jumps around while typing. Can we prevent this? Some ideas regarding how:
+- use the same update cycle (in broadcasting messages and while updating the frontend) for cursor position and changes in the text
+- use some error correction thingy to update cursor position, like text directly before and after the cursor. Make it the priority that this is not violated, and use cursor offset only as secondary source of information and to resolve ambiguity
+- something else?
 
 # Security
 
@@ -106,6 +112,13 @@ RESOLVED (2026-06-02): root cause was the Bash guard's denylist model — see th
 # Features
 
 
+## OpenRouter models — SHIPPED (2026-07-03), follow-ups
+Users can select OpenRouter models (curated list + custom slug, `openrouter/<author>/<model>` stored on `Document.agentModel`) once the document env has `OPENROUTER_API_KEY`. Runs go through the existing Claude Agent SDK pointed at OpenRouter's Anthropic-compatible endpoint (`applyProviderEnv` in `agent-core/agent-env.ts`). Follow-ups:
+- **Merge resolver stays on the Anthropic default**: `lib/research-workspace.ts` doesn't pass `agentConfig`/`agentEnv` to `resolveMergeConflicts`. To make merge resolution follow an OpenRouter document, pass `agentConfig: { model: document.agentModel }` + `agentEnv: await loadDocumentEnv(documentId)` at that call site — `merge-resolver.ts` already resolves provider + env correctly.
+- **Extended thinking is force-disabled for OpenRouter models** (`resolveAgentSdkConfig`). If the compat endpoint proves to accept/ignore Anthropic thinking params for non-Claude models, this can be relaxed there.
+- **Scaffold dimension**: config is provider-shaped (`AgentModelProvider`), so a future non-SDK scaffold (pi/opencode) can be added as a new provider + runner without reworking UI/schema.
+- An *invalid* (vs missing) OpenRouter key fails slowly — the SDK retries 401s 10× (~3 min) before the run fails.
+
 ## Per-user agent credentials — PLANNED (do after sandboxing)
 Currently all Claude usage runs through the host's `~/.claude` OAuth session (one account). Goal: each user connects their own Claude credential **once**, and every document they own inherits it; the agent then runs under the owner's credential.
 
@@ -114,11 +127,29 @@ Desired UX (per user review, 2026-06-03):
 - Configured once per user; all documents **owned by that user** inherit it automatically (no per-document setup).
 - A document's own env (`DocumentEnvVar`) can still override (e.g. a shared/team doc with its own key).
 
-Implementation sketch (extends the now-built sandbox plumbing):
-- The agent already authenticates purely from its env (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`) — see `lib/agent-runner/agent-credential.ts` and `agent-core/agent-env.ts`. The container/runner injects whatever the agent env contains. So this feature only needs to change the **source** of that credential from the host `~/.claude` fallback to a **per-user store**.
-- New `UserCredential` model (encrypted at rest): `userId`, `kind` (`oauth` | `api_key`), the secret (+ OAuth `refreshToken`/`expiresAt` for refresh). Never returned in full over the API (mask like `DocumentEnvVar`).
+### ⚠️ ToS reality check on the subscription path (researched 2026-06-22)
+The "connect your Claude subscription" path is **mechanically trivial but legally contested**, and the policy has whipsawed all year. Record before building:
+- **Timeline:** Jan 2026 — subscription OAuth tokens blocked for third-party tools, reversed within days. Feb 2026 — Consumer ToS revised to formally restrict OAuth auth to Claude Code and Claude.ai only. Apr 4 2026 — outright ban enforced on third-party agents using subscription credentials. May/Jun 2026 — announced a separate monthly "Agent SDK credit" ($20 Pro / $100 Max 5× / $200 Max 20×, billed at API rates) that *would* have officially blessed third-party subscription auth. **Jun 15 2026 — that credit rollout was paused**; usage stays on subscription limits as before, no credit to claim, "reworking the plan."
+- **Canonical SDK docs still say** (Agent SDK overview, current): *"Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK. Please use the API key authentication methods described in this document instead."*
+- **Net:** there is **no clean, self-serve, sanctioned mechanism** for a hosted multi-tenant app to authenticate end-users' subscriptions right now. The "unless previously approved" clause implies a **partner-approval route** (contact Anthropic), not an OAuth client we can just register. Using a user's subscription via our service today sits in the restricted zone — tolerable for our own small set of subscription-holding users at their own risk, **not** safe to market broadly. If we want this properly, email Anthropic for approval.
+- **API-key auth is unambiguously allowed** (Console keys; the Console "Claude Code" role can mint Claude-Code-scoped keys). It should be the default we ship.
+
+### How the subscription connect flow actually works (no OAuth dance needed)
+- The simplest "connect" is **`claude setup-token`**: the user runs it locally, it walks them through OAuth and prints a **1-year** token (prefix `sk-ant-oat01-`); they paste it into our settings UI and we store it and inject it as `CLAUDE_CODE_OAUTH_TOKEN`. Requires a Pro/Max/Team/Enterprise plan; scoped to inference only (can't do Remote Control — fine for us).
+- **This removes the refresh machinery from the earlier sketch.** A `setup-token` token lasts a year, so we do *not* need `refreshToken`/`expiresAt` plumbing for the paste path — just store the token and prompt re-connect when it 401s. (The full `claude login` OAuth control-request flow — `SDKControlClaudeAuthenticate` etc. — is the alternative if we want in-app "connect" without leaving the browser, but it's strictly more work; defer it.)
+- **SDK credential precedence** (so we inject exactly one): `ANTHROPIC_API_KEY` (X-Api-Key) → `apiKeyHelper` → `CLAUDE_CODE_OAUTH_TOKEN` → subscription `/login`. If a `UserCredential` is `api_key`, inject only `ANTHROPIC_API_KEY`; if `oauth`, inject only `CLAUDE_CODE_OAUTH_TOKEN` and make sure no stray `ANTHROPIC_API_KEY` is in the run env (the container env scrub in `container-args.ts` already guards the empty-string case — extend it to drop the unused var entirely).
+
+### Implementation sketch (extends the now-built sandbox plumbing)
+- The agent already authenticates purely from its env (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`) — see `lib/agent-runner/agent-credential.ts` and `agent-core/agent-env.ts`. The container/runner injects whatever the agent env contains. So this feature only needs to change the **source** of that credential from the host `~/.claude` fallback to a **per-user store**. Both auth methods resolve to env vars, so the connect-method choice is orthogonal to the resolution plumbing.
+- New `UserCredential` model (encrypted at rest): `userId`, `kind` (`oauth` | `api_key`), the secret (+ optional `expiresAt` for display; `refreshToken` only if we later add the in-app OAuth flow). Never returned in full over the API (mask like `DocumentEnvVar`).
 - Credential resolution order when building a run's agent env: document env (`DocumentEnvVar`) → **document owner's `UserCredential`** → host `~/.claude` fallback (single-tenant/dev). Layer it the same way `loadDocumentEnv` results are layered today.
-- Connect flow: reuse the `claude login` subscription OAuth flow (open URL, paste code back). The Agent SDK exposes Claude OAuth control requests (SDKControlClaudeAuthenticate / SDKControlClaudeOAuthCallback / SDKControlClaudeOAuthWaitForCompletion) — scope these for the paste-code-back loop. API-key paste is the simple fallback.
-- OAuth token refresh: store `refreshToken`; refresh server-side before a run when `expiresAt` is near (the host `~/.claude` CLI does this today; we'd replicate the refresh call).
+- Connect flow: **paste an Anthropic API key** (ship first, unambiguously allowed) **or paste a `claude setup-token` subscription token** (gate behind a clear in-app disclaimer about ToS/usage; treat as the user authorizing their own account at their own risk until/unless Anthropic approves us).
 - Gate AI features on the owner having a connected credential once we stop using the host account.
-- (Earlier context: deferred per discussion 2026-05-29.)
+
+### Build phases
+1. `UserCredential` schema + encryption-at-rest + masked read API + `POST/GET/DELETE /api/user/credentials` (mirror `DocumentEnvVar` route patterns).
+2. Settings UI: paste API key OR paste subscription token; show masked value + which kind is connected.
+3. Resolution layer: extend the agent-env build in the three routes (`ai-edit`, `agents`, comment-reply) to layer owner `UserCredential` between doc env and host fallback; inject exactly one credential var per the precedence rule above.
+4. Disable the host `~/.claude` fallback in multi-tenant mode (env flag); gate AI features when the owner has no credential.
+5. Tests: resolution precedence (doc env > owner cred > host), single-var injection (oauth vs api_key, no stray `ANTHROPIC_API_KEY`), masked-read, 401→re-connect prompt.
+- (Earlier context: deferred per discussion 2026-05-29. ToS research 2026-06-22.)

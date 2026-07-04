@@ -1,4 +1,14 @@
-import { AGENT_EFFORTS, AGENT_MODELS } from "@/lib/agent-config";
+import { useState } from "react";
+
+import {
+  AGENT_EFFORTS,
+  ANTHROPIC_AGENT_MODELS,
+  OPENROUTER_AGENT_MODELS,
+  OPENROUTER_MODEL_PREFIX,
+  isOpenRouterAgentModel,
+  isStorableAgentModel,
+  normalizeAgentModel
+} from "@/lib/agent-config";
 import { cn, truncate } from "@/lib/utils";
 
 import { AgentTimeline } from "./agent-timeline";
@@ -25,6 +35,7 @@ export function AgentPanel({
   canWriteDocument,
   agentModel,
   agentEffort,
+  hasOpenRouterKey,
   onAgentModelChange,
   onAgentEffortChange,
   onClose,
@@ -44,6 +55,7 @@ export function AgentPanel({
   canWriteDocument: boolean;
   agentModel: string;
   agentEffort: string;
+  hasOpenRouterKey: boolean;
   onAgentModelChange: (model: string) => void;
   onAgentEffortChange: (effort: string) => void;
   onClose: () => void;
@@ -52,6 +64,36 @@ export function AgentPanel({
   onAgentMessageChange: (next: string) => void;
   onSendAgentMessage: (options?: AgentConversationOptions) => void;
 }) {
+  const CUSTOM_SENTINEL = "__openrouter_custom__";
+  const [customMode, setCustomMode] = useState(false);
+  const [customDraft, setCustomDraft] = useState("");
+  const [customError, setCustomError] = useState<string | null>(null);
+
+  // Legacy stored aliases ("sonnet"/"opus") display as their canonical model;
+  // the canonical value is what gets PATCHed on the next change.
+  const normalizedModel = normalizeAgentModel(agentModel);
+  const modelIsOpenRouter = isOpenRouterAgentModel(normalizedModel);
+  const storedCustomModel =
+    modelIsOpenRouter && !OPENROUTER_AGENT_MODELS.some((m) => m.value === normalizedModel)
+      ? normalizedModel
+      : null;
+  // Keep a stored OpenRouter selection visible even if the key was deleted.
+  const showOpenRouterGroup = hasOpenRouterKey || modelIsOpenRouter;
+
+  function commitCustomSlug() {
+    const raw = customDraft.trim();
+    if (!raw) return;
+    const value = raw.startsWith(OPENROUTER_MODEL_PREFIX) ? raw : `${OPENROUTER_MODEL_PREFIX}${raw}`;
+    if (!isStorableAgentModel(value)) {
+      setCustomError("Enter an OpenRouter slug like openai/gpt-5.2");
+      return;
+    }
+    setCustomError(null);
+    setCustomMode(false);
+    setCustomDraft("");
+    onAgentModelChange(value);
+  }
+
   return (
     <div className="agent-screen" role="region" aria-label="Agents">
       <header className="agent-screen-topbar">
@@ -68,24 +110,56 @@ export function AgentPanel({
             <select
               className="agent-config-select"
               disabled={!canWriteDocument}
-              onChange={(event) => onAgentModelChange(event.target.value)}
+              onChange={(event) => {
+                const value = event.target.value;
+                if (value === CUSTOM_SENTINEL) {
+                  setCustomMode(true);
+                  setCustomError(null);
+                  return;
+                }
+                setCustomMode(false);
+                onAgentModelChange(value);
+              }}
               title={canWriteDocument ? "Model the agent runs as" : "Only editors can change the model"}
-              value={agentModel}
+              value={customMode ? CUSTOM_SENTINEL : normalizedModel}
             >
-              {AGENT_MODELS.map((model) => (
-                <option key={model.value} value={model.value}>
-                  {model.label}
-                </option>
-              ))}
+              <optgroup label="Anthropic">
+                {ANTHROPIC_AGENT_MODELS.map((model) => (
+                  <option key={model.value} value={model.value}>
+                    {model.label}
+                  </option>
+                ))}
+              </optgroup>
+              {showOpenRouterGroup ? (
+                <optgroup label="OpenRouter">
+                  {OPENROUTER_AGENT_MODELS.map((model) => (
+                    <option key={model.value} value={model.value}>
+                      {model.label}
+                    </option>
+                  ))}
+                  {storedCustomModel ? (
+                    <option value={storedCustomModel}>
+                      {storedCustomModel.slice(OPENROUTER_MODEL_PREFIX.length)}
+                    </option>
+                  ) : null}
+                  <option value={CUSTOM_SENTINEL}>Custom slug…</option>
+                </optgroup>
+              ) : null}
             </select>
           </label>
           <label className="agent-config-field">
             <span className="agent-config-label">Thinking</span>
             <select
               className="agent-config-select"
-              disabled={!canWriteDocument}
+              disabled={!canWriteDocument || modelIsOpenRouter}
               onChange={(event) => onAgentEffortChange(event.target.value)}
-              title={canWriteDocument ? "Extended-thinking effort" : "Only editors can change thinking effort"}
+              title={
+                modelIsOpenRouter
+                  ? "Extended thinking applies to Anthropic models"
+                  : canWriteDocument
+                    ? "Extended-thinking effort"
+                    : "Only editors can change thinking effort"
+              }
               value={agentEffort}
             >
               {AGENT_EFFORTS.map((effort) => (
@@ -95,6 +169,39 @@ export function AgentPanel({
               ))}
             </select>
           </label>
+          {customMode ? (
+            <div className="agent-config-field agent-config-custom-model">
+              <input
+                aria-label="Custom OpenRouter model slug"
+                className="agent-config-custom-input"
+                onChange={(event) => setCustomDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    commitCustomSlug();
+                  }
+                }}
+                placeholder="openai/gpt-5.2"
+                value={customDraft}
+              />
+              <button
+                className="ghost-button"
+                disabled={!customDraft.trim()}
+                onClick={commitCustomSlug}
+                type="button"
+              >
+                Use
+              </button>
+              {customError ? <span className="agent-config-hint agent-config-error">{customError}</span> : null}
+            </div>
+          ) : null}
+          {!hasOpenRouterKey ? (
+            <span className="agent-config-hint">
+              {modelIsOpenRouter
+                ? "This model needs OPENROUTER_API_KEY — add it in the Env menu."
+                : "Add OPENROUTER_API_KEY in the Env menu to use OpenRouter models."}
+            </span>
+          ) : null}
         </div>
         <span className="agent-screen-topbar-status">
           {activeAiRuns.length > 0

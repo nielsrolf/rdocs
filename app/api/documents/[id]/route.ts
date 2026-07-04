@@ -1,16 +1,17 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { AGENT_EFFORTS, AGENT_MODELS } from "@/lib/agent-config";
+import { AGENT_EFFORTS, isStorableAgentModel } from "@/lib/agent-config";
 import { getCurrentUser } from "@/lib/auth";
-import { serializeAiRun } from "@/lib/ai-runs";
+import { failAbandonedAiRuns, serializeAiRun } from "@/lib/ai-runs";
+import { getCollaborationVersion } from "@/lib/collaboration";
 import { listDocumentThreads, maybeCreateVersionSnapshot } from "@/lib/document-data";
+import { hasDocumentEnvKey } from "@/lib/document-env";
 import { parseDocumentContent, serializeDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
 import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
 import { normalizeSourceLinks } from "@/lib/sources";
 
-const agentModelValues = AGENT_MODELS.map((m) => m.value) as [string, ...string[]];
 const agentEffortValues = AGENT_EFFORTS.map((e) => e.value) as [string, ...string[]];
 
 const updateDocumentSchema = z.object({
@@ -22,7 +23,11 @@ const updateDocumentSchema = z.object({
   commitSha: z.string().optional().nullable(),
   commitUrl: z.string().url().optional().nullable(),
   aiRunId: z.string().optional().nullable(),
-  agentModel: z.enum(agentModelValues).optional(),
+  agentModel: z
+    .string()
+    .max(160)
+    .refine(isStorableAgentModel, { message: "Unknown agent model." })
+    .optional(),
   agentEffort: z.enum(agentEffortValues).optional()
 });
 
@@ -209,41 +214,42 @@ export async function GET(request: Request, { params }: RouteContext) {
     })
   ]);
 
-  // In-process agents abort after 10 min and the route updates status accordingly.
-  // A RUNNING run older than that is guaranteed abandoned (server restart/crash).
-  const STALE_RUN_MS = 12 * 60 * 1000;
-  const now = Date.now();
-  const staleRunIds = aiRuns
-    .filter((run) => run.status === "RUNNING" && now - run.startedAt.getTime() > STALE_RUN_MS)
-    .map((run) => run.id);
-  if (staleRunIds.length > 0) {
-    const finishedAt = new Date();
-    const error = "Run abandoned (server restart or crash).";
-    await db.aiRun.updateMany({
-      where: { id: { in: staleRunIds }, status: "RUNNING" },
-      data: { status: "FAILED", error, finishedAt }
-    });
-    const staleSet = new Set(staleRunIds);
+  const reaped = await failAbandonedAiRuns(aiRuns);
+  if (reaped) {
     for (const run of aiRuns) {
-      if (staleSet.has(run.id)) {
+      if (reaped.failedIds.has(run.id)) {
         run.status = "FAILED";
-        run.error = error;
-        run.finishedAt = finishedAt;
+        run.error = reaped.error;
+        run.finishedAt = reaped.finishedAt;
       }
     }
   }
 
   const activeAiRuns = aiRuns.filter((run) => run.status === "RUNNING");
 
+  // The current collaboration (durable) version. The merge-recovery dialog reads
+  // this alongside `content` so it can commit a resolved merge as a version-
+  // checked successor (the server re-checks it authoritatively, so a small race
+  // here just yields a 409 stale + re-merge).
+  const collaborationVersion = await getCollaborationVersion(
+    access.document.id,
+    access.document.content,
+    access.document.updatedAt
+  );
+
   return NextResponse.json({
     document: {
       id: access.document.id,
       title: access.document.title,
       content: parseDocumentContent(access.document.content),
+      collaborationVersion,
       repoUrl: access.document.repoUrl,
       repoBranch: access.document.repoBranch,
       agentModel: access.document.agentModel,
       agentEffort: access.document.agentEffort,
+      // Key presence only (never the value) — the selector uses it to decide
+      // whether to offer OpenRouter models.
+      hasOpenRouterKey: await hasDocumentEnvKey(access.document.id, "OPENROUTER_API_KEY"),
       updatedAt: access.document.updatedAt
     },
     threads,

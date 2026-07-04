@@ -13,13 +13,15 @@ import StarterKit from "@tiptap/starter-kit";
 import { AiEditRange } from "@/components/document-workspace/ai-edit-selections";
 import { CommentAnchor } from "@/components/document-workspace/comment-anchors";
 import { Mention } from "@/components/document-workspace/mention";
+import { SuggestedDeletion, SuggestedInsertion } from "@/components/document-workspace/suggestions";
 import {
   AttachmentChipSchemaNode,
   EmbeddedWidgetSchemaNode,
   RepoImageSchemaNode,
   TabBreakSchemaNode,
   aiEditSelectionIdsAttributeSpec,
-  commentThreadIdsAttributeSpec
+  commentThreadIdsAttributeSpec,
+  suggestionRecordsAttributesSpec
 } from "@/lib/document-schema-nodes";
 
 const Image = ImageExtension.extend({
@@ -27,7 +29,8 @@ const Image = ImageExtension.extend({
     return {
       ...this.parent?.(),
       ...commentThreadIdsAttributeSpec,
-      ...aiEditSelectionIdsAttributeSpec
+      ...aiEditSelectionIdsAttributeSpec,
+      ...suggestionRecordsAttributesSpec
     };
   }
 });
@@ -45,6 +48,8 @@ export function createDocumentEditorSchema() {
     CommentAnchor,
     Mention,
     AiEditRange,
+    SuggestedInsertion,
+    SuggestedDeletion,
     Link.configure({
       openOnClick: false,
       autolink: true,

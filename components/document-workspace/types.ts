@@ -9,6 +9,8 @@ export type CommentView = {
   id: string;
   body: string;
   aiModel: string | null;
+  // Display name for anonymous share-link commenters (author is null).
+  guestName?: string | null;
   sourceLinks: string[];
   commitSha: string | null;
   commitUrl: string | null;
@@ -31,7 +33,7 @@ export type ThreadView = {
   createdBy: {
     id: string;
     name: string;
-  };
+  } | null;
   lastReadAt: string | Date | null;
   comments: CommentView[];
 };
@@ -79,6 +81,7 @@ export type DocumentWorkspaceProps = {
   initialRepoBranch: string | null;
   initialAgentModel: string | null;
   initialAgentEffort: string | null;
+  initialHasOpenRouterKey: boolean;
   isAuthenticated: boolean;
   isOwner: boolean;
   shareToken: string | null;

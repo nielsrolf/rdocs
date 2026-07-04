@@ -27,6 +27,10 @@ export type CommitResult = {
   commitSha: string | null;
   commitUrl: string | null;
   pushed: boolean;
+  // Set when the local commit succeeded but pushing it to origin failed (e.g.
+  // the bot account lacks write access). Never fatal: the local commit is the
+  // source of truth and callers surface this to the user instead of failing.
+  pushError?: string;
 };
 
 const WORKSPACE_ROOT = path.join(process.cwd(), ".research-workspaces");
@@ -568,12 +572,22 @@ export async function commitWorkspaceChanges(input: {
   const commitSha = shaResult.stdout.trim();
 
   let pushed = false;
+  let pushError: string | undefined;
   if (input.push && !isReadOnlyRepoUrl(input.repoUrl) && (await hasOriginRemote(input.workspace))) {
-    await runCommand("git", ["push", "-u", "origin", "HEAD"], {
-      cwd: input.workspace,
-      timeoutMs: 300_000
-    });
-    pushed = true;
+    try {
+      await runCommand("git", ["push", "-u", "origin", "HEAD"], {
+        cwd: input.workspace,
+        timeoutMs: 300_000
+      });
+      pushed = true;
+    } catch (error) {
+      pushError = error instanceof Error ? error.message : String(error);
+      console.warn("[research-workspace] push failed; keeping local commit", {
+        workspace: input.workspace,
+        commitSha,
+        error: pushError
+      });
+    }
   }
 
   if (
@@ -589,14 +603,18 @@ export async function commitWorkspaceChanges(input: {
       syncBranchToBaseWorkspace(
         baseWorkspace,
         commitSha,
-        input.push && !isReadOnlyRepoUrl(input.repoUrl)
+        // Skip the base push when the worktree push was already denied — it
+        // would fail identically; the local merge still keeps the base current.
+        input.push && !pushError && !isReadOnlyRepoUrl(input.repoUrl)
       )
     );
   }
 
   return {
     commitSha,
-    commitUrl: getGithubCommitUrl(input.repoUrl, commitSha),
-    pushed
+    // A denied push means the commit does not exist on GitHub — no URL to link.
+    commitUrl: pushError ? null : getGithubCommitUrl(input.repoUrl, commitSha),
+    pushed,
+    pushError
   };
 }

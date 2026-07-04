@@ -260,3 +260,54 @@ itLive("a comment author can edit their comment; unauthenticated edits are rejec
   });
   assert.ok(noauth.status === 401 || noauth.status === 403, `expected 401/403, got ${noauth.status}`);
 });
+
+itLive("agent model PATCH accepts canonical ids, legacy aliases, and openrouter slugs — and rejects junk", async () => {
+  const cookie = await signUp();
+  const docId = await createDocument(cookie);
+
+  for (const agentModel of ["claude-fable-5", "sonnet", "openrouter/openai/gpt-5.2", "openrouter/deepseek/deepseek-v3.2:free"]) {
+    const res = await authed(cookie, `/api/documents/${docId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title: "model test", agentModel })
+    });
+    assert.equal(res.status, 200, `expected 200 for ${agentModel}`);
+  }
+
+  const get = await authed(cookie, `/api/documents/${docId}`);
+  const data = await get.json();
+  assert.equal(data.document.agentModel, "openrouter/deepseek/deepseek-v3.2:free");
+
+  for (const agentModel of ["gpt-5", "openrouter/", "openrouter/../../etc/passwd", "openrouter/a b/c"]) {
+    const res = await authed(cookie, `/api/documents/${docId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title: "model test", agentModel })
+    });
+    assert.equal(res.status, 400, `expected 400 for ${agentModel}`);
+  }
+});
+
+itLive("document GET reports OPENROUTER_API_KEY presence (never the value)", async () => {
+  const cookie = await signUp();
+  const docId = await createDocument(cookie);
+
+  const before = await (await authed(cookie, `/api/documents/${docId}`)).json();
+  assert.equal(before.document.hasOpenRouterKey, false);
+
+  const add = await authed(cookie, `/api/documents/${docId}/environment`, {
+    method: "POST",
+    body: JSON.stringify({ key: "OPENROUTER_API_KEY", value: "sk-or-v1-test" })
+  });
+  assert.equal(add.status, 200);
+
+  const after = await (await authed(cookie, `/api/documents/${docId}`)).json();
+  assert.equal(after.document.hasOpenRouterKey, true);
+  assert.ok(!JSON.stringify(after).includes("sk-or-v1-test"), "key value must never appear in the document payload");
+
+  const del = await authed(cookie, `/api/documents/${docId}/environment`, {
+    method: "DELETE",
+    body: JSON.stringify({ key: "OPENROUTER_API_KEY" })
+  });
+  assert.equal(del.status, 200);
+  const cleared = await (await authed(cookie, `/api/documents/${docId}`)).json();
+  assert.equal(cleared.document.hasOpenRouterKey, false);
+});

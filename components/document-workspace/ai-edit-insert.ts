@@ -59,7 +59,12 @@ export function buildAiEditInsertContent(input: {
   widgets: AiEditWidget[];
   documentId: string;
   shareToken: string | null;
+  // When false, images that aren't referenced inline in replacementText are NOT
+  // appended at the end. Agent suggestions set this so the run's images don't get
+  // duplicated onto every suggestion — each suggestion renders only what it cites.
+  appendUnusedImages?: boolean;
 }) {
+  const appendUnusedImages = input.appendUnusedImages ?? true;
   const imagesByPath = new Map<string, AiEditImage>();
   input.images.forEach((image) => {
     if (image.path) {
@@ -105,11 +110,13 @@ export function buildAiEditInsertContent(input: {
     content.push(buildAiEditHtml("", input.sourceLinks));
   }
 
-  input.images
-    .filter((image) => !usedImagePaths.has(getImagePathFromSource(image.path ?? image.src)))
-    .forEach((image) => {
-      content.push(toRepoImageNode(image));
-    });
+  if (appendUnusedImages) {
+    input.images
+      .filter((image) => !usedImagePaths.has(getImagePathFromSource(image.path ?? image.src)))
+      .forEach((image) => {
+        content.push(toRepoImageNode(image));
+      });
+  }
 
   input.widgets.forEach((widget) => {
     content.push(toWidgetNode(widget, input.documentId, input.shareToken));

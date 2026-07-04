@@ -35,6 +35,22 @@ import {
   upsertAiEditSelection
 } from "./document-workspace/ai-edit-selections";
 import { buildAiEditRemountTransaction } from "./document-workspace/ai-edit-remount";
+import { resolveSuggestionRange, type AgentSuggestionInput } from "./document-workspace/ai-suggestions";
+import { submitPendingReplyThenAskAi } from "./document-workspace/ask-ai-flow";
+import {
+  Suggestions,
+  acceptAllSuggestions,
+  acceptSuggestion,
+  collectSuggestionRanges,
+  createSuggestionId,
+  markExplicitSuggestion,
+  rejectAllSuggestions,
+  rejectSuggestion,
+  setSuggestionMode,
+  suggestionPluginKey,
+  type SuggestionAuthor,
+  type SuggestionSummary
+} from "./document-workspace/suggestions";
 import { CommentRail } from "./document-workspace/comment-rail";
 import { DocOutline, OUTLINE_MAX_WIDTH, OUTLINE_MIN_WIDTH } from "./document-workspace/doc-outline";
 import { MoveBlock, SlashTab, StrikeShortcut, TaskItem } from "./document-workspace/editor-extras";
@@ -67,10 +83,14 @@ import {
 import {
   createCollaborationExtension,
   createRemotePresenceExtension,
+  planCollaborationPush,
+  planDivergenceRecovery,
   type CollaborationStepResponse,
   type ReceivedMappingEntry,
   type RemotePresenceView
 } from "./document-workspace/collaboration";
+import { DivergenceMergeDialog } from "./document-workspace/divergence-merge-dialog";
+import type { DocNode } from "@/lib/document-merge";
 import { useCollaborationStream } from "./document-workspace/use-collaboration-stream";
 import { usePresence } from "./document-workspace/use-presence";
 import { FindBar } from "./document-workspace/find-bar";
@@ -193,6 +213,7 @@ export function DocumentWorkspace({
   initialRepoBranch,
   initialAgentModel,
   initialAgentEffort,
+  initialHasOpenRouterKey,
   isAuthenticated,
   isOwner,
   shareToken,
@@ -207,6 +228,7 @@ export function DocumentWorkspace({
   const [repoBranch, setRepoBranch] = useState(initialRepoBranch ?? "");
   const [agentModel, setAgentModel] = useState(initialAgentModel ?? DEFAULT_AGENT_MODEL);
   const [agentEffort, setAgentEffort] = useState(initialAgentEffort ?? DEFAULT_AGENT_EFFORT);
+  const [hasOpenRouterKey, setHasOpenRouterKey] = useState(initialHasOpenRouterKey);
   const [repoBusy, setRepoBusy] = useState(false);
   const [repoNotice, setRepoNotice] = useState<string | null>(null);
   // Bumped on every doc-changing transaction (local or remote) so anchor-derived
@@ -301,6 +323,10 @@ export function DocumentWorkspace({
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const [remoteNotice, setRemoteNotice] = useState<string | null>(null);
+  // Set when an unrecoverable divergence is detected with another client present
+  // (so the sole-client force-push is off the table): drives the manual merge
+  // dialog. `localContent` is this tab's copy at detection time.
+  const [mergeState, setMergeState] = useState<{ localContent: JSONContent } | null>(null);
   const [remotePresence, setRemotePresence] = useState<RemotePresenceView[]>([]);
   const [threadOffsets, setThreadOffsets] = useState<Record<string, number>>({});
   const [railHeight, setRailHeight] = useState(640);
@@ -319,6 +345,11 @@ export function DocumentWorkspace({
   // Guards the sole-client force-push recovery so a divergence can't fire it
   // concurrently or repeatedly while a previous attempt is still in flight.
   const forcePushBusyRef = useRef(false);
+  // Latched once an unrecoverable divergence is being handled. Every divergence-
+  // detection site funnels through handleUnrecoverableDivergence(); this stops the
+  // SSE/poll loop from re-triggering recovery (and hammering the server) while a
+  // force-push reload is pending or the merge dialog is open.
+  const divergenceHandlingRef = useRef(false);
   const typingClearTimerRef = useRef<number | null>(null);
   const isApplyingRemoteUpdateRef = useRef(false);
   const hasUnsavedChangesRef = useRef(false);
@@ -359,8 +390,54 @@ export function DocumentWorkspace({
     agentToast,
     dismissToast: dismissAgentToast
   } = useAgentNotifications();
-  const canWriteComments = isAuthenticated && initialPermission !== "VIEW";
+  // Anonymous visitors holding a COMMENT/EDIT share link can comment too — the
+  // server resolves their access from the token, like collab pushes and AI edits.
+  const canWriteComments = (isAuthenticated || Boolean(shareToken)) && initialPermission !== "VIEW";
   const canWriteDocument = initialPermission === "EDIT";
+  // Comment-access users (can comment but not edit) are locked into suggesting
+  // mode: the editor is interactive for them, but every change is forced into a
+  // tracked-change suggestion. Editors default to direct editing and can toggle.
+  const suggestOnlyUser = canWriteComments && !canWriteDocument;
+  const canPersistEdits = canWriteDocument || canWriteComments;
+  const [suggestingMode, setSuggestingMode] = useState(suggestOnlyUser);
+  const suggestingModeRef = useRef(suggestingMode);
+  suggestingModeRef.current = suggestingMode;
+  const suggestionAuthor = useMemo<SuggestionAuthor>(
+    () => ({ authorId: currentUserId, authorLabel: currentUserName ?? null }),
+    [currentUserId, currentUserName]
+  );
+  // Pending suggestions present in the document, recomputed as the doc changes
+  // (docRevision bumps on every doc-changing transaction).
+  const [suggestionSummaries, setSuggestionSummaries] = useState<SuggestionSummary[]>([]);
+  const [suggestionPanelOpen, setSuggestionPanelOpen] = useState(false);
+  // Inline Accept/Reject affordance shown when the caret sits inside a suggestion.
+  const [suggestionPopover, setSuggestionPopover] = useState<{
+    id: string;
+    label: string;
+    authorLabel: string | null;
+    top: number;
+    left: number;
+  } | null>(null);
+  // Distinct suggestions (a find/replace shares one id across its delete+insert
+  // parts), ordered by document position, for the review panel.
+  const distinctSuggestions = useMemo(() => {
+    const byId = new Map<string, { id: string; authorLabel: string | null; from: number; kinds: Set<string> }>();
+    for (const summary of suggestionSummaries) {
+      const existing = byId.get(summary.suggestionId);
+      if (existing) {
+        existing.kinds.add(summary.kind);
+        existing.from = Math.min(existing.from, summary.from);
+      } else {
+        byId.set(summary.suggestionId, {
+          id: summary.suggestionId,
+          authorLabel: summary.author.authorLabel,
+          from: summary.from,
+          kinds: new Set([summary.kind])
+        });
+      }
+    }
+    return Array.from(byId.values()).sort((a, b) => a.from - b.from);
+  }, [suggestionSummaries]);
 
   const commentHighlightExtension = useMemo(
     () =>
@@ -625,6 +702,9 @@ export function DocumentWorkspace({
       const receiveTr = receiveTransaction(editor.state, steps, clientIds, {
         mapSelectionBackward: true
       });
+      // Tell the suggestions interceptor to ignore this apply — foreign steps
+      // already carry their author's marks; we must not re-mark them as ours.
+      receiveTr.setMeta(suggestionPluginKey, { type: "skip" });
       recordReceivedMapping(versionBefore, receiveTr.mapping);
       editor.view.dispatch(receiveTr);
       if (typeof payload.updatedAt === "string") {
@@ -666,9 +746,19 @@ export function DocumentWorkspace({
     collaborationPushBusyRef.current = true;
     collaborationPushQueuedRef.current = false;
 
-    // Attach any one-shot AI-edit version metadata to this push. Kept until the
-    // push is accepted (a 409 rebase + re-flush must still carry it).
-    const versionMeta = pendingCollabVersionMetaRef.current;
+    // Chunk a large flush. A single AI reformat or a big paste can produce many
+    // hundreds of steps, but the server rejects any push above its cap with a
+    // non-recoverable 400 ("steps:too_big"), which used to strand the tab on
+    // "Save failed" forever. Send at most one batch now; once it's confirmed the
+    // collab plugin advances its version and the re-flush queued below drains
+    // the rest, so an edit of any size eventually saves.
+    const { batch, isFinalBatch } = planCollaborationPush(sendable.steps);
+
+    // Attach any one-shot AI-edit version metadata ONLY to the batch that drains
+    // the buffer, so the version snapshot records the complete post-edit content
+    // (with commit attribution) rather than an intermediate chunk. Kept until
+    // accepted (a 409 rebase + re-flush, or a later batch, must still carry it).
+    const versionMeta = isFinalBatch ? pendingCollabVersionMetaRef.current : null;
 
     // Bound the push so a never-settling request cannot leave
     // collaborationPushBusyRef stuck `true` forever (which silently disables
@@ -685,7 +775,7 @@ export function DocumentWorkspace({
         },
         body: JSON.stringify({
           version: sendable.version,
-          steps: sendable.steps.map((step) => step.toJSON()),
+          steps: batch.map((step) => step.toJSON()),
           clientId: collabClientIdRef.current,
           shareToken,
           ...(versionMeta ? { versionMeta } : {})
@@ -705,7 +795,8 @@ export function DocumentWorkspace({
             documentId,
             status: response.status,
             sentVersion: sendable.version,
-            sentStepCount: sendable.steps.length,
+            sentStepCount: batch.length,
+            pendingStepCount: sendable.steps.length,
             serverError: typeof data?.error === "string" ? data.error : null
           }
         });
@@ -721,28 +812,20 @@ export function DocumentWorkspace({
             setSaveState(sendableSteps(editor.state) ? "saving" : "saved");
             return;
           }
-
-          // The rebase failed — our local doc has diverged from the server's
-          // confirmed version. If we're the sole client, force-push our state
-          // and reload; otherwise fall through to the normal conflict handling.
-          if (await attemptForcePushRecovery()) {
-            return;
-          }
+          // The rebase failed — fall through to the sole-client force-push below.
         }
 
-        // A 422 means the server could not apply our steps at all (corrupt step
-        // or client/server schema mismatch). Retrying sends the same bad steps
-        // and fails identically, so do NOT queue a re-flush — surface a refresh
-        // prompt and stop. (Distinct from 409, which IS retryable.)
-        if (response.status === 422) {
-          collaborationPushQueuedRef.current = false;
-          setRemoteNotice("Live collaboration lost sync. Refresh this document to reconnect.");
-          setSaveState("error");
-          return;
-        }
-
-        setSaveState("error");
-        void pullCollaborationSteps();
+        // Unrecoverable: a push the server won't accept and we can't rebase away
+        // — a failed 409 rebase, OR a hard 4xx/5xx the server rejected outright
+        // (a malformed/oversized/un-appliable step payload). A 422 (corrupt step
+        // / schema mismatch) fails identically on retry, so it's unrecoverable
+        // too. Route through the shared handler: sole client → force-push (git
+        // push --force semantics — your local doc IS the source of truth so a
+        // desync must never strand you on "Save failed"); collaborator present →
+        // manual merge so we never clobber concurrent edits. A normal 409 that
+        // already rebased returned above, so this never clobbers recoverable work.
+        collaborationPushQueuedRef.current = false;
+        await handleUnrecoverableDivergence();
         return;
       }
 
@@ -753,11 +836,21 @@ export function DocumentWorkspace({
       }
 
       if (!applyCollaborationPayload(data)) {
-        setSaveState("error");
+        // The server accepted our push but the steps it echoed back can't be
+        // applied locally — same unrecoverable divergence, same recovery.
+        await handleUnrecoverableDivergence();
         return;
       }
 
-      setSaveState(response.ok && !sendableSteps(editor.state) ? "saved" : "saving");
+      // A partial batch (large edit split across pushes) leaves more steps
+      // sendable now that the version advanced — queue the next batch so the
+      // flush drains to completion instead of stopping half-saved.
+      if (sendableSteps(editor.state)) {
+        collaborationPushQueuedRef.current = true;
+        setSaveState("saving");
+      } else {
+        setSaveState("saved");
+      }
     } catch {
       // Network failure or a push that hit COLLAB_PUSH_TIMEOUT_MS. The lock is
       // released in the finally, then we schedule a delayed retry so a transient
@@ -772,7 +865,8 @@ export function DocumentWorkspace({
         data: {
           documentId,
           sentVersion: sendable.version,
-          sentStepCount: sendable.steps.length
+          sentStepCount: batch.length,
+          pendingStepCount: sendable.steps.length
         }
       });
       scheduleCollaborationFlush(COLLAB_PUSH_RETRY_DELAY_MS);
@@ -799,7 +893,9 @@ export function DocumentWorkspace({
   }
 
   async function pullCollaborationSteps() {
-    if (!editor || collaborationPullBusyRef.current) {
+    // Stop the 500ms fallback poll from hammering the server once a divergence is
+    // being handled (a force-push reload is pending or the merge dialog is open).
+    if (!editor || collaborationPullBusyRef.current || divergenceHandlingRef.current) {
       return;
     }
 
@@ -814,7 +910,12 @@ export function DocumentWorkspace({
       const data = (await response?.json().catch(() => null)) as CollaborationStepResponse | null;
 
       if (data && Array.isArray(data.steps) && data.steps.length > 0) {
-        applyCollaborationPayload(data);
+        // A pull can be the first place a divergence surfaces (an idle tab, or a
+        // freshly-opened tab whose stale seed can't apply its catch-up steps).
+        // Route a failed apply through recovery instead of looping forever.
+        if (!applyCollaborationPayload(data)) {
+          await handleUnrecoverableDivergence();
+        }
       }
     } finally {
       collaborationPullBusyRef.current = false;
@@ -881,6 +982,35 @@ export function DocumentWorkspace({
     } finally {
       forcePushBusyRef.current = false;
     }
+  }
+
+  // Single entry point for an unrecoverable divergence, reached from EVERY place
+  // applyCollaborationPayload returns false (the push-409 rebase, the fallback
+  // poll, and the live SSE "steps" event). Mirrors `git`: a sole editor force-
+  // pushes its branch; with a collaborator present we must not clobber their
+  // work, so we open the manual merge dialog. Latched so the 500ms poll / SSE
+  // can't re-fire it and hammer the server while recovery is pending.
+  async function handleUnrecoverableDivergence() {
+    if (!editor || divergenceHandlingRef.current) {
+      return;
+    }
+    divergenceHandlingRef.current = true;
+    setSaveState("error");
+
+    const recovery = planDivergenceRecovery({
+      otherClientsPresent: remotePresenceRef.current.length > 0
+    });
+
+    if (recovery === "force-push" && (await attemptForcePushRecovery())) {
+      // attemptForcePushRecovery reloads the page on success; stay latched.
+      return;
+    }
+
+    // Either a collaborator is present, or the server refused the force-push
+    // (it re-checks presence authoritatively). Resolve via a manual merge —
+    // capture this tab's copy now, before any further remote steps churn it.
+    setRemoteNotice(null);
+    setMergeState({ localContent: editor.getJSON() });
   }
 
 
@@ -1030,6 +1160,7 @@ export function DocumentWorkspace({
       collaborationExtension,
       remotePresenceExtension,
       AiEditSelections,
+      Suggestions,
       commentHighlightExtension,
       latexRenderExtension,
       SearchExtension,
@@ -1056,7 +1187,10 @@ export function DocumentWorkspace({
       tabsVisibilityExtension
     ],
     immediatelyRender: false,
-    editable: canWriteDocument,
+    // Comment-access users are editable too, but locked into suggesting mode (the
+    // Suggestions plugin rewrites their edits into tracked changes, and the collab
+    // route enforces that they only change suggestions, never committed content).
+    editable: canPersistEdits,
     content: initialContent as JSONContent,
     editorProps: {
       attributes: {
@@ -1150,6 +1284,38 @@ export function DocumentWorkspace({
       setTableControlsActive(editor.isActive("table"));
       const { selection } = editor.state;
       const { from, to } = selection;
+
+      // Inline suggestion review: when the caret is inside a tracked change, show
+      // an Accept/Reject popover anchored to it (editors only — accept/reject is
+      // an edit-level action). Computed independently of the selection menu below.
+      if (canWriteDocument && editorPageRef.current) {
+        const ranges = collectSuggestionRanges(editor.state.doc);
+        const hit = ranges.find((range) => from >= range.from && from <= range.to);
+        if (hit) {
+          const related = ranges.filter((range) => range.suggestionId === hit.suggestionId);
+          const kinds = new Set(related.map((range) => range.kind));
+          const anchorFrom = Math.min(...related.map((range) => range.from));
+          const coords = editor.view.coordsAtPos(anchorFrom);
+          const pageRect = editorPageRef.current.getBoundingClientRect();
+          setSuggestionPopover({
+            id: hit.suggestionId,
+            label:
+              kinds.has("insert") && kinds.has("delete")
+                ? "Replace"
+                : kinds.has("insert")
+                  ? "Insert"
+                  : "Delete",
+            authorLabel: hit.author.authorLabel,
+            top: Math.max(8, coords.bottom - pageRect.top + 6),
+            left: Math.max(8, Math.min(coords.left - pageRect.left, pageRect.width - 200))
+          });
+        } else {
+          setSuggestionPopover(null);
+        }
+      } else {
+        setSuggestionPopover(null);
+      }
+
       if (!editorPageRef.current) {
         setSelection(null);
         setSelectionPopoverMode(null);
@@ -1191,7 +1357,7 @@ export function DocumentWorkspace({
       setSelectionPopoverMode("menu");
     },
     onUpdate: ({ editor }) => {
-      if (!canWriteDocument || isApplyingRemoteUpdateRef.current) {
+      if (!canPersistEdits || isApplyingRemoteUpdateRef.current) {
         return;
       }
 
@@ -1224,6 +1390,23 @@ export function DocumentWorkspace({
       }
     }
   });
+
+  // Push the current suggesting mode + author into the suggestions plugin so its
+  // appendTransaction interceptor and Backspace/Delete keymap know whether to
+  // convert edits into tracked changes, and who is authoring them.
+  useEffect(() => {
+    if (!editor) return;
+    editor.view.dispatch(setSuggestionMode(editor.state, suggestingMode, suggestionAuthor));
+  }, [editor, suggestingMode, suggestionAuthor]);
+
+  // Recompute the pending-suggestion list whenever the document changes.
+  useEffect(() => {
+    if (!editor) {
+      setSuggestionSummaries([]);
+      return;
+    }
+    setSuggestionSummaries(collectSuggestionRanges(editor.state.doc));
+  }, [editor, docRevision]);
 
   useEffect(() => {
     if (!editor) {
@@ -1400,6 +1583,7 @@ export function DocumentWorkspace({
     lastSseAtRef,
     applyCollaborationPayload,
     pullCollaborationSteps,
+    onUnrecoverableDivergence: handleUnrecoverableDivergence,
     sendPresence,
     setThreads,
     setDocumentUpdatedAt,
@@ -1912,7 +2096,8 @@ export function DocumentWorkspace({
         anchorText: selectedRange.text.slice(0, 1000),
         anchorContext: selectedRange.context ? selectedRange.context.slice(0, 2000) : selectedRange.context,
         clientId: collabClientIdRef.current,
-        shareToken
+        shareToken,
+        guestName: isAuthenticated ? undefined : currentUserName
       })
     });
 
@@ -2255,10 +2440,177 @@ export function DocumentWorkspace({
     });
   }
 
-  async function handleReply(threadId: string) {
+  // Resolve an agent's anchored find/replace suggestions against the live doc and
+  // apply them as tracked changes. Skipped (un-resolvable) anchors are reported.
+  // Renders a tracked-change replacement over a KNOWN range with full formatting:
+  // the agent's markdown (incl. inline/block formatting and repo-image figures
+  // resolved against the run's images) is parsed to real nodes, inserted right
+  // after the struck range, and the inserted span is flagged as a suggested
+  // insertion sharing one id with the deletion (so one accept performs the
+  // replacement). Returns false if nothing was applied.
+  function applyRichTrackedReplacement(
+    range: { from: number; to: number },
+    replacementText: string,
+    author: SuggestionAuthor,
+    runImages: AiEditImage[],
+    runSources: string[]
+  ): boolean {
+    if (!editor) return false;
+    const record = {
+      suggestionId: createSuggestionId(),
+      authorId: author.authorId,
+      authorLabel: author.authorLabel,
+      createdAt: new Date().toISOString()
+    };
+    let insertion: { from: number; to: number } | undefined;
+    const replacement = (replacementText ?? "").trim();
+    if (replacement) {
+      const html = buildAiEditInsertContent({
+        replacementText,
+        sourceLinks: runSources,
+        images: runImages,
+        widgets: [],
+        documentId,
+        shareToken,
+        appendUnusedImages: false
+      });
+      const sizeBefore = editor.state.doc.content.size;
+      // Insert the rich content first (skip-tagged so the suggesting-mode
+      // interceptor doesn't double-mark it), then mark the inserted span below.
+      editor
+        .chain()
+        .insertContentAt(range.to, html, { updateSelection: false })
+        .command(({ tr }) => {
+          tr.setMeta(suggestionPluginKey, { type: "skip" });
+          return true;
+        })
+        .run();
+      const delta = editor.state.doc.content.size - sizeBefore;
+      if (delta > 0) insertion = { from: range.to, to: range.to + delta };
+    }
+    const tr = markExplicitSuggestion(editor.state, {
+      deletion: range.to > range.from ? { from: range.from, to: range.to } : undefined,
+      insertion,
+      record
+    });
+    if (!tr) return false;
+    editor.view.dispatch(tr);
+    return true;
+  }
+
+  function applyAgentSuggestions(
+    aiRunId: string,
+    suggestions: AgentSuggestionInput[],
+    model: unknown,
+    runImages: AiEditImage[] = [],
+    runSources: string[] = []
+  ) {
+    if (!editor || suggestions.length === 0) return;
+    const author: SuggestionAuthor = {
+      authorId: `ai-run:${aiRunId}`,
+      authorLabel: typeof model === "string" && model ? model : "AI"
+    };
+    // Resolve every anchor against the CURRENT doc first, then apply high → low so
+    // earlier offsets stay valid as later ones insert content.
+    const resolved: Array<{ suggestion: AgentSuggestionInput; from: number; to: number }> = [];
+    const skipped: AgentSuggestionInput[] = [];
+    for (const suggestion of suggestions) {
+      const range = resolveSuggestionRange(editor.state.doc, suggestion.findText);
+      if (!range) {
+        skipped.push(suggestion);
+        continue;
+      }
+      resolved.push({ suggestion, from: range.from, to: range.to });
+    }
+    resolved.sort((a, b) => b.from - a.from);
+    for (const op of resolved) {
+      applyRichTrackedReplacement(
+        { from: op.from, to: op.to },
+        op.suggestion.replacementText,
+        author,
+        runImages,
+        runSources
+      );
+    }
+    if (skipped.length > 0) {
+      logClientEvent({
+        scope: "ai-suggestion-anchor-lost",
+        level: "warn",
+        message: "agent suggestions could not be placed",
+        data: { documentId, aiRunId, applied: resolved.length, skipped: skipped.length, total: suggestions.length }
+      });
+      reportClientError(
+        `${skipped.length} of ${suggestions.length} AI suggestion(s) could not be placed in the document.`,
+        "ai-suggestion-anchor-lost",
+        { documentId, aiRunId }
+      );
+    }
+  }
+
+  // Anchors the standalone comment threads an agent created (server-side) by
+  // adding the commentAnchor mark for each at its resolved range, through the
+  // collab pipeline. The threads already exist + show in the rail; this places
+  // their highlight in the text. Unresolved anchors leave the thread unanchored.
+  function applyAgentComments(aiRunId: string, comments: Array<{ threadId: string; findText: string }>) {
+    if (!editor || comments.length === 0) return;
+    let applied = 0;
+    const skipped: string[] = [];
+    for (const comment of comments) {
+      const range = resolveSuggestionRange(editor.state.doc, comment.findText);
+      if (!range) {
+        skipped.push(comment.threadId);
+        continue;
+      }
+      const tr = buildCommentAnchorTransaction(editor.state, range, comment.threadId);
+      if (tr) {
+        editor.view.dispatch(tr);
+        applied += 1;
+      } else {
+        skipped.push(comment.threadId);
+      }
+    }
+    if (skipped.length > 0) {
+      logClientEvent({
+        scope: "ai-comment-anchor-lost",
+        level: "warn",
+        message: "agent comment anchors could not be placed",
+        data: { documentId, aiRunId, applied, skipped: skipped.length, total: comments.length }
+      });
+    }
+  }
+
+  function handleAcceptSuggestion(suggestionId: string) {
+    if (!editor) return;
+    const tr = acceptSuggestion(editor.state, suggestionId);
+    if (tr) editor.view.dispatch(tr);
+    setSuggestionPopover(null);
+  }
+
+  function handleRejectSuggestion(suggestionId: string) {
+    if (!editor) return;
+    const tr = rejectSuggestion(editor.state, suggestionId);
+    if (tr) editor.view.dispatch(tr);
+    setSuggestionPopover(null);
+  }
+
+  function handleAcceptAllSuggestions() {
+    if (!editor) return;
+    const tr = acceptAllSuggestions(editor.state);
+    if (tr) editor.view.dispatch(tr);
+    setSuggestionPopover(null);
+  }
+
+  function handleRejectAllSuggestions() {
+    if (!editor) return;
+    const tr = rejectAllSuggestions(editor.state);
+    if (tr) editor.view.dispatch(tr);
+    setSuggestionPopover(null);
+  }
+
+  async function handleReply(threadId: string): Promise<boolean> {
     const draft = getReplyDraft(threadId).trim();
     if (!draft) {
-      return;
+      return false;
     }
 
     setReplyBusyThreadId(threadId);
@@ -2272,7 +2624,8 @@ export function DocumentWorkspace({
       body: JSON.stringify({
         body: draft,
         clientId: collabClientIdRef.current,
-        shareToken
+        shareToken,
+        guestName: isAuthenticated ? undefined : currentUserName
       })
     });
 
@@ -2286,7 +2639,7 @@ export function DocumentWorkspace({
         serverError: typeof data?.error === "string" ? data.error : null
       });
       setReplyBusyThreadId(null);
-      return;
+      return false;
     }
 
     setThreads((current) =>
@@ -2302,9 +2655,26 @@ export function DocumentWorkspace({
     );
     setReplyDraft(threadId, "");
     setReplyBusyThreadId(null);
+    return true;
   }
 
   async function handleAskAi(threadId: string) {
+    // Mark the thread busy up front so the button can't double-fire while a
+    // pending reply draft is being sent.
+    setAiBusyThreadId(threadId);
+    const result = await submitPendingReplyThenAskAi({
+      draft: getReplyDraft(threadId),
+      sendReply: () => handleReply(threadId),
+      askAi: () => startAskAiRun(threadId)
+    });
+    if (result === "reply-failed") {
+      // handleReply already surfaced the error toast; don't ask AI on a thread
+      // that is missing the user's latest message.
+      setAiBusyThreadId(null);
+    }
+  }
+
+  async function startAskAiRun(threadId: string) {
     setAiBusyThreadId(threadId);
     setGlobalError(null);
     await ensureAgentNotificationPermission();
@@ -2946,6 +3316,39 @@ export function DocumentWorkspace({
           editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
           return;
         }
+        const agentSuggestions = Array.isArray(fetched.suggestions)
+          ? (fetched.suggestions as AgentSuggestionInput[])
+          : [];
+        if (fetched.suggestOnly) {
+          // Comment-access user asked the agent to edit their selection: land the
+          // replacement as a tracked change over the selection (not committed),
+          // plus any out-of-selection suggestions the agent proposed.
+          const range = getAiEditSelectionRange(editor.state, selectionId);
+          const author: SuggestionAuthor = {
+            authorId: `ai-run:${run.id}`,
+            authorLabel: typeof fetched.model === "string" ? fetched.model : "AI"
+          };
+          const runImages = Array.isArray(fetched.images) ? (fetched.images as AiEditImage[]) : [];
+          const runSources = Array.isArray(fetched.sources) ? (fetched.sources as string[]) : [];
+          if (range) {
+            applyRichTrackedReplacement(range, fetched.replacementText, author, runImages, runSources);
+          }
+          applyAgentSuggestions(run.id, agentSuggestions, fetched.model, runImages, runSources);
+          if (Array.isArray(fetched.agentComments)) {
+            applyAgentComments(run.id, fetched.agentComments as Array<{ threadId: string; findText: string }>);
+          }
+          editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
+          await flushCollaborationSteps();
+          await fetch(`/api/documents/${documentId}/ai-runs/${run.id}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "markApplied", shareToken })
+          }).catch(() => null);
+          setActiveAiRun(null);
+          setActiveAiTarget(null);
+          aiEditRunStateRef.current.set(run.id, "applied");
+          return;
+        }
         await applyAiEditRun({
           aiRunId: run.id,
           selectionId,
@@ -2957,10 +3360,85 @@ export function DocumentWorkspace({
           commitSha: typeof fetched.commitSha === "string" ? fetched.commitSha : null,
           commitUrl: typeof fetched.commitUrl === "string" ? fetched.commitUrl : null
         });
+        // The agent may also have proposed edits OUTSIDE the selection and/or
+        // left standalone comments.
+        const editAgentComments = Array.isArray(fetched.agentComments)
+          ? (fetched.agentComments as Array<{ threadId: string; findText: string }>)
+          : [];
+        if (agentSuggestions.length > 0) {
+          applyAgentSuggestions(
+            run.id,
+            agentSuggestions,
+            fetched.model,
+            Array.isArray(fetched.images) ? (fetched.images as AiEditImage[]) : [],
+            Array.isArray(fetched.sources) ? (fetched.sources as string[]) : []
+          );
+        }
+        if (editAgentComments.length > 0) {
+          applyAgentComments(run.id, editAgentComments);
+        }
+        if (agentSuggestions.length > 0 || editAgentComments.length > 0) {
+          await flushCollaborationSteps();
+        }
         aiEditRunStateRef.current.set(run.id, "applied");
       });
     }
   }, [aiRuns, editor, documentId, shareToken]);
+
+  // Apply tracked-change suggestions proposed by comment-reply / conversation
+  // agents (SELECTION_EDIT runs are handled by the loop above). Each run is
+  // processed once per session; markApplied makes it idempotent across reloads so
+  // the persisted marks are not re-applied.
+  const suggestionRunProcessedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!editor || !canPersistEdits) return;
+    for (const run of aiRuns) {
+      if (run.status !== "SUCCEEDED") continue;
+      if (run.triggerType === "SELECTION_EDIT") continue;
+      if (run.appliedAt) {
+        suggestionRunProcessedRef.current.add(run.id);
+        continue;
+      }
+      if (suggestionRunProcessedRef.current.has(run.id)) continue;
+      suggestionRunProcessedRef.current.add(run.id);
+      void (async () => {
+        const shareQuery = shareToken ? `?share=${encodeURIComponent(shareToken)}` : "";
+        const response = await fetch(
+          `/api/documents/${documentId}/ai-runs/${run.id}${shareQuery}`,
+          { cache: "no-store" }
+        ).catch(() => null);
+        const data = await response?.json().catch(() => null);
+        const fetched = data?.aiRun;
+        const suggestions = Array.isArray(fetched?.suggestions)
+          ? (fetched.suggestions as AgentSuggestionInput[])
+          : [];
+        const agentComments = Array.isArray(fetched?.agentComments)
+          ? (fetched.agentComments as Array<{ threadId: string; findText: string }>)
+          : [];
+        if (suggestions.length > 0) {
+          applyAgentSuggestions(
+            run.id,
+            suggestions,
+            fetched?.model,
+            Array.isArray(fetched?.images) ? (fetched.images as AiEditImage[]) : [],
+            Array.isArray(fetched?.sources) ? (fetched.sources as string[]) : []
+          );
+        }
+        if (agentComments.length > 0) {
+          applyAgentComments(run.id, agentComments);
+        }
+        if (suggestions.length > 0 || agentComments.length > 0) {
+          await flushCollaborationSteps();
+        }
+        // Mark applied so a reload doesn't re-apply the now-persisted suggestions.
+        await fetch(`/api/documents/${documentId}/ai-runs/${run.id}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "markApplied", shareToken })
+        }).catch(() => null);
+      })();
+    }
+  }, [aiRuns, editor, documentId, shareToken, canPersistEdits]);
 
   // Clear async run busy-state once the run we kicked off reaches a terminal
   // state in the polled runs. (The comment reply itself arrives via the SSE
@@ -3063,6 +3541,92 @@ export function DocumentWorkspace({
           <ExportMenu documentId={documentId} shareToken={shareToken} />
 
           <FileMenu currentDocumentId={documentId} onOpenVersionHistory={() => setHistoryOpen(true)} />
+
+          {canPersistEdits && (
+            <div className="suggestion-mode-controls">
+              {canWriteDocument ? (
+                <button
+                  aria-pressed={suggestingMode}
+                  className={`ghost-button header-toggle-button${suggestingMode ? " active" : ""}`}
+                  onClick={() => setSuggestingMode((value) => !value)}
+                  title={
+                    suggestingMode
+                      ? "Suggesting: your edits become tracked changes. Click to edit directly."
+                      : "Editing directly. Click to switch to suggesting (tracked changes)."
+                  }
+                  type="button"
+                >
+                  {suggestingMode ? "Suggesting" : "Editing"}
+                </button>
+              ) : (
+                <span
+                  className="ghost-button header-toggle-button active suggestion-mode-locked"
+                  title="You have comment access — your edits are saved as suggestions."
+                >
+                  Suggesting
+                </span>
+              )}
+
+              {distinctSuggestions.length > 0 && (
+                <div className="suggestion-review">
+                  <button
+                    aria-pressed={suggestionPanelOpen}
+                    className={`ghost-button header-toggle-button${suggestionPanelOpen ? " active" : ""}`}
+                    onClick={() => setSuggestionPanelOpen((value) => !value)}
+                    type="button"
+                  >
+                    {distinctSuggestions.length} suggestion{distinctSuggestions.length === 1 ? "" : "s"}
+                  </button>
+                  {suggestionPanelOpen && (
+                    <div className="suggestion-review-panel" role="menu">
+                      {canWriteDocument && (
+                        <div className="suggestion-review-bulk">
+                          <button type="button" className="ghost-button" onClick={handleAcceptAllSuggestions}>
+                            Accept all
+                          </button>
+                          <button type="button" className="ghost-button" onClick={handleRejectAllSuggestions}>
+                            Reject all
+                          </button>
+                        </div>
+                      )}
+                      <ul className="suggestion-review-list">
+                        {distinctSuggestions.map((suggestion) => (
+                          <li key={suggestion.id} className="suggestion-review-item">
+                            <span className="suggestion-review-meta">
+                              {suggestion.kinds.has("insert") && suggestion.kinds.has("delete")
+                                ? "Replace"
+                                : suggestion.kinds.has("insert")
+                                  ? "Insert"
+                                  : "Delete"}
+                              {suggestion.authorLabel ? ` · ${suggestion.authorLabel}` : ""}
+                            </span>
+                            {canWriteDocument && (
+                              <span className="suggestion-review-actions">
+                                <button
+                                  type="button"
+                                  className="ghost-button"
+                                  onClick={() => handleAcceptSuggestion(suggestion.id)}
+                                >
+                                  Accept
+                                </button>
+                                <button
+                                  type="button"
+                                  className="ghost-button"
+                                  onClick={() => handleRejectSuggestion(suggestion.id)}
+                                >
+                                  Reject
+                                </button>
+                              </span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           <button
             aria-pressed={formatBarOpen}
@@ -3256,7 +3820,11 @@ export function DocumentWorkspace({
           </details>
 
           {canWriteDocument ? (
-            <EnvironmentMenu documentId={documentId} shareToken={shareToken} />
+            <EnvironmentMenu
+              documentId={documentId}
+              shareToken={shareToken}
+              onKeysChanged={(keys) => setHasOpenRouterKey(keys.includes("OPENROUTER_API_KEY"))}
+            />
           ) : null}
 
           <div className="document-topbar-actions">
@@ -3369,6 +3937,33 @@ export function DocumentWorkspace({
               />
             ) : null}
 
+            {suggestionPopover && canWriteDocument ? (
+              <div
+                className="suggestion-inline-popover"
+                style={{ top: suggestionPopover.top, left: suggestionPopover.left }}
+                onMouseDown={(event) => event.preventDefault()}
+              >
+                <span className="suggestion-inline-label">
+                  {suggestionPopover.label}
+                  {suggestionPopover.authorLabel ? ` · ${suggestionPopover.authorLabel}` : ""}
+                </span>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => handleAcceptSuggestion(suggestionPopover.id)}
+                >
+                  Accept
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => handleRejectSuggestion(suggestionPopover.id)}
+                >
+                  Reject
+                </button>
+              </div>
+            ) : null}
+
             <EditorContent editor={editor} />
             <LinkPopover editor={editor} containerRef={editorPageRef} canEdit={canWriteDocument} />
             <HeadingCopyOverlay editor={editor} containerRef={editorPageRef} />
@@ -3465,6 +4060,7 @@ export function DocumentWorkspace({
           canWriteDocument={canWriteDocument}
           agentModel={agentModel}
           agentEffort={agentEffort}
+          hasOpenRouterKey={hasOpenRouterKey}
           onAgentModelChange={(model) => void handleSaveAgentConfig({ model })}
           onAgentEffortChange={(effort) => void handleSaveAgentConfig({ effort })}
           onClose={() => setAgentPanelOpen(false)}
@@ -3518,6 +4114,15 @@ export function DocumentWorkspace({
           onCreateShareLink={handleCreateShareLink}
           onRevokeShareLink={handleRevokeShareLink}
           onClose={() => setShareModalOpen(false)}
+        />
+      ) : null}
+
+      {mergeState ? (
+        <DivergenceMergeDialog
+          documentId={documentId}
+          shareToken={shareToken}
+          clientId={collabClientIdRef.current}
+          localContent={mergeState.localContent as unknown as DocNode}
         />
       ) : null}
     </section>

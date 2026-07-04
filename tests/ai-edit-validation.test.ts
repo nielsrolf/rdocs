@@ -50,6 +50,29 @@ test("detectEditAssetIntent classifies image / widget / either / none", () => {
   assert.equal(none.requiresAnyAsset, false);
 });
 
+test("detectEditAssetIntent treats an interactive-qualified plot as a widget, not both assets", () => {
+  // Regression for run cmql1ijho01lt13dd2vksjdrr: "Can you add interactive plots
+  // that visualize our spending?" was parsed as requiresImage && requiresWidget,
+  // so the agent's valid Plotly widget was rejected for lacking a static image,
+  // and it timed out generating one. "interactive <plot/chart/visual>" is a
+  // single interactive visualization — a widget, not a widget plus an image.
+  for (const instruction of [
+    "Can you add interactive plots that visualize our spending?",
+    "Add an interactive chart of revenue over time",
+    "make this an interactive visualization"
+  ]) {
+    const intent = detectEditAssetIntent(instruction);
+    assert.equal(intent.requiresWidget, true, instruction);
+    assert.equal(intent.requiresImage, false, instruction);
+    assert.equal(intent.requiresAnyAsset, false, instruction);
+  }
+
+  // A bare "plot"/"figure" with no interactive qualifier is still an image.
+  const plot = detectEditAssetIntent("Add a plot of the results");
+  assert.equal(plot.requiresImage, true);
+  assert.equal(plot.requiresWidget, false);
+});
+
 test("validateAiEditAssets rejects an empty submission with a retry message", () => {
   const error = validateAiEditAssets({
     replacementText: "",

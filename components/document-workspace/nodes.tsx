@@ -8,6 +8,8 @@ import {
   commentThreadIdsAttributeSpec
 } from "@/lib/document-schema-nodes";
 
+import { resolveShareToken, withShareToken } from "./share-url";
+
 function formatAttachmentSize(bytes: number) {
   if (!bytes || bytes < 0) return "";
   if (bytes < 1024) return `${bytes} B`;
@@ -23,8 +25,17 @@ function formatAttachmentSize(bytes: number) {
 
 function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttributes }: NodeViewProps) {
   const [refreshing, setRefreshing] = useState(false);
+  // The persisted attribute only distinguishes minimized vs. inline. Full-screen
+  // is a transient viewing mode kept in local state — we don't want a document to
+  // reopen with a widget covering the whole viewport.
   const collapsed = node.attrs.collapsed !== false;
-  const expanded = !collapsed;
+  const inlineExpanded = !collapsed;
+  const [fullscreen, setFullscreen] = useState(false);
+  // The iframe is mounted whenever the widget is showing (inline or full-screen);
+  // autosize only applies to the inline frame (full-screen fills via CSS).
+  const showFrame = inlineExpanded || fullscreen;
+  const showInlineFrame = inlineExpanded && !fullscreen;
+  const mode = fullscreen ? "fullscreen" : inlineExpanded ? "inline" : "minimized";
   const [frameHeight, setFrameHeight] = useState(120);
   const [error, setError] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -32,20 +43,42 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
   const lastAppliedHeightRef = useRef(0);
   const widgetId = node.attrs.widgetId as string;
   const documentId = node.attrs.documentId as string;
-  const shareToken = (node.attrs.shareToken as string | null) || null;
   const label = (node.attrs.label as string) || "Interactive widget";
   const buildCmd = (node.attrs.buildCmd as string) || "";
   const embedSource = (node.attrs.embedSource as string) || "";
-  const src =
-    (node.attrs.src as string) ||
-    `/api/documents/${documentId}/widgets/${widgetId}/source${shareToken ? `?share=${encodeURIComponent(shareToken)}` : ""}`;
+  // Prefer the node's baked shareToken; fall back to the page's ?share param so a
+  // guest on a view/comment-only link can load a widget the owner created (whose
+  // baked token is empty). Parity with RepoImageView / AttachmentChipView.
+  const shareToken = resolveShareToken(
+    node.attrs.shareToken as string | null,
+    typeof window !== "undefined" ? window.location.search : ""
+  );
+  const src = withShareToken(
+    (node.attrs.src as string) || `/api/documents/${documentId}/widgets/${widgetId}/source`,
+    shareToken
+  );
 
   useEffect(() => {
     window.requestAnimationFrame(resizeFrame);
-  }, [expanded, src]);
+  }, [showInlineFrame, src]);
+
+  // Lock body scroll and wire Escape to exit while full-screen.
+  useEffect(() => {
+    if (!fullscreen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFullscreen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [fullscreen]);
 
   useEffect(() => {
-    if (!expanded) return;
+    if (!showInlineFrame) return;
     const frame = iframeRef.current;
     if (!frame) return;
 
@@ -76,7 +109,7 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
       observer?.disconnect();
       mutationObserver?.disconnect();
     };
-  }, [expanded, src]);
+  }, [showInlineFrame, src]);
 
   async function refreshWidget() {
     setRefreshing(true);
@@ -103,7 +136,7 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
   }
 
   function resizeFrame() {
-    if (!expanded) {
+    if (!showInlineFrame) {
       lastAppliedHeightRef.current = 0;
       setFrameHeight(0);
       return;
@@ -162,9 +195,24 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
     setFrameHeight(nextHeight);
   }
 
+  function setMode(next: "minimized" | "inline" | "fullscreen") {
+    if (next === "fullscreen") {
+      setFullscreen(true);
+      return;
+    }
+    setFullscreen(false);
+    if ((next === "inline") === inlineExpanded) {
+      // Persisted state already matches — just make sure the frame is sized.
+      window.requestAnimationFrame(resizeFrame);
+      return;
+    }
+    updateAttributes({ collapsed: next === "minimized" });
+    window.requestAnimationFrame(resizeFrame);
+  }
+
   return (
     <NodeViewWrapper
-      className={`embedded-widget-node ${expanded ? "embedded-widget-node-expanded" : ""} ${
+      className={`embedded-widget-node ${inlineExpanded ? "embedded-widget-node-expanded" : ""} ${
         selected ? "embedded-widget-node-selected" : ""
       }`}
       contentEditable={false}
@@ -176,16 +224,29 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
           <span>{embedSource}</span>
         </div>
         <div className="embedded-widget-actions">
-          <button
-            className="ghost-button"
-            onClick={() => {
-              updateAttributes({ collapsed: expanded });
-              window.requestAnimationFrame(resizeFrame);
-            }}
-            type="button"
-          >
-            {expanded ? "Collapse" : "Expand"}
-          </button>
+          <div className="embedded-widget-modes" role="group" aria-label="Widget view mode">
+            <button
+              className={`ghost-button ${mode === "minimized" ? "is-active" : ""}`}
+              onClick={() => setMode("minimized")}
+              type="button"
+            >
+              Minimize
+            </button>
+            <button
+              className={`ghost-button ${mode === "inline" ? "is-active" : ""}`}
+              onClick={() => setMode("inline")}
+              type="button"
+            >
+              Inline
+            </button>
+            <button
+              className={`ghost-button ${mode === "fullscreen" ? "is-active" : ""}`}
+              onClick={() => setMode("fullscreen")}
+              type="button"
+            >
+              Full screen
+            </button>
+          </div>
           <button className="ghost-button" disabled={refreshing || !editor.isEditable} onClick={refreshWidget} type="button">
             {refreshing ? "Refreshing..." : "Refresh"}
           </button>
@@ -196,24 +257,44 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
           ) : null}
         </div>
       </div>
-      {expanded ? (
-        <>
+      {showFrame ? (
+        <div className={`embedded-widget-stage ${fullscreen ? "embedded-widget-stage-fullscreen" : ""}`}>
+          {fullscreen ? (
+            <div className="embedded-widget-fullscreen-bar">
+              <strong>{label}</strong>
+              <div className="embedded-widget-actions">
+                <button
+                  className="ghost-button"
+                  disabled={refreshing || !editor.isEditable}
+                  onClick={refreshWidget}
+                  type="button"
+                >
+                  {refreshing ? "Refreshing..." : "Refresh"}
+                </button>
+                <button className="ghost-button" onClick={() => setFullscreen(false)} type="button">
+                  Exit full screen
+                </button>
+              </div>
+            </div>
+          ) : null}
           <iframe
             className="embedded-widget-frame"
             onLoad={resizeFrame}
             ref={iframeRef}
             sandbox="allow-scripts allow-same-origin"
             src={src}
-            scrolling="no"
-            style={{ height: frameHeight }}
+            scrolling={fullscreen ? "auto" : "no"}
+            style={fullscreen ? undefined : { height: frameHeight }}
             title={label}
           />
           {error ? <div className="embedded-widget-error">{error}</div> : null}
-          <details className="embedded-widget-details">
-            <summary>Build command</summary>
-            <code>{buildCmd}</code>
-          </details>
-        </>
+          {!fullscreen ? (
+            <details className="embedded-widget-details">
+              <summary>Build command</summary>
+              <code>{buildCmd}</code>
+            </details>
+          ) : null}
+        </div>
       ) : (
         <div className="embedded-widget-collapsed">Widget collapsed</div>
       )}
@@ -225,21 +306,10 @@ function RepoImageView({ node }: NodeViewProps) {
   const rawSrc = (node.attrs.src as string) || "";
   const alt = (node.attrs.alt as string) || "Repository image";
   const caption = (node.attrs.caption as string | null) || null;
-  let src = rawSrc;
-  if (
-    typeof window !== "undefined" &&
-    rawSrc.startsWith("/api/documents/") &&
-    rawSrc.includes("/repo-files")
-  ) {
-    const shareToken = new URLSearchParams(window.location.search).get("share");
-    if (shareToken) {
-      const url = new URL(rawSrc, window.location.origin);
-      if (!url.searchParams.has("share")) {
-        url.searchParams.set("share", shareToken);
-      }
-      src = `${url.pathname}?${url.searchParams.toString()}`;
-    }
-  }
+  // Fall back to the page's ?share param so a guest on a view/comment-only link
+  // can load a repo image the owner created (whose baked URL has no token).
+  const shareToken = resolveShareToken(null, typeof window !== "undefined" ? window.location.search : "");
+  const src = withShareToken(rawSrc, shareToken);
 
   return (
     <NodeViewWrapper className="repo-image-node">
@@ -291,10 +361,10 @@ function AttachmentChipView({ deleteNode, editor, node, selected }: NodeViewProp
 
   // Prefer the explicit shareToken attr; fall back to the page's ?share param so
   // a guest viewing a shared link can still download (parity with RepoImageView).
-  let shareToken = (node.attrs.shareToken as string | null) || null;
-  if (!shareToken && typeof window !== "undefined") {
-    shareToken = new URLSearchParams(window.location.search).get("share");
-  }
+  const shareToken = resolveShareToken(
+    node.attrs.shareToken as string | null,
+    typeof window !== "undefined" ? window.location.search : ""
+  );
 
   const href =
     attachmentId && documentId

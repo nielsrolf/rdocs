@@ -13,7 +13,7 @@ import type {
 import type { AgentRunner, AgentRunOptions, MergeResolveJob } from "./index";
 import { toAgentJob } from "./index";
 import { buildContainerEnv, buildContainerRunArgs, serializeEnvFile } from "./container-args";
-import { resolveAgentCredentialEnv } from "./agent-credential";
+import { resolveContainerCredentialEnv } from "./agent-credential";
 
 // Runs the agent in a hardened local container with the relevant worktree
 // bind-mounted at /workspace. The agent's tools are confined to the container's
@@ -39,6 +39,7 @@ export class ContainerRunner implements AgentRunner {
       job,
       workspaceHostPath: job.input.workspacePath,
       agentEnv: job.agentEnv,
+      agentModel: job.agentConfig?.model,
       onProgress: options?.onProgress
     });
     return output as ClaudeResearchAgentOutput;
@@ -55,7 +56,8 @@ export class ContainerRunner implements AgentRunner {
         agentEnv: job.agentEnv
       },
       workspaceHostPath: job.workspacePath,
-      agentEnv: job.agentEnv
+      agentEnv: job.agentEnv,
+      agentModel: job.agentConfig?.model
     });
   }
 
@@ -63,6 +65,7 @@ export class ContainerRunner implements AgentRunner {
     job: unknown;
     workspaceHostPath: string;
     agentEnv?: DocumentEnv;
+    agentModel?: string | null;
     onProgress?: AgentRunOptions["onProgress"];
   }): Promise<Record<string, unknown>> {
     const runtime = process.env.AGENT_CONTAINER_RUNTIME || "docker";
@@ -73,7 +76,9 @@ export class ContainerRunner implements AgentRunner {
     const envFile = path.join(tmpDir, "env");
     try {
       const containerEnv = buildContainerEnv(process.env, opts.agentEnv ?? {});
-      const { added, warning } = resolveAgentCredentialEnv(containerEnv, { homeDir: process.env.HOME });
+      const { added, warning } = resolveContainerCredentialEnv(containerEnv, opts.agentModel, {
+        homeDir: process.env.HOME
+      });
       Object.assign(containerEnv, added);
       if (warning) console.warn(`[agent-runner] ${warning}`);
       await writeFile(envFile, serializeEnvFile(containerEnv), { mode: 0o600 });

@@ -7,7 +7,8 @@ import { test } from "node:test";
 import {
   hasAnthropicCredential,
   readHostClaudeOAuth,
-  resolveAgentCredentialEnv
+  resolveAgentCredentialEnv,
+  resolveContainerCredentialEnv
 } from "../lib/agent-runner/agent-credential";
 
 // Create a throwaway HOME containing ~/.claude/.credentials.json with the given
@@ -69,4 +70,42 @@ test("resolveAgentCredentialEnv warns when no credential is available", () => {
   const { added, warning } = resolveAgentCredentialEnv({}, { homeDir: "/nonexistent/home" });
   assert.deepEqual(added, {});
   assert.match(warning ?? "", /no Anthropic credential/i);
+});
+
+test("resolveContainerCredentialEnv never injects the host OAuth token for OpenRouter jobs", () => {
+  const home = makeHomeWithCreds({ accessToken: "oauth-xyz", expiresAt: 9_000 });
+  try {
+    // Key present: nothing added, no warning — the container authenticates
+    // with the document's OPENROUTER_API_KEY alone.
+    const withKey = resolveContainerCredentialEnv(
+      { OPENROUTER_API_KEY: "sk-or-v1-abc" },
+      "openrouter/openai/gpt-5.2",
+      { homeDir: home, now: 1_000 }
+    );
+    assert.deepEqual(withKey.added, {});
+    assert.equal(withKey.warning, null);
+
+    // Key missing: still nothing injected (the run fails honestly inside the
+    // sandbox instead of silently billing the host Anthropic account).
+    const withoutKey = resolveContainerCredentialEnv({}, "openrouter/openai/gpt-5.2", {
+      homeDir: home,
+      now: 1_000
+    });
+    assert.deepEqual(withoutKey.added, {});
+    assert.match(withoutKey.warning ?? "", /OPENROUTER_API_KEY/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("resolveContainerCredentialEnv keeps the Anthropic fallback for non-OpenRouter jobs", () => {
+  const home = makeHomeWithCreds({ accessToken: "oauth-xyz", expiresAt: 9_000 });
+  try {
+    for (const model of ["claude-sonnet-5", "sonnet", null, undefined]) {
+      const { added } = resolveContainerCredentialEnv({}, model, { homeDir: home, now: 1_000 });
+      assert.deepEqual(added, { CLAUDE_CODE_OAUTH_TOKEN: "oauth-xyz" }, `model=${String(model)}`);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

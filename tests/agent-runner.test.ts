@@ -73,7 +73,8 @@ test("toAgentJob splits serializable job data from runtime handlers and round-tr
     validation: {
       kind: "edit_selection",
       selectedText: "old",
-      assetIntent: { requiresImage: false, requiresWidget: false, requiresAnyAsset: false }
+      assetIntent: { requiresImage: false, requiresWidget: false, requiresAnyAsset: false },
+      documentText: "body"
     },
     // The runtime callback must NOT leak into the serializable job:
     onProgress: () => {}

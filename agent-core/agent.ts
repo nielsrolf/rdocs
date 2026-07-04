@@ -11,14 +11,24 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 
-import { parseMaxTurns, resolveAgentSdkConfig, type DocumentAgentConfig } from "./agent-config";
-import { buildAgentEnv, type DocumentEnv } from "./agent-env";
+import {
+  parseMaxTurns,
+  resolveAgentSdkConfig,
+  resolveRefusalFallbackModel,
+  type DocumentAgentConfig
+} from "./agent-config";
+import { applyProviderEnv, buildAgentEnv, type DocumentEnv } from "./agent-env";
+import {
+  normalizeAgentComments,
+  normalizeSuggestions,
+  type AgentComment,
+  type AgentSuggestion
+} from "./ai-edit-submission";
 import { evaluateToolPathAccess } from "./agent-sandbox";
 import { CLAUDE_AGENT_TOOLS } from "./ai-tools";
 import type { AiDocumentBlock } from "./types";
 
 const MAX_PROGRESS_MESSAGE_LENGTH = 1400;
-const CLAUDE_AGENT_TIMEOUT_MS = 600_000;
 const MAX_PASTED_IMAGE_BYTES = 4 * 1024 * 1024;
 
 // Replace any unpaired UTF-16 surrogate with U+FFFD. Document/selection text can
@@ -83,6 +93,8 @@ export type ClaudeResearchAgentOutput = {
     embedSource?: string;
   }>;
   summary?: string;
+  suggestions?: AgentSuggestion[];
+  comments?: AgentComment[];
   model: string;
 };
 
@@ -102,9 +114,70 @@ export type ClaudeAgentRunOptions = {
   agentConfig?: DocumentAgentConfig;
   /** Per-document secrets injected into the agent env (see lib/agent-env). */
   agentEnv?: DocumentEnv;
+  /**
+   * Set when the agent already runs inside an isolated runtime (the container
+   * runner), where the container's mount namespace is the authoritative
+   * filesystem boundary. In that case the in-process workspace-confinement guard
+   * and the kernel Seatbelt/bubblewrap sandbox are redundant — and actively
+   * harmful, because they block the agent from reaching legitimate paths outside
+   * /workspace (its own $HOME, persisted tool-result files, the toolchain). When
+   * true, both are disabled. Defaults to false for the in-process runner, which
+   * has no OS sandbox and relies on the guard as its only confinement.
+   */
+  isolatedRuntime?: boolean;
 };
 
 const SUBMIT_TOOL_NAME = "mcp__gdocs__submit_response";
+
+// A safety-classifier block is an HTTP 200 with stop_reason "refusal" (not an
+// HTTP error), which the Claude Code runtime turns into a fixed user-facing
+// message: "Claude Code is unable to respond to this request, which appears to
+// violate our Usage Policy (https://www.anthropic.com/legal/aup). ...". We
+// detect either signal: the stop_reason on the SDK result message, or that
+// message text in the errors array / final result text.
+export function isSafetyRefusalMessage(text: string): boolean {
+  return /unable to respond to this request[\s\S]{0,200}?usage policy|appears to violate our usage policy/i.test(
+    text
+  );
+}
+
+/**
+ * Thrown when the agent run died because the model's safety classifiers
+ * refused a request mid-run (stop_reason "refusal"), rather than because of a
+ * real execution failure. `runClaudeResearchAgent` catches this and reruns the
+ * turn once on the refusal-fallback model (see resolveRefusalFallbackModel).
+ */
+export class AgentSafetyRefusalError extends Error {
+  readonly isSafetyRefusal = true;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentSafetyRefusalError";
+  }
+}
+
+export function isSafetyRefusalError(error: unknown): error is AgentSafetyRefusalError {
+  return (
+    error instanceof Error &&
+    (error as Partial<AgentSafetyRefusalError>).isSafetyRefusal === true
+  );
+}
+
+/**
+ * Whether a failed run died because of a safety-classifier refusal, whatever
+ * shape the failure took. The SDK does not reliably yield the error result
+ * message to the consumer loop: when the runtime subprocess exits after a
+ * refusal, Query.readMessages replaces the exit error with a thrown plain
+ * `Error("Claude Code returned an error result: <refusal text>")`. So the
+ * fallback decision must match on message text as well as the typed error we
+ * construct ourselves from the result message.
+ */
+export function isSafetyRefusalFailure(error: unknown): boolean {
+  if (isSafetyRefusalError(error)) {
+    return true;
+  }
+  return error instanceof Error && isSafetyRefusalMessage(error.message);
+}
 
 const submitResponseSchema = {
   replacementText: z
@@ -139,7 +212,42 @@ const submitResponseSchema = {
     )
     .optional()
     .describe("Interactive widgets to insert. Only for edit_selection."),
-  summary: z.string().optional().describe("Short note about what you inspected, decided, or changed.")
+  summary: z.string().optional().describe("Short note about what you inspected, decided, or changed."),
+  suggestions: z
+    .array(
+      z.object({
+        findText: z
+          .string()
+          .min(1)
+          .describe(
+            "An EXACT, UNIQUE substring of the CURRENT document text shown above. Must match verbatim (including punctuation) and occur exactly once — extend it until unique."
+          ),
+        replacementText: z
+          .string()
+          .describe("Markdown that should replace findText if a human accepts. Empty string suggests deleting findText."),
+        reason: z.string().optional().describe("Short human-facing rationale shown with the suggestion.")
+      })
+    )
+    .optional()
+    .describe(
+      "Tracked-change edit suggestions, available in ALL modes. Each is an anchored find/replace a human reviews and accepts or rejects; they are never applied automatically. Use this for changes outside any selection you were asked to replace."
+    ),
+  comments: z
+    .array(
+      z.object({
+        findText: z
+          .string()
+          .min(1)
+          .describe(
+            "An EXACT, UNIQUE substring of the current document text to anchor this comment on. Verbatim, occurring exactly once — extend it until unique."
+          ),
+        body: z.string().min(1).describe("The comment text to leave on that anchor (concise Markdown).")
+      })
+    )
+    .optional()
+    .describe(
+      "Standalone comments to leave anchored on sections of the document, available in ALL modes. Each is { findText, body }: a NEW comment thread is created at findText, authored by you. Use this to review a document and leave feedback in place (separate from your reply to the triggering thread)."
+    )
 };
 
 function compactValue(value: unknown, limit = MAX_PROGRESS_MESSAGE_LENGTH) {
@@ -292,6 +400,17 @@ Finishing your turn:
 - When you are done, call the submit_response tool exactly once with your final output. Do not write the result as a plain text reply, and do not call submit_response more than once.
 - For edit_selection, populate replacementText. For comment_reply and conversation, populate reply. Always include a brief summary.
 
+Suggesting edits (available in every mode):
+- You can propose tracked-change edits to the document via the optional suggestions array on submit_response. Each suggestion is { findText, replacementText, reason? }.
+- findText MUST be an exact substring of the current document text shown below and MUST occur EXACTLY ONCE. Copy it verbatim, including punctuation and capitalization; if a phrase is not unique, extend it (add surrounding words) until it is. An empty replacementText suggests deleting findText.
+- replacementText is rendered as Markdown with full formatting (bold/italic, lists, headings, code, tables, LaTeX). You may include a repo-local image as a Markdown figure — ![caption](assets/plot.png) — provided you commit the file; it resolves the same way as in an edit. (Interactive widgets are not yet supported inside suggestions.)
+- Suggestions are shown to a human who accepts or rejects each one — they are NEVER applied automatically. Do not claim in a reply that you changed the document; you only proposed suggestions.
+- Do not use suggestions to restate the selection you were asked to replace — use the top-level replacementText for that. Use suggestions for changes elsewhere in the document.
+
+Leaving comments (available in every mode):
+- You can leave standalone review comments anchored on sections of the document via the optional comments array on submit_response. Each is { findText, body }: findText is an exact, unique substring to anchor on (same rules as above), body is your comment. A new comment thread is created there, authored by you.
+- Use this when asked to review the document and leave feedback in place. You may leave as many as warranted. This is separate from any reply you post to the triggering comment thread — leave the in-document comments via this array, then summarize in your reply.
+
 Current document:
 Title: ${input.documentTitle || "Untitled"}
 
@@ -345,9 +464,9 @@ ${historyBlock}New user message:
 ${instruction}
 
 You may inspect or modify workspace files if that helps. Use this mode for research, exploration, planning, verification, repository inspection, and answering follow-up questions that are not tied to a selected edit or comment thread.
-Do not edit the document text directly in this mode.
+Do not edit the document text directly in this mode. If you want to propose changes to the document, add them to the suggestions array — a human reviews and accepts or rejects each one.
 
-When done, call submit_response with reply (the concise answer to show in the agent conversation), optional sources, and a brief summary.`;
+When done, call submit_response with reply (the concise answer to show in the agent conversation), optional suggestions, optional sources, and a brief summary.`;
   }
 
   if (input.mode === "edit_selection") {
@@ -377,7 +496,9 @@ If the instruction says "figure or widget", "image or widget", or otherwise offe
 For each widget, first create a durable repo-local build script under widgets/, generate the HTML under assets/, and run the build command successfully. The build_cmd must reference a file that exists in the repo.
 If the instruction asks for ideas, suggestions, options, or advice rather than explicitly asking you to rename, replace, or rewrite, answer the request in the replacement text. Do not replace a short title/name with only your favorite candidate; preserve the original text and add concise options or rationale.
 
-When done, call submit_response with replacementText set to the new document text. Optionally add sources, images, widgets, and a brief summary.`;
+Use replacementText for the selection itself. For changes the instruction implies OUTSIDE the selected text (elsewhere in the document), add them to the suggestions array as tracked-change find/replace edits a human can accept or reject.
+
+When done, call submit_response with replacementText set to the new document text. Optionally add suggestions, sources, images, widgets, and a brief summary.`;
   }
 
   const transcript = (input.comments || [])
@@ -395,10 +516,10 @@ ${transcript}
 Instruction:
 ${instruction || "Write the next assistant reply for this comment thread."}
 
-You may inspect or modify workspace files if that helps the research task, but a comment request can only post a comment reply. Do not claim to have edited the document unless the user explicitly asked for repository file changes and you made them.
+You may inspect or modify workspace files if that helps the research task. A comment request posts a comment reply, but if the discussion implies concrete document edits you may ALSO propose them via the suggestions array (tracked-change find/replace edits a human accepts or rejects). If the user asks you to review the document and leave comments, anchor each piece of feedback in place via the comments array, then post a short reply summarizing what you did (e.g. "I've reviewed the doc and left N comments"). Do not claim to have edited the document — you only suggested.
 Format the reply for the comment thread using concise Markdown when helpful: short paragraphs, bullets, code fences, and $...$ math are supported. Do not return a wall of text.
 
-When done, call submit_response with reply set to the comment text to post. Optionally add sources and a brief summary.`;
+When done, call submit_response with reply set to the comment text to post. Optionally add suggestions, sources, and a brief summary.`;
 }
 
 function getBlockText(block: unknown) {
@@ -603,6 +724,12 @@ function normalizeSubmittedOutput(args: unknown): Partial<ClaudeResearchAgentOut
       })
       .filter((widget): widget is NormalizedWidget => widget != null);
   }
+  if (Array.isArray(typed.suggestions)) {
+    out.suggestions = normalizeSuggestions(typed.suggestions);
+  }
+  if (Array.isArray(typed.comments)) {
+    out.comments = normalizeAgentComments(typed.comments);
+  }
   return out;
 }
 
@@ -618,8 +745,8 @@ async function runClaudeResearchAgentOnce(
     );
   }
   const cwd = input.workspacePath;
+  const isolatedRuntime = options.isolatedRuntime ?? false;
   const abortController = new AbortController();
-  const timeout = setTimeout(() => abortController.abort(), CLAUDE_AGENT_TIMEOUT_MS);
 
   let captured: Partial<ClaudeResearchAgentOutput> | null = null;
   const submitTool = tool(
@@ -671,6 +798,11 @@ async function runClaudeResearchAgentOnce(
   // Canonicalise (realpath) both roots so symlinked path components — e.g. macOS
   // /tmp -> /private/tmp — don't cause legitimate in-workspace reads to be
   // rejected (the agent reports canonical absolute paths).
+  //
+  // Skipped entirely under an isolated runtime (the container runner): there the
+  // container's mount namespace is the boundary, so this guard only adds friction
+  // — it would block the agent from reaching its own $HOME, persisted tool-result
+  // files, and the toolchain, all of which live outside /workspace.
   const canonical = (p: string) => {
     try {
       return realpathSync(p);
@@ -723,19 +855,24 @@ async function runClaudeResearchAgentOnce(
       thinking: sdkConfig.thinking,
       ...(sdkConfig.effort ? { effort: sdkConfig.effort } : {}),
       // Scrub the host environment and inject only the document's own secrets;
-      // the agent must not inherit unrelated host vars.
-      env: buildAgentEnv(process.env, options.agentEnv),
+      // the agent must not inherit unrelated host vars. For OpenRouter models
+      // the env is then rewritten to point the SDK at OpenRouter's
+      // Anthropic-compatible endpoint using the document's OPENROUTER_API_KEY.
+      env: applyProviderEnv(buildAgentEnv(process.env, options.agentEnv), sdkConfig.provider),
       // Kernel sandbox (macOS Seatbelt / Linux bubblewrap) as the authoritative
-      // workspace boundary. Degrade gracefully where unavailable rather than
-      // refusing to run; the PreToolUse guard still applies either way.
-      sandbox: {
-        enabled: true,
-        failIfUnavailable: false,
-        autoAllowBashIfSandboxed: true
-      },
-      hooks: {
-        PreToolUse: [{ hooks: [preToolUseGuard] }]
-      },
+      // workspace boundary for the in-process runner. Degrade gracefully where
+      // unavailable rather than refusing to run; the PreToolUse guard still
+      // applies either way. Under an isolated runtime (the container) the
+      // container itself is the boundary, so we disable this — a nested kernel
+      // sandbox is redundant and re-imposes the same out-of-/workspace friction.
+      sandbox: isolatedRuntime
+        ? { enabled: false }
+        : {
+            enabled: true,
+            failIfUnavailable: false,
+            autoAllowBashIfSandboxed: true
+          },
+      hooks: isolatedRuntime ? {} : { PreToolUse: [{ hooks: [preToolUseGuard] }] },
       abortController
     }
   });
@@ -743,6 +880,7 @@ async function runClaudeResearchAgentOnce(
   emitProgress(onProgress, { role: "system", message: "Starting Claude research agent." });
 
   let resultText = "";
+  let resultStopReason: string | null = null;
   let errors: string[] = [];
 
   try {
@@ -750,6 +888,7 @@ async function runClaudeResearchAgentOnce(
       if (message.type === "assistant") {
         handleAssistantMessage(message, onProgress);
       } else if (message.type === "result") {
+        resultStopReason = message.stop_reason ?? null;
         if (!message.is_error && "result" in message && typeof message.result === "string") {
           resultText = message.result;
         }
@@ -762,17 +901,30 @@ async function runClaudeResearchAgentOnce(
     }
   } catch (error) {
     if (abortController.signal.aborted) {
-      throw new Error("Claude research agent timed out after 600 seconds.");
+      throw new Error("Claude research agent run was aborted.");
     }
     throw error;
   } finally {
-    clearTimeout(timeout);
     agentQuery.close();
   }
 
   if (errors.length) {
     errors.forEach((message) => emitProgress(onProgress, { role: "error", message }));
-    throw new Error(errors.join("\n"));
+    const joined = errors.join("\n");
+    if (resultStopReason === "refusal" || isSafetyRefusalMessage(joined)) {
+      throw new AgentSafetyRefusalError(joined);
+    }
+    throw new Error(joined);
+  }
+
+  // A refusal can also end the run as a nominal "success" whose result text is
+  // the runtime's Usage-Policy message. Without submit_response output that
+  // text would be pasted into the document as the reply/replacement — treat it
+  // as the refusal it is so the fallback rerun can kick in.
+  if (!captured && (resultStopReason === "refusal" || isSafetyRefusalMessage(resultText))) {
+    throw new AgentSafetyRefusalError(
+      resultText.trim() || "The model's safety classifiers refused this request."
+    );
   }
 
   emitProgress(onProgress, { role: "system", message: "Preparing document update." });
@@ -787,6 +939,8 @@ async function runClaudeResearchAgentOnce(
     ...fallback,
     images: fallback.images ?? [],
     widgets: fallback.widgets ?? [],
+    suggestions: fallback.suggestions ?? [],
+    comments: fallback.comments ?? [],
     model: sdkConfig.label
   };
 }
@@ -795,10 +949,33 @@ function isRetryableAgentError(error: unknown) {
   if (!(error instanceof Error)) {
     return false;
   }
+  // A classifier refusal is deterministic for a given model — retrying on the
+  // same model wastes the attempt. The model-fallback path handles it instead.
+  if (isSafetyRefusalFailure(error)) {
+    return false;
+  }
   if (/timed out/i.test(error.message)) {
     return false;
   }
   return /(rate|timeout|fetch|network|ECONN|ETIMEDOUT|EAI_AGAIN|overloaded|temporar)/i.test(error.message);
+}
+
+async function runWithTransientRetry(
+  input: ClaudeResearchAgentInput,
+  options: ClaudeAgentRunOptions
+): Promise<ClaudeResearchAgentOutput> {
+  try {
+    return await runClaudeResearchAgentOnce(input, options);
+  } catch (error) {
+    if (!isRetryableAgentError(error)) {
+      throw error;
+    }
+    emitProgress(options.onProgress, {
+      role: "system",
+      message: `Retrying after transient error: ${error instanceof Error ? error.message : "unknown"}`
+    });
+    return runClaudeResearchAgentOnce(input, options);
+  }
 }
 
 export async function runClaudeResearchAgent(
@@ -812,15 +989,28 @@ export async function runClaudeResearchAgent(
       ? { onProgress: onProgressOrOptions }
       : onProgressOrOptions ?? {};
   try {
-    return await runClaudeResearchAgentOnce(input, options);
+    return await runWithTransientRetry(input, options);
   } catch (error) {
-    if (!isRetryableAgentError(error)) {
+    if (!isSafetyRefusalFailure(error)) {
       throw error;
     }
+    const fallbackModel = resolveRefusalFallbackModel(
+      options.agentConfig,
+      process.env.CLAUDE_AGENT_MODEL
+    );
+    if (!fallbackModel) {
+      throw error;
+    }
+    // The rerun happens in the same worktree (and, for container runs, the
+    // same container), so files the refused attempt already created survive —
+    // only the conversation restarts.
     emitProgress(options.onProgress, {
       role: "system",
-      message: `Retrying after transient error: ${error instanceof Error ? error.message : "unknown"}`
+      message: `Safety classifiers refused a request mid-run (often a false positive). Retrying with ${fallbackModel}; workspace files from the first attempt are preserved.`
     });
-    return runClaudeResearchAgentOnce(input, options);
+    return runWithTransientRetry(input, {
+      ...options,
+      agentConfig: { ...options.agentConfig, model: fallbackModel }
+    });
   }
 }

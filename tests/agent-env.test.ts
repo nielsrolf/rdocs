@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildAgentEnv, isValidEnvKey, maskSecret } from "../lib/agent-env";
+import {
+  OPENROUTER_BASE_URL,
+  applyProviderEnv,
+  buildAgentEnv,
+  isValidEnvKey,
+  maskSecret
+} from "../lib/agent-env";
 
 test("non-allowlisted host variables are dropped", () => {
   const env = buildAgentEnv({ FOO: "bar", SECRET_THING: "x", PATH: "/usr/bin" });
@@ -87,6 +93,47 @@ test("maskSecret reveals only the edges of long secrets", () => {
   assert.equal(maskSecret("short"), "*****");
   assert.equal(maskSecret("ab"), "***");
   assert.match(maskSecret("12345678"), /^\*+$/);
+});
+
+test("applyProviderEnv rewrites the env to OpenRouter's compat endpoint", () => {
+  const env = applyProviderEnv(
+    {
+      OPENROUTER_API_KEY: "sk-or-v1-abc",
+      ANTHROPIC_API_KEY: "sk-ant-host",
+      CLAUDE_CODE_OAUTH_TOKEN: "oauth-host",
+      PATH: "/bin"
+    },
+    "openrouter"
+  );
+  assert.equal(env.ANTHROPIC_BASE_URL, OPENROUTER_BASE_URL);
+  assert.equal(env.ANTHROPIC_AUTH_TOKEN, "sk-or-v1-abc");
+  // The host Anthropic credentials must not survive: an empty ANTHROPIC_API_KEY
+  // (treated as unset by the CLI) guarantees the host key can't leak through,
+  // and the OAuth token is removed so it can't win auth precedence.
+  assert.equal(env.ANTHROPIC_API_KEY, "");
+  assert.equal("CLAUDE_CODE_OAUTH_TOKEN" in env, false);
+  // The key stays available to agent tools (e.g. scripts calling OpenRouter).
+  assert.equal(env.OPENROUTER_API_KEY, "sk-or-v1-abc");
+  assert.equal(env.PATH, "/bin");
+});
+
+test("applyProviderEnv throws a clear error when the OpenRouter key is missing", () => {
+  for (const env of [{}, { OPENROUTER_API_KEY: "" }, { OPENROUTER_API_KEY: "   " }]) {
+    assert.throws(() => applyProviderEnv(env as Record<string, string>, "openrouter"), /OPENROUTER_API_KEY/);
+  }
+});
+
+test("applyProviderEnv is a no-op for the anthropic provider", () => {
+  const input = { ANTHROPIC_API_KEY: "sk-ant-host", CLAUDE_CODE_OAUTH_TOKEN: "oauth-host" };
+  const env = applyProviderEnv(input, "anthropic");
+  assert.deepEqual(env, input);
+});
+
+test("applyProviderEnv does not mutate its input", () => {
+  const input = { OPENROUTER_API_KEY: "sk-or-v1-abc", CLAUDE_CODE_OAUTH_TOKEN: "oauth-host" };
+  applyProviderEnv(input, "openrouter");
+  assert.equal(input.CLAUDE_CODE_OAUTH_TOKEN, "oauth-host");
+  assert.equal("ANTHROPIC_BASE_URL" in input, false);
 });
 
 test("env key validation accepts POSIX-ish names and rejects junk", () => {

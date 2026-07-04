@@ -15,7 +15,9 @@ const createThreadSchema = z.object({
   anchorText: z.string().min(1).max(1000),
   anchorContext: z.string().max(2000).optional().nullable(),
   clientId: z.string().min(1).max(120).optional().nullable(),
-  shareToken: z.string().optional().nullable()
+  shareToken: z.string().optional().nullable(),
+  // Display name for anonymous share-link commenters; ignored when signed in.
+  guestName: z.string().trim().min(1).max(80).optional().nullable()
 });
 
 type RouteContext = {
@@ -27,11 +29,9 @@ type RouteContext = {
 export async function POST(request: Request, { params }: RouteContext) {
   const startedAt = Date.now();
   const { id } = await params;
+  // Anonymous share-link visitors may comment too — access is resolved from the
+  // share token below, mirroring the collab and ai-edit routes.
   const user = await getCurrentUser();
-  if (!user) {
-    console.warn("[comment-create] unauthenticated", { documentId: id });
-    return NextResponse.json({ error: "You must be signed in to comment." }, { status: 401 });
-  }
 
   const body = await request.json().catch(() => null);
   const parsed = createThreadSchema.safeParse(body);
@@ -41,15 +41,21 @@ export async function POST(request: Request, { params }: RouteContext) {
       code: issue.code,
       message: issue.message
     }));
-    console.warn("[comment-create] invalid payload", { documentId: id, userId: user.id, issues });
+    console.warn("[comment-create] invalid payload", { documentId: id, userId: user?.id ?? null, issues });
     return NextResponse.json({ error: "Invalid comment payload.", issues }, { status: 400 });
   }
 
-  const access = await resolveDocumentAccess(id, user.id, parsed.data.shareToken ?? null);
+  const access = await resolveDocumentAccess(id, user?.id, parsed.data.shareToken ?? null);
   if (!access || !canComment(access.permission)) {
-    console.warn("[comment-create] forbidden", { documentId: id, userId: user.id, hasAccess: !!access, permission: access?.permission ?? null });
+    if (!user && !parsed.data.shareToken) {
+      console.warn("[comment-create] unauthenticated", { documentId: id });
+      return NextResponse.json({ error: "You must be signed in to comment." }, { status: 401 });
+    }
+    console.warn("[comment-create] forbidden", { documentId: id, userId: user?.id ?? null, hasAccess: !!access, permission: access?.permission ?? null });
     return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
   }
+
+  const guestName = user ? null : parsed.data.guestName?.trim() || "Guest";
 
   // Refuse to create an orphan: the client is expected to push the
   // commentAnchor step before POSTing the thread. If the anchor isn't on the
@@ -62,7 +68,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     if (!documentHasAnchorForThread(docContent, parsed.data.threadId)) {
       console.warn("[comment-create] anchor missing", {
         documentId: id,
-        userId: user.id,
+        userId: user?.id ?? null,
         threadId: parsed.data.threadId
       });
       return NextResponse.json(
@@ -77,13 +83,14 @@ export async function POST(request: Request, { params }: RouteContext) {
     data: {
       id: parsed.data.threadId,
       documentId: id,
-      createdById: user.id,
+      createdById: user?.id ?? null,
       anchorText: parsed.data.anchorText,
       anchorContext: parsed.data.anchorContext,
       comments: {
         create: {
           body: parsed.data.body,
-          authorId: user.id
+          authorId: user?.id ?? null,
+          guestName
         }
       }
     },
@@ -108,6 +115,7 @@ export async function POST(request: Request, { params }: RouteContext) {
           id: true,
           body: true,
           aiModel: true,
+          guestName: true,
           sourceLinks: true,
           commitSha: true,
           commitUrl: true,
@@ -125,11 +133,14 @@ export async function POST(request: Request, { params }: RouteContext) {
   });
 
   const now = new Date();
-  await db.commentThreadRead.upsert({
-    where: { threadId_userId: { threadId: thread.id, userId: user.id } },
-    create: { threadId: thread.id, userId: user.id, lastReadAt: now },
-    update: { lastReadAt: now }
-  });
+  // Read markers are per-user; anonymous visitors have no user row to track.
+  if (user) {
+    await db.commentThreadRead.upsert({
+      where: { threadId_userId: { threadId: thread.id, userId: user.id } },
+      create: { threadId: thread.id, userId: user.id, lastReadAt: now },
+      update: { lastReadAt: now }
+    });
+  }
 
   const firstComment = thread.comments[0];
   if (firstComment) {
@@ -137,7 +148,7 @@ export async function POST(request: Request, { params }: RouteContext) {
       commentId: firstComment.id,
       documentId: id,
       body: parsed.data.body,
-      authorId: user.id
+      authorId: user?.id ?? null
     });
   }
 
@@ -148,7 +159,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     }
   });
 
-    const serialized = serializeThread(thread, { lastReadAt: now });
+    const serialized = serializeThread(thread, { lastReadAt: user ? now : null });
     broadcastDocumentEvent(
       id,
       "thread-created",
@@ -158,7 +169,8 @@ export async function POST(request: Request, { params }: RouteContext) {
 
     console.log("[comment-create]", {
       documentId: id,
-      userId: user.id,
+      userId: user?.id ?? null,
+      guest: !user,
       threadId: thread.id,
       anchorBytes: parsed.data.anchorText.length,
       bodyBytes: parsed.data.body.length,
@@ -172,7 +184,7 @@ export async function POST(request: Request, { params }: RouteContext) {
   } catch (error) {
     console.error("[comment-create] failed", {
       documentId: id,
-      userId: user.id,
+      userId: user?.id ?? null,
       requestedThreadId: parsed.data.threadId ?? null,
       bodyBytes: parsed.data.body.length,
       elapsedMs: Date.now() - startedAt,

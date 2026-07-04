@@ -55,6 +55,7 @@ export function serializeComment(
     id: string;
     body: string;
     aiModel: string | null;
+    guestName?: string | null;
     sourceLinks?: string | null;
     commitSha?: string | null;
     commitUrl?: string | null;
@@ -72,6 +73,7 @@ export function serializeComment(
     id: comment.id,
     body: comment.body,
     aiModel: comment.aiModel,
+    guestName: comment.guestName ?? null,
     sourceLinks: parseSourceLinks(comment.sourceLinks),
     commitSha: comment.commitSha ?? null,
     commitUrl: comment.commitUrl ?? null,
@@ -93,11 +95,12 @@ export function serializeThread(
     createdBy: {
       id: string;
       name: string;
-    };
+    } | null;
     comments: Array<{
       id: string;
       body: string;
       aiModel: string | null;
+      guestName?: string | null;
       sourceLinks?: string | null;
       commitSha?: string | null;
       commitUrl?: string | null;
@@ -173,6 +176,7 @@ export async function listDocumentThreads(documentId: string, userId?: string | 
           id: true,
           body: true,
           aiModel: true,
+          guestName: true,
           sourceLinks: true,
           commitSha: true,
           commitUrl: true,
