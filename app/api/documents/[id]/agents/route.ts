@@ -6,7 +6,7 @@ import { getAgentRunner } from "@/lib/agent-runner";
 import { getCurrentUser } from "@/lib/auth";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
-import { loadDocumentEnv } from "@/lib/document-env";
+import { loadAgentEnvForDocument } from "@/lib/user-credentials";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 import { rateLimit } from "@/lib/rate-limit";
 import { normalizeAgentImages } from "@/lib/ai-edit-submission";
@@ -132,7 +132,7 @@ async function runAgentConversationInBackground(input: {
       }
     });
     const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, documentId);
-    const agentEnv = await loadDocumentEnv(documentId);
+    const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model);
     const result = await getAgentRunner().run({
       mode: "conversation",
       documentTitle,

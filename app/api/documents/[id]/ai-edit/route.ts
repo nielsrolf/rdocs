@@ -14,7 +14,7 @@ import {
   normalizeSubmittedWidget
 } from "@/lib/ai-edit-submission";
 import { db } from "@/lib/db";
-import { loadDocumentEnv } from "@/lib/document-env";
+import { loadAgentEnvForDocument } from "@/lib/user-credentials";
 import { canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
 import { createAgentCommentThreads } from "@/lib/agent-comments";
 import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
@@ -155,7 +155,7 @@ async function runAiEditInBackground(input: {
     }
     const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, documentId);
     const assetIntent = detectEditAssetIntent(parsed.instruction);
-    const agentEnv = await loadDocumentEnv(documentId);
+    const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model);
 
     const result = await getAgentRunner().run(
       {

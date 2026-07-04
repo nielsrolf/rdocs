@@ -13,7 +13,7 @@ import {
   parseDocumentContent
 } from "@/lib/content";
 import { db } from "@/lib/db";
-import { loadDocumentEnv } from "@/lib/document-env";
+import { loadAgentEnvForDocument } from "@/lib/user-credentials";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 import { normalizeAgentImages } from "@/lib/ai-edit-submission";
 import { createAgentCommentThreads } from "@/lib/agent-comments";
@@ -114,7 +114,7 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
       });
     }
     const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, thread.documentId);
-    const agentEnv = await loadDocumentEnv(thread.documentId);
+    const agentEnv = await loadAgentEnvForDocument(thread.documentId, thread.document.agentModel);
 
     const aiReply = await getAgentRunner().run({
       mode: "comment_reply",

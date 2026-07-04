@@ -23,6 +23,24 @@ model User {
   commentReactions  CommentReaction[]
   mentions          CommentMention[]
   documentMentions  DocumentMention[]
+  credential        UserCredential?
+}
+
+// A single Anthropic credential a user connects once; every document they OWN
+// inherits it, and the agent runs under the owner's credential (see
+// lib/user-credentials.ts). `kind` is "api_key" (an Anthropic API key) or
+// "oauth" (a `claude setup-token` subscription token). `secret` is the value
+// encrypted at rest with CREDENTIAL_ENCRYPTION_KEY (AES-256-GCM) — never
+// returned in full over the API; listed back masked, like DocumentEnvVar.
+model UserCredential {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  kind      String
+  secret    String
+  label     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model Document {
