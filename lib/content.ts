@@ -108,6 +108,13 @@ function extractTextFromNode(node: unknown): string {
     return `[Attachment: ${fileName}]\n\n`;
   }
 
+  // Preserve table structure as GFM so the plain-text haystack (used for
+  // findText / anchor matching) stays consistent with what the agent sees.
+  if (typedNode.type === "table") {
+    const gfm = serializeTableToGfm(node, (cell) => escapeTableCell(extractCellText(cell)));
+    return gfm ? `${gfm}\n\n` : "";
+  }
+
   const childText = Array.isArray(typedNode.content)
     ? typedNode.content.map((child) => extractTextFromNode(child)).join("")
     : "";
@@ -286,6 +293,50 @@ function extractLinkHref(marks: unknown): string | null {
   return null;
 }
 
+// Serialize a cell's text content for the GFM table paths that don't preserve
+// inline marks (plain text + AI blocks). Kept separate from the mark-aware
+// markdown path so both round-trip through markdown-it identically.
+function extractCellText(cell: unknown): string {
+  return getNodeContent(cell)
+    .map((child) => extractTextFromNode(child))
+    .join("");
+}
+
+// Normalize a single table cell for GFM: collapse any internal newlines /
+// whitespace to a single line and escape `|` so cell content can't corrupt
+// columns. Applied on top of both the mark-aware and plain-text cell renderers,
+// so identical input yields identical output across all three table paths.
+function escapeTableCell(text: string): string {
+  return text
+    .replace(/\r?\n/g, " ")
+    .replace(/\|/g, "\\|")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Render a `table` node as valid GFM: header row, a `| --- |` delimiter row with
+// one cell per column, then the body rows. GFM requires a header, so we treat
+// the first row as the header even when it is made of plain `tableCell`s.
+function serializeTableToGfm(node: unknown, renderCell: (cell: unknown) => string): string {
+  const rows = getNodeContent(node).filter((row) => getNodeType(row) === "tableRow");
+  if (rows.length === 0) {
+    return "";
+  }
+
+  const columnCount = Math.max(1, getNodeContent(rows[0]).length);
+  const lines: string[] = [];
+
+  rows.forEach((row, rowIndex) => {
+    const cells = getNodeContent(row).map((cell) => renderCell(cell));
+    lines.push(`| ${cells.join(" | ")} |`);
+    if (rowIndex === 0) {
+      lines.push(`| ${Array.from({ length: columnCount }, () => "---").join(" | ")} |`);
+    }
+  });
+
+  return lines.join("\n");
+}
+
 function appendTextBlock(blocks: AiDocumentBlock[], text: string) {
   const normalized = text.replace(/\s+\n/g, "\n");
   if (!normalized) {
@@ -376,6 +427,16 @@ function visitNodeForAiBlocks(node: unknown, blocks: AiDocumentBlock[]) {
     const fileName = typeof attrs?.fileName === "string" ? attrs.fileName : "Attachment";
     const workspacePath = typeof attrs?.workspacePath === "string" ? attrs.workspacePath : "";
     appendTextBlock(blocks, `[Attachment: ${fileName}${workspacePath ? ` (${workspacePath})` : ""}]\n`);
+    return;
+  }
+
+  // Emit tables as GFM so the agent sees real table structure (matching the
+  // plain-text haystack) rather than tab-joined cells.
+  if (nodeType === "table") {
+    const gfm = serializeTableToGfm(node, (cell) => escapeTableCell(extractCellText(cell)));
+    if (gfm) {
+      appendTextBlock(blocks, `\n${gfm}\n\n`);
+    }
     return;
   }
 
@@ -585,12 +646,8 @@ function serializeNodeToMarkdown(node: unknown, context: MarkdownContext): strin
   }
 
   if (nodeType === "table") {
-    return `${serializeChildrenToMarkdown(node, context)}\n`;
-  }
-
-  if (nodeType === "tableRow") {
-    const cells = getNodeContent(node).map((cell) => serializeChildrenToMarkdown(cell, context).replace(/\s+/g, " ").trim());
-    return `| ${cells.join(" | ")} |\n`;
+    const body = serializeTableToGfm(node, (cell) => escapeTableCell(serializeChildrenToMarkdown(cell, context)));
+    return body ? `${body}\n\n` : "";
   }
 
   return serializeChildrenToMarkdown(node, context);

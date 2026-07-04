@@ -1,7 +1,40 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { aiEditMarkdown } from "../components/document-workspace/markdown";
 import { getDocumentAiBlocks, getDocumentMarkdown, getDocumentPlainText } from "../lib/content";
+
+const tableDoc = {
+  type: "doc",
+  content: [
+    {
+      type: "table",
+      content: [
+        {
+          type: "tableRow",
+          content: [
+            { type: "tableHeader", content: [{ type: "paragraph", content: [{ type: "text", text: "Name" }] }] },
+            { type: "tableHeader", content: [{ type: "paragraph", content: [{ type: "text", text: "Value" }] }] }
+          ]
+        },
+        {
+          type: "tableRow",
+          content: [
+            { type: "tableCell", content: [{ type: "paragraph", content: [{ type: "text", text: "a|b" }] }] },
+            { type: "tableCell", content: [{ type: "paragraph", content: [{ type: "text", text: "two" }] }] }
+          ]
+        },
+        {
+          type: "tableRow",
+          content: [
+            { type: "tableCell", content: [{ type: "paragraph", content: [{ type: "text", text: "three" }] }] },
+            { type: "tableCell", content: [{ type: "paragraph", content: [{ type: "text", text: "four" }] }] }
+          ]
+        }
+      ]
+    }
+  ]
+};
 
 const richDoc = {
   type: "doc",
@@ -129,4 +162,56 @@ test("getDocumentPlainText skips through repo images and widgets in plain text",
   assert.match(text, /Hello world/);
   assert.match(text, /Repository image: Accuracy plot/);
   assert.match(text, /Interactive widget: Rollout explorer/);
+});
+
+test("getDocumentMarkdown emits valid GFM for tables with a delimiter row and escaped pipes", () => {
+  const md = getDocumentMarkdown(tableDoc);
+  const lines = md.split("\n").filter((line) => line.trim().length > 0);
+
+  // Header row, GFM delimiter row, then two body rows.
+  assert.equal(lines[0], "| Name | Value |");
+  assert.equal(lines[1], "| --- | --- |");
+  assert.equal(lines[2], "| a\\|b | two |");
+  assert.equal(lines[3], "| three | four |");
+
+  // The pipe inside the cell must be escaped so it does not split the column.
+  assert.match(md, /a\\\|b/);
+});
+
+test("table markdown round-trips through the AI-edit markdown-it pipeline into a real table", () => {
+  // doc -> GFM markdown (server serialization)
+  const md = getDocumentMarkdown(tableDoc);
+  // GFM -> HTML via the exact markdown-it instance buildAiEditInsertContent uses.
+  const html = aiEditMarkdown.render(md);
+
+  // A real HTML table (which TipTap's Table extension parses into a `table` node),
+  // NOT a paragraph of literal pipes (the pre-fix failure mode).
+  assert.match(html, /<table>/);
+  assert.match(html, /<th>Name<\/th>/);
+  assert.match(html, /<th>Value<\/th>/);
+  // Escaped pipe is unescaped by markdown-it back into a literal `|` inside the cell.
+  assert.match(html, /<td>a\|b<\/td>/);
+  assert.match(html, /<td>three<\/td>/);
+  assert.match(html, /<td>four<\/td>/);
+  assert.doesNotMatch(html, /<p>\s*\|/);
+});
+
+test("getDocumentAiBlocks preserves table structure as GFM, consistent with getDocumentPlainText", () => {
+  const blocks = getDocumentAiBlocks(tableDoc);
+  const tableBlock = blocks.find((block) => block.type === "text" && block.text.includes("| Name |"));
+  if (!tableBlock || tableBlock.type !== "text") {
+    assert.fail("expected a text block containing the serialized table");
+  }
+
+  assert.match(tableBlock.text, /\| Name \| Value \|/);
+  assert.match(tableBlock.text, /\| --- \| --- \|/);
+  assert.match(tableBlock.text, /\| a\\\|b \| two \|/);
+  assert.match(tableBlock.text, /\| three \| four \|/);
+
+  // Consistency constraint (Gap C): what the agent SEES (AI blocks) must match the
+  // findText / anchor haystack (getDocumentPlainText). Both must carry the same GFM.
+  const plain = getDocumentPlainText(tableDoc);
+  assert.match(plain, /\| Name \| Value \|/);
+  assert.match(plain, /\| --- \| --- \|/);
+  assert.match(plain, /\| a\\\|b \| two \|/);
 });
