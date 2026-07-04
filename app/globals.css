@@ -186,6 +186,64 @@ body.public-view-shell .document-page-shell {
   cursor: pointer;
 }
 
+.ai-edit-retry-toast {
+  position: fixed;
+  left: 1.25rem;
+  bottom: 1.25rem;
+  z-index: 46;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  width: min(24rem, calc(100vw - 2rem));
+  border-radius: 12px;
+  border: 1px solid rgba(197, 34, 31, 0.32);
+  background: var(--surface-strong);
+  color: var(--danger);
+  padding: 0.8rem 0.95rem;
+  box-shadow: var(--shadow);
+}
+
+.ai-edit-retry-toast__body {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.ai-edit-retry-toast__detail {
+  color: var(--text);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.ai-edit-retry-toast__hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.ai-edit-retry-toast__actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.ai-edit-retry-toast__retry,
+.ai-edit-retry-toast__dismiss {
+  border-radius: 8px;
+  padding: 0.35rem 0.85rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.ai-edit-retry-toast__retry {
+  background: var(--accent, #1a73e8);
+  color: #fff;
+}
+
+.ai-edit-retry-toast__dismiss {
+  background: transparent;
+  border-color: var(--border, rgba(0, 0, 0, 0.16));
+  color: var(--text);
+}
+
 .agent-toast {
   position: fixed;
   right: 1.25rem;

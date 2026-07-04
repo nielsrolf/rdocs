@@ -179,6 +179,23 @@ export function isSafetyRefusalFailure(error: unknown): boolean {
   return error instanceof Error && isSafetyRefusalMessage(error.message);
 }
 
+/**
+ * Whether a failed run died because the model rejected the supplied credential
+ * (HTTP 401 / "Failed to authenticate" / "Invalid authentication credentials" /
+ * an expired OAuth token). This is distinct from a transient error: retrying
+ * with the SAME credential is pointless, so the fix is to re-resolve the
+ * credential at the layer that owns it (lib/agent-runner) and retry there. The
+ * transient-retry loop in agent-core deliberately excludes these.
+ */
+export function isAuthFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return /\b401\b|failed to authenticate|invalid authentication credentials|invalid api key|oauth token (?:has )?expired|authentication_error/i.test(
+    error.message
+  );
+}
+
 const submitResponseSchema = {
   replacementText: z
     .string()
@@ -964,7 +981,7 @@ async function runClaudeResearchAgentOnce(
   };
 }
 
-function isRetryableAgentError(error: unknown) {
+export function isRetryableAgentError(error: unknown) {
   if (!(error instanceof Error)) {
     return false;
   }
@@ -973,28 +990,72 @@ function isRetryableAgentError(error: unknown) {
   if (isSafetyRefusalFailure(error)) {
     return false;
   }
+  // Auth failures are NOT transient — a retry with the same stale credential
+  // just burns the attempt. The credential-owning layer (lib/agent-runner)
+  // re-resolves and retries those; see isAuthFailure / ContainerRunner.
+  if (isAuthFailure(error)) {
+    return false;
+  }
   if (/timed out/i.test(error.message)) {
     return false;
   }
-  return /(rate|timeout|fetch|network|ECONN|ETIMEDOUT|EAI_AGAIN|overloaded|temporar)/i.test(error.message);
+  return /(rate|timeout|fetch|network|ECONN|ETIMEDOUT|EAI_AGAIN|overloaded|temporar|\b(429|500|502|503|529)\b|overloaded_error|ECONNREFUSED|container spawn failed|container exited without a result)/i.test(
+    error.message
+  );
+}
+
+// Default backoff schedule for transient retries. Two retries: ~2s then ~8s.
+export const TRANSIENT_RETRY_DELAYS_MS = [2_000, 8_000];
+
+/**
+ * Run `fn`, retrying on classified-retryable errors with the given backoff
+ * schedule. `delaysMs.length` is the max number of retries (attempt 0 is the
+ * initial try). `sleep` and the schedule are injectable so the behavior is
+ * unit-testable with a fake clock. On exhaustion or a non-retryable error the
+ * last error is re-thrown.
+ */
+export async function retryWithBackoff<T>(
+  fn: (attempt: number) => Promise<T>,
+  opts: {
+    isRetryable: (error: unknown) => boolean;
+    delaysMs: number[];
+    sleep?: (ms: number) => Promise<void>;
+    onRetry?: (info: { error: unknown; attempt: number; delayMs: number }) => void;
+  }
+): Promise<T> {
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await fn(attempt);
+    } catch (error) {
+      if (attempt >= opts.delaysMs.length || !opts.isRetryable(error)) {
+        throw error;
+      }
+      const delayMs = opts.delaysMs[attempt];
+      opts.onRetry?.({ error, attempt, delayMs });
+      await sleep(delayMs);
+      attempt += 1;
+    }
+  }
 }
 
 async function runWithTransientRetry(
   input: ClaudeResearchAgentInput,
   options: ClaudeAgentRunOptions
 ): Promise<ClaudeResearchAgentOutput> {
-  try {
-    return await runClaudeResearchAgentOnce(input, options);
-  } catch (error) {
-    if (!isRetryableAgentError(error)) {
-      throw error;
+  return retryWithBackoff((_) => runClaudeResearchAgentOnce(input, options), {
+    isRetryable: isRetryableAgentError,
+    delaysMs: TRANSIENT_RETRY_DELAYS_MS,
+    onRetry: ({ error, attempt, delayMs }) => {
+      emitProgress(options.onProgress, {
+        role: "system",
+        message: `Transient error (attempt ${attempt + 1}); retrying in ${Math.round(
+          delayMs / 1000
+        )}s: ${error instanceof Error ? error.message : "unknown"}`
+      });
     }
-    emitProgress(options.onProgress, {
-      role: "system",
-      message: `Retrying after transient error: ${error instanceof Error ? error.message : "unknown"}`
-    });
-    return runClaudeResearchAgentOnce(input, options);
-  }
+  });
 }
 
 export async function runClaudeResearchAgent(

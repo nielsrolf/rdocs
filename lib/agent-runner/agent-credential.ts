@@ -53,30 +53,55 @@ export function readHostClaudeOAuth(opts: {
   }
 }
 
+// A host OAuth access token expiring within this window is treated as unusable:
+// the run would very likely die with a 401 mid-flight. Injecting it "hopefully"
+// is what produced the reported "401 Invalid authentication credentials" failure.
+export const OAUTH_EXPIRY_MARGIN_MS = 2 * 60 * 1000;
+
+// Actionable message surfaced when the host session cannot supply a usable token.
+export const HOST_SESSION_EXPIRED_MESSAGE =
+  "host Claude session expired — run `claude` on the host to refresh it, or set " +
+  "ANTHROPIC_API_KEY (or a document OPENROUTER_API_KEY) so the agent has a durable credential.";
+
 // Given the container env already assembled from host + document env, return any
 // credential vars to ADD. Empty if a credential is already present or none can
 // be found. `now` is injectable for tests.
+//
+// Freshness gate: this reads the host credentials file fresh at call time (so a
+// refresh performed by Claude Code on the host is picked up), and REFUSES to
+// inject an OAuth token that is already expired or expires within
+// OAUTH_EXPIRY_MARGIN_MS. In that case it returns an actionable `error` and an
+// empty `added` so the caller can fail fast instead of shipping a doomed token
+// into the sandbox. Callers that retry should call this again — the retry re-reads
+// the file and can pick up a token Claude Code refreshed in the meantime.
 export function resolveAgentCredentialEnv(
   containerEnv: Record<string, string | undefined>,
   opts: { homeDir?: string | undefined; credentialsPath?: string; now?: number } = {}
-): { added: Record<string, string>; warning: string | null } {
+): { added: Record<string, string>; warning: string | null; error: string | null } {
   if (hasAnthropicCredential(containerEnv)) {
-    return { added: {}, warning: null };
+    return { added: {}, warning: null, error: null };
   }
   const oauth = readHostClaudeOAuth(opts);
   if (!oauth) {
     return {
       added: {},
       warning:
-        "no Anthropic credential available for the sandboxed agent (no ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN in env or document env, and no readable ~/.claude OAuth session); the agent will fail to authenticate."
+        "no Anthropic credential available for the sandboxed agent (no ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN in env or document env, and no readable ~/.claude OAuth session); the agent will fail to authenticate.",
+      error: null
     };
   }
   const now = opts.now ?? Date.now();
-  const warning =
-    oauth.expiresAt && oauth.expiresAt < now
-      ? "host ~/.claude OAuth access token appears expired; the agent may fail to authenticate until you refresh it (run `claude`)."
-      : null;
-  return { added: { CLAUDE_CODE_OAUTH_TOKEN: oauth.token }, warning };
+  // Only gate when the expiry is known. A token with unknown expiry can't be
+  // proven stale, so we let the run proceed (previous behavior).
+  if (typeof oauth.expiresAt === "number" && oauth.expiresAt <= now + OAUTH_EXPIRY_MARGIN_MS) {
+    const state = oauth.expiresAt <= now ? "is expired" : "expires within two minutes";
+    return {
+      added: {},
+      warning: null,
+      error: `host ~/.claude OAuth access token ${state}; ${HOST_SESSION_EXPIRED_MESSAGE}`
+    };
+  }
+  return { added: { CLAUDE_CODE_OAUTH_TOKEN: oauth.token }, warning: null, error: null };
 }
 
 // Model-aware wrapper: OpenRouter jobs authenticate with the document's
@@ -87,12 +112,12 @@ export function resolveContainerCredentialEnv(
   containerEnv: Record<string, string | undefined>,
   agentModel: string | null | undefined,
   opts: { homeDir?: string | undefined; credentialsPath?: string; now?: number } = {}
-): { added: Record<string, string>; warning: string | null } {
+): { added: Record<string, string>; warning: string | null; error: string | null } {
   if (isOpenRouterAgentModel(agentModel)) {
     const warning = containerEnv.OPENROUTER_API_KEY?.trim()
       ? null
       : "OpenRouter model selected but OPENROUTER_API_KEY is missing from the container env; the run will fail inside the sandbox.";
-    return { added: {}, warning };
+    return { added: {}, warning, error: null };
   }
   return resolveAgentCredentialEnv(containerEnv, opts);
 }

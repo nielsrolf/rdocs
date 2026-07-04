@@ -6,6 +6,7 @@ import {
   buildContainerRunArgs,
   serializeEnvFile
 } from "../lib/agent-runner/container-args";
+import { classifyContainerFailure } from "../lib/agent-runner/container";
 
 const WS = "/repo/.research-workspaces/doc-1/worktrees/run-1";
 const ENVFILE = "/tmp/gdocs-agent-x/env";
@@ -118,6 +119,70 @@ test("a document OPENROUTER_API_KEY reaches the container env file intact", () =
   assert.equal(env.OPENROUTER_API_KEY, "sk-or-v1-abc");
   const lines = serializeEnvFile(env).trimEnd().split("\n");
   assert.ok(lines.includes("OPENROUTER_API_KEY=sk-or-v1-abc"));
+});
+
+test("classifyContainerFailure re-resolves once on a 401 for Anthropic jobs, then fails actionably", () => {
+  const authErr = new Error("Failed to authenticate. API Error: 401 Invalid authentication credentials");
+  // First 401 (nothing retried yet) → re-resolve the credential and retry once.
+  assert.deepEqual(
+    classifyContainerFailure(authErr, { isOpenRouter: false, authRetried: false, transientAttempt: 0 }),
+    { action: "auth-retry" }
+  );
+  // Second 401 (already retried) → give up with the actionable host-session message.
+  const second = classifyContainerFailure(authErr, {
+    isOpenRouter: false,
+    authRetried: true,
+    transientAttempt: 0
+  });
+  assert.equal(second.action, "auth-fail");
+  assert.match(second.action === "auth-fail" ? second.message : "", /run `claude` on the host/i);
+});
+
+test("classifyContainerFailure never re-resolves a 401 for OpenRouter jobs (durable key)", () => {
+  const authErr = new Error("API Error: 401 Invalid authentication credentials");
+  const decision = classifyContainerFailure(authErr, {
+    isOpenRouter: true,
+    authRetried: false,
+    transientAttempt: 0
+  });
+  assert.equal(decision.action, "auth-fail");
+});
+
+test("classifyContainerFailure retries transient container failures with escalating backoff, then throws", () => {
+  const spawnErr = new Error("agent container spawn failed: spawn docker ENOENT");
+  const first = classifyContainerFailure(spawnErr, {
+    isOpenRouter: false,
+    authRetried: false,
+    transientAttempt: 0,
+    delaysMs: [2_000, 8_000]
+  });
+  assert.deepEqual(first, { action: "transient-retry", delayMs: 2_000 });
+  const second = classifyContainerFailure(spawnErr, {
+    isOpenRouter: false,
+    authRetried: false,
+    transientAttempt: 1,
+    delaysMs: [2_000, 8_000]
+  });
+  assert.deepEqual(second, { action: "transient-retry", delayMs: 8_000 });
+  // Budget exhausted.
+  assert.deepEqual(
+    classifyContainerFailure(spawnErr, {
+      isOpenRouter: false,
+      authRetried: false,
+      transientAttempt: 2,
+      delaysMs: [2_000, 8_000]
+    }),
+    { action: "throw" }
+  );
+});
+
+test("classifyContainerFailure throws (no retry) on a non-transient, non-auth failure", () => {
+  const decision = classifyContainerFailure(new Error("replacementText must not be empty"), {
+    isOpenRouter: false,
+    authRetried: false,
+    transientAttempt: 0
+  });
+  assert.deepEqual(decision, { action: "throw" });
 });
 
 test("serializeEnvFile emits VAR=VALUE lines and skips multiline values", () => {

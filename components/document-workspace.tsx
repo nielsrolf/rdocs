@@ -288,6 +288,15 @@ export function DocumentWorkspace({
   const [activeAiRun, setActiveAiRun] = useState<ActiveAiRunView | null>(null);
   const [activeAiRuns, setActiveAiRuns] = useState<ActiveAiRunView[]>([]);
   const [aiRuns, setAiRuns] = useState<ActiveAiRunView[]>([]);
+  // A SELECTION_EDIT run that FAILED but whose selection marker is still alive,
+  // so the user can retry without re-selecting. Cleared on retry success or when
+  // the user dismisses it (which also removes the marker). See Item 4 / retryFailedAiEdit.
+  const [failedAiEdit, setFailedAiEdit] = useState<{
+    selectionId: string;
+    aiRunId: string;
+    instruction: string;
+    error: string;
+  } | null>(null);
   const aiEditRunStateRef = useRef<Map<string, "applying" | "applied" | "failed">>(new Map());
   // Serializes AI-run applies. Two runs finishing in the same poll cycle must not
   // apply concurrently: each apply ends by remounting the editor via setContent of a
@@ -2088,35 +2097,59 @@ export function DocumentWorkspace({
       return;
     }
 
+    const postComment = async () => {
+      const response = await fetch(`/api/documents/${documentId}/comments`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          threadId,
+          body: composerBody.trim(),
+          anchorText: selectedRange.text.slice(0, 1000),
+          anchorContext: selectedRange.context ? selectedRange.context.slice(0, 2000) : selectedRange.context,
+          clientId: collabClientIdRef.current,
+          shareToken,
+          guestName: isAuthenticated ? undefined : currentUserName
+        })
+      });
+      const data = await response.json().catch(() => null);
+      return { response, data };
+    };
+
     await flushCollaborationSteps();
+    let { response, data } = await postComment();
 
-    const response = await fetch(`/api/documents/${documentId}/comments`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        threadId,
-        body: composerBody.trim(),
-        anchorText: selectedRange.text.slice(0, 1000),
-        anchorContext: selectedRange.context ? selectedRange.context.slice(0, 2000) : selectedRange.context,
-        clientId: collabClientIdRef.current,
-        shareToken,
-        guestName: isAuthenticated ? undefined : currentUserName
-      })
-    });
-
-    const data = await response.json().catch(() => null);
+    // A 409 ("Anchor not yet saved") is the collab flush→persist race: the
+    // commentAnchor step is in the editor and was just flushed, but the server's
+    // persisted snapshot hasn't caught up yet. It clears within moments, so
+    // re-flush and re-POST with bounded backoff instead of failing. Crucially we
+    // must NOT revert the editor here — the revert would wipe the just-inserted
+    // anchor that we are waiting for the server to persist.
+    let anchorRetries = 0;
+    const MAX_ANCHOR_RETRIES = 3;
+    while (response.status === 409 && anchorRetries < MAX_ANCHOR_RETRIES) {
+      anchorRetries += 1;
+      await new Promise((resolve) => setTimeout(resolve, 400 * anchorRetries));
+      await flushCollaborationSteps();
+      ({ response, data } = await postComment());
+    }
 
     if (!response.ok || !data?.thread) {
-      isApplyingRemoteUpdateRef.current = true;
-      editor.commands.setContent(previousContent, false);
-      isApplyingRemoteUpdateRef.current = false;
+      // Only revert for real failures. A 409 that outlived every retry means the
+      // anchor still isn't persisted server-side; reverting would destroy it, so
+      // leave the doc intact and just surface the error.
+      if (response.status !== 409) {
+        isApplyingRemoteUpdateRef.current = true;
+        editor.commands.setContent(previousContent, false);
+        isApplyingRemoteUpdateRef.current = false;
+      }
       reportClientError(data?.error ?? "Unable to create thread.", "comment-create", {
         documentId,
         threadId,
         status: response.status,
-        serverError: typeof data?.error === "string" ? data.error : null
+        serverError: typeof data?.error === "string" ? data.error : null,
+        anchorRetries
       });
       setCommentBusy(false);
       return;
@@ -2281,6 +2314,136 @@ export function DocumentWorkspace({
       return true;
     });
     return widgets;
+  }
+
+  // Drop the surviving marker for a failed run the user chose not to retry.
+  function dismissFailedAiEdit() {
+    const failed = failedAiEdit;
+    setFailedAiEdit(null);
+    if (!failed || !editor) return;
+    editor.view.dispatch(removeAiEditSelection(editor.state, failed.selectionId));
+    logClientEvent({
+      scope: "ai-edit-retry",
+      level: "info",
+      message: "user dismissed failed ai edit",
+      data: { documentId, selectionId: failed.selectionId, aiRunId: failed.aiRunId }
+    });
+  }
+
+  // Re-run a FAILED selection edit against the SAME marker with the SAME
+  // instruction — no re-select, no re-type. The instruction lives on the AiRun
+  // row; the selection text/markdown are reconstructed from the still-live
+  // marker range, and the same selectionId is reused so the polling effect
+  // applies the new run's result to the same range.
+  async function retryFailedAiEdit() {
+    const failed = failedAiEdit;
+    if (!failed || !editor) return;
+
+    const range = getAiEditSelectionRange(editor.state, failed.selectionId);
+    const selectedText = range
+      ? editor.state.doc.textBetween(range.from, range.to, "\n", " ").trim()
+      : "";
+    if (!range || !selectedText) {
+      // The range collapsed away since the failure — nothing left to edit.
+      reportClientError(
+        "The edited text was removed, so the AI edit can't be retried.",
+        "ai-edit-retry",
+        { documentId, selectionId: failed.selectionId, aiRunId: failed.aiRunId }
+      );
+      dismissFailedAiEdit();
+      return;
+    }
+
+    const instruction = failed.instruction.trim();
+    if (!instruction) {
+      reportClientError("The original instruction is missing, so this edit can't be retried.", "ai-edit-retry", {
+        documentId,
+        selectionId: failed.selectionId,
+        aiRunId: failed.aiRunId
+      });
+      dismissFailedAiEdit();
+      return;
+    }
+
+    const selectionId = failed.selectionId;
+    const selectedMarkdown = getSelectionMarkdownFromEditor(editor, range.from, range.to);
+    const triggerId = buildAiRunSelectionTriggerId(selectionId);
+
+    setFailedAiEdit(null);
+    editor.view.dispatch(
+      upsertAiEditSelection(editor.state, {
+        id: selectionId,
+        from: range.from,
+        to: range.to,
+        progress: "Retrying Claude research agent."
+      })
+    );
+    setActiveAiRun({
+      id: `pending-selection-edit-${Date.now()}`,
+      triggerType: "SELECTION_EDIT",
+      triggerId,
+      selectionId,
+      instruction,
+      status: "RUNNING",
+      progress: "Retrying Claude research agent.",
+      startedAt: new Date().toISOString()
+    });
+
+    logClientEvent({
+      scope: "ai-edit-retry",
+      level: "info",
+      message: "retrying failed ai edit",
+      data: { documentId, selectionId, previousAiRunId: failed.aiRunId }
+    });
+
+    const fetchStartedAt = Date.now();
+    const response = await fetch(`/api/documents/${documentId}/ai-edit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        selectedText,
+        selectedMarkdown,
+        selectedContext: getSelectionContextFromEditor(editor, range.from, range.to) || undefined,
+        instruction,
+        selectionId,
+        shareToken
+      })
+    }).catch((error) => {
+      logClientEvent({
+        scope: "ai-edit-retry",
+        level: "error",
+        message: "retry kickoff fetch threw",
+        data: {
+          documentId,
+          selectionId,
+          error: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+        }
+      });
+      return null;
+    });
+
+    const data = await response?.json().catch(() => null);
+    const kickoffAiRunId = data && typeof data.aiRunId === "string" ? (data.aiRunId as string) : null;
+
+    if (!response?.ok || !kickoffAiRunId) {
+      reportClientError(data?.error ?? "AI edit failed to start.", "ai-edit-retry", {
+        documentId,
+        selectionId,
+        status: response?.status ?? null,
+        serverError: typeof data?.error === "string" ? data.error : null,
+        elapsedMs: Date.now() - fetchStartedAt
+      });
+      // Re-arm the retry affordance so the user can try again (marker is intact).
+      setActiveAiRun(null);
+      setFailedAiEdit({
+        selectionId,
+        aiRunId: failed.aiRunId,
+        instruction,
+        error: typeof data?.error === "string" ? data.error : "AI edit failed to start."
+      });
+      return;
+    }
+    // The polling effect picks up the new run and applies it to the same marker.
   }
 
   async function applyAiEditRun(input: {
@@ -3278,11 +3441,18 @@ export function DocumentWorkspace({
         const finishedAtMs = run.finishedAt ? new Date(run.finishedAt).getTime() : 0;
         const isStaleFromPreviousSession =
           finishedAtMs > 0 && finishedAtMs < mountedAtRef.current - 5_000;
+        // Keep the selection marker alive so the user can retry the SAME
+        // instruction on the SAME range without re-selecting and re-typing. The
+        // marker only survives if the range still exists; if it was deleted
+        // out from under the run there is nothing to retry, so fall back to the
+        // old cleanup behavior.
+        const markerRange = getAiEditSelectionRange(editor.state, selectionId);
         if (!isStaleFromPreviousSession) {
           reportClientError(run.error ?? "AI edit failed.", "ai-edit-run-failed", {
             documentId,
             selectionId,
-            aiRunId: run.id
+            aiRunId: run.id,
+            retryable: !!markerRange
           });
           notifyAgentCompleted({
             id: run.id,
@@ -3291,8 +3461,27 @@ export function DocumentWorkspace({
             status: "FAILED"
           });
         }
-        editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
         setActiveAiRun(null);
+        if (markerRange && !isStaleFromPreviousSession) {
+          // Keep the highlight but drop the "running" progress label so the
+          // marker doesn't look like it's still working.
+          editor.view.dispatch(
+            upsertAiEditSelection(editor.state, {
+              id: selectionId,
+              from: markerRange.from,
+              to: markerRange.to,
+              progress: null
+            })
+          );
+          setFailedAiEdit({
+            selectionId,
+            aiRunId: run.id,
+            instruction: run.instruction ?? "",
+            error: run.error ?? "AI edit failed."
+          });
+        } else {
+          editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
+        }
         continue;
       }
 
@@ -3545,6 +3734,34 @@ export function DocumentWorkspace({
       {globalError ? (
         <div className="error-toast" role="alert" aria-live="assertive" onClick={() => setGlobalError(null)}>
           {globalError}
+        </div>
+      ) : null}
+
+      {failedAiEdit ? (
+        <div className="ai-edit-retry-toast" role="alert" aria-live="assertive">
+          <div className="ai-edit-retry-toast__body">
+            <strong>AI edit failed.</strong>
+            <span className="ai-edit-retry-toast__detail">
+              {failedAiEdit.error || "The agent run did not complete."}
+            </span>
+            <span className="ai-edit-retry-toast__hint">Your selection is still highlighted.</span>
+          </div>
+          <div className="ai-edit-retry-toast__actions">
+            <button
+              type="button"
+              className="ai-edit-retry-toast__retry"
+              onClick={() => void retryFailedAiEdit()}
+            >
+              Retry
+            </button>
+            <button
+              type="button"
+              className="ai-edit-retry-toast__dismiss"
+              onClick={dismissFailedAiEdit}
+            >
+              Dismiss
+            </button>
+          </div>
         </div>
       ) : null}
 

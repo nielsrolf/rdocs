@@ -10,10 +10,58 @@ import type {
   DocumentEnv
 } from "@/agent-core";
 
+import { isAuthFailure, isOpenRouterAgentModel, isRetryableAgentError } from "@/agent-core";
+
 import type { AgentRunner, AgentRunOptions, MergeResolveJob } from "./index";
 import { toAgentJob } from "./index";
 import { buildContainerEnv, buildContainerRunArgs, serializeEnvFile } from "./container-args";
-import { resolveContainerCredentialEnv } from "./agent-credential";
+import { HOST_SESSION_EXPIRED_MESSAGE, resolveContainerCredentialEnv } from "./agent-credential";
+
+// Transient container-level failures (spawn / exit-without-result) get one
+// bounded backoff retry here. In-agent-loop API errors (429/500/overloaded) are
+// retried INSIDE the container by agent-core's runWithTransientRetry; those
+// never reach this layer, so the two retry budgets do not stack on the same
+// error.
+const CONTAINER_TRANSIENT_DELAYS_MS = [2_000, 8_000];
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+export type ContainerFailureDecision =
+  | { action: "auth-retry" }
+  | { action: "auth-fail"; message: string }
+  | { action: "transient-retry"; delayMs: number }
+  | { action: "throw" };
+
+// Pure retry policy for a container spawn failure — extracted so it is unit
+// testable without spawning docker. State (authRetried / transientAttempt) is
+// carried by the caller's loop.
+export function classifyContainerFailure(
+  error: unknown,
+  ctx: {
+    isOpenRouter: boolean;
+    authRetried: boolean;
+    transientAttempt: number;
+    delaysMs?: number[];
+  }
+): ContainerFailureDecision {
+  const delaysMs = ctx.delaysMs ?? CONTAINER_TRANSIENT_DELAYS_MS;
+  if (isAuthFailure(error)) {
+    // OpenRouter jobs use a durable API key: re-resolving can't refresh it, so
+    // fail fast. Anthropic jobs get exactly one re-resolve-and-retry.
+    if (!ctx.isOpenRouter && !ctx.authRetried) {
+      return { action: "auth-retry" };
+    }
+    return {
+      action: "auth-fail",
+      message:
+        `[agent-runner] agent authentication failed (401). ${HOST_SESSION_EXPIRED_MESSAGE} ` +
+        `Original error: ${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+  if (isRetryableAgentError(error) && ctx.transientAttempt < delaysMs.length) {
+    return { action: "transient-retry", delayMs: delaysMs[ctx.transientAttempt] };
+  }
+  return { action: "throw" };
+}
 
 // Runs the agent in a hardened local container with the relevant worktree
 // bind-mounted at /workspace. The agent's tools are confined to the container's
@@ -74,14 +122,25 @@ export class ContainerRunner implements AgentRunner {
 
     const tmpDir = await mkdtemp(path.join(os.tmpdir(), "gdocs-agent-"));
     const envFile = path.join(tmpDir, "env");
+    const isOpenRouter = isOpenRouterAgentModel(opts.agentModel);
     try {
-      const containerEnv = buildContainerEnv(process.env, opts.agentEnv ?? {});
-      const { added, warning } = resolveContainerCredentialEnv(containerEnv, opts.agentModel, {
-        homeDir: process.env.HOME
-      });
-      Object.assign(containerEnv, added);
-      if (warning) console.warn(`[agent-runner] ${warning}`);
-      await writeFile(envFile, serializeEnvFile(containerEnv), { mode: 0o600 });
+      // (Re-)resolve the credential and rewrite the env-file. Called once up front
+      // and again before an auth retry, so a token Claude Code refreshed on the
+      // host in the meantime is picked up (the credential is snapshotted into the
+      // env-file, not read live by the container).
+      const prepareEnv = async () => {
+        const containerEnv = buildContainerEnv(process.env, opts.agentEnv ?? {});
+        const { added, warning, error } = resolveContainerCredentialEnv(containerEnv, opts.agentModel, {
+          homeDir: process.env.HOME
+        });
+        // Freshness gate: never ship a credential that is already unusable.
+        if (error) {
+          throw new Error(`[agent-runner] ${error}`);
+        }
+        Object.assign(containerEnv, added);
+        if (warning) console.warn(`[agent-runner] ${warning}`);
+        await writeFile(envFile, serializeEnvFile(containerEnv), { mode: 0o600 });
+      };
 
       const args = buildContainerRunArgs({
         image,
@@ -97,7 +156,37 @@ export class ContainerRunner implements AgentRunner {
         ociRuntime: process.env.AGENT_CONTAINER_OCI_RUNTIME || undefined
       });
 
-      return await this.spawnContainer(runtime, args, opts.job, opts.onProgress);
+      let authRetried = false;
+      let transientAttempt = 0;
+      for (;;) {
+        await prepareEnv();
+        try {
+          return await this.spawnContainer(runtime, args, opts.job, opts.onProgress);
+        } catch (error) {
+          const decision = classifyContainerFailure(error, { isOpenRouter, authRetried, transientAttempt });
+          if (decision.action === "auth-retry") {
+            authRetried = true;
+            console.warn(
+              "[agent-runner] agent authentication failed (401); re-reading host credentials and retrying once."
+            );
+            continue;
+          }
+          if (decision.action === "auth-fail") {
+            throw new Error(decision.message);
+          }
+          if (decision.action === "transient-retry") {
+            transientAttempt += 1;
+            console.warn(
+              `[agent-runner] transient container failure (attempt ${transientAttempt}); retrying in ${Math.round(
+                decision.delayMs / 1000
+              )}s: ${error instanceof Error ? error.message : String(error)}`
+            );
+            await sleep(decision.delayMs);
+            continue;
+          }
+          throw error;
+        }
+      }
     } finally {
       await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     }
@@ -157,7 +246,12 @@ export class ContainerRunner implements AgentRunner {
         process.stderr.write(`[agent-container] ${text}`);
       });
 
-      child.on("error", (error) => reject(error));
+      // "container spawn failed" is a recognized transient signal
+      // (isRetryableAgentError) — a missing/slow container runtime is worth a
+      // retry rather than an opaque terminal failure.
+      child.on("error", (error) =>
+        reject(new Error(`agent container spawn failed: ${error instanceof Error ? error.message : String(error)}`))
+      );
 
       child.on("close", async (code) => {
         if (stdoutBuffer.trim()) handleFrame(stdoutBuffer);
@@ -170,9 +264,11 @@ export class ContainerRunner implements AgentRunner {
           resolve(result);
           return;
         }
+        // "container exited without a result" is also a recognized transient
+        // signal — an OOM-killed or crashed container is often worth one retry.
         reject(
           new Error(
-            `Agent container exited with code ${code} without emitting a result.` +
+            `agent container exited without a result (exit code ${code}).` +
               (stderrTail ? ` Last stderr:\n${stderrTail}` : "")
           )
         );
