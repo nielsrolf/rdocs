@@ -1,7 +1,19 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { recordAiRunEvent, serializeAiRun } from "@/lib/ai-runs";
+import {
+  buildConversationHistory,
+  markAiRunSucceeded,
+  recordAiRunEvent,
+  serializeAiRun,
+  startAiRunHeartbeat
+} from "@/lib/ai-runs";
+import {
+  RUN_CANCELLED_MESSAGE,
+  deregisterRunAbortController,
+  isRunCancellation,
+  registerRunAbortController
+} from "@/lib/agent-runner/run-registry";
 import { getAgentRunner } from "@/lib/agent-runner";
 import { getCurrentUser } from "@/lib/auth";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
@@ -27,41 +39,6 @@ const agentConversationSchema = z.object({
   previousRunId: z.string().optional().nullable()
 });
 
-const CONVERSATION_HISTORY_ROLES = new Set(["user", "agent"]);
-const MAX_CONVERSATION_TURNS = 24;
-
-async function buildConversationHistory(documentId: string, previousRunId: string | null) {
-  if (!previousRunId) {
-    return { history: [] as Array<{ role: string; message: string }>, rootRunId: null as string | null };
-  }
-  const chain: Array<{ id: string; parentRunId: string | null }> = [];
-  let cursorId: string | null = previousRunId;
-  const visited = new Set<string>();
-  while (cursorId && !visited.has(cursorId) && chain.length < MAX_CONVERSATION_TURNS) {
-    visited.add(cursorId);
-    const run: { id: string; parentRunId: string | null; documentId: string } | null = await db.aiRun.findUnique({
-      where: { id: cursorId },
-      select: { id: true, parentRunId: true, documentId: true }
-    });
-    if (!run || run.documentId !== documentId) {
-      break;
-    }
-    chain.push({ id: run.id, parentRunId: run.parentRunId });
-    cursorId = run.parentRunId;
-  }
-  if (chain.length === 0) {
-    return { history: [], rootRunId: null };
-  }
-  chain.reverse();
-  const events = await db.aiRunEvent.findMany({
-    where: { aiRunId: { in: chain.map((entry) => entry.id) } },
-    orderBy: { createdAt: "asc" },
-    select: { role: true, message: true }
-  });
-  const history = events.filter((event) => CONVERSATION_HISTORY_ROLES.has(event.role));
-  return { history, rootRunId: chain[0]?.id ?? null };
-}
-
 type RouteContext = {
   params: Promise<{
     id: string;
@@ -85,6 +62,8 @@ async function runAgentConversationInBackground(input: {
   const { documentId, aiRunId, message, previousRunId, documentTitle, documentContent, createdById, agentConfig } =
     input;
   let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
+  const stopHeartbeat = startAiRunHeartbeat(aiRunId);
+  const abort = registerRunAbortController(aiRunId);
 
   try {
     const { history: conversationHistory } = await buildConversationHistory(documentId, previousRunId);
@@ -154,6 +133,8 @@ async function runAgentConversationInBackground(input: {
     }, {
       agentConfig: { model: agentConfig.model, effort: agentConfig.effort },
       agentEnv,
+      signal: abort.signal,
+      containerName: `gdocs-run-${aiRunId}`,
       validation: { kind: "conversation", documentText: suggestionAnchorText },
       onProgress: async (event) => {
         await Promise.all([
@@ -202,19 +183,14 @@ async function runAgentConversationInBackground(input: {
       documentText
     });
 
-    await db.aiRun.update({
-      where: { id: aiRunId },
-      data: {
-        status: "SUCCEEDED",
-        progress: result.summary ?? "Finished.",
-        model: result.model,
-        commitSha: commit.commitSha,
-        commitUrl: commit.commitUrl,
-        finishedAt: new Date(),
-        suggestions: JSON.stringify(Array.isArray(result.suggestions) ? result.suggestions : []),
-        agentComments: JSON.stringify(agentComments),
-        replacementImages: JSON.stringify(normalizeAgentImages(result.images, documentId, null, aiRunId))
-      }
+    await markAiRunSucceeded(aiRunId, {
+      progress: result.summary ?? "Finished.",
+      model: result.model,
+      commitSha: commit.commitSha,
+      commitUrl: commit.commitUrl,
+      suggestions: JSON.stringify(Array.isArray(result.suggestions) ? result.suggestions : []),
+      agentComments: JSON.stringify(agentComments),
+      replacementImages: JSON.stringify(normalizeAgentImages(result.images, documentId, null, aiRunId))
     });
   } catch (error) {
     if (linkedRepo) {
@@ -227,22 +203,29 @@ async function runAgentConversationInBackground(input: {
       }).catch(() => null);
     }
 
+    const failureMessage = isRunCancellation(error, abort.signal)
+      ? RUN_CANCELLED_MESSAGE
+      : error instanceof Error
+        ? error.message
+        : "Agent conversation failed.";
     await recordAiRunEvent({
       aiRunId,
       role: "error",
-      message: error instanceof Error ? error.message : "Agent conversation failed."
+      message: failureMessage
     }).catch(() => null);
     await db.aiRun
       .update({
         where: { id: aiRunId },
         data: {
           status: "FAILED",
-          error: error instanceof Error ? error.message : "Agent conversation failed.",
+          error: failureMessage,
           finishedAt: new Date()
         }
       })
       .catch(() => null);
   } finally {
+    deregisterRunAbortController(aiRunId);
+    stopHeartbeat();
     if (linkedRepo && linkedRepo.baseWorkspace !== linkedRepo.worktree) {
       await removeRunWorktree(linkedRepo).catch(() => null);
     }

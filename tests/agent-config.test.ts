@@ -4,8 +4,10 @@ import { test } from "node:test";
 import {
   DEFAULT_AGENT_MAX_TURNS,
   DEFAULT_AGENT_MODEL,
+  agentModelProvider,
   isAgentEffort,
   isAgentModel,
+  isLiteLlmAgentModel,
   isOpenRouterAgentModel,
   isStorableAgentModel,
   normalizeAgentModel,
@@ -180,4 +182,45 @@ test("resolveRefusalFallbackModel honors the env fallback model like resolveAgen
   assert.equal(resolveRefusalFallbackModel(null, "claude-fable-5"), REFUSAL_FALLBACK_MODEL);
   assert.equal(resolveRefusalFallbackModel({ effort: "off" }, "claude-fable-5"), REFUSAL_FALLBACK_MODEL);
   assert.equal(resolveRefusalFallbackModel(null, "claude-sonnet-5"), null);
+});
+
+test("litellm models resolve to the bare name with thinking force-disabled", () => {
+  const resolved = resolveAgentSdkConfig({ model: "litellm/anthropic/claude-opus-4-8", effort: "high" });
+  assert.equal(resolved.provider, "litellm");
+  assert.equal(resolved.model, "anthropic/claude-opus-4-8");
+  assert.deepEqual(resolved.thinking, { type: "disabled" });
+  assert.equal(resolved.effort, undefined);
+  assert.equal(resolved.label, "litellm:anthropic/claude-opus-4-8");
+});
+
+test("isStorableAgentModel accepts well-formed litellm model names of any depth", () => {
+  for (const value of [
+    "litellm/anthropic/claude-opus-4-8",
+    "litellm/openai/gpt-5",
+    "litellm/openrouter/openai/gpt-5",
+    "litellm/local/qwen3.6-27b",
+    "litellm/embedding"
+  ]) {
+    assert.equal(isStorableAgentModel(value), true, `expected storable: ${value}`);
+  }
+});
+
+test("isStorableAgentModel rejects malformed litellm values", () => {
+  for (const value of ["litellm/", "litellm//x", "litellm/a b", "litellm/../etc/passwd", `litellm/${"a".repeat(200)}`]) {
+    assert.equal(isStorableAgentModel(value), false, `expected rejected: ${String(value)}`);
+  }
+});
+
+test("agentModelProvider routes each prefix to its provider", () => {
+  assert.equal(agentModelProvider("claude-sonnet-5"), "anthropic");
+  assert.equal(agentModelProvider("sonnet"), "anthropic");
+  assert.equal(agentModelProvider("openrouter/openai/gpt-5.2"), "openrouter");
+  assert.equal(agentModelProvider("litellm/anthropic/claude-opus-4-8"), "litellm");
+  assert.equal(agentModelProvider(null), "anthropic");
+  assert.equal(isLiteLlmAgentModel("litellm/openai/gpt-5"), true);
+  assert.equal(isLiteLlmAgentModel("openrouter/openai/gpt-5"), false);
+});
+
+test("litellm models never fall back to an Anthropic model on refusal", () => {
+  assert.equal(resolveRefusalFallbackModel({ model: "litellm/anthropic/claude-fable-5" }), null);
 });

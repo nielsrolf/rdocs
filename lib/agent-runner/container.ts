@@ -10,12 +10,13 @@ import type {
   DocumentEnv
 } from "@/agent-core";
 
-import { isAuthFailure, isOpenRouterAgentModel, isRetryableAgentError } from "@/agent-core";
+import { agentModelProvider, isAuthFailure, isRetryableAgentError } from "@/agent-core";
 
 import type { AgentRunner, AgentRunOptions, MergeResolveJob } from "./index";
 import { toAgentJob } from "./index";
 import { buildContainerEnv, buildContainerRunArgs, serializeEnvFile } from "./container-args";
 import { HOST_SESSION_EXPIRED_MESSAGE, resolveContainerCredentialEnv } from "./agent-credential";
+import { RunCancelledError } from "./run-registry";
 
 // Transient container-level failures (spawn / exit-without-result) get one
 // bounded backoff retry here. In-agent-loop API errors (429/500/overloaded) are
@@ -37,7 +38,8 @@ export type ContainerFailureDecision =
 export function classifyContainerFailure(
   error: unknown,
   ctx: {
-    isOpenRouter: boolean;
+    /** True for OpenRouter/LiteLLM jobs, which authenticate with a durable provider key. */
+    usesProviderKey: boolean;
     authRetried: boolean;
     transientAttempt: number;
     delaysMs?: number[];
@@ -45,9 +47,9 @@ export function classifyContainerFailure(
 ): ContainerFailureDecision {
   const delaysMs = ctx.delaysMs ?? CONTAINER_TRANSIENT_DELAYS_MS;
   if (isAuthFailure(error)) {
-    // OpenRouter jobs use a durable API key: re-resolving can't refresh it, so
-    // fail fast. Anthropic jobs get exactly one re-resolve-and-retry.
-    if (!ctx.isOpenRouter && !ctx.authRetried) {
+    // OpenRouter/LiteLLM jobs use a durable API key: re-resolving can't refresh
+    // it, so fail fast. Anthropic jobs get exactly one re-resolve-and-retry.
+    if (!ctx.usesProviderKey && !ctx.authRetried) {
       return { action: "auth-retry" };
     }
     return {
@@ -88,7 +90,9 @@ export class ContainerRunner implements AgentRunner {
       workspaceHostPath: job.input.workspacePath,
       agentEnv: job.agentEnv,
       agentModel: job.agentConfig?.model,
-      onProgress: options?.onProgress
+      onProgress: options?.onProgress,
+      signal: options?.signal,
+      containerName: options?.containerName
     });
     return output as ClaudeResearchAgentOutput;
   }
@@ -115,6 +119,8 @@ export class ContainerRunner implements AgentRunner {
     agentEnv?: DocumentEnv;
     agentModel?: string | null;
     onProgress?: AgentRunOptions["onProgress"];
+    signal?: AbortSignal;
+    containerName?: string;
   }): Promise<Record<string, unknown>> {
     const runtime = process.env.AGENT_CONTAINER_RUNTIME || "docker";
     const image = process.env.AGENT_CONTAINER_IMAGE || "gdocs-agent:local";
@@ -122,7 +128,7 @@ export class ContainerRunner implements AgentRunner {
 
     const tmpDir = await mkdtemp(path.join(os.tmpdir(), "gdocs-agent-"));
     const envFile = path.join(tmpDir, "env");
-    const isOpenRouter = isOpenRouterAgentModel(opts.agentModel);
+    const usesProviderKey = agentModelProvider(opts.agentModel) !== "anthropic";
     try {
       // (Re-)resolve the credential and rewrite the env-file. Called once up front
       // and again before an auth retry, so a token Claude Code refreshed on the
@@ -144,6 +150,7 @@ export class ContainerRunner implements AgentRunner {
 
       const args = buildContainerRunArgs({
         image,
+        name: opts.containerName,
         workspaceHostPath: opts.workspaceHostPath,
         envFileHostPath: envFile,
         uid: process.getuid?.(),
@@ -159,11 +166,22 @@ export class ContainerRunner implements AgentRunner {
       let authRetried = false;
       let transientAttempt = 0;
       for (;;) {
+        if (opts.signal?.aborted) {
+          throw new RunCancelledError();
+        }
         await prepareEnv();
         try {
-          return await this.spawnContainer(runtime, args, opts.job, opts.onProgress);
+          return await this.spawnContainer(runtime, args, opts.job, opts.onProgress, {
+            signal: opts.signal,
+            containerName: opts.containerName
+          });
         } catch (error) {
-          const decision = classifyContainerFailure(error, { isOpenRouter, authRetried, transientAttempt });
+          // A killed container manifests as "exited without a result" — never
+          // classify a cancellation as transient and retry it.
+          if (opts.signal?.aborted) {
+            throw new RunCancelledError();
+          }
+          const decision = classifyContainerFailure(error, { usesProviderKey, authRetried, transientAttempt });
           if (decision.action === "auth-retry") {
             authRetried = true;
             console.warn(
@@ -196,10 +214,35 @@ export class ContainerRunner implements AgentRunner {
     runtime: string,
     args: string[],
     job: unknown,
-    onProgress?: AgentRunOptions["onProgress"]
+    onProgress?: AgentRunOptions["onProgress"],
+    cancel?: { signal?: AbortSignal; containerName?: string }
   ): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       const child = spawn(runtime, args, { stdio: ["pipe", "pipe", "pipe"] });
+
+      // Cancellation: SIGTERM the docker client (which proxies the signal into
+      // the container) and, when the container is named, `docker kill` it too —
+      // deterministic even if the client process is wedged. The close handler
+      // then settles the promise; the spawnJob loop turns it into
+      // RunCancelledError because the signal is aborted.
+      const onAbort = () => {
+        child.kill("SIGTERM");
+        if (cancel?.containerName) {
+          const killer = spawn(runtime, ["kill", "--signal", "KILL", cancel.containerName], {
+            stdio: "ignore",
+            detached: true
+          });
+          killer.on("error", () => {});
+          killer.unref();
+        }
+      };
+      if (cancel?.signal) {
+        if (cancel.signal.aborted) {
+          onAbort();
+        } else {
+          cancel.signal.addEventListener("abort", onAbort, { once: true });
+        }
+      }
 
       let result: Record<string, unknown> | null = null;
       let frameError: string | null = null;
@@ -254,6 +297,7 @@ export class ContainerRunner implements AgentRunner {
       );
 
       child.on("close", async (code) => {
+        cancel?.signal?.removeEventListener("abort", onAbort);
         if (stdoutBuffer.trim()) handleFrame(stdoutBuffer);
         await Promise.all(pending);
         if (frameError) {

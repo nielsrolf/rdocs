@@ -16,6 +16,7 @@ import { hasDocumentEnvKey } from "@/lib/document-env";
 import { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
 import { db } from "@/lib/db";
 import { resolveDocumentAccess } from "@/lib/permissions";
+import { hasUserCredential } from "@/lib/user-credentials";
 import { getPublicOrigin } from "@/lib/request-origin";
 
 type PageProps = {
@@ -121,7 +122,17 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
     ...member,
     permission: member.permission as PermissionLevelValue
   }));
-  const initialHasOpenRouterKey = await hasDocumentEnvKey(id, "OPENROUTER_API_KEY");
+  // Third-party model gating: a document env key OR a per-user credential the
+  // document OWNER connected (owner keys apply to every doc they own).
+  const [envHasOpenRouterKey, envHasLiteLlmKey, ownerHasOpenRouterKey, ownerHasLiteLlmKey] =
+    await Promise.all([
+      hasDocumentEnvKey(id, "OPENROUTER_API_KEY"),
+      hasDocumentEnvKey(id, "LITELLM_API_KEY"),
+      hasUserCredential(access.document.ownerId, "openrouter"),
+      hasUserCredential(access.document.ownerId, "litellm")
+    ]);
+  const initialHasOpenRouterKey = envHasOpenRouterKey || ownerHasOpenRouterKey;
+  const initialHasLiteLlmKey = envHasLiteLlmKey || ownerHasLiteLlmKey;
   const initialCollaborationVersion = await getCollaborationVersion(
     access.document.id,
     access.document.content,
@@ -147,6 +158,9 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         initialAgentModel={access.document.agentModel}
         initialAgentEffort={access.document.agentEffort}
         initialHasOpenRouterKey={initialHasOpenRouterKey}
+        initialHasLiteLlmKey={initialHasLiteLlmKey}
+        ownerHasOpenRouterKey={ownerHasOpenRouterKey}
+        ownerHasLiteLlmKey={ownerHasLiteLlmKey}
         initialThreads={normalizedThreads}
         initialTitle={access.document.title}
         isAuthenticated={Boolean(user)}

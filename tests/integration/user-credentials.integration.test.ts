@@ -63,12 +63,13 @@ function authed(cookie: string, url: string, init: RequestInit = {}) {
 itLive("credential CRUD: connect, mask, replace, and remove", async (t) => {
   const cookie = await signUp();
 
-  // Initially none connected.
+  // Initially none connected. (The route returns the multi-provider
+  // `credentials` array — at most one entry per provider.)
   let res = await authed(cookie, "/api/user/credentials");
   assert.equal(res.status, 200);
-  assert.equal((await res.json()).credential, null);
+  assert.deepEqual((await res.json()).credentials, []);
 
-  // Connect an API key (kind auto-detected).
+  // Connect an API key (provider defaults to anthropic, kind auto-detected).
   res = await authed(cookie, "/api/user/credentials", {
     method: "POST",
     body: JSON.stringify({ value: "sk-ant-api03-abcdefghijklmnop" })
@@ -79,8 +80,11 @@ itLive("credential CRUD: connect, mask, replace, and remove", async (t) => {
     return;
   }
   assert.equal(res.status, 200, "connect should succeed");
-  assert.equal(created.credential.kind, "api_key");
-  assert.match(created.credential.masked, /\*/, "value returned masked");
+  const anthropic = created.credentials.find(
+    (credential: { provider: string }) => credential.provider === "anthropic"
+  );
+  assert.equal(anthropic?.kind, "api_key");
+  assert.match(anthropic?.masked ?? "", /\*/, "value returned masked");
   assert.ok(
     !JSON.stringify(created).includes("abcdefghijklmnop"),
     "full secret never returned"
@@ -92,7 +96,10 @@ itLive("credential CRUD: connect, mask, replace, and remove", async (t) => {
     body: JSON.stringify({ value: "sk-ant-oat01-zyxwvutsrqponml" })
   });
   assert.equal(res.status, 200);
-  assert.equal((await res.json()).credential.kind, "oauth");
+  const replaced = (await res.json()).credentials.find(
+    (credential: { provider: string }) => credential.provider === "anthropic"
+  );
+  assert.equal(replaced?.kind, "oauth");
 
   // Mismatched explicit kind is rejected.
   res = await authed(cookie, "/api/user/credentials", {
@@ -109,10 +116,13 @@ itLive("credential CRUD: connect, mask, replace, and remove", async (t) => {
   assert.equal(res.status, 400, "bad prefix rejected");
 
   // Remove.
-  res = await authed(cookie, "/api/user/credentials", { method: "DELETE" });
+  res = await authed(cookie, "/api/user/credentials", {
+    method: "DELETE",
+    body: JSON.stringify({ provider: "anthropic" })
+  });
   assert.equal(res.status, 200);
   res = await authed(cookie, "/api/user/credentials");
-  assert.equal((await res.json()).credential, null);
+  assert.deepEqual((await res.json()).credentials, []);
 });
 
 itLive("credential route requires auth", async () => {

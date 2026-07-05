@@ -23,24 +23,29 @@ model User {
   commentReactions  CommentReaction[]
   mentions          CommentMention[]
   documentMentions  DocumentMention[]
-  credential        UserCredential?
+  credentials       UserCredential[]
 }
 
-// A single Anthropic credential a user connects once; every document they OWN
-// inherits it, and the agent runs under the owner's credential (see
-// lib/user-credentials.ts). `kind` is "api_key" (an Anthropic API key) or
-// "oauth" (a `claude setup-token` subscription token). `secret` is the value
-// encrypted at rest with CREDENTIAL_ENCRYPTION_KEY (AES-256-GCM) — never
-// returned in full over the API; listed back masked, like DocumentEnvVar.
+// Per-user AI credentials, at most one per provider; every document the user
+// OWNS inherits them, and the agent runs under the owner's credential (see
+// lib/user-credentials.ts). `provider` is "anthropic" | "openrouter" |
+// "litellm". `kind` is "api_key" (a plain API key — the only kind for
+// openrouter/litellm) or "oauth" (a `claude setup-token` subscription token,
+// anthropic only). `secret` is the value encrypted at rest with
+// CREDENTIAL_ENCRYPTION_KEY (AES-256-GCM) — never returned in full over the
+// API; listed back masked, like DocumentEnvVar.
 model UserCredential {
   id        String   @id @default(cuid())
-  userId    String   @unique
+  userId    String
+  provider  String   @default("anthropic")
   kind      String
   secret    String
   label     String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider])
 }
 
 model Document {
@@ -249,6 +254,10 @@ model AiRun {
   error         String?
   startedAt     DateTime          @default(now())
   finishedAt    DateTime?
+  // Process-liveness heartbeat ticked by the in-process runner while the run
+  // executes. Distinguishes "quiet but alive" (long tool waits emit no
+  // AiRunEvents) from "owning server died" for the stale-run reaper.
+  heartbeatAt   DateTime?
   selectionId        String?
   replacementText    String?
   replacementImages  String?

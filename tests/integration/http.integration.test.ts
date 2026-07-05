@@ -274,7 +274,14 @@ itLive("agent model PATCH accepts canonical ids, legacy aliases, and openrouter 
   const cookie = await signUp();
   const docId = await createDocument(cookie);
 
-  for (const agentModel of ["claude-fable-5", "sonnet", "openrouter/openai/gpt-5.2", "openrouter/deepseek/deepseek-v3.2:free"]) {
+  for (const agentModel of [
+    "claude-fable-5",
+    "sonnet",
+    "openrouter/openai/gpt-5.2",
+    "litellm/anthropic/claude-opus-4-8",
+    "litellm/openrouter/openai/gpt-5",
+    "openrouter/deepseek/deepseek-v3.2:free"
+  ]) {
     const res = await authed(cookie, `/api/documents/${docId}`, {
       method: "PATCH",
       body: JSON.stringify({ title: "model test", agentModel })
@@ -286,7 +293,7 @@ itLive("agent model PATCH accepts canonical ids, legacy aliases, and openrouter 
   const data = await get.json();
   assert.equal(data.document.agentModel, "openrouter/deepseek/deepseek-v3.2:free");
 
-  for (const agentModel of ["gpt-5", "openrouter/", "openrouter/../../etc/passwd", "openrouter/a b/c"]) {
+  for (const agentModel of ["gpt-5", "openrouter/", "openrouter/../../etc/passwd", "openrouter/a b/c", "litellm/", "litellm/../etc/passwd"]) {
     const res = await authed(cookie, `/api/documents/${docId}`, {
       method: "PATCH",
       body: JSON.stringify({ title: "model test", agentModel })
@@ -319,4 +326,77 @@ itLive("document GET reports OPENROUTER_API_KEY presence (never the value)", asy
   assert.equal(del.status, 200);
   const cleared = await (await authed(cookie, `/api/documents/${docId}`)).json();
   assert.equal(cleared.document.hasOpenRouterKey, false);
+});
+
+itLive("a per-user provider credential unlocks third-party models on the owner's documents", async () => {
+  const cookie = await signUp();
+  const docId = await createDocument(cookie);
+
+  const before = await (await authed(cookie, `/api/documents/${docId}`)).json();
+  assert.equal(before.document.hasOpenRouterKey, false);
+  assert.equal(before.document.hasLiteLlmKey, false);
+
+  // Connect user-level keys (no document env involved).
+  for (const [provider, value] of [
+    ["openrouter", "sk-or-v1-user-test"],
+    ["litellm", "sk-litellm-user-test"]
+  ]) {
+    const res = await authed(cookie, "/api/user/credentials", {
+      method: "POST",
+      body: JSON.stringify({ provider, value })
+    });
+    assert.equal(res.status, 200, `expected 200 connecting ${provider} credential`);
+  }
+
+  const list = await (await authed(cookie, "/api/user/credentials")).json();
+  assert.deepEqual(
+    list.credentials.map((c: { provider: string }) => c.provider).sort(),
+    ["litellm", "openrouter"]
+  );
+  assert.ok(
+    !JSON.stringify(list).includes("sk-or-v1-user-test"),
+    "credential value must never be returned in full"
+  );
+
+  const after = await (await authed(cookie, `/api/documents/${docId}`)).json();
+  assert.equal(after.document.hasOpenRouterKey, true, "owner openrouter key should gate the selector");
+  assert.equal(after.document.hasLiteLlmKey, true, "owner litellm key should gate the selector");
+
+  // Removing the user-level keys locks the groups again.
+  for (const provider of ["openrouter", "litellm"]) {
+    const res = await authed(cookie, "/api/user/credentials", {
+      method: "DELETE",
+      body: JSON.stringify({ provider })
+    });
+    assert.equal(res.status, 200);
+  }
+  const cleared = await (await authed(cookie, `/api/documents/${docId}`)).json();
+  assert.equal(cleared.document.hasOpenRouterKey, false);
+  assert.equal(cleared.document.hasLiteLlmKey, false);
+});
+
+itLive("document GET reports LITELLM_API_KEY presence (never the value)", async () => {
+  const cookie = await signUp();
+  const docId = await createDocument(cookie);
+
+  const before = await (await authed(cookie, `/api/documents/${docId}`)).json();
+  assert.equal(before.document.hasLiteLlmKey, false);
+
+  const add = await authed(cookie, `/api/documents/${docId}/environment`, {
+    method: "POST",
+    body: JSON.stringify({ key: "LITELLM_API_KEY", value: "sk-litellm-test" })
+  });
+  assert.equal(add.status, 200);
+
+  const after = await (await authed(cookie, `/api/documents/${docId}`)).json();
+  assert.equal(after.document.hasLiteLlmKey, true);
+  assert.ok(!JSON.stringify(after).includes("sk-litellm-test"), "key value must never appear in the document payload");
+
+  const del = await authed(cookie, `/api/documents/${docId}/environment`, {
+    method: "DELETE",
+    body: JSON.stringify({ key: "LITELLM_API_KEY" })
+  });
+  assert.equal(del.status, 200);
+  const cleared = await (await authed(cookie, `/api/documents/${docId}`)).json();
+  assert.equal(cleared.document.hasLiteLlmKey, false);
 });

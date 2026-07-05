@@ -10,6 +10,7 @@ import { hasDocumentEnvKey } from "@/lib/document-env";
 import { parseDocumentContent, serializeDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
 import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import { hasUserCredential } from "@/lib/user-credentials";
 import { normalizeSourceLinks } from "@/lib/sources";
 
 const agentEffortValues = AGENT_EFFORTS.map((e) => e.value) as [string, ...string[]];
@@ -248,8 +249,14 @@ export async function GET(request: Request, { params }: RouteContext) {
       agentModel: access.document.agentModel,
       agentEffort: access.document.agentEffort,
       // Key presence only (never the value) — the selector uses it to decide
-      // whether to offer OpenRouter models.
-      hasOpenRouterKey: await hasDocumentEnvKey(access.document.id, "OPENROUTER_API_KEY"),
+      // whether to offer OpenRouter/LiteLLM models. A doc env key OR a per-user
+      // key connected by the document owner counts.
+      hasOpenRouterKey:
+        (await hasDocumentEnvKey(access.document.id, "OPENROUTER_API_KEY")) ||
+        (await hasUserCredential(access.document.ownerId, "openrouter")),
+      hasLiteLlmKey:
+        (await hasDocumentEnvKey(access.document.id, "LITELLM_API_KEY")) ||
+        (await hasUserCredential(access.document.ownerId, "litellm")),
       updatedAt: access.document.updatedAt
     },
     threads,

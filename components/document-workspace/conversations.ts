@@ -1,5 +1,14 @@
 import type { ActiveAiRunView, AiRunEventView } from "./types";
 
+// Content fingerprint of a polled run list. The 2s document poll returns fresh
+// object identities every tick even when nothing changed; re-setting state from
+// them re-renders the whole agent view, which yanks auto-scroll and disturbs
+// any text selection the user is making. Callers compare fingerprints and skip
+// the state update entirely for no-op polls.
+export function aiRunsFingerprint(runs: ActiveAiRunView[]): string {
+  return JSON.stringify(runs);
+}
+
 export type AgentConversation = {
   rootId: string;
   runs: ActiveAiRunView[];

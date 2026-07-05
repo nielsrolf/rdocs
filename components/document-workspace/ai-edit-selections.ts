@@ -330,6 +330,25 @@ export function getAiEditSelectionRange(state: EditorState, id: string) {
   return collectAiEditSelectionRanges(state.doc).get(id) ?? null;
 }
 
+// Where a finished run's replacement should land. An intact anchor (plugin
+// entry or surviving mark — including the zero-width point a deleted range
+// collapses to) wins. When the anchor is truly gone (e.g. a false "abandoned"
+// failure already stripped the mark before the run actually finished), the
+// result must still land SOMEWHERE visible: fall back to an end-of-document
+// insertion point instead of dropping the agent's work. Callers use
+// `anchorLost` to tell the user where the result went.
+export function resolveAiEditApplyRange(
+  state: EditorState,
+  id: string
+): { from: number; to: number; anchorLost: boolean } {
+  const range = getAiEditSelectionRange(state, id);
+  if (range) {
+    return { ...range, anchorLost: false };
+  }
+  const end = state.doc.content.size;
+  return { from: end, to: end, anchorLost: true };
+}
+
 // Re-pins every tracked selection's plugin entry to its true document position
 // (from the surviving marks/atom attributes). Call this right after a full-doc
 // `editor.commands.setContent(...)` remount: that remount's replace-everything
@@ -531,6 +550,20 @@ export function aiEditSelectionIdsToProtect(runs: ActiveAiRunView[]): Set<string
     if (selectionId) ids.add(selectionId);
   }
   return ids;
+}
+
+// Mount-time wrapper around cleanupStaleAiEditRangeMarks. `runsLoaded` must be
+// true only once the FIRST server-derived run list has arrived: sweeping
+// against the initial empty list protects nothing and strips every anchor —
+// including the mark a SUCCEEDED-but-unapplied run needs to land its result —
+// which made every fresh page load eat pending results as "marker lost".
+export function cleanupStaleAiEditRangeMarksAfterRunsLoaded(
+  state: EditorState,
+  runs: ActiveAiRunView[],
+  runsLoaded: boolean
+): Transaction | null {
+  if (!runsLoaded) return null;
+  return cleanupStaleAiEditRangeMarks(state, aiEditSelectionIdsToProtect(runs));
 }
 
 export function cleanupStaleAiEditRangeMarks(state: EditorState, activeSelectionIds: Set<string>): Transaction | null {

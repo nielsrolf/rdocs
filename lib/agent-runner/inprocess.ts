@@ -7,6 +7,7 @@ import {
 } from "@/agent-core";
 
 import type { AgentRunner, AgentRunOptions, MergeResolveJob } from "./index";
+import { RunCancelledError } from "./run-registry";
 
 // Runs the agent loop IN THE SERVER PROCESS — today's behavior. This provides
 // NO OS-level sandbox: the agent's Bash/Read/Write tools run as subprocesses of
@@ -33,11 +34,37 @@ export class InProcessRunner implements AgentRunner {
     const validateSubmission = options?.validation
       ? buildSubmissionValidator(options.validation, { workspacePath: input.workspacePath })
       : undefined;
-    return runClaudeResearchAgent(input, {
+    const runPromise = runClaudeResearchAgent(input, {
       onProgress: options?.onProgress,
       agentConfig: options?.agentConfig,
       agentEnv: options?.agentEnv,
       validateSubmission
+    });
+    const signal = options?.signal;
+    if (!signal) {
+      return runPromise;
+    }
+    // Best-effort cancellation for the dev-only in-process backend: settle the
+    // run promise immediately so the route's bookkeeping proceeds. The SDK loop
+    // itself is not torn down (no OS boundary to kill) — it finishes orphaned.
+    // The container backend is the one that kills the actual execution.
+    return new Promise<ClaudeResearchAgentOutput>((resolve, reject) => {
+      const onAbort = () => reject(new RunCancelledError());
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+      runPromise.then(
+        (value) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
+        (error) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        }
+      );
     });
   }
 

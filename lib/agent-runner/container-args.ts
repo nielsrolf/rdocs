@@ -5,6 +5,8 @@ import { buildAgentEnv, type DocumentEnv } from "@/agent-core";
 
 export type ContainerRunSpec = {
   image: string;
+  /** Stable container name (`--name`) so a cancel can `docker kill` it deterministically. */
+  name?: string;
   /** Host path of the document worktree; bind-mounted rw at containerWorkspace. */
   workspaceHostPath: string;
   /** Host path of the --env-file (read by the container runtime on the host). */
@@ -86,6 +88,10 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
   const readOnly = spec.readOnly ?? true;
 
   const args = ["run", "--rm", "-i"];
+
+  if (spec.name) {
+    args.push("--name", spec.name);
+  }
 
   // Stronger isolation runtime (e.g. gVisor's runsc) when configured. An extra
   // layer on top of the flags below, not a replacement for them.

@@ -15,6 +15,12 @@ export async function register() {
   const { gcStaleWorktrees } = await import("@/lib/research-workspace");
 
   try {
+    // Snapshot the orphans' workspaces BEFORE flipping their status, so their
+    // uncommitted work can be preserved for session continuation.
+    const orphanedRuns = await db.aiRun.findMany({
+      where: { status: { in: ["RUNNING", "PENDING"] } },
+      select: { id: true, documentId: true, workspacePath: true, branchName: true }
+    });
     const orphaned = await db.aiRun.updateMany({
       where: { status: { in: ["RUNNING", "PENDING"] } },
       data: {
@@ -25,6 +31,15 @@ export async function register() {
     });
     if (orphaned.count > 0) {
       console.log(`[startup] failed ${orphaned.count} orphaned AI run(s) from a previous process.`);
+    }
+    if (orphanedRuns.length > 0) {
+      // Don't block startup on git work; salvage runs in the background.
+      const { salvageOrphanedRunWorkspaces } = await import("@/lib/run-salvage");
+      void salvageOrphanedRunWorkspaces(orphanedRuns).catch((error) => {
+        console.error("[startup] interrupted-run salvage failed", {
+          error: error instanceof Error ? error.message : error
+        });
+      });
     }
   } catch (error) {
     console.error("[startup] failed to reap orphaned AI runs", {

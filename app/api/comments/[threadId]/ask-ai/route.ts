@@ -1,7 +1,13 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { recordAiRunEvent } from "@/lib/ai-runs";
+import { markAiRunSucceeded, recordAiRunEvent, startAiRunHeartbeat } from "@/lib/ai-runs";
+import {
+  RUN_CANCELLED_MESSAGE,
+  deregisterRunAbortController,
+  isRunCancellation,
+  registerRunAbortController
+} from "@/lib/agent-runner/run-registry";
 import { getCurrentUser } from "@/lib/auth";
 import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { serializeComment } from "@/lib/document-data";
@@ -62,6 +68,8 @@ type ThreadForReply = {
 async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForReply; createdById: string | null }) {
   const { aiRunId, thread, createdById } = input;
   let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
+  const stopHeartbeat = startAiRunHeartbeat(aiRunId);
+  const abort = registerRunAbortController(aiRunId);
 
   try {
     const documentContent = parseDocumentContent(thread.document.content);
@@ -142,6 +150,8 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
     }, {
       agentConfig: { model: thread.document.agentModel, effort: thread.document.agentEffort },
       agentEnv,
+      signal: abort.signal,
+      containerName: `gdocs-run-${aiRunId}`,
       validation: { kind: "comment_reply", documentText: suggestionAnchorText },
       onProgress: async (event) => {
         await Promise.all([
@@ -225,22 +235,17 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
       documentText
     });
 
-    await db.aiRun.update({
-      where: { id: aiRunId },
-      data: {
-        status: "SUCCEEDED",
-        model: aiReply.model,
-        commitSha: commit.commitSha,
-        commitUrl: commit.commitUrl,
-        finishedAt: new Date(),
-        suggestions: JSON.stringify(Array.isArray(aiReply.suggestions) ? aiReply.suggestions : []),
-        agentComments: JSON.stringify(agentComments),
-        // Persist any repo images the agent committed so suggestions that cite
-        // them with markdown can resolve the image when applied client-side.
-        replacementImages: JSON.stringify(
-          normalizeAgentImages(aiReply.images, thread.documentId, null, aiRunId)
-        )
-      }
+    await markAiRunSucceeded(aiRunId, {
+      model: aiReply.model,
+      commitSha: commit.commitSha,
+      commitUrl: commit.commitUrl,
+      suggestions: JSON.stringify(Array.isArray(aiReply.suggestions) ? aiReply.suggestions : []),
+      agentComments: JSON.stringify(agentComments),
+      // Persist any repo images the agent committed so suggestions that cite
+      // them with markdown can resolve the image when applied client-side.
+      replacementImages: JSON.stringify(
+        normalizeAgentImages(aiReply.images, thread.documentId, null, aiRunId)
+      )
     });
     await recordAiRunEvent({
       aiRunId,
@@ -276,22 +281,29 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
       error: error instanceof Error ? error.message : error
     });
 
+    const failureMessage = isRunCancellation(error, abort.signal)
+      ? RUN_CANCELLED_MESSAGE
+      : error instanceof Error
+        ? error.message
+        : "AI run failed.";
     await recordAiRunEvent({
       aiRunId,
       role: "error",
-      message: error instanceof Error ? error.message : "AI run failed."
+      message: failureMessage
     }).catch(() => null);
     await db.aiRun
       .update({
         where: { id: aiRunId },
         data: {
           status: "FAILED",
-          error: error instanceof Error ? error.message : "AI run failed.",
+          error: failureMessage,
           finishedAt: new Date()
         }
       })
       .catch(() => null);
   } finally {
+    deregisterRunAbortController(aiRunId);
+    stopHeartbeat();
     if (linkedRepo && linkedRepo.baseWorkspace !== linkedRepo.worktree) {
       await removeRunWorktree(linkedRepo).catch(() => null);
     }

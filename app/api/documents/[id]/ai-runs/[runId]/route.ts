@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getCurrentUser } from "@/lib/auth";
+import { cancelAiRun } from "@/lib/agent-runner/run-registry";
 import { db } from "@/lib/db";
 import { canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
 
@@ -112,7 +113,7 @@ export async function POST(request: Request, { params }: RouteContext) {
       ? (body as { shareToken?: unknown }).shareToken
       : null;
 
-  if (action !== "markApplied") {
+  if (action !== "markApplied" && action !== "cancel") {
     return NextResponse.json({ error: "Unsupported action." }, { status: 400 });
   }
 
@@ -122,6 +123,35 @@ export async function POST(request: Request, { params }: RouteContext) {
     user?.id,
     typeof shareToken === "string" ? shareToken : null
   );
+
+  if (action === "cancel") {
+    // Anyone who can start agent runs (comment access) may stop one.
+    if (!access || !canComment(access.permission)) {
+      return NextResponse.json({ error: "You do not have agent access." }, { status: 403 });
+    }
+    const target = await db.aiRun.findFirst({
+      where: { id: runId, documentId: id },
+      select: { status: true }
+    });
+    if (!target) {
+      return NextResponse.json({ error: "Run not found." }, { status: 404 });
+    }
+    if (target.status !== "RUNNING") {
+      return NextResponse.json({ ok: true, cancelled: false, status: target.status });
+    }
+    const cancelled = cancelAiRun(runId);
+    if (!cancelled) {
+      // RUNNING in the DB but not owned by this process — a restart orphan the
+      // reaper/boot sweep will fail shortly; nothing to abort here.
+      return NextResponse.json(
+        { error: "This run is not owned by the current server process; it will be reaped shortly." },
+        { status: 409 }
+      );
+    }
+    // Bookkeeping (status FAILED + "Cancelled by user." + workspace preservation)
+    // happens in the background runner's catch; the client sees it via polling.
+    return NextResponse.json({ ok: true, cancelled: true }, { status: 202 });
+  }
   // Suggest-only runs land as tracked changes (not committed content), so a
   // comment-access user is allowed to mark them applied; committed edits remain
   // edit-only.

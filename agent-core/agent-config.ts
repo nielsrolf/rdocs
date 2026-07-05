@@ -5,14 +5,19 @@
 // the SDK or the database — and framework-free, because it ships into the
 // agent container image.
 //
-// Two providers share the one selector:
+// Three providers share the one selector:
 //   - "anthropic": canonical Claude model ids, run against the Anthropic API.
 //   - "openrouter": any OpenRouter slug, stored with an "openrouter/" prefix
 //     (e.g. "openrouter/openai/gpt-5.2") and run through OpenRouter's
 //     Anthropic-compatible endpoint via the same SDK. Requires the document
 //     env to provide OPENROUTER_API_KEY (see applyProviderEnv in agent-env.ts).
+//   - "litellm": any model name served by a LiteLLM proxy, stored with a
+//     "litellm/" prefix (e.g. "litellm/anthropic/claude-opus-4-8") and run
+//     through LiteLLM's Anthropic-compatible /v1/messages endpoint. Requires
+//     LITELLM_API_KEY (document env) and LITELLM_BASE_URL (document env, or a
+//     host default — see applyProviderEnv in agent-env.ts).
 
-export type AgentModelProvider = "anthropic" | "openrouter";
+export type AgentModelProvider = "anthropic" | "openrouter" | "litellm";
 
 export type AgentModelOption = {
   /** Value stored on Document.agentModel. */
@@ -38,6 +43,16 @@ export const OPENROUTER_AGENT_MODELS: readonly AgentModelOption[] = [
   { value: "openrouter/minimax/minimax-m3", label: "MiniMax M3", hint: "MiniMax flagship", provider: "openrouter" },
   { value: "openrouter/google/gemini-3.5-flash", label: "Gemini 3.5 Flash", hint: "Fast Google model", provider: "openrouter" },
   { value: "openrouter/deepseek/deepseek-v4-pro", label: "DeepSeek V4 Pro", hint: "Strong open model", provider: "openrouter" }
+] as const;
+
+// Curated LiteLLM picks shown when the document has a LITELLM_API_KEY. Model
+// names are whatever the LiteLLM deployment routes (config.yaml model_name
+// entries, often provider-prefixed wildcards); any other name is reachable via
+// the custom-model input — this list is just sensible defaults, not a whitelist.
+export const LITELLM_AGENT_MODELS: readonly AgentModelOption[] = [
+  { value: "litellm/anthropic/claude-sonnet-5", label: "Claude Sonnet 5", hint: "Via LiteLLM", provider: "litellm" },
+  { value: "litellm/anthropic/claude-opus-4-8", label: "Claude Opus 4.8", hint: "Via LiteLLM", provider: "litellm" },
+  { value: "litellm/openai/gpt-5", label: "GPT-5", hint: "Via LiteLLM", provider: "litellm" }
 ] as const;
 
 // Historical values stored on existing Document rows before canonical ids.
@@ -67,11 +82,16 @@ export const DEFAULT_AGENT_MODEL = "claude-sonnet-5";
 export const DEFAULT_AGENT_EFFORT: AgentEffort = "off";
 
 export const OPENROUTER_MODEL_PREFIX = "openrouter/";
+export const LITELLM_MODEL_PREFIX = "litellm/";
 
 // An OpenRouter slug is "<author>/<model>", optionally with a ":variant"
 // suffix (e.g. ":free"). Dots and dashes appear in real slugs; spaces, path
 // traversal, and empty segments must not.
 const OPENROUTER_SLUG_RE = /^[a-z0-9][\w.-]*\/[a-z0-9][\w.:-]*$/i;
+// A LiteLLM model name is one or more "/"-separated segments (deployments route
+// names like "anthropic/claude-opus-4-8", "openrouter/openai/gpt-5", or a bare
+// alias like "embedding"). Same character discipline as OpenRouter slugs.
+const LITELLM_MODEL_RE = /^[a-z0-9][\w.:-]*(\/[a-z0-9][\w.:-]*)*$/i;
 const MAX_MODEL_VALUE_LENGTH = 160;
 
 /** Map a legacy stored alias ("sonnet"/"opus") to its canonical id. */
@@ -86,15 +106,33 @@ export function isOpenRouterAgentModel(value: unknown): boolean {
   );
 }
 
+export function isLiteLlmAgentModel(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    normalizeAgentModel(value).startsWith(LITELLM_MODEL_PREFIX)
+  );
+}
+
+/**
+ * Which provider a stored Document.agentModel routes through. Anything without
+ * a recognized provider prefix is treated as Anthropic (canonical ids, legacy
+ * aliases, and unknown values that will fall back downstream).
+ */
+export function agentModelProvider(value: unknown): AgentModelProvider {
+  if (isOpenRouterAgentModel(value)) return "openrouter";
+  if (isLiteLlmAgentModel(value)) return "litellm";
+  return "anthropic";
+}
+
 function isKnownAnthropicModel(value: string): boolean {
   return ANTHROPIC_AGENT_MODELS.some((m) => m.value === value);
 }
 
 /**
  * Whether a value may be persisted as Document.agentModel: a known Anthropic
- * model (or legacy alias), or "openrouter/" + a well-formed OpenRouter slug.
- * Shared by the PATCH route (server) and the selector UI (client) so both
- * sides validate identically.
+ * model (or legacy alias), "openrouter/" + a well-formed OpenRouter slug, or
+ * "litellm/" + a well-formed LiteLLM model name. Shared by the PATCH route
+ * (server) and the selector UI (client) so both sides validate identically.
  */
 export function isStorableAgentModel(value: unknown): value is string {
   if (typeof value !== "string" || value.length === 0 || value.length > MAX_MODEL_VALUE_LENGTH) {
@@ -102,10 +140,17 @@ export function isStorableAgentModel(value: unknown): value is string {
   }
   const normalized = normalizeAgentModel(value);
   if (isKnownAnthropicModel(normalized)) return true;
-  if (!normalized.startsWith(OPENROUTER_MODEL_PREFIX)) return false;
-  const slug = normalized.slice(OPENROUTER_MODEL_PREFIX.length);
-  if (slug.includes("..")) return false;
-  return OPENROUTER_SLUG_RE.test(slug);
+  if (normalized.startsWith(OPENROUTER_MODEL_PREFIX)) {
+    const slug = normalized.slice(OPENROUTER_MODEL_PREFIX.length);
+    if (slug.includes("..")) return false;
+    return OPENROUTER_SLUG_RE.test(slug);
+  }
+  if (normalized.startsWith(LITELLM_MODEL_PREFIX)) {
+    const name = normalized.slice(LITELLM_MODEL_PREFIX.length);
+    if (name.includes("..")) return false;
+    return LITELLM_MODEL_RE.test(name);
+  }
+  return false;
 }
 
 export function isAgentModel(value: unknown): value is AgentModel {
@@ -124,7 +169,7 @@ export type DocumentAgentConfig = {
 type SdkThinking = { type: "disabled" } | { type: "adaptive" };
 
 export type ResolvedAgentSdkConfig = {
-  /** Model id handed to the SDK: a canonical Claude id, or a bare OpenRouter slug. */
+  /** Model id handed to the SDK: a canonical Claude id, a bare OpenRouter slug, or a bare LiteLLM model name. */
   model: string;
   provider: AgentModelProvider;
   thinking: SdkThinking;
@@ -144,9 +189,9 @@ export type ResolvedAgentSdkConfig = {
  * An unrecognised model falls back; an unrecognised/"off"/missing effort disables
  * extended thinking — matching the pre-feature behaviour.
  *
- * OpenRouter models always run with extended thinking disabled: the adaptive
- * thinking params are Anthropic-specific and may be rejected by the compat
- * endpoint for non-Claude models.
+ * OpenRouter and LiteLLM models always run with extended thinking disabled:
+ * the adaptive thinking params are Anthropic-specific and may be rejected by
+ * the compat endpoint for non-Claude models.
  */
 export function resolveAgentSdkConfig(
   config: DocumentAgentConfig | null | undefined,
@@ -168,6 +213,16 @@ export function resolveAgentSdkConfig(
       provider: "openrouter",
       thinking: { type: "disabled" },
       label: `openrouter:${slug}`
+    };
+  }
+
+  if (normalized.startsWith(LITELLM_MODEL_PREFIX)) {
+    const name = normalized.slice(LITELLM_MODEL_PREFIX.length);
+    return {
+      model: name,
+      provider: "litellm",
+      thinking: { type: "disabled" },
+      label: `litellm:${name}`
     };
   }
 

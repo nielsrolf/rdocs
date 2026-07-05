@@ -32,6 +32,14 @@ export type AgentRunOptions = {
   validation?: SubmissionValidationSpec;
   agentConfig?: DocumentAgentConfig;
   agentEnv?: DocumentEnv;
+  // Cancellation. Aborting the signal must terminate the run promptly; backends
+  // reject with RunCancelledError (see run-registry.ts). Runtime-only — never
+  // shipped as part of the serialized job.
+  signal?: AbortSignal;
+  // Backend hint: a stable name for the execution unit (the docker container),
+  // so cancellation can kill it deterministically. Ignored by non-container
+  // backends.
+  containerName?: string;
 };
 
 /** The serializable half of an agent run — safe to JSON-encode and ship. */

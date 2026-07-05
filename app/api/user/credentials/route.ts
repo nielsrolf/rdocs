@@ -4,21 +4,29 @@ import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth";
 import {
   deleteUserCredential,
-  getUserCredentialMasked,
+  getUserCredentialsMasked,
   normalizeCredentialInput,
   upsertUserCredential
 } from "@/lib/user-credentials";
 
 export const runtime = "nodejs";
 
-// Per-user Anthropic credential connected once and inherited by every document
-// the user owns. Mirrors the document environment route: values are write-only
-// over the API — listed back masked, never in full.
+// Per-user AI credentials (at most one per provider) connected once and
+// inherited by every document the user owns. Mirrors the document environment
+// route: values are write-only over the API — listed back masked, never in
+// full.
+
+const providerSchema = z.enum(["anthropic", "openrouter", "litellm"]);
 
 const upsertSchema = z.object({
+  provider: providerSchema.optional().nullable(),
   kind: z.enum(["api_key", "oauth"]).optional().nullable(),
   value: z.string().min(1).max(8192),
   label: z.string().max(128).optional().nullable()
+});
+
+const deleteSchema = z.object({
+  provider: providerSchema.optional().nullable()
 });
 
 export async function GET() {
@@ -26,8 +34,8 @@ export async function GET() {
   if (!user) {
     return NextResponse.json({ error: "Not signed in." }, { status: 401 });
   }
-  const credential = await getUserCredentialMasked(user.id);
-  return NextResponse.json({ credential });
+  const credentials = await getUserCredentialsMasked(user.id);
+  return NextResponse.json({ credentials });
 }
 
 export async function POST(request: Request) {
@@ -45,6 +53,7 @@ export async function POST(request: Request) {
   let normalized;
   try {
     normalized = normalizeCredentialInput({
+      provider: parsed.data.provider ?? null,
       kind: parsed.data.kind ?? null,
       value: parsed.data.value
     });
@@ -65,15 +74,21 @@ export async function POST(request: Request) {
     );
   }
 
-  const credential = await getUserCredentialMasked(user.id);
-  return NextResponse.json({ ok: true, credential });
+  const credentials = await getUserCredentialsMasked(user.id);
+  return NextResponse.json({ ok: true, credentials });
 }
 
-export async function DELETE() {
+export async function DELETE(request: Request) {
   const user = await getCurrentUser();
   if (!user) {
     return NextResponse.json({ error: "Not signed in." }, { status: 401 });
   }
-  await deleteUserCredential(user.id);
-  return NextResponse.json({ ok: true, credential: null });
+  const body = await request.json().catch(() => null);
+  const parsed = deleteSchema.safeParse(body ?? {});
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid provider." }, { status: 400 });
+  }
+  await deleteUserCredential(user.id, parsed.data.provider ?? "anthropic");
+  const credentials = await getUserCredentialsMasked(user.id);
+  return NextResponse.json({ ok: true, credentials });
 }

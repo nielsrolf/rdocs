@@ -34,7 +34,12 @@ const ALLOWLIST_EXACT = new Set([
   // App-specific bits the agent relies on.
   "PYTHON_BIN",
   "GITHUB_TOKEN",
-  "GH_TOKEN"
+  "GH_TOKEN",
+  // Host-provided default endpoint for the LiteLLM provider. Only the URL —
+  // LITELLM_API_KEY is deliberately NOT allowlisted (like OPENROUTER_API_KEY,
+  // it must come from the document env so a host key is never silently billed
+  // for every document's runs).
+  "LITELLM_BASE_URL"
 ]);
 
 // Host variables whose names start with one of these prefixes are copied
@@ -71,11 +76,13 @@ export const OPENROUTER_BASE_URL = "https://openrouter.ai/api";
 
 /**
  * Rewrite an already-built agent env for the selected provider. No-op for
- * "anthropic". For "openrouter" the Claude Agent SDK is pointed at
- * OpenRouter's Anthropic-compatible endpoint:
- *   - requires OPENROUTER_API_KEY (from the document env) — throws a clear
- *     error when missing rather than silently running on the host's Anthropic
- *     credential and billing the wrong account;
+ * "anthropic". For "openrouter" and "litellm" the Claude Agent SDK is pointed
+ * at the provider's Anthropic-compatible endpoint:
+ *   - requires the provider key (OPENROUTER_API_KEY / LITELLM_API_KEY, from
+ *     the document env) — throws a clear error when missing rather than
+ *     silently running on the host's Anthropic credential and billing the
+ *     wrong account; litellm additionally requires LITELLM_BASE_URL (document
+ *     env, or the host default passed through the allowlist);
  *   - sets ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN (sent as a Bearer token);
  *   - clears ANTHROPIC_API_KEY and removes CLAUDE_CODE_OAUTH_TOKEN so no
  *     host Anthropic credential can win the SDK's auth precedence.
@@ -86,15 +93,36 @@ export function applyProviderEnv(
   env: Record<string, string>,
   provider: AgentModelProvider
 ): Record<string, string> {
-  if (provider !== "openrouter") return env;
-  const key = env.OPENROUTER_API_KEY?.trim();
-  if (!key) {
-    throw new Error(
-      "OpenRouter model selected but OPENROUTER_API_KEY is not set in the document environment. Add it via the Env menu."
-    );
+  if (provider !== "openrouter" && provider !== "litellm") return env;
+
+  let baseUrl: string;
+  let key: string | undefined;
+  if (provider === "openrouter") {
+    baseUrl = OPENROUTER_BASE_URL;
+    key = env.OPENROUTER_API_KEY?.trim();
+    if (!key) {
+      throw new Error(
+        "OpenRouter model selected but OPENROUTER_API_KEY is not set. Add it via the Env menu, or connect an OpenRouter key in the AI credentials menu."
+      );
+    }
+  } else {
+    key = env.LITELLM_API_KEY?.trim();
+    if (!key) {
+      throw new Error(
+        "LiteLLM model selected but LITELLM_API_KEY is not set. Add it via the Env menu, or connect a LiteLLM key in the AI credentials menu."
+      );
+    }
+    const rawBase = env.LITELLM_BASE_URL?.trim();
+    if (!rawBase) {
+      throw new Error(
+        "LiteLLM model selected but LITELLM_BASE_URL is not set. Add it via the Env menu (e.g. https://litellm.example.com) or configure a host default."
+      );
+    }
+    baseUrl = rawBase.replace(/\/+$/, "");
   }
+
   const result = { ...env };
-  result.ANTHROPIC_BASE_URL = OPENROUTER_BASE_URL;
+  result.ANTHROPIC_BASE_URL = baseUrl;
   result.ANTHROPIC_AUTH_TOKEN = key;
   // Empty string is treated as unset by the CLI (verified); keeping the key
   // present-but-empty guarantees a host ANTHROPIC_API_KEY cannot leak through.

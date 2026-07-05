@@ -145,3 +145,45 @@ test("env key validation accepts POSIX-ish names and rejects junk", () => {
   assert.equal(isValidEnvKey("has-dash"), false);
   assert.equal(isValidEnvKey(""), false);
 });
+
+test("applyProviderEnv rewrites the env to a LiteLLM endpoint", () => {
+  const env = applyProviderEnv(
+    {
+      LITELLM_API_KEY: "sk-litellm-abc",
+      LITELLM_BASE_URL: "https://litellm.example.com/",
+      ANTHROPIC_API_KEY: "sk-ant-host",
+      CLAUDE_CODE_OAUTH_TOKEN: "oauth-host",
+      PATH: "/bin"
+    },
+    "litellm"
+  );
+  // Trailing slash is stripped so the SDK's path-appending yields /v1/messages.
+  assert.equal(env.ANTHROPIC_BASE_URL, "https://litellm.example.com");
+  assert.equal(env.ANTHROPIC_AUTH_TOKEN, "sk-litellm-abc");
+  // Host Anthropic credentials must not survive (same guarantees as OpenRouter).
+  assert.equal(env.ANTHROPIC_API_KEY, "");
+  assert.equal("CLAUDE_CODE_OAUTH_TOKEN" in env, false);
+  // The key stays available to agent tools (e.g. scripts calling LiteLLM).
+  assert.equal(env.LITELLM_API_KEY, "sk-litellm-abc");
+  assert.equal(env.PATH, "/bin");
+});
+
+test("applyProviderEnv throws clear errors when LiteLLM key or base URL is missing", () => {
+  for (const env of [{}, { LITELLM_API_KEY: "", LITELLM_BASE_URL: "https://x" }, { LITELLM_API_KEY: "   ", LITELLM_BASE_URL: "https://x" }]) {
+    assert.throws(() => applyProviderEnv(env as Record<string, string>, "litellm"), /LITELLM_API_KEY/);
+  }
+  for (const env of [{ LITELLM_API_KEY: "sk-x" }, { LITELLM_API_KEY: "sk-x", LITELLM_BASE_URL: "  " }]) {
+    assert.throws(() => applyProviderEnv(env as Record<string, string>, "litellm"), /LITELLM_BASE_URL/);
+  }
+});
+
+test("host LITELLM_BASE_URL passes the allowlist but a host LITELLM_API_KEY does not", () => {
+  // The base URL is configuration, not a credential — a server-wide default is
+  // fine. The key must stay per-document so the host is never silently billed.
+  const env = buildAgentEnv({
+    LITELLM_BASE_URL: "http://host.docker.internal:9274",
+    LITELLM_API_KEY: "sk-host-litellm"
+  });
+  assert.equal(env.LITELLM_BASE_URL, "http://host.docker.internal:9274");
+  assert.equal(env.LITELLM_API_KEY, undefined);
+});

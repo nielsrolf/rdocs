@@ -1,26 +1,45 @@
 import crypto from "node:crypto";
 
-import { isOpenRouterAgentModel } from "@/agent-core";
+import { agentModelProvider } from "@/agent-core";
 import { maskSecret, type DocumentEnv } from "@/lib/agent-env";
 import { hasAnthropicCredential } from "@/lib/agent-runner/agent-credential";
 import { db } from "@/lib/db";
 import { loadDocumentEnv } from "@/lib/document-env";
 
-// Per-user Anthropic credential store. A user connects EITHER an Anthropic API
-// key OR a `claude setup-token` subscription OAuth token once; every document
-// they OWN inherits it, and the agent authenticates under the owner's
-// credential. Secrets are encrypted at rest (AES-256-GCM) and never returned in
-// full over the API — listed back masked, like DocumentEnvVar.
+// Per-user AI credential store, at most one credential per provider. For
+// "anthropic" a user connects EITHER an Anthropic API key OR a
+// `claude setup-token` subscription OAuth token; for "openrouter"/"litellm"
+// they connect that provider's API key. Every document they OWN inherits the
+// credentials, and the agent authenticates under the owner's credential for
+// the selected model's provider. Secrets are encrypted at rest (AES-256-GCM)
+// and never returned in full over the API — listed back masked, like
+// DocumentEnvVar.
 //
 // Resolution precedence when building a run's agent env:
 //   document env (DocumentEnvVar) → document OWNER's UserCredential → host
-//   ~/.claude fallback (handled downstream in agent-credential.ts).
+//   ~/.claude fallback (Anthropic only, handled downstream in
+//   agent-credential.ts).
+
+export type CredentialProvider = "anthropic" | "openrouter" | "litellm";
 
 export type CredentialKind = "api_key" | "oauth";
 
 export type OwnerCredential = { kind: CredentialKind; value: string };
 
+export type NormalizedCredentialInput = OwnerCredential & { provider: CredentialProvider };
+
+export const CREDENTIAL_PROVIDERS: readonly CredentialProvider[] = [
+  "anthropic",
+  "openrouter",
+  "litellm"
+];
+
+export function isCredentialProvider(value: unknown): value is CredentialProvider {
+  return typeof value === "string" && (CREDENTIAL_PROVIDERS as string[]).includes(value);
+}
+
 export type MaskedUserCredential = {
+  provider: CredentialProvider;
   kind: CredentialKind;
   masked: string;
   label: string | null;
@@ -42,20 +61,38 @@ export function detectCredentialKind(value: string): CredentialKind | null {
 }
 
 /**
- * Validate + normalize a connect request. Auto-detects the kind from the prefix
- * as a convenience; if an explicit kind is supplied it must agree with the
- * detected kind (mismatches are rejected). Throws an Error with a user-facing
- * message on any invalid input.
+ * Validate + normalize a connect request. For "anthropic" (the default) the
+ * kind is auto-detected from the prefix; if an explicit kind is supplied it
+ * must agree with the detected kind (mismatches are rejected). For
+ * "openrouter"/"litellm" the value is an opaque API key (kind "api_key"), but
+ * a value that looks like an Anthropic credential is rejected as an almost
+ * certain mix-up. Throws an Error with a user-facing message on any invalid
+ * input.
  */
 export function normalizeCredentialInput(input: {
+  provider?: CredentialProvider | null;
   kind?: CredentialKind | null;
   value: string;
-}): OwnerCredential {
+}): NormalizedCredentialInput {
+  const provider = input.provider ?? "anthropic";
   const value = input.value.trim();
   if (!value) {
     throw new Error("Credential value is required.");
   }
   const detected = detectCredentialKind(value);
+
+  if (provider !== "anthropic") {
+    if (detected) {
+      throw new Error(
+        `The value looks like an Anthropic credential (sk-ant-…) but the ${provider} provider was selected.`
+      );
+    }
+    if (/\s/.test(value)) {
+      throw new Error("API keys must not contain whitespace.");
+    }
+    return { provider, kind: "api_key", value };
+  }
+
   if (!detected) {
     throw new Error(
       "Value must be an Anthropic API key (starts with sk-ant-) or a subscription OAuth token (starts with sk-ant-oat)."
@@ -66,7 +103,7 @@ export function normalizeCredentialInput(input: {
       `The value looks like ${detected === "oauth" ? "a subscription OAuth token" : "an API key"} but kind "${input.kind}" was requested.`
     );
   }
-  return { kind: detected, value };
+  return { provider, kind: detected, value };
 }
 
 // --- Encryption at rest (AES-256-GCM) -------------------------------------
@@ -133,71 +170,113 @@ export function decryptSecret(stored: string): string {
 
 // --- DB access ------------------------------------------------------------
 
-/** The decrypted credential for a user, or null when none is connected. */
-export async function getUserCredential(userId: string): Promise<OwnerCredential | null> {
+/** The decrypted credential a user connected for a provider, or null. */
+export async function getUserCredential(
+  userId: string,
+  provider: CredentialProvider = "anthropic"
+): Promise<OwnerCredential | null> {
   const row = await db.userCredential.findUnique({
-    where: { userId },
+    where: { userId_provider: { userId, provider } },
     select: { kind: true, secret: true }
   });
   if (!row) return null;
   return { kind: row.kind as CredentialKind, value: decryptSecret(row.secret) };
 }
 
-/** Masked view safe to return over the API / show in the UI. */
-export async function getUserCredentialMasked(userId: string): Promise<MaskedUserCredential | null> {
+/** Key-presence check (no decryption) — used to gate the model selector. */
+export async function hasUserCredential(
+  userId: string,
+  provider: CredentialProvider
+): Promise<boolean> {
   const row = await db.userCredential.findUnique({
-    where: { userId },
-    select: { kind: true, secret: true, label: true, updatedAt: true }
+    where: { userId_provider: { userId, provider } },
+    select: { id: true }
   });
-  if (!row) return null;
-  return {
-    kind: row.kind as CredentialKind,
-    masked: maskSecret(decryptSecret(row.secret)),
-    label: row.label,
-    updatedAt: row.updatedAt.toISOString()
-  };
+  return Boolean(row);
+}
+
+/** Masked views safe to return over the API / show in the UI. */
+export async function getUserCredentialsMasked(userId: string): Promise<MaskedUserCredential[]> {
+  const rows = await db.userCredential.findMany({
+    where: { userId },
+    select: { provider: true, kind: true, secret: true, label: true, updatedAt: true }
+  });
+  const order = (p: string) => CREDENTIAL_PROVIDERS.indexOf(p as CredentialProvider);
+  return rows
+    .sort((a, b) => order(a.provider) - order(b.provider))
+    .map((row) => ({
+      provider: row.provider as CredentialProvider,
+      kind: row.kind as CredentialKind,
+      masked: maskSecret(decryptSecret(row.secret)),
+      label: row.label,
+      updatedAt: row.updatedAt.toISOString()
+    }));
 }
 
 export async function upsertUserCredential(
   userId: string,
-  credential: OwnerCredential,
+  credential: NormalizedCredentialInput,
   label?: string | null
 ): Promise<void> {
   const secret = encryptSecret(credential.value);
   await db.userCredential.upsert({
-    where: { userId },
-    create: { userId, kind: credential.kind, secret, label: label ?? null },
+    where: { userId_provider: { userId, provider: credential.provider } },
+    create: {
+      userId,
+      provider: credential.provider,
+      kind: credential.kind,
+      secret,
+      label: label ?? null
+    },
     update: { kind: credential.kind, secret, label: label ?? null }
   });
 }
 
-export async function deleteUserCredential(userId: string): Promise<void> {
-  await db.userCredential.delete({ where: { userId } }).catch(() => undefined);
+export async function deleteUserCredential(
+  userId: string,
+  provider: CredentialProvider = "anthropic"
+): Promise<void> {
+  await db.userCredential
+    .delete({ where: { userId_provider: { userId, provider } } })
+    .catch(() => undefined);
 }
 
 // --- Resolution -----------------------------------------------------------
 
+/** The document-env variable each third-party provider authenticates with. */
+export const PROVIDER_ENV_KEY = {
+  openrouter: "OPENROUTER_API_KEY",
+  litellm: "LITELLM_API_KEY"
+} as const;
+
 /**
- * Layer the document owner's credential onto an already-loaded document env,
- * injecting EXACTLY ONE Anthropic credential var per the SDK's precedence rules.
+ * Layer the document owner's credential onto an already-loaded document env.
+ * `ownerCredential` is the owner's credential FOR THE MODEL'S PROVIDER
+ * (anthropic / openrouter / litellm).
  *
- *   - OpenRouter models authenticate via OPENROUTER_API_KEY and applyProviderEnv
- *     strips Anthropic creds anyway — so we never inject the owner's Anthropic
- *     credential for them.
  *   - A credential already in the document env (DocumentEnvVar) wins — it is the
  *     team/shared-doc override, higher precedence than the owner's personal key.
- *   - Otherwise inject the owner credential: api_key → ANTHROPIC_API_KEY (and
- *     drop any CLAUDE_CODE_OAUTH_TOKEN); oauth → CLAUDE_CODE_OAUTH_TOKEN (and
- *     drop any ANTHROPIC_API_KEY, since the SDK would otherwise prefer the key).
- *   - No owner credential → unchanged; the host ~/.claude fallback (downstream)
- *     applies as before.
+ *   - OpenRouter/LiteLLM models: inject the owner's key as the provider env var
+ *     (OPENROUTER_API_KEY / LITELLM_API_KEY) so applyProviderEnv picks it up.
+ *   - Anthropic models: inject EXACTLY ONE credential var per the SDK's
+ *     precedence rules — api_key → ANTHROPIC_API_KEY (and drop any
+ *     CLAUDE_CODE_OAUTH_TOKEN); oauth → CLAUDE_CODE_OAUTH_TOKEN (and drop any
+ *     ANTHROPIC_API_KEY, since the SDK would otherwise prefer the key).
+ *   - No owner credential → unchanged; for Anthropic the host ~/.claude
+ *     fallback (downstream) applies as before.
  */
 export function applyOwnerCredentialEnv(
   agentEnv: DocumentEnv,
   ownerCredential: OwnerCredential | null,
   agentModel: string | null | undefined
 ): DocumentEnv {
-  if (isOpenRouterAgentModel(agentModel)) return agentEnv;
+  const provider = agentModelProvider(agentModel);
+  if (provider !== "anthropic") {
+    const keyVar = PROVIDER_ENV_KEY[provider];
+    if (agentEnv[keyVar]?.trim()) return agentEnv;
+    if (!ownerCredential) return agentEnv;
+    return { ...agentEnv, [keyVar]: ownerCredential.value };
+  }
   if (hasAnthropicCredential(agentEnv)) return agentEnv;
   if (!ownerCredential) return agentEnv;
   const next: DocumentEnv = { ...agentEnv };
@@ -209,6 +288,25 @@ export function applyOwnerCredentialEnv(
     delete next.ANTHROPIC_API_KEY;
   }
   return next;
+}
+
+/**
+ * Fail-fast check for third-party provider keys AFTER the owner credential has
+ * been layered in: an OpenRouter/LiteLLM run with no key anywhere would only
+ * die later inside the sandbox (applyProviderEnv throws in the container), so
+ * surface a clear, actionable error at the route instead. Returns null for
+ * Anthropic models and when the key is present.
+ */
+export function providerKeyRequirementError(
+  agentEnv: DocumentEnv,
+  agentModel: string | null | undefined
+): string | null {
+  const provider = agentModelProvider(agentModel);
+  if (provider === "anthropic") return null;
+  const keyVar = PROVIDER_ENV_KEY[provider];
+  if (agentEnv[keyVar]?.trim()) return null;
+  const label = provider === "openrouter" ? "OpenRouter" : "LiteLLM";
+  return `${label} model selected but no ${keyVar} is available. Add it in the document's Env menu, or connect a ${label} key in the AI credentials menu.`;
 }
 
 function isFlagEnabled(value: string | undefined): boolean {
@@ -231,8 +329,8 @@ const CONNECT_CREDENTIAL_MESSAGE =
 /**
  * Guards on falling back to the HOST ~/.claude credential. Returns a clear
  * user-facing message (so the run fails fast instead of hitting a cryptic 401)
- * when the resolved env has no Anthropic credential, the model is not
- * OpenRouter, and either:
+ * when the resolved env has no Anthropic credential, the model routes through
+ * the Anthropic provider (OpenRouter/LiteLLM bring their own keys), and either:
  *   - AGENT_REQUIRE_USER_CREDENTIAL is set (phase-4 multi-tenant mode: host
  *     fallback disabled for everyone), or
  *   - AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS is set and the document owner's
@@ -246,7 +344,7 @@ export function credentialRequirementError(
   ownerEmail: string | null | undefined = null,
   env: Record<string, string | undefined> = process.env
 ): string | null {
-  if (isOpenRouterAgentModel(agentModel)) return null;
+  if (agentModelProvider(agentModel) !== "anthropic") return null;
   if (hasAnthropicCredential(agentEnv)) return null;
   if (isFlagEnabled(env.AGENT_REQUIRE_USER_CREDENTIAL)) return CONNECT_CREDENTIAL_MESSAGE;
   const allowlist = parseEmailAllowlist(env.AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS);
@@ -258,8 +356,10 @@ export function credentialRequirementError(
 
 /**
  * Build the agent env for a document run: document env, layered with the
- * document OWNER's connected credential, with the phase-4 requirement enforced.
- * Drop-in replacement for loadDocumentEnv at the three agent-run call sites.
+ * document OWNER's connected credential for the model's provider, with the
+ * phase-4 requirement (Anthropic) / provider-key requirement (OpenRouter,
+ * LiteLLM) enforced. Drop-in replacement for loadDocumentEnv at the three
+ * agent-run call sites.
  */
 export async function loadAgentEnvForDocument(
   documentId: string,
@@ -272,9 +372,12 @@ export async function loadAgentEnvForDocument(
       select: { ownerId: true, owner: { select: { email: true } } }
     })
   ]);
-  const ownerCredential = doc?.ownerId ? await getUserCredential(doc.ownerId) : null;
+  const provider = agentModelProvider(agentModel);
+  const ownerCredential = doc?.ownerId ? await getUserCredential(doc.ownerId, provider) : null;
   const env = applyOwnerCredentialEnv(docEnv, ownerCredential, agentModel);
-  const requirementError = credentialRequirementError(env, agentModel, doc?.owner?.email ?? null);
+  const requirementError =
+    credentialRequirementError(env, agentModel, doc?.owner?.email ?? null) ??
+    providerKeyRequirementError(env, agentModel);
   if (requirementError) {
     throw new Error(requirementError);
   }

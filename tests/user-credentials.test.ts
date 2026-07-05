@@ -8,7 +8,8 @@ import {
   decryptSecret,
   detectCredentialKind,
   encryptSecret,
-  normalizeCredentialInput
+  normalizeCredentialInput,
+  providerKeyRequirementError
 } from "../lib/user-credentials";
 
 // A valid 32-byte key for the encryption round-trip tests. getEncryptionKey()
@@ -27,15 +28,18 @@ test("detectCredentialKind distinguishes oauth tokens from api keys", () => {
 
 test("normalizeCredentialInput auto-detects kind and rejects mismatches", () => {
   assert.deepEqual(normalizeCredentialInput({ value: "sk-ant-api03-xyz" }), {
+    provider: "anthropic",
     kind: "api_key",
     value: "sk-ant-api03-xyz"
   });
   assert.deepEqual(normalizeCredentialInput({ value: "sk-ant-oat01-abc" }), {
+    provider: "anthropic",
     kind: "oauth",
     value: "sk-ant-oat01-abc"
   });
   // Explicit kind that agrees is accepted.
   assert.deepEqual(normalizeCredentialInput({ kind: "oauth", value: "sk-ant-oat01-abc" }), {
+    provider: "anthropic",
     kind: "oauth",
     value: "sk-ant-oat01-abc"
   });
@@ -45,6 +49,27 @@ test("normalizeCredentialInput auto-detects kind and rejects mismatches", () => 
   assert.throws(() => normalizeCredentialInput({ value: "garbage" }), /Anthropic API key/i);
   // Empty rejected.
   assert.throws(() => normalizeCredentialInput({ value: "   " }), /required/i);
+});
+
+test("normalizeCredentialInput handles third-party provider keys", () => {
+  assert.deepEqual(normalizeCredentialInput({ provider: "openrouter", value: " sk-or-v1-abc " }), {
+    provider: "openrouter",
+    kind: "api_key",
+    value: "sk-or-v1-abc"
+  });
+  assert.deepEqual(normalizeCredentialInput({ provider: "litellm", value: "sk-7FW0abc" }), {
+    provider: "litellm",
+    kind: "api_key",
+    value: "sk-7FW0abc"
+  });
+  // An Anthropic-looking value under a third-party provider is a mix-up.
+  assert.throws(
+    () => normalizeCredentialInput({ provider: "openrouter", value: "sk-ant-api03-xyz" }),
+    /looks like an Anthropic credential/i
+  );
+  // Whitespace inside a key is never valid.
+  assert.throws(() => normalizeCredentialInput({ provider: "litellm", value: "sk abc" }), /whitespace/i);
+  assert.throws(() => normalizeCredentialInput({ provider: "litellm", value: "  " }), /required/i);
 });
 
 // --- encryption round-trip + missing key -----------------------------------
@@ -130,15 +155,68 @@ test("single-var injection: oauth sets CLAUDE_CODE_OAUTH_TOKEN and drops any ANT
   assert.ok(!("ANTHROPIC_API_KEY" in env), "no stray api key (SDK would prefer it)");
 });
 
-test("openrouter models never receive the owner's Anthropic credential", () => {
+test("openrouter models never receive an Anthropic credential var", () => {
   const env = applyOwnerCredentialEnv(
     { OPENROUTER_API_KEY: "sk-or-v1-abc" },
-    { kind: "api_key", value: "sk-ant-owner" },
+    { kind: "api_key", value: "sk-or-v1-owner" },
     "openrouter/openai/gpt-5.2"
   );
   assert.equal(env.ANTHROPIC_API_KEY, undefined);
   assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  // Doc env key wins over the owner's per-user key.
   assert.equal(env.OPENROUTER_API_KEY, "sk-or-v1-abc");
+});
+
+// --- per-user provider keys --------------------------------------------------
+
+test("owner's openrouter key fills in when the doc env has none", () => {
+  const env = applyOwnerCredentialEnv({}, { kind: "api_key", value: "sk-or-v1-owner" }, "openrouter/openai/gpt-5.2");
+  assert.equal(env.OPENROUTER_API_KEY, "sk-or-v1-owner");
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
+});
+
+test("owner's litellm key fills in when the doc env has none", () => {
+  const env = applyOwnerCredentialEnv(
+    { LITELLM_BASE_URL: "http://host.docker.internal:9274" },
+    { kind: "api_key", value: "sk-litellm-owner" },
+    "litellm/anthropic/claude-opus-4-8"
+  );
+  assert.equal(env.LITELLM_API_KEY, "sk-litellm-owner");
+  assert.equal(env.LITELLM_BASE_URL, "http://host.docker.internal:9274");
+});
+
+test("doc env litellm key wins over the owner's per-user key", () => {
+  const env = applyOwnerCredentialEnv(
+    { LITELLM_API_KEY: "sk-litellm-doc" },
+    { kind: "api_key", value: "sk-litellm-owner" },
+    "litellm/openai/gpt-5"
+  );
+  assert.equal(env.LITELLM_API_KEY, "sk-litellm-doc");
+});
+
+test("no owner provider key leaves the env untouched", () => {
+  const env = applyOwnerCredentialEnv({ FOO: "bar" }, null, "litellm/openai/gpt-5");
+  assert.deepEqual(env, { FOO: "bar" });
+});
+
+// --- provider-key fail-fast ---------------------------------------------------
+
+test("providerKeyRequirementError: third-party model with no key anywhere → actionable error", () => {
+  assert.match(
+    providerKeyRequirementError({}, "openrouter/openai/gpt-5.2") ?? "",
+    /OPENROUTER_API_KEY.*Env menu.*AI credentials/i
+  );
+  assert.match(
+    providerKeyRequirementError({ LITELLM_API_KEY: "  " }, "litellm/openai/gpt-5") ?? "",
+    /LITELLM_API_KEY/
+  );
+});
+
+test("providerKeyRequirementError: null when the key is present or the model is Anthropic", () => {
+  assert.equal(providerKeyRequirementError({ OPENROUTER_API_KEY: "sk-or-v1-x" }, "openrouter/openai/gpt-5.2"), null);
+  assert.equal(providerKeyRequirementError({ LITELLM_API_KEY: "sk-x" }, "litellm/openai/gpt-5"), null);
+  assert.equal(providerKeyRequirementError({}, "claude-sonnet-5"), null);
+  assert.equal(providerKeyRequirementError({}, null), null);
 });
 
 // --- phase-4 flag behavior -------------------------------------------------
@@ -218,4 +296,29 @@ test("host allowlist: openrouter model bypasses the allowlist", () => {
 
 test("host allowlist: unset → host fallback stays open for everyone (back-compat)", () => {
   assert.equal(credentialRequirementError({}, "claude-sonnet-5", "stranger@example.com", {}), null);
+});
+
+test("litellm models never receive the owner's Anthropic credential", () => {
+  const env = applyOwnerCredentialEnv(
+    { LITELLM_API_KEY: "sk-litellm-abc" },
+    { kind: "api_key", value: "sk-ant-owner" },
+    "litellm/anthropic/claude-opus-4-8"
+  );
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(env.LITELLM_API_KEY, "sk-litellm-abc");
+});
+
+test("credentialRequirementError: litellm model bypasses the requirement and the allowlist", () => {
+  assert.equal(
+    credentialRequirementError({}, "litellm/openai/gpt-5", null, {
+      AGENT_REQUIRE_USER_CREDENTIAL: "1"
+    }),
+    null
+  );
+  assert.equal(
+    credentialRequirementError({}, "litellm/openai/gpt-5", "stranger@example.com", {
+      AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS: "owner@example.com"
+    }),
+    null
+  );
 });

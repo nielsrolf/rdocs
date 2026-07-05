@@ -278,7 +278,9 @@ body.public-view-shell .document-page-shell {
 .agent-screen {
   position: fixed;
   inset: 0;
-  z-index: 35;
+  /* Full-page takeover: must sit above the site nav (.topbar, z 38) so the
+     nav doesn't paint over the agent-config (model configurator) strip. */
+  z-index: 39;
   display: grid;
   grid-template-rows: auto 1fr;
   width: 100vw;
@@ -991,6 +993,69 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
 }
 
 /* --- Composer --- */
+
+/* Final-edit payload of a succeeded selection-edit run, shown under the
+   timeline so the session view exposes WHAT the agent wrote. */
+.agent-result {
+  margin: 0 1rem 0.75rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  flex-shrink: 0;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.agent-result > summary {
+  list-style: none;
+  cursor: pointer;
+  position: sticky;
+  top: 0;
+  background: inherit;
+}
+
+.agent-result > summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-result-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.45rem 0.75rem;
+}
+
+.agent-result-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.agent-result-copy {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.6rem;
+}
+
+.agent-result-body {
+  padding: 0 0.85rem 0.75rem;
+  font-size: 0.88rem;
+  user-select: text;
+}
+
+.agent-stop-button {
+  color: #b3261e;
+  border-color: rgba(179, 38, 30, 0.4);
+  font-size: 0.75rem;
+  padding: 0.15rem 0.6rem;
+}
+
+.agent-stop-button:hover {
+  background: rgba(179, 38, 30, 0.08);
+}
 
 .agent-compose {
   display: flex;
@@ -1836,6 +1901,7 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   flex-wrap: wrap;
   gap: 0.35rem;
   padding: 0.42rem 0.55rem;
+  position: relative;
   border: 1px solid rgba(218, 220, 224, 0.9);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.92);
@@ -1847,6 +1913,18 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   position: relative;
   padding-right: 0.5rem;
   margin-right: 0.15rem;
+}
+
+/* On desktop the tools wrapper is transparent: its children lay out as if they
+   were direct flex items of the topbar. It collapses into a drawer on mobile
+   (see the max-width: 720px block). The toggle is mobile-only. */
+.document-topbar-tools {
+  display: contents;
+}
+
+/* Specificity must beat `.document-topbar .ghost-button { display: inline-flex }`. */
+.document-topbar .ghost-button.document-tools-toggle {
+  display: none;
 }
 
 .document-topbar .document-compact-status::after {
@@ -3974,8 +4052,58 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
     flex-wrap: wrap;
   }
 
+  /* Let the title share its row with the Menu button instead of forcing a
+     full-width row of its own. */
   .document-topbar-left {
-    flex-basis: 100%;
+    flex: 1 1 auto;
+  }
+
+  /* Save state + word count are low-value on mobile — reclaim the row. */
+  .document-topbar .document-compact-status {
+    display: none;
+  }
+
+  /* Mobile is read-first: collapse the editing tools (Export, File, Format,
+     Comments, Repo, Env, suggesting) into a drawer behind the Menu button so
+     the bar stays a single compact row. */
+  .document-topbar .ghost-button.document-tools-toggle {
+    display: inline-flex;
+    order: 2;
+    margin-left: auto;
+  }
+
+  .document-topbar-tools {
+    display: none;
+    position: absolute;
+    top: calc(100% + 0.4rem);
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.35rem;
+    padding: 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: white;
+    box-shadow: var(--shadow);
+    z-index: 25;
+  }
+
+  .document-topbar-tools[data-open="true"] {
+    display: flex;
+  }
+
+  /* Menus and buttons inside the drawer stretch to full width. */
+  .document-topbar-tools .header-menu,
+  .document-topbar-tools .header-menu summary,
+  .document-topbar-tools .suggestion-mode-controls,
+  .document-topbar-tools > .ghost-button {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .document-topbar-actions {
+    order: 3;
   }
 
   .header-menu-panel {

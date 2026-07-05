@@ -227,6 +227,16 @@ export function AgentTimeline({
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
+    // Stick to the bottom only when the user is already there. Yanking the
+    // scroll on every progress tick made it impossible to read or select
+    // earlier output while a run streams.
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom > 160) return;
+    // Never move the pane out from under an in-progress text selection.
+    const selection = typeof window !== "undefined" ? window.getSelection() : null;
+    if (selection && !selection.isCollapsed && selection.anchorNode && el.contains(selection.anchorNode)) {
+      return;
+    }
     el.scrollTop = el.scrollHeight;
   }, [grouped.length, isRunning, progress]);
 

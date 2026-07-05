@@ -117,6 +117,11 @@ export function EnvironmentMenu({
             Secrets injected into this document&apos;s agent runs. Values are write-only — shown
             masked, never in full. The agent does not inherit the server&apos;s environment.
           </p>
+          <p>
+            AI providers: set <code>OPENROUTER_API_KEY</code> or <code>LITELLM_API_KEY</code> (+{" "}
+            <code>LITELLM_BASE_URL</code> if the server has no default) here to unlock those models
+            under Agents → Model.
+          </p>
         </div>
 
         <div className="env-var-list">

@@ -31,12 +31,12 @@ import {
 } from "./document-workspace/ai-edit-insert";
 import {
   AiEditSelections,
-  aiEditSelectionIdsToProtect,
-  cleanupStaleAiEditRangeMarks,
+  cleanupStaleAiEditRangeMarksAfterRunsLoaded,
   describeAiEditSelectionPresence,
   getAiEditSelectionRange,
   removeAiEditSelection,
   reseedAiEditSelectionsFromDoc,
+  resolveAiEditApplyRange,
   syncAiEditSelectionRuns,
   upsertAiEditSelection
 } from "./document-workspace/ai-edit-selections";
@@ -101,7 +101,7 @@ import { useCollaborationStream } from "./document-workspace/use-collaboration-s
 import { usePresence } from "./document-workspace/use-presence";
 import { FindBar } from "./document-workspace/find-bar";
 import { SearchExtension } from "./document-workspace/search";
-import { buildConversations } from "./document-workspace/conversations";
+import { aiRunsFingerprint, buildConversations } from "./document-workspace/conversations";
 import { createLatexRenderExtension } from "./document-workspace/latex";
 import { AttachmentChip, EmbeddedWidget, RepoImage, TabBreak } from "./document-workspace/nodes";
 import {
@@ -220,6 +220,9 @@ export function DocumentWorkspace({
   initialAgentModel,
   initialAgentEffort,
   initialHasOpenRouterKey,
+  initialHasLiteLlmKey,
+  ownerHasOpenRouterKey,
+  ownerHasLiteLlmKey,
   isAuthenticated,
   isOwner,
   shareToken,
@@ -235,6 +238,7 @@ export function DocumentWorkspace({
   const [agentModel, setAgentModel] = useState(initialAgentModel ?? DEFAULT_AGENT_MODEL);
   const [agentEffort, setAgentEffort] = useState(initialAgentEffort ?? DEFAULT_AGENT_EFFORT);
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(initialHasOpenRouterKey);
+  const [hasLiteLlmKey, setHasLiteLlmKey] = useState(initialHasLiteLlmKey);
   const [repoBusy, setRepoBusy] = useState(false);
   const [repoNotice, setRepoNotice] = useState<string | null>(null);
   // Bumped on every doc-changing transaction (local or remote) so anchor-derived
@@ -289,6 +293,10 @@ export function DocumentWorkspace({
   const [activeAiRun, setActiveAiRun] = useState<ActiveAiRunView | null>(null);
   const [activeAiRuns, setActiveAiRuns] = useState<ActiveAiRunView[]>([]);
   const [aiRuns, setAiRuns] = useState<ActiveAiRunView[]>([]);
+  // False until the first server-derived run list arrives (applyRemoteSnapshot).
+  // Gates the mount-time stale-mark sweep: sweeping before then would strip the
+  // anchors of runs we simply haven't heard about yet.
+  const [aiRunsLoaded, setAiRunsLoaded] = useState(false);
   // A SELECTION_EDIT run that FAILED but whose selection marker is still alive,
   // so the user can retry without re-selecting. Cleared on retry success or when
   // the user dismisses it (which also removes the marker). See Item 4 / retryFailedAiEdit.
@@ -322,6 +330,7 @@ export function DocumentWorkspace({
   const [editBusyCommentId, setEditBusyCommentId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [formatBarOpen, setFormatBarOpen] = useState(false);
+  const [chromeMenuOpen, setChromeMenuOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyVersions, setHistoryVersions] = useState<VersionView[]>([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
@@ -388,6 +397,7 @@ export function DocumentWorkspace({
   const threadsRef = useRef<HighlightThread[]>(initialThreads);
   const activeThreadIdRef = useRef<string | null>(initialThreads[0]?.id ?? null);
   const previousAiRunsRef = useRef<Record<string, string>>({});
+  const lastAiRunsFingerprintRef = useRef<string>("");
   const remotePresenceRef = useRef<RemotePresenceView[]>([]);
   const receivedMappingsRef = useRef<ReceivedMappingEntry[]>([]);
   const currentUserIdRef = useRef<string | null>(currentUserId);
@@ -621,6 +631,15 @@ export function DocumentWorkspace({
   }, []);
 
   function syncAiRuns(nextRuns: ActiveAiRunView[]) {
+    // No-op polls (identical content, fresh object identities) must not
+    // re-set state: the resulting re-render disturbs text selection and
+    // auto-scroll in the agent view.
+    const fingerprint = aiRunsFingerprint(nextRuns);
+    if (fingerprint === lastAiRunsFingerprintRef.current) {
+      return;
+    }
+    lastAiRunsFingerprintRef.current = fingerprint;
+
     const previous = previousAiRunsRef.current;
 
     nextRuns.forEach((run) => {
@@ -1063,6 +1082,7 @@ export function DocumentWorkspace({
   }) {
     setThreads(snapshot.threads);
     syncAiRuns(snapshot.aiRuns ?? snapshot.activeAiRuns ?? (snapshot.activeAiRun ? [snapshot.activeAiRun] : []));
+    setAiRunsLoaded(true);
     setActiveAiTarget((currentTarget) => {
       const visibleRun = snapshot.activeAiRun ?? snapshot.activeAiRuns?.[0] ?? null;
       if (!visibleRun) {
@@ -2461,12 +2481,17 @@ export function DocumentWorkspace({
     if (!editor) return;
 
     const { aiRunId, selectionId, instruction, replacementText, images, widgets, sources, commitSha, commitUrl } = input;
-    const replacementRange = getAiEditSelectionRange(editor.state, selectionId);
-    if (!replacementRange) {
+    const resolvedRange = resolveAiEditApplyRange(editor.state, selectionId);
+    if (resolvedRange.anchorLost) {
+      // The anchor is gone (e.g. a false "abandoned" failure stripped the mark
+      // before the run actually finished). NEVER drop the result — fall through
+      // and insert it at the end of the document, where the user can see it and
+      // move or delete it. Previously this path claimed the run as applied
+      // without inserting anything, silently eating hours of agent work.
       logClientEvent({
         scope: "ai-edit-marker-lost",
-        level: "error",
-        message: "marker not in editor when applying ai run",
+        level: "warn",
+        message: "marker not in editor when applying ai run; inserting at end of document",
         data: {
           documentId,
           selectionId,
@@ -2477,21 +2502,13 @@ export function DocumentWorkspace({
           presence: describeAiEditSelectionPresence(editor.state, selectionId)
         }
       });
-      // Claim the run so we don't loop on it; the user already lost the anchor.
-      await fetch(`/api/documents/${documentId}/ai-runs/${aiRunId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "markApplied", shareToken })
-      }).catch(() => null);
-      setActiveAiRun(null);
-      setActiveAiTarget(null);
       reportClientError(
-        "The edited range was deleted before the AI run finished. Replacement skipped.",
+        "The edited range was lost while the AI run finished — its result was added at the end of the document.",
         "ai-edit-marker-lost",
         { documentId, selectionId, aiRunId }
       );
-      return;
     }
+    const replacementRange = { from: resolvedRange.from, to: resolvedRange.to };
 
     const docSizeBefore = editor.state.doc.content.size;
     let docSizeAfter = docSizeBefore;
@@ -2974,6 +2991,123 @@ export function DocumentWorkspace({
     toggleThreadTag(thread, tag);
   }
 
+  // Follow-up into an EDIT session: instead of a conversation run, start a new
+  // SELECTION_EDIT run threaded under the session (parentRunId). The server
+  // gives the agent the prior attempts' transcript, and the prior work is
+  // already merged into the base checkout, so the agent continues rather than
+  // restarts. The result applies through the normal selection pipeline — via
+  // the surviving marker, or the end-of-document fallback if the anchor is gone.
+  async function handleEditSessionFollowUp(rootId: string, message: string) {
+    const conversation = conversations.find((c) => c.rootId === rootId);
+    if (!conversation) return;
+    const rootRun = conversation.runs[0];
+    const latestRun = conversation.latestRun;
+    const selectionId = rootRun.selectionId ?? parseAiRunSelectionId(rootRun.triggerId ?? null);
+
+    setAgentBusy(true);
+    setGlobalError(null);
+    await ensureAgentNotificationPermission();
+
+    let markerRange: { from: number; to: number } | null = null;
+    let selectedText = "";
+    if (editor && selectionId) {
+      markerRange = getAiEditSelectionRange(editor.state, selectionId);
+      if (markerRange && markerRange.to > markerRange.from) {
+        selectedText = editor.state.doc.textBetween(markerRange.from, markerRange.to, "\n");
+      }
+    }
+
+    const pendingRun: ActiveAiRunView = {
+      id: `pending-edit-${Date.now()}`,
+      triggerType: "SELECTION_EDIT",
+      parentRunId: latestRun.id,
+      selectionId: selectionId ?? null,
+      instruction: message,
+      status: "RUNNING",
+      progress: "Starting Claude research agent.",
+      startedAt: new Date().toISOString(),
+      events: [
+        {
+          id: `pending-event-${Date.now()}`,
+          role: "user",
+          message,
+          createdAt: new Date().toISOString()
+        }
+      ]
+    };
+    syncAiRuns([pendingRun, ...aiRuns]);
+    setAgentMessage("");
+    setComposeMode("selected");
+    setSelectedConversationId(rootId);
+
+    const response = await fetch(`/api/documents/${documentId}/ai-edit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        selectedText,
+        instruction: message,
+        selectionId,
+        parentRunId: latestRun.id,
+        shareToken,
+        suggest: canWriteDocument ? undefined : true
+      })
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data?.aiRunId) {
+      reportClientError(data?.error ?? "Agent follow-up failed to start.", "agent-edit-followup", {
+        documentId,
+        parentRunId: latestRun.id,
+        status: response.status,
+        serverError: typeof data?.error === "string" ? data.error : null
+      });
+      syncAiRuns(aiRuns.filter((run) => run.id !== pendingRun.id));
+      setAgentBusy(false);
+      return;
+    }
+    // Re-arm the shimmer on the surviving anchor so the document shows the
+    // session is active again; the poll's syncRuns keeps it labeled.
+    if (editor && selectionId && markerRange) {
+      editor.view.dispatch(
+        upsertAiEditSelection(editor.state, {
+          id: selectionId,
+          from: markerRange.from,
+          to: markerRange.to,
+          progress: "Working…"
+        })
+      );
+    }
+    logClientEvent({
+      scope: "ai-edit-kickoff",
+      level: "info",
+      message: "edit session follow-up accepted by server",
+      data: { documentId, selectionId, aiRunId: data.aiRunId, parentRunId: latestRun.id }
+    });
+    agentRunIdRef.current = data.aiRunId;
+  }
+
+  async function handleStopAgentRun(runId: string) {
+    const response = await fetch(`/api/documents/${documentId}/ai-runs/${runId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "cancel", shareToken })
+    }).catch(() => null);
+    const data = await response?.json().catch(() => null);
+    if (!response?.ok) {
+      reportClientError(data?.error ?? "Could not stop the agent run.", "agent-cancel", {
+        documentId,
+        runId,
+        status: response?.status ?? null
+      });
+      return;
+    }
+    logClientEvent({
+      scope: "agent-cancel",
+      level: "info",
+      message: "agent run cancel requested",
+      data: { documentId, runId, cancelled: data?.cancelled ?? null }
+    });
+  }
+
   async function handleAgentConversation(options?: { previousRunId?: string | null; rootId?: string | null }) {
     const message = agentMessage.trim();
     if (!message) {
@@ -2982,6 +3116,15 @@ export function DocumentWorkspace({
 
     const previousRunId = options?.previousRunId ?? null;
     const followUpRootId = options?.rootId ?? previousRunId ?? null;
+
+    // Follow-ups into an edit session continue the EDIT, not a chat.
+    if (followUpRootId) {
+      const conversation = conversations.find((c) => c.rootId === followUpRootId);
+      if (conversation && conversation.runs[0]?.triggerType === "SELECTION_EDIT") {
+        await handleEditSessionFollowUp(followUpRootId, message);
+        return;
+      }
+    }
 
     setAgentBusy(true);
     setGlobalError(null);
@@ -3711,12 +3854,12 @@ export function DocumentWorkspace({
 
   const aiEditMarkCleanupDoneRef = useRef(false);
   useEffect(() => {
-    if (!editor || aiEditMarkCleanupDoneRef.current) return;
+    if (!editor || !aiRunsLoaded || aiEditMarkCleanupDoneRef.current) return;
     aiEditMarkCleanupDoneRef.current = true;
 
-    const cleanupTr = cleanupStaleAiEditRangeMarks(editor.state, aiEditSelectionIdsToProtect(aiRuns));
+    const cleanupTr = cleanupStaleAiEditRangeMarksAfterRunsLoaded(editor.state, aiRuns, aiRunsLoaded);
     if (cleanupTr) editor.view.dispatch(cleanupTr);
-  }, [aiRuns, editor]);
+  }, [aiRuns, aiRunsLoaded, editor]);
 
   const commentThreadRunsByThread = useMemo(() => {
     const map = new Map<string, ActiveAiRunView>();
@@ -3802,6 +3945,21 @@ export function DocumentWorkspace({
             </span>
           </div>
 
+          <button
+            aria-controls="document-topbar-tools"
+            aria-expanded={chromeMenuOpen}
+            className={`ghost-button document-tools-toggle${chromeMenuOpen ? " active" : ""}`}
+            onClick={() => setChromeMenuOpen((value) => !value)}
+            type="button"
+          >
+            Menu
+          </button>
+
+          <div
+            className="document-topbar-tools"
+            data-open={chromeMenuOpen ? "true" : "false"}
+            id="document-topbar-tools"
+          >
           <ExportMenu documentId={documentId} shareToken={shareToken} />
 
           <FileMenu currentDocumentId={documentId} onOpenVersionHistory={() => setHistoryOpen(true)} />
@@ -4087,9 +4245,13 @@ export function DocumentWorkspace({
             <EnvironmentMenu
               documentId={documentId}
               shareToken={shareToken}
-              onKeysChanged={(keys) => setHasOpenRouterKey(keys.includes("OPENROUTER_API_KEY"))}
+              onKeysChanged={(keys) => {
+                setHasOpenRouterKey(keys.includes("OPENROUTER_API_KEY") || ownerHasOpenRouterKey);
+                setHasLiteLlmKey(keys.includes("LITELLM_API_KEY") || ownerHasLiteLlmKey);
+              }}
             />
           ) : null}
+          </div>
 
           <div className="document-topbar-actions">
             {remoteNotice ? <span className="subtle-pill">{remoteNotice}</span> : null}
@@ -4314,6 +4476,8 @@ export function DocumentWorkspace({
       {agentPanelOpen ? (
         <AgentPanel
           title={title}
+          documentId={documentId}
+          shareToken={shareToken}
           activeAiRuns={activeAiRuns}
           conversations={conversations}
           selectedConversation={selectedConversation}
@@ -4325,6 +4489,7 @@ export function DocumentWorkspace({
           agentModel={agentModel}
           agentEffort={agentEffort}
           hasOpenRouterKey={hasOpenRouterKey}
+          hasLiteLlmKey={hasLiteLlmKey}
           onAgentModelChange={(model) => void handleSaveAgentConfig({ model })}
           onAgentEffortChange={(effort) => void handleSaveAgentConfig({ effort })}
           onClose={() => setAgentPanelOpen(false)}
@@ -4338,6 +4503,7 @@ export function DocumentWorkspace({
           }}
           onAgentMessageChange={setAgentMessage}
           onSendAgentMessage={(options) => void handleAgentConversation(options)}
+          onStopRun={(runId) => void handleStopAgentRun(runId)}
         />
       ) : null}
 

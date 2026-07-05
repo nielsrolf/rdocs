@@ -3,7 +3,13 @@ import { z } from "zod";
 
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { getCurrentUser } from "@/lib/auth";
-import { recordAiRunEvent } from "@/lib/ai-runs";
+import { buildConversationHistory, markAiRunSucceeded, recordAiRunEvent, startAiRunHeartbeat } from "@/lib/ai-runs";
+import {
+  RUN_CANCELLED_MESSAGE,
+  deregisterRunAbortController,
+  isRunCancellation,
+  registerRunAbortController
+} from "@/lib/agent-runner/run-registry";
 import { buildAndVerifyWidget } from "@/agent-core";
 import { getAgentRunner } from "@/lib/agent-runner";
 import { detectEditAssetIntent } from "@/lib/ai-asset-intent";
@@ -27,17 +33,34 @@ import {
 } from "@/lib/research-workspace";
 import { normalizeSourceLinks } from "@/lib/sources";
 
-const aiEditSchema = z.object({
-  selectedText: z.string().min(1).max(200000),
-  selectedMarkdown: z.string().max(400000).optional().nullable(),
-  selectedContext: z.string().max(50000).optional().nullable(),
-  instruction: z.string().min(1).max(4000),
-  selectionId: z.string().min(1).max(120).regex(/^[A-Za-z0-9_-]+$/).optional().nullable(),
-  shareToken: z.string().optional().nullable(),
-  // Set by comment-access users: the selection edit and any out-of-selection
-  // edits are applied as tracked-change suggestions instead of committed content.
-  suggest: z.boolean().optional()
-});
+const aiEditSchema = z
+  .object({
+    selectedText: z.string().max(200000),
+    selectedMarkdown: z.string().max(400000).optional().nullable(),
+    selectedContext: z.string().max(50000).optional().nullable(),
+    instruction: z.string().min(1).max(4000),
+    selectionId: z.string().min(1).max(120).regex(/^[A-Za-z0-9_-]+$/).optional().nullable(),
+    shareToken: z.string().optional().nullable(),
+    // Set by comment-access users: the selection edit and any out-of-selection
+    // edits are applied as tracked-change suggestions instead of committed content.
+    suggest: z.boolean().optional(),
+    // Session continuation: a follow-up message into an existing edit session.
+    // The new run threads under this parent (same conversation in the agent
+    // view) and the agent gets the prior attempts' transcript as history.
+    parentRunId: z.string().min(1).max(60).optional().nullable()
+  })
+  .superRefine((data, ctx) => {
+    // A fresh edit needs a real selection; a continuation may have lost its
+    // anchor (the previous attempt failed and the marker is gone) and still be
+    // worth running — the agent has the session history to work from.
+    if (!data.parentRunId && data.selectedText.length < 1) {
+      ctx.addIssue({
+        code: "custom",
+        message: "selectedText is required unless this is a session continuation (parentRunId).",
+        path: ["selectedText"]
+      });
+    }
+  });
 
 async function createAgentWidgets(input: {
   widgets: unknown;
@@ -122,6 +145,8 @@ async function runAiEditInBackground(input: {
 }) {
   const { documentId, aiRunId, parsed, documentTitle, documentContentRaw, createdById, agentConfig } = input;
   let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
+  const stopHeartbeat = startAiRunHeartbeat(aiRunId);
+  const abort = registerRunAbortController(aiRunId);
   try {
     const documentContent = parseDocumentContent(documentContentRaw);
     const documentText = getDocumentPlainText(documentContent);
@@ -156,6 +181,13 @@ async function runAiEditInBackground(input: {
     const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, documentId);
     const assetIntent = detectEditAssetIntent(parsed.instruction);
     const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model);
+    // Session continuation: give the agent the prior attempts' transcript so it
+    // can pick up where the previous (failed/cancelled) attempt left off. The
+    // prior attempt's committed work is already merged into the base checkout,
+    // so this run's fresh worktree contains it.
+    const { history: conversationHistory } = parsed.parentRunId
+      ? await buildConversationHistory(documentId, parsed.parentRunId)
+      : { history: [] };
 
     const result = await getAgentRunner().run(
       {
@@ -177,11 +209,14 @@ async function runAiEditInBackground(input: {
         selectedText: parsed.selectedText,
         selectedMarkdown: parsed.selectedMarkdown ?? null,
         selectedContext: parsed.selectedContext ?? null,
-        instruction: parsed.instruction.trim()
+        instruction: parsed.instruction.trim(),
+        conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined
       },
       {
         agentConfig: { model: agentConfig.model, effort: agentConfig.effort },
         agentEnv,
+        signal: abort.signal,
+        containerName: `gdocs-run-${aiRunId}`,
         onProgress: async (event) => {
           await Promise.all([
             db.aiRun.update({ where: { id: aiRunId }, data: { progress: event.message } }),
@@ -294,32 +329,27 @@ async function runAiEditInBackground(input: {
       await recordAiRunEvent({ aiRunId, role: "system", message: note }).catch(() => null);
     }
 
-    await db.aiRun.update({
-      where: { id: aiRunId },
-      data: {
-        status: "SUCCEEDED",
-        model: result.model,
-        commitSha: commit.commitSha,
-        commitUrl: commit.commitUrl,
-        finishedAt: new Date(),
-        replacementText: finalReplacement,
-        replacementImages: JSON.stringify(images),
-        replacementWidgets: JSON.stringify(widgets),
-        replacementSources: JSON.stringify(sourceLinks),
-        suggestions: JSON.stringify(Array.isArray(result.suggestions) ? result.suggestions : []),
-        agentComments: JSON.stringify(
-          createdById
-            ? await createAgentCommentThreads({
-                documentId,
-                aiRunId,
-                createdById,
-                model: result.model,
-                comments: Array.isArray(result.comments) ? result.comments : [],
-                documentText
-              })
-            : []
-        )
-      }
+    await markAiRunSucceeded(aiRunId, {
+      model: result.model,
+      commitSha: commit.commitSha,
+      commitUrl: commit.commitUrl,
+      replacementText: finalReplacement,
+      replacementImages: JSON.stringify(images),
+      replacementWidgets: JSON.stringify(widgets),
+      replacementSources: JSON.stringify(sourceLinks),
+      suggestions: JSON.stringify(Array.isArray(result.suggestions) ? result.suggestions : []),
+      agentComments: JSON.stringify(
+        createdById
+          ? await createAgentCommentThreads({
+              documentId,
+              aiRunId,
+              createdById,
+              model: result.model,
+              comments: Array.isArray(result.comments) ? result.comments : [],
+              documentText
+            })
+          : []
+      )
     });
     await recordAiRunEvent({
       aiRunId,
@@ -342,22 +372,29 @@ async function runAiEditInBackground(input: {
       });
     }
 
+    const failureMessage = isRunCancellation(error, abort.signal)
+      ? RUN_CANCELLED_MESSAGE
+      : error instanceof Error
+        ? error.message
+        : "AI edit failed.";
     await recordAiRunEvent({
       aiRunId,
       role: "error",
-      message: error instanceof Error ? error.message : "AI edit failed."
+      message: failureMessage
     }).catch(() => null);
     await db.aiRun
       .update({
         where: { id: aiRunId },
         data: {
           status: "FAILED",
-          error: error instanceof Error ? error.message : "AI edit failed.",
+          error: failureMessage,
           finishedAt: new Date()
         }
       })
       .catch(() => null);
   } finally {
+    deregisterRunAbortController(aiRunId);
+    stopHeartbeat();
     if (linkedRepo && linkedRepo.baseWorkspace !== linkedRepo.worktree) {
       await removeRunWorktree(linkedRepo).catch(() => null);
     }
@@ -401,12 +438,24 @@ export async function POST(request: Request, { params }: RouteContext) {
     );
   }
 
+  // Continuations must thread under a run of the SAME document; a bad parent
+  // id degrades to a fresh run rather than leaking another doc's session.
+  let parentRunId: string | null = null;
+  if (parsed.data.parentRunId) {
+    const parent = await db.aiRun.findFirst({
+      where: { id: parsed.data.parentRunId, documentId: id },
+      select: { id: true }
+    });
+    parentRunId = parent?.id ?? null;
+  }
+
   const aiRun = await db.aiRun.create({
     data: {
       documentId: id,
       triggerType: "SELECTION_EDIT",
       triggerId: parsed.data.selectionId ? `selection:${parsed.data.selectionId}` : null,
       selectionId: parsed.data.selectionId ?? null,
+      parentRunId,
       instruction: parsed.data.instruction.trim(),
       progress: "Starting Claude research agent.",
       suggestOnly

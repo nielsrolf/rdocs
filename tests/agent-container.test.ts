@@ -125,12 +125,12 @@ test("classifyContainerFailure re-resolves once on a 401 for Anthropic jobs, the
   const authErr = new Error("Failed to authenticate. API Error: 401 Invalid authentication credentials");
   // First 401 (nothing retried yet) → re-resolve the credential and retry once.
   assert.deepEqual(
-    classifyContainerFailure(authErr, { isOpenRouter: false, authRetried: false, transientAttempt: 0 }),
+    classifyContainerFailure(authErr, { usesProviderKey: false, authRetried: false, transientAttempt: 0 }),
     { action: "auth-retry" }
   );
   // Second 401 (already retried) → give up with the actionable host-session message.
   const second = classifyContainerFailure(authErr, {
-    isOpenRouter: false,
+    usesProviderKey: false,
     authRetried: true,
     transientAttempt: 0
   });
@@ -141,7 +141,7 @@ test("classifyContainerFailure re-resolves once on a 401 for Anthropic jobs, the
 test("classifyContainerFailure never re-resolves a 401 for OpenRouter jobs (durable key)", () => {
   const authErr = new Error("API Error: 401 Invalid authentication credentials");
   const decision = classifyContainerFailure(authErr, {
-    isOpenRouter: true,
+    usesProviderKey: true,
     authRetried: false,
     transientAttempt: 0
   });
@@ -151,14 +151,14 @@ test("classifyContainerFailure never re-resolves a 401 for OpenRouter jobs (dura
 test("classifyContainerFailure retries transient container failures with escalating backoff, then throws", () => {
   const spawnErr = new Error("agent container spawn failed: spawn docker ENOENT");
   const first = classifyContainerFailure(spawnErr, {
-    isOpenRouter: false,
+    usesProviderKey: false,
     authRetried: false,
     transientAttempt: 0,
     delaysMs: [2_000, 8_000]
   });
   assert.deepEqual(first, { action: "transient-retry", delayMs: 2_000 });
   const second = classifyContainerFailure(spawnErr, {
-    isOpenRouter: false,
+    usesProviderKey: false,
     authRetried: false,
     transientAttempt: 1,
     delaysMs: [2_000, 8_000]
@@ -167,7 +167,7 @@ test("classifyContainerFailure retries transient container failures with escalat
   // Budget exhausted.
   assert.deepEqual(
     classifyContainerFailure(spawnErr, {
-      isOpenRouter: false,
+      usesProviderKey: false,
       authRetried: false,
       transientAttempt: 2,
       delaysMs: [2_000, 8_000]
@@ -178,7 +178,7 @@ test("classifyContainerFailure retries transient container failures with escalat
 
 test("classifyContainerFailure throws (no retry) on a non-transient, non-auth failure", () => {
   const decision = classifyContainerFailure(new Error("replacementText must not be empty"), {
-    isOpenRouter: false,
+    usesProviderKey: false,
     authRetried: false,
     transientAttempt: 0
   });

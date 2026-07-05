@@ -150,3 +150,25 @@ test("resolveContainerCredentialEnv keeps the Anthropic fallback for non-OpenRou
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("resolveContainerCredentialEnv never injects the host OAuth token for LiteLLM jobs", () => {
+  const home = makeHomeWithCreds({ accessToken: "oauth-xyz", expiresAt: 9_000 });
+  try {
+    const withKey = resolveContainerCredentialEnv(
+      { LITELLM_API_KEY: "sk-litellm-abc" },
+      "litellm/anthropic/claude-opus-4-8",
+      { homeDir: home, now: 1_000 }
+    );
+    assert.deepEqual(withKey.added, {});
+    assert.equal(withKey.warning, null);
+
+    const withoutKey = resolveContainerCredentialEnv({}, "litellm/anthropic/claude-opus-4-8", {
+      homeDir: home,
+      now: 1_000
+    });
+    assert.deepEqual(withoutKey.added, {});
+    assert.match(withoutKey.warning ?? "", /LITELLM_API_KEY/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

@@ -1,10 +1,13 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   AGENT_EFFORTS,
   ANTHROPIC_AGENT_MODELS,
+  LITELLM_AGENT_MODELS,
+  LITELLM_MODEL_PREFIX,
   OPENROUTER_AGENT_MODELS,
   OPENROUTER_MODEL_PREFIX,
+  isLiteLlmAgentModel,
   isOpenRouterAgentModel,
   isStorableAgentModel,
   normalizeAgentModel
@@ -13,8 +16,73 @@ import { cn, truncate } from "@/lib/utils";
 
 import { AgentTimeline } from "./agent-timeline";
 import type { AgentConversation } from "./conversations";
+import { MarkdownBody } from "./markdown";
 import type { ActiveAiRunView } from "./types";
 import { formatRelativeTime } from "./utils";
+
+// The final edit a SUCCEEDED selection-edit run produced. The polled run list
+// intentionally omits the (potentially large) replacement payload, so this
+// fetches the run detail once per run id and renders it with a copy affordance
+// — previously the session view never showed WHAT the agent actually wrote.
+function RunResultBlock({
+  documentId,
+  run,
+  shareToken
+}: {
+  documentId: string;
+  run: ActiveAiRunView;
+  shareToken?: string | null;
+}) {
+  const [replacementText, setReplacementText] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const isEditResult = run.triggerType === "SELECTION_EDIT" && run.status === "SUCCEEDED";
+
+  useEffect(() => {
+    let alive = true;
+    setReplacementText(null);
+    setCopied(false);
+    if (!isEditResult) return;
+    const shareQuery = shareToken ? `?share=${encodeURIComponent(shareToken)}` : "";
+    fetch(`/api/documents/${documentId}/ai-runs/${run.id}${shareQuery}`, { cache: "no-store" })
+      .then((response) => response.json())
+      .then((data) => {
+        if (!alive) return;
+        const text = data?.aiRun?.replacementText;
+        setReplacementText(typeof text === "string" && text.trim() ? text : null);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [documentId, run.id, isEditResult, shareToken]);
+
+  if (!isEditResult || !replacementText) {
+    return null;
+  }
+
+  return (
+    <details className="agent-result" open>
+      <summary className="agent-result-header">
+        <span className="agent-result-title">Final edit</span>
+        <button
+          className="ghost-button agent-result-copy"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void navigator.clipboard?.writeText(replacementText).then(() => {
+              setCopied(true);
+              window.setTimeout(() => setCopied(false), 1500);
+            });
+          }}
+          type="button"
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </summary>
+      <MarkdownBody body={replacementText} className="agent-result-body markdown-body" />
+    </details>
+  );
+}
 
 type ComposeMode = "selected" | "new";
 
@@ -25,6 +93,8 @@ type AgentConversationOptions = {
 
 export function AgentPanel({
   title,
+  documentId,
+  shareToken,
   activeAiRuns,
   conversations,
   selectedConversation,
@@ -36,15 +106,19 @@ export function AgentPanel({
   agentModel,
   agentEffort,
   hasOpenRouterKey,
+  hasLiteLlmKey,
   onAgentModelChange,
   onAgentEffortChange,
   onClose,
   onSelectConversation,
   onStartNewConversation,
   onAgentMessageChange,
-  onSendAgentMessage
+  onSendAgentMessage,
+  onStopRun
 }: {
   title: string;
+  documentId: string;
+  shareToken?: string | null;
   activeAiRuns: ActiveAiRunView[];
   conversations: AgentConversation[];
   selectedConversation: AgentConversation | null;
@@ -56,6 +130,7 @@ export function AgentPanel({
   agentModel: string;
   agentEffort: string;
   hasOpenRouterKey: boolean;
+  hasLiteLlmKey: boolean;
   onAgentModelChange: (model: string) => void;
   onAgentEffortChange: (effort: string) => void;
   onClose: () => void;
@@ -63,9 +138,19 @@ export function AgentPanel({
   onStartNewConversation: () => void;
   onAgentMessageChange: (next: string) => void;
   onSendAgentMessage: (options?: AgentConversationOptions) => void;
+  onStopRun: (runId: string) => void;
 }) {
-  const CUSTOM_SENTINEL = "__openrouter_custom__";
-  const [customMode, setCustomMode] = useState(false);
+  // Optimistic "Stopping…" state; cleared when the polled status leaves RUNNING.
+  const [stoppingRunId, setStoppingRunId] = useState<string | null>(null);
+  const selectedIsRunning = selectedConversation?.status === "RUNNING";
+  useEffect(() => {
+    if (!selectedIsRunning) setStoppingRunId(null);
+  }, [selectedIsRunning]);
+  // Two custom-model flows share one input; the sentinel encodes which
+  // provider's prefix gets applied on commit.
+  const OPENROUTER_CUSTOM_SENTINEL = "__openrouter_custom__";
+  const LITELLM_CUSTOM_SENTINEL = "__litellm_custom__";
+  const [customMode, setCustomMode] = useState<"openrouter" | "litellm" | null>(null);
   const [customDraft, setCustomDraft] = useState("");
   const [customError, setCustomError] = useState<string | null>(null);
 
@@ -73,23 +158,35 @@ export function AgentPanel({
   // the canonical value is what gets PATCHed on the next change.
   const normalizedModel = normalizeAgentModel(agentModel);
   const modelIsOpenRouter = isOpenRouterAgentModel(normalizedModel);
-  const storedCustomModel =
+  const modelIsLiteLlm = isLiteLlmAgentModel(normalizedModel);
+  const modelIsThirdParty = modelIsOpenRouter || modelIsLiteLlm;
+  const storedCustomOpenRouterModel =
     modelIsOpenRouter && !OPENROUTER_AGENT_MODELS.some((m) => m.value === normalizedModel)
       ? normalizedModel
       : null;
-  // Keep a stored OpenRouter selection visible even if the key was deleted.
+  const storedCustomLiteLlmModel =
+    modelIsLiteLlm && !LITELLM_AGENT_MODELS.some((m) => m.value === normalizedModel)
+      ? normalizedModel
+      : null;
+  // Keep a stored third-party selection visible even if its key was deleted.
   const showOpenRouterGroup = hasOpenRouterKey || modelIsOpenRouter;
+  const showLiteLlmGroup = hasLiteLlmKey || modelIsLiteLlm;
 
   function commitCustomSlug() {
     const raw = customDraft.trim();
-    if (!raw) return;
-    const value = raw.startsWith(OPENROUTER_MODEL_PREFIX) ? raw : `${OPENROUTER_MODEL_PREFIX}${raw}`;
+    if (!raw || !customMode) return;
+    const prefix = customMode === "openrouter" ? OPENROUTER_MODEL_PREFIX : LITELLM_MODEL_PREFIX;
+    const value = raw.startsWith(prefix) ? raw : `${prefix}${raw}`;
     if (!isStorableAgentModel(value)) {
-      setCustomError("Enter an OpenRouter slug like openai/gpt-5.2");
+      setCustomError(
+        customMode === "openrouter"
+          ? "Enter an OpenRouter slug like openai/gpt-5.2"
+          : "Enter a LiteLLM model name like anthropic/claude-opus-4-8"
+      );
       return;
     }
     setCustomError(null);
-    setCustomMode(false);
+    setCustomMode(null);
     setCustomDraft("");
     onAgentModelChange(value);
   }
@@ -112,16 +209,22 @@ export function AgentPanel({
               disabled={!canWriteDocument}
               onChange={(event) => {
                 const value = event.target.value;
-                if (value === CUSTOM_SENTINEL) {
-                  setCustomMode(true);
+                if (value === OPENROUTER_CUSTOM_SENTINEL || value === LITELLM_CUSTOM_SENTINEL) {
+                  setCustomMode(value === OPENROUTER_CUSTOM_SENTINEL ? "openrouter" : "litellm");
                   setCustomError(null);
                   return;
                 }
-                setCustomMode(false);
+                setCustomMode(null);
                 onAgentModelChange(value);
               }}
               title={canWriteDocument ? "Model the agent runs as" : "Only editors can change the model"}
-              value={customMode ? CUSTOM_SENTINEL : normalizedModel}
+              value={
+                customMode === "openrouter"
+                  ? OPENROUTER_CUSTOM_SENTINEL
+                  : customMode === "litellm"
+                    ? LITELLM_CUSTOM_SENTINEL
+                    : normalizedModel
+              }
             >
               <optgroup label="Anthropic">
                 {ANTHROPIC_AGENT_MODELS.map((model) => (
@@ -137,12 +240,27 @@ export function AgentPanel({
                       {model.label}
                     </option>
                   ))}
-                  {storedCustomModel ? (
-                    <option value={storedCustomModel}>
-                      {storedCustomModel.slice(OPENROUTER_MODEL_PREFIX.length)}
+                  {storedCustomOpenRouterModel ? (
+                    <option value={storedCustomOpenRouterModel}>
+                      {storedCustomOpenRouterModel.slice(OPENROUTER_MODEL_PREFIX.length)}
                     </option>
                   ) : null}
-                  <option value={CUSTOM_SENTINEL}>Custom slug…</option>
+                  <option value={OPENROUTER_CUSTOM_SENTINEL}>Custom slug…</option>
+                </optgroup>
+              ) : null}
+              {showLiteLlmGroup ? (
+                <optgroup label="LiteLLM">
+                  {LITELLM_AGENT_MODELS.map((model) => (
+                    <option key={model.value} value={model.value}>
+                      {model.label}
+                    </option>
+                  ))}
+                  {storedCustomLiteLlmModel ? (
+                    <option value={storedCustomLiteLlmModel}>
+                      {storedCustomLiteLlmModel.slice(LITELLM_MODEL_PREFIX.length)}
+                    </option>
+                  ) : null}
+                  <option value={LITELLM_CUSTOM_SENTINEL}>Custom model…</option>
                 </optgroup>
               ) : null}
             </select>
@@ -151,10 +269,10 @@ export function AgentPanel({
             <span className="agent-config-label">Thinking</span>
             <select
               className="agent-config-select"
-              disabled={!canWriteDocument || modelIsOpenRouter}
+              disabled={!canWriteDocument || modelIsThirdParty}
               onChange={(event) => onAgentEffortChange(event.target.value)}
               title={
-                modelIsOpenRouter
+                modelIsThirdParty
                   ? "Extended thinking applies to Anthropic models"
                   : canWriteDocument
                     ? "Extended-thinking effort"
@@ -172,7 +290,9 @@ export function AgentPanel({
           {customMode ? (
             <div className="agent-config-field agent-config-custom-model">
               <input
-                aria-label="Custom OpenRouter model slug"
+                aria-label={
+                  customMode === "openrouter" ? "Custom OpenRouter model slug" : "Custom LiteLLM model name"
+                }
                 className="agent-config-custom-input"
                 onChange={(event) => setCustomDraft(event.target.value)}
                 onKeyDown={(event) => {
@@ -181,7 +301,7 @@ export function AgentPanel({
                     commitCustomSlug();
                   }
                 }}
-                placeholder="openai/gpt-5.2"
+                placeholder={customMode === "openrouter" ? "openai/gpt-5.2" : "anthropic/claude-opus-4-8"}
                 value={customDraft}
               />
               <button
@@ -195,11 +315,20 @@ export function AgentPanel({
               {customError ? <span className="agent-config-hint agent-config-error">{customError}</span> : null}
             </div>
           ) : null}
-          {!hasOpenRouterKey ? (
+          {modelIsOpenRouter && !hasOpenRouterKey ? (
             <span className="agent-config-hint">
-              {modelIsOpenRouter
-                ? "This model needs OPENROUTER_API_KEY — add it in the Env menu."
-                : "Add OPENROUTER_API_KEY in the Env menu to use OpenRouter models."}
+              This model needs an OpenRouter key — add OPENROUTER_API_KEY in the Env menu or connect
+              one in AI credentials.
+            </span>
+          ) : modelIsLiteLlm && !hasLiteLlmKey ? (
+            <span className="agent-config-hint">
+              This model needs a LiteLLM key — add LITELLM_API_KEY in the Env menu or connect one in
+              AI credentials.
+            </span>
+          ) : !hasOpenRouterKey && !hasLiteLlmKey ? (
+            <span className="agent-config-hint">
+              For OpenRouter/LiteLLM models, add a key in the Env menu or connect one in AI
+              credentials.
             </span>
           ) : null}
         </div>
@@ -268,6 +397,20 @@ export function AgentPanel({
                   ) : null}
                 </div>
                 <div className="agent-main-meta">
+                  {selectedConversation.status === "RUNNING" && canWriteComments ? (
+                    <button
+                      className="ghost-button agent-stop-button"
+                      disabled={stoppingRunId === selectedConversation.latestRun.id}
+                      onClick={() => {
+                        setStoppingRunId(selectedConversation.latestRun.id);
+                        onStopRun(selectedConversation.latestRun.id);
+                      }}
+                      title="Stop this agent run. Its work so far is committed, and a follow-up message continues the session."
+                      type="button"
+                    >
+                      {stoppingRunId === selectedConversation.latestRun.id ? "Stopping…" : "◼ Stop"}
+                    </button>
+                  ) : null}
                   {selectedConversation.branchName ? (
                     <span><span className="agent-meta-label">branch</span> {selectedConversation.branchName}</span>
                   ) : null}
@@ -287,44 +430,60 @@ export function AgentPanel({
                 status={selectedConversation.status}
               />
 
+              <RunResultBlock
+                documentId={documentId}
+                run={selectedConversation.latestRun}
+                shareToken={shareToken}
+              />
+
               {canWriteComments ? (
-                <form
-                  className="agent-compose"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    if (!agentBusy && agentMessage.trim()) {
+                (() => {
+                  const isEditSession = selectedConversation.runs[0]?.triggerType === "SELECTION_EDIT";
+                  const composerBlocked = agentBusy || selectedIsRunning;
+                  const placeholder = selectedIsRunning
+                    ? "The agent is still running — stop it to send a follow-up."
+                    : isEditSession
+                      ? "Send a follow-up — the agent continues this edit from its previous work… (⌘/Ctrl + Enter)"
+                      : "Reply to the agent… (⌘/Ctrl + Enter to send)";
+                  const send = () => {
+                    if (!composerBlocked && agentMessage.trim()) {
                       onSendAgentMessage({
                         previousRunId: selectedConversation.latestRun.id,
                         rootId: selectedConversation.rootId
                       });
                     }
-                  }}
-                >
-                  <textarea
-                    onChange={(event) => onAgentMessageChange(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                  };
+                  return (
+                    <form
+                      className="agent-compose"
+                      onSubmit={(event) => {
                         event.preventDefault();
-                        if (!agentBusy && agentMessage.trim()) {
-                          onSendAgentMessage({
-                            previousRunId: selectedConversation.latestRun.id,
-                            rootId: selectedConversation.rootId
-                          });
-                        }
-                      }
-                    }}
-                    placeholder="Reply to the agent… (⌘/Ctrl + Enter to send)"
-                    rows={2}
-                    value={agentMessage}
-                  />
-                  <button
-                    className="primary-button"
-                    disabled={agentBusy || !agentMessage.trim()}
-                    type="submit"
-                  >
-                    {agentBusy ? "Sending…" : "Reply"}
-                  </button>
-                </form>
+                        send();
+                      }}
+                    >
+                      <textarea
+                        disabled={selectedIsRunning}
+                        onChange={(event) => onAgentMessageChange(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                            event.preventDefault();
+                            send();
+                          }
+                        }}
+                        placeholder={placeholder}
+                        rows={2}
+                        value={agentMessage}
+                      />
+                      <button
+                        className="primary-button"
+                        disabled={composerBlocked || !agentMessage.trim()}
+                        type="submit"
+                      >
+                        {agentBusy ? "Sending…" : isEditSession ? "Continue" : "Reply"}
+                      </button>
+                    </form>
+                  );
+                })()
               ) : null}
             </>
           ) : (
