@@ -52,8 +52,10 @@ test("outline tab actions stay hidden at rest and reveal on hover/focus", async 
     // Regression guard: even with a very long title, the row must not overflow
     // the sidebar (which would push the action buttons off-screen to the right).
     const fits = await page.evaluate(() => {
-      const inner = document.querySelector(".doc-outline-inner") as HTMLElement | null;
-      const actionsEl = document.querySelector(".doc-tab-actions");
+      // `document` here is the Prisma fixture in the enclosing scope, not the DOM
+      // global — go through `window` so TypeScript resolves the browser document.
+      const inner = window.document.querySelector(".doc-outline-inner") as HTMLElement | null;
+      const actionsEl = window.document.querySelector(".doc-tab-actions");
       if (!inner || !actionsEl) return null;
       const innerRect = inner.getBoundingClientRect();
       const actionsRect = actionsEl.getBoundingClientRect();
