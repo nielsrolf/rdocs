@@ -35,8 +35,11 @@ const Image = ImageExtension.extend({
   }
 });
 
-export function createDocumentEditorSchema() {
-  return getSchema([
+// The extension list is exported separately so server-side HTML→JSON parsing
+// (@tiptap/html generateJSON in lib/mcp/markdown-doc.ts) uses the exact same
+// schema as collaboration-step validation.
+export function documentEditorExtensions() {
+  return [
     StarterKit,
     Underline,
     TaskList,
@@ -65,5 +68,9 @@ export function createDocumentEditorSchema() {
     EmbeddedWidgetSchemaNode,
     AttachmentChipSchemaNode,
     TabBreakSchemaNode
-  ]);
+  ];
+}
+
+export function createDocumentEditorSchema() {
+  return getSchema(documentEditorExtensions());
 }

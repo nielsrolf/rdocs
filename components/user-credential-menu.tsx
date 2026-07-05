@@ -24,6 +24,13 @@ const PROVIDER_OPTIONS: Array<{ value: CredentialProvider; label: string; placeh
   { value: "litellm", label: "LiteLLM", placeholder: "sk-…" }
 ];
 
+type McpToken = {
+  id: string;
+  label: string | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+};
+
 // User-level "AI credentials" surface, mounted in the topbar. A user connects
 // at most one credential per provider (Anthropic API key or `claude
 // setup-token` OAuth token; OpenRouter / LiteLLM API keys); every document
@@ -39,6 +46,11 @@ export function UserCredentialMenu() {
   const [providerDraft, setProviderDraft] = useState<CredentialProvider>("anthropic");
   const [valueDraft, setValueDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [mcpTokens, setMcpTokens] = useState<McpToken[]>([]);
+  // The plaintext command is only available right after creating a token.
+  const [mcpCommand, setMcpCommand] = useState<string | null>(null);
+  const [mcpCopied, setMcpCopied] = useState(false);
+  const [mcpBusy, setMcpBusy] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -52,10 +64,77 @@ export function UserCredentialMenu() {
       }
       setCredentials(data.credentials ?? []);
       setLoaded(true);
+      const tokenResponse = await fetch("/api/user/mcp-tokens", { cache: "no-store" });
+      const tokenData = await tokenResponse.json().catch(() => null);
+      if (tokenResponse.ok) {
+        setMcpTokens(tokenData.tokens ?? []);
+      }
     } catch {
       setError("Failed to load credentials.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleCreateMcpToken() {
+    if (mcpBusy) return;
+    setMcpBusy(true);
+    setError(null);
+    setMcpCopied(false);
+    try {
+      const response = await fetch("/api/user/mcp-tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        setError(data?.error ?? "Failed to create MCP token.");
+        return;
+      }
+      setMcpTokens(data.tokens ?? []);
+      setMcpCommand(data.command ?? null);
+      if (data.command) {
+        try {
+          await navigator.clipboard.writeText(data.command);
+          setMcpCopied(true);
+        } catch {
+          // Clipboard can be unavailable (permissions, http) — the command stays visible to copy manually.
+        }
+      }
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
+  async function handleCopyMcpCommand() {
+    if (!mcpCommand) return;
+    try {
+      await navigator.clipboard.writeText(mcpCommand);
+      setMcpCopied(true);
+    } catch {
+      setError("Copy failed — select the command text and copy it manually.");
+    }
+  }
+
+  async function handleRevokeMcpToken(id: string) {
+    if (mcpBusy) return;
+    setMcpBusy(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/user/mcp-tokens", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id })
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        setError(data?.error ?? "Failed to revoke MCP token.");
+        return;
+      }
+      setMcpTokens(data.tokens ?? []);
+    } finally {
+      setMcpBusy(false);
     }
   }
 
@@ -198,6 +277,57 @@ export function UserCredentialMenu() {
           LiteLLM also set <code>LITELLM_BASE_URL</code> in the document&apos;s Env menu if this
           server doesn&apos;t provide a default.)
         </p>
+
+        <div style={{ borderTop: "1px solid var(--border, #444)", paddingTop: 12 }}>
+          <strong>Connect via MCP</strong>
+          <p>
+            Let a local Claude Code (or any MCP client) read and edit your documents as you. Creating
+            a token copies a ready-to-paste <code>claude mcp add</code> command; the token is shown
+            only once.
+          </p>
+
+          <div className="env-var-list">
+            {mcpTokens.map((token) => (
+              <div className="env-var-row" key={token.id}>
+                <span className="env-var-key">{token.label ?? "MCP token"}</span>
+                <span className="env-var-value">
+                  created {new Date(token.createdAt).toLocaleDateString()}
+                  {token.lastUsedAt ? ` · last used ${new Date(token.lastUsedAt).toLocaleDateString()}` : " · never used"}
+                </span>
+                <button
+                  aria-label="Revoke MCP token"
+                  className="env-var-delete"
+                  disabled={mcpBusy}
+                  onClick={() => handleRevokeMcpToken(token.id)}
+                  title="Revoke"
+                  type="button"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <div className="env-add-row">
+            <button className="ghost-button" disabled={mcpBusy} onClick={handleCreateMcpToken} type="button">
+              {mcpBusy ? "Working…" : "Connect via MCP"}
+            </button>
+            {mcpCommand ? (
+              <button className="ghost-button" disabled={mcpBusy} onClick={handleCopyMcpCommand} type="button">
+                {mcpCopied ? "Copied ✓" : "Copy command"}
+              </button>
+            ) : null}
+          </div>
+
+          {mcpCommand ? (
+            <p className="subtle-pill" style={{ display: "block", whiteSpace: "normal", lineHeight: 1.4 }}>
+              Run this in your terminal{mcpCopied ? " (already in your clipboard)" : ""}:
+              <code style={{ display: "block", marginTop: 6, wordBreak: "break-all", userSelect: "all" }}>
+                {mcpCommand}
+              </code>
+            </p>
+          ) : null}
+        </div>
 
         {error ? <span className="subtle-pill env-error">{error}</span> : null}
       </div>

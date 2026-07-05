@@ -162,7 +162,9 @@ export function getImagePathFromSource(src: string) {
   }
 
   try {
-    const url = new URL(trimmed, window.location.origin);
+    // Server-safe: this module is also imported by the MCP bridge (no window).
+    const origin = typeof window === "undefined" ? "http://localhost" : window.location.origin;
+    const url = new URL(trimmed, origin);
     const pathParam = url.searchParams.get("path");
     if (pathParam) {
       return pathParam;

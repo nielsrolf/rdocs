@@ -24,6 +24,7 @@ model User {
   mentions          CommentMention[]
   documentMentions  DocumentMention[]
   credentials       UserCredential[]
+  apiTokens         ApiToken[]
 }
 
 // Per-user AI credentials, at most one per provider; every document the user
@@ -46,6 +47,23 @@ model UserCredential {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, provider])
+}
+
+// Personal access tokens for the MCP bridge (`/api/mcp`). The plaintext token
+// (`gdai_<hex>`) is shown ONCE at creation and only its SHA-256 hex digest is
+// stored; resolution is a hash lookup (see lib/api-tokens.ts). Revocation is a
+// soft delete via `revokedAt` so the row keeps its audit trail.
+model ApiToken {
+  id         String    @id @default(cuid())
+  userId     String
+  tokenHash  String    @unique
+  label      String?
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model Document {

@@ -123,6 +123,22 @@ User flow, for context when reading logs:
 
 Every step is now logged. If you change any of them, keep the `scope` strings stable so historical greps still work.
 
+## MCP bridge (external agents editing documents)
+
+`POST /api/mcp` is a stateless streamable-HTTP MCP server (hand-rolled JSON-RPC in `lib/mcp/server.ts` — initialize / tools/list / tools/call only). Users connect a local Claude Code with the one-liner from the topbar **AI credentials → Connect via MCP** button, which mints an `ApiToken` (SHA-256-hashed, `lib/api-tokens.ts`) and copies:
+
+```
+claude mcp add --transport http gdocs-ai <APP_URL>/api/mcp --header "Authorization: Bearer gdai_…"
+```
+
+Key invariants:
+
+- **All content edits go through the collab step pipeline** (`lib/mcp/apply-edit.ts` → `submitCollaborationSteps`), never a direct content write. Live clients see MCP edits over SSE; stale-version pushes retry up to 3×.
+- **Markdown → nodes uses the same pipeline as the browser**: `buildAiEditInsertContent` → markdown-it → `generateJSON` (`@tiptap/html`, in `lib/mcp/markdown-doc.ts`), so `![widget: label](widget://<id>)` placeholders and repo-relative image paths behave identically to built-in agent edits.
+- **`upload_files` / `create_widget` write into the document's base workspace** (git-committed under `withWorkspaceLock`, path-traversal-guarded in `lib/mcp/workspace-files.ts`), so `/widgets/<id>/source` and `/repo-files` can serve the artifacts. `create_widget` follows the same host-build policy as the manual `POST /widgets` route.
+- Tool schemas are zod (`lib/mcp/tools.ts`), converted with `z.toJSONSchema` for `tools/list`. Tool-level failures (bad `find_text`, missing access) return `isError: true` results so the model can self-correct; only malformed JSON-RPC gets protocol errors.
+- Tests: `tests/mcp-server.test.ts` (headless, real SQLite + collab pipeline).
+
 ## Bug-fix workflow (required)
 
 When the user reports a bug, **reproduce it first with a new test case that initially fails, then fix it.** Concretely:
