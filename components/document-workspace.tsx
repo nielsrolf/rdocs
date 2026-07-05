@@ -31,6 +31,7 @@ import {
 } from "./document-workspace/ai-edit-insert";
 import {
   AiEditSelections,
+  aiEditSelectionIdsToProtect,
   cleanupStaleAiEditRangeMarks,
   describeAiEditSelectionPresence,
   getAiEditSelectionRange,
@@ -3415,16 +3416,23 @@ export function DocumentWorkspace({
     if (!editor) return;
 
     const selectionRuns: Array<{ run: ActiveAiRunView; selectionId: string }> = [];
+    const settledSelectionIds: string[] = [];
 
-    for (const run of activeAiRuns) {
-      if (run.status !== "RUNNING" || run.triggerType !== "SELECTION_EDIT") continue;
+    for (const run of aiRuns) {
+      if (run.triggerType !== "SELECTION_EDIT") continue;
       const selectionId = run.selectionId ?? parseAiRunSelectionId(run.triggerId);
       if (!selectionId) continue;
-      selectionRuns.push({ run, selectionId });
+      if (run.status === "RUNNING") {
+        selectionRuns.push({ run, selectionId });
+      } else if (run.status === "SUCCEEDED" && run.appliedAt) {
+        // Applied (possibly by another session): drop any lingering local entry
+        // so the "working" shimmer doesn't outlive the run.
+        settledSelectionIds.push(selectionId);
+      }
     }
 
-    editor.view.dispatch(syncAiEditSelectionRuns(editor.state, selectionRuns));
-  }, [activeAiRuns, editor]);
+    editor.view.dispatch(syncAiEditSelectionRuns(editor.state, selectionRuns, settledSelectionIds));
+  }, [aiRuns, editor]);
 
   useEffect(() => {
     if (!editor) return;
@@ -3706,16 +3714,9 @@ export function DocumentWorkspace({
     if (!editor || aiEditMarkCleanupDoneRef.current) return;
     aiEditMarkCleanupDoneRef.current = true;
 
-    const activeSelectionIds = new Set<string>();
-    for (const run of activeAiRuns) {
-      if (run.status !== "RUNNING" || run.triggerType !== "SELECTION_EDIT") continue;
-      const selectionId = parseAiRunSelectionId(run.triggerId);
-      if (selectionId) activeSelectionIds.add(selectionId);
-    }
-
-    const cleanupTr = cleanupStaleAiEditRangeMarks(editor.state, activeSelectionIds);
+    const cleanupTr = cleanupStaleAiEditRangeMarks(editor.state, aiEditSelectionIdsToProtect(aiRuns));
     if (cleanupTr) editor.view.dispatch(cleanupTr);
-  }, [activeAiRuns, editor]);
+  }, [aiRuns, editor]);
 
   const commentThreadRunsByThread = useMemo(() => {
     const map = new Map<string, ActiveAiRunView>();

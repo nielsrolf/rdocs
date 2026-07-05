@@ -3,7 +3,7 @@ import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
-import { getAiRunProgressLabel } from "./utils";
+import { getAiRunProgressLabel, parseAiRunSelectionId } from "./utils";
 import type { ActiveAiRunView } from "./types";
 
 export type AiEditSelectionMetadata = {
@@ -32,7 +32,11 @@ type AiEditSelectionMeta =
     }
   | { type: "removeMetadata"; id: string }
   | { type: "reseed"; entries: Array<{ id: string; from: number; to: number }> }
-  | { type: "syncRuns"; entries: Array<{ id: string; metadata: AiEditSelectionMetadata }> };
+  | {
+      type: "syncRuns";
+      entries: Array<{ id: string; metadata: AiEditSelectionMetadata }>;
+      settledIds?: string[];
+    };
 
 export const aiEditSelectionPluginKey = new PluginKey<AiEditSelectionState>("ai-edit-selections");
 
@@ -208,6 +212,13 @@ function applyMeta(
     return next;
   }
 
+  // A settled run (terminal AND its result already applied/claimed) must not
+  // keep decorating the document. This is what clears the "Claude is working"
+  // shimmer in a tab that did NOT perform the apply itself — its entry was
+  // created with source "local" at kickoff and nothing else ever removes it.
+  for (const id of meta.settledIds ?? []) {
+    next.delete(id);
+  }
   const syncedIds = new Set(meta.entries.map((entry) => entry.id));
   for (const [id, value] of next) {
     if (value.metadata.source === "run" && !syncedIds.has(id)) {
@@ -483,7 +494,8 @@ export function removeAiEditSelection(state: EditorState, id: string) {
 
 export function syncAiEditSelectionRuns(
   state: EditorState,
-  runs: Array<{ run: ActiveAiRunView; selectionId: string }>
+  runs: Array<{ run: ActiveAiRunView; selectionId: string }>,
+  settledSelectionIds: string[] = []
 ) {
   return state.tr.setMeta(aiEditSelectionPluginKey, {
     type: "syncRuns",
@@ -494,8 +506,31 @@ export function syncAiEditSelectionRuns(
         progress: getAiRunProgressLabel(run),
         source: "run" as const
       }
-    }))
+    })),
+    settledIds: settledSelectionIds
   } satisfies AiEditSelectionMeta);
+}
+
+export function aiEditRunSelectionId(run: ActiveAiRunView): string | null {
+  if (run.triggerType !== "SELECTION_EDIT") return null;
+  return run.selectionId ?? parseAiRunSelectionId(run.triggerId);
+}
+
+// The selection ids whose anchors (marks / atom attrs) cleanupStaleAiEditRangeMarks
+// must leave alone. Pass the FULL polled run list, not just the running ones: a
+// SUCCEEDED run whose replacement has not been applied yet still needs its anchor
+// — cleaning it up makes the apply find no marker and silently drop the result.
+// FAILED runs are deliberately unprotected here; the failed-run handler re-arms
+// the marker itself for same-session retries.
+export function aiEditSelectionIdsToProtect(runs: ActiveAiRunView[]): Set<string> {
+  const ids = new Set<string>();
+  for (const run of runs) {
+    if (run.status === "FAILED") continue;
+    if (run.status === "SUCCEEDED" && run.appliedAt) continue;
+    const selectionId = aiEditRunSelectionId(run);
+    if (selectionId) ids.add(selectionId);
+  }
+  return ids;
 }
 
 export function cleanupStaleAiEditRangeMarks(state: EditorState, activeSelectionIds: Set<string>): Transaction | null {
