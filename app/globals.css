@@ -4012,6 +4012,101 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
     flex-direction: column;
     align-items: stretch;
   }
+
+  /* Prevent iOS tap-to-zoom: focusable text surfaces need >= 16px text. */
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
+
+  .ProseMirror {
+    font-size: 16px;
+  }
+
+  /* Larger, thumb-friendly tap targets for chrome controls. */
+  .header-menu summary,
+  .editor-toolbar-button,
+  .ghost-button,
+  .primary-button {
+    min-height: 44px;
+  }
+
+  .editor-toolbar-button {
+    padding: 0.55rem 0.8rem;
+  }
+
+  /* App-level top bar: wrap the nav instead of overflowing the width. */
+  .topbar {
+    flex-wrap: wrap;
+    row-gap: 0.5rem;
+  }
+
+  .topbar-nav {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .user-chip {
+    max-width: 45vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Header dropdown panels must not force a min-width wider than the screen. */
+  .header-menu-panel {
+    min-width: 0;
+  }
+
+  /* Long unbreakable cell content must not blow out fixed-layout tables. */
+  .ProseMirror td,
+  .ProseMirror th {
+    overflow-wrap: anywhere;
+  }
+
+  /* Editor code blocks scroll horizontally rather than widen the page. */
+  .ProseMirror pre {
+    overflow-x: auto;
+  }
+
+  /* Fixed toasts become bottom sheets that clear the notch / home indicator. */
+  .error-toast,
+  .agent-toast {
+    left: 0.75rem;
+    right: 0.75rem;
+    bottom: max(0.75rem, env(safe-area-inset-bottom));
+    width: auto;
+  }
+
+  /* The selection comment / AI-edit composer becomes a bottom sheet so it
+     never renders off-screen next to a selection near the viewport edge. */
+  .selection-bubble-wrap:has(.comment-composer-popover) {
+    position: fixed;
+    left: 0.75rem !important;
+    right: 0.75rem;
+    top: auto !important;
+    bottom: max(0.75rem, env(safe-area-inset-bottom));
+    z-index: 46;
+  }
+
+  .comment-composer-popover {
+    width: auto;
+  }
+}
+
+@media (max-width: 480px) {
+  .editor-page {
+    padding: 1rem 0.9rem;
+  }
+
+  .document-title-input {
+    font-size: 1rem;
+  }
+
+  .hero-copy h1 {
+    font-size: clamp(2rem, 9vw, 2.8rem);
+  }
 }
 
 /* --- @mentions: highlight + autocomplete --- */
