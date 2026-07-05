@@ -109,6 +109,23 @@ RESOLVED (2026-06-02): root cause was the Bash guard's denylist model — see th
 
 
 
+# Agent pipeline & robustness fixes — SHIPPED (2026-07-04)
+
+One batch, all live-verified (a real container agent run returned a sorted, valid GFM table with no meta commentary):
+- **Tables round-trip** (`lib/content.ts`): doc→markdown now emits valid GFM (delimiter row, escaped pipes) in all three serializations (selection markdown, plain-text findText haystack, AI blocks — one shared `serializeTableToGfm` so they can't diverge). Previously the delimiter row was missing, so agents echoed delimiter-less pipes that markdown-it inserted as a paragraph of literal `|` characters — the "table edits fail sometimes" bug.
+- **Widget inline round-trip**: widgets serialize as `![widget: <label>](widget://<widgetId>)` placeholders; `buildAiEditInsertContent` resolves placeholders inline (existing by id, new array widgets by label / `widget://new`), heals the legacy `[Interactive widget: …](…)` link form, and appends unreferenced array widgets as before. The `summary || selectedText` fallback for empty replacements is DEAD (`ai-edit` route) — it used to insert the agent's meta summary into the document body (observed in production). Empty replacement + assets now applies as widget/image-only content instead of dropping the widgets client-side. Validation rejects echoed widget-metadata prose and obvious chat-style openers.
+- **Prompt contract** (`agent-core/agent.ts`): replacementText now has an explicit drop-in contract (final document prose, no meta commentary, must read seamlessly with surrounding text); selection context is sent as fenced `<text_before_selection>`/`<text_after_selection>` blocks; question-shaped instructions must be answered in document voice; suggestion replacementText carries the same contract; user-prompt fields are fenced against label-collision.
+- **Run robustness**: expired host OAuth tokens are refused pre-dispatch (re-read from disk, actionable error) instead of injected; classified 401s re-resolve the credential and retry once (container layer); transient retry broadened (429/5xx/529/overloaded/spawn failures) with 2 backed-off retries; comment-create 409 ("Anchor not yet saved") now auto-retries client-side without reverting the editor; FAILED selection edits keep their marker and show a Retry/Dismiss card (`ai-edit-retry` scope).
+- **Mobile pass**: proper viewport meta (`width=device-width` — the app previously rendered at ~980px on phones), ≥16px inputs/editor text (no iOS zoom-jank), wrapping topbar, 44px tap targets, safe-area-aware toasts, bottom-sheet comment composer on small screens.
+- **Integration tests** seed users via Prisma + locally-minted JWT (`tests/integration/helpers.ts`) — the suite outgrew the 10/min sign-up rate limit.
+
+Known follow-ups (deliberately deferred, roughly in priority order):
+1. **Resume abandoned runs** instead of reaping to FAILED: persist the serializable `AgentJob` on the AiRun row; on startup/reaper re-dispatch, reusing the surviving worktree. Also shorten the 15-min blind window with a boot-epoch check.
+2. **Workspace mutex timeout** (`lib/research-workspace.ts` `withWorkspaceLock`): a wedged setup currently deadlocks a document's queue forever.
+3. **Worktree GC**: crash-orphaned `.research-workspaces/**/worktrees` are never swept; push-failed worktrees are removed (lossy).
+4. **Merge resolver on OpenRouter docs** (see OpenRouter follow-ups below).
+5. UI re-connect prompt when a stored user credential 401s.
+
 # Features
 
 
@@ -119,6 +136,10 @@ Users can select OpenRouter models (curated list + custom slug, `openrouter/<aut
 - **Scaffold dimension**: config is provider-shaped (`AgentModelProvider`), so a future non-SDK scaffold (pi/opencode) can be added as a new provider + runner without reworking UI/schema.
 - An *invalid* (vs missing) OpenRouter key fails slowly — the SDK retries 401s 10× (~3 min) before the run fails.
 
+## Per-user agent credentials — SHIPPED (2026-07-04, phases 1–4)
+Implemented per the plan below: encrypted `UserCredential` (AES-256-GCM, key in `.env` `CREDENTIAL_ENCRYPTION_KEY`), masked CRUD at `/api/user/credentials`, topbar "AI credential" menu (paste an Anthropic API key or a `claude setup-token` OAuth token, with the ToS disclaimer), and resolution precedence document env → document OWNER's credential → host `~/.claude` fallback with exactly one credential var injected (`lib/user-credentials.ts` `loadAgentEnvForDocument`, used by all three agent routes). Phase 4 flag `AGENT_REQUIRE_USER_CREDENTIAL` (default off) disables the host fallback and fails fast with "Connect an Anthropic credential in settings." Tests: `tests/user-credentials.test.ts` (16), `tests/integration/user-credentials.integration.test.ts` (live CRUD, verified green). Remaining follow-up: prompt a re-connect in the UI when a stored credential 401s (today it surfaces as a failed run with the actionable message).
+
+### Original plan (for reference)
 ## Per-user agent credentials — PLANNED (do after sandboxing)
 Currently all Claude usage runs through the host's `~/.claude` OAuth session (one account). Goal: each user connects their own Claude credential **once**, and every document they own inherits it; the agent then runs under the owner's credential.
 
