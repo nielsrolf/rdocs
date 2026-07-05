@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
 import test, { after } from "node:test";
 
 import { db } from "../../lib/db";
+import { seedUser } from "./helpers";
 
 // HTTP coverage of the per-user AI credential CRUD route (auth + validation +
 // masking), mirroring the document environment route tests. Targets a RUNNING
@@ -44,23 +44,13 @@ after(async () => {
   await db.$disconnect().catch(() => undefined);
 });
 
-function cookieFrom(response: Response): string {
-  const setCookies = response.headers.getSetCookie?.() ?? [];
-  return setCookies.map((c) => c.split(";")[0]).join("; ");
-}
-
+// Seed via Prisma + locally-minted JWT (see tests/integration/helpers.ts) —
+// the HTTP sign-up route is rate limited to 10/min/IP across the whole
+// integration run.
 async function signUp(): Promise<string> {
-  const email = `cred-${crypto.randomUUID()}@example.com`;
-  createdEmails.push(email);
-  const res = await fetch(`${BASE}/api/auth/sign-up`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: "Cred Test", email, password: "password1234" })
-  });
-  assert.equal(res.status, 200, "sign-up should succeed");
-  const cookie = cookieFrom(res);
-  assert.ok(cookie.includes("gdocs_ai_session"), "sign-up should set a session cookie");
-  return cookie;
+  const seeded = await seedUser();
+  createdEmails.push(seeded.email);
+  return seeded.cookie;
 }
 
 function authed(cookie: string, url: string, init: RequestInit = {}) {

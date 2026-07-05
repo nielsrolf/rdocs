@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import test, { after } from "node:test";
 
 import { db } from "../../lib/db";
+import { seedUser } from "./helpers";
 
 // End-to-end HTTP coverage of the real Next.js API routes (auth cookies +
 // routing + serialization + persistence) for the bug classes that depend on the
@@ -57,7 +58,16 @@ function cookieFrom(response: Response): string {
   return setCookies.map((c) => c.split(";")[0]).join("; ");
 }
 
+// Seed via Prisma + mint the JWT locally — the HTTP sign-up route is rate
+// limited to 10/min/IP, and this suite creates a user per test. Real route
+// coverage lives in the dedicated sign-up test below.
 async function signUp(): Promise<string> {
+  const seeded = await seedUser();
+  createdEmails.push(seeded.email);
+  return seeded.cookie;
+}
+
+itLive("the HTTP sign-up route issues a session cookie", async () => {
   const email = `int-${crypto.randomUUID()}@example.com`;
   createdEmails.push(email);
   const res = await fetch(`${BASE}/api/auth/sign-up`, {
@@ -68,8 +78,7 @@ async function signUp(): Promise<string> {
   assert.equal(res.status, 200, "sign-up should succeed");
   const cookie = cookieFrom(res);
   assert.ok(cookie.includes("gdocs_ai_session"), "sign-up should set a session cookie");
-  return cookie;
-}
+});
 
 function authed(cookie: string, url: string, init: RequestInit = {}) {
   return fetch(`${BASE}${url}`, {
