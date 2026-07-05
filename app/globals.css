@@ -73,6 +73,12 @@ select:focus {
   background: rgba(255, 255, 255, 0.85);
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(10px);
+  /* backdrop-filter traps children in this stacking context at level auto, so
+     dropdowns (e.g. the AI credential menu) painted under the workspace's
+     sticky chrome (z 12) and comment rail (z ≤ 30). Lift the whole bar above
+     in-document popovers (35) but below modal overlays (40). */
+  position: relative;
+  z-index: 38;
 }
 
 body.public-view-shell .topbar {

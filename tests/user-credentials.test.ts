@@ -144,17 +144,19 @@ test("openrouter models never receive the owner's Anthropic credential", () => {
 // --- phase-4 flag behavior -------------------------------------------------
 
 test("credentialRequirementError: off by default (no flag)", () => {
-  assert.equal(credentialRequirementError({}, "claude-sonnet-5", {}), null);
+  assert.equal(credentialRequirementError({}, "claude-sonnet-5", null, {}), null);
 });
 
 test("credentialRequirementError: flag on + no credential → clear error", () => {
-  const msg = credentialRequirementError({}, "claude-sonnet-5", { AGENT_REQUIRE_USER_CREDENTIAL: "1" });
+  const msg = credentialRequirementError({}, "claude-sonnet-5", null, {
+    AGENT_REQUIRE_USER_CREDENTIAL: "1"
+  });
   assert.match(msg ?? "", /Connect an Anthropic credential/i);
 });
 
 test("credentialRequirementError: flag on but a credential is present → ok", () => {
   assert.equal(
-    credentialRequirementError({ ANTHROPIC_API_KEY: "sk-ant-x" }, "claude-sonnet-5", {
+    credentialRequirementError({ ANTHROPIC_API_KEY: "sk-ant-x" }, "claude-sonnet-5", null, {
       AGENT_REQUIRE_USER_CREDENTIAL: "1"
     }),
     null
@@ -163,7 +165,57 @@ test("credentialRequirementError: flag on but a credential is present → ok", (
 
 test("credentialRequirementError: flag on + openrouter model → ok (uses OPENROUTER_API_KEY)", () => {
   assert.equal(
-    credentialRequirementError({}, "openrouter/openai/gpt-5.2", { AGENT_REQUIRE_USER_CREDENTIAL: "1" }),
+    credentialRequirementError({}, "openrouter/openai/gpt-5.2", null, {
+      AGENT_REQUIRE_USER_CREDENTIAL: "1"
+    }),
     null
   );
+});
+
+// --- host-fallback owner allowlist ------------------------------------------
+
+const ALLOWLIST = { AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS: "owner@example.com, Second@Example.com" };
+
+test("host allowlist: non-allowlisted owner without credential → error (no host fallback)", () => {
+  const msg = credentialRequirementError({}, "claude-sonnet-5", "stranger@example.com", ALLOWLIST);
+  assert.match(msg ?? "", /Connect an Anthropic credential/i);
+});
+
+test("host allowlist: allowlisted owner without credential → ok (host fallback allowed)", () => {
+  assert.equal(credentialRequirementError({}, "claude-sonnet-5", "owner@example.com", ALLOWLIST), null);
+});
+
+test("host allowlist: matching is case- and whitespace-insensitive", () => {
+  assert.equal(
+    credentialRequirementError({}, "claude-sonnet-5", "  second@example.COM ", ALLOWLIST),
+    null
+  );
+});
+
+test("host allowlist: unknown owner email (null) → error when allowlist is set", () => {
+  const msg = credentialRequirementError({}, "claude-sonnet-5", null, ALLOWLIST);
+  assert.match(msg ?? "", /Connect an Anthropic credential/i);
+});
+
+test("host allowlist: non-allowlisted owner WITH a credential → ok (their own key is used)", () => {
+  assert.equal(
+    credentialRequirementError(
+      { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-x" },
+      "claude-sonnet-5",
+      "stranger@example.com",
+      ALLOWLIST
+    ),
+    null
+  );
+});
+
+test("host allowlist: openrouter model bypasses the allowlist", () => {
+  assert.equal(
+    credentialRequirementError({}, "openrouter/openai/gpt-5.2", "stranger@example.com", ALLOWLIST),
+    null
+  );
+});
+
+test("host allowlist: unset → host fallback stays open for everyone (back-compat)", () => {
+  assert.equal(credentialRequirementError({}, "claude-sonnet-5", "stranger@example.com", {}), null);
 });

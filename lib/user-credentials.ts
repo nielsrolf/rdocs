@@ -216,21 +216,44 @@ function isFlagEnabled(value: string | undefined): boolean {
   return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
 }
 
+function parseEmailAllowlist(value: string | undefined): string[] | null {
+  if (!value) return null;
+  const emails = value
+    .split(",")
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean);
+  return emails.length > 0 ? emails : null;
+}
+
+const CONNECT_CREDENTIAL_MESSAGE =
+  "Connect an Anthropic credential in settings to run AI features.";
+
 /**
- * Phase-4 multi-tenant guard (default OFF). When AGENT_REQUIRE_USER_CREDENTIAL
- * is set and the resolved env has no Anthropic credential (and the model is not
- * OpenRouter), returns a clear user-facing message so the run fails fast instead
- * of hitting a cryptic 401 on the host fallback. Returns null otherwise.
+ * Guards on falling back to the HOST ~/.claude credential. Returns a clear
+ * user-facing message (so the run fails fast instead of hitting a cryptic 401)
+ * when the resolved env has no Anthropic credential, the model is not
+ * OpenRouter, and either:
+ *   - AGENT_REQUIRE_USER_CREDENTIAL is set (phase-4 multi-tenant mode: host
+ *     fallback disabled for everyone), or
+ *   - AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS is set and the document owner's
+ *     email is not on that comma-separated allowlist (host subscription is
+ *     reserved for the listed accounts; everyone else brings their own key).
+ * Returns null otherwise (fallback permitted).
  */
 export function credentialRequirementError(
   agentEnv: DocumentEnv,
   agentModel: string | null | undefined,
+  ownerEmail: string | null | undefined = null,
   env: Record<string, string | undefined> = process.env
 ): string | null {
-  if (!isFlagEnabled(env.AGENT_REQUIRE_USER_CREDENTIAL)) return null;
   if (isOpenRouterAgentModel(agentModel)) return null;
   if (hasAnthropicCredential(agentEnv)) return null;
-  return "Connect an Anthropic credential in settings to run AI features.";
+  if (isFlagEnabled(env.AGENT_REQUIRE_USER_CREDENTIAL)) return CONNECT_CREDENTIAL_MESSAGE;
+  const allowlist = parseEmailAllowlist(env.AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS);
+  if (allowlist && !(ownerEmail && allowlist.includes(ownerEmail.trim().toLowerCase()))) {
+    return CONNECT_CREDENTIAL_MESSAGE;
+  }
+  return null;
 }
 
 /**
@@ -244,11 +267,14 @@ export async function loadAgentEnvForDocument(
 ): Promise<DocumentEnv> {
   const [docEnv, doc] = await Promise.all([
     loadDocumentEnv(documentId),
-    db.document.findUnique({ where: { id: documentId }, select: { ownerId: true } })
+    db.document.findUnique({
+      where: { id: documentId },
+      select: { ownerId: true, owner: { select: { email: true } } }
+    })
   ]);
   const ownerCredential = doc?.ownerId ? await getUserCredential(doc.ownerId) : null;
   const env = applyOwnerCredentialEnv(docEnv, ownerCredential, agentModel);
-  const requirementError = credentialRequirementError(env, agentModel);
+  const requirementError = credentialRequirementError(env, agentModel, doc?.owner?.email ?? null);
   if (requirementError) {
     throw new Error(requirementError);
   }
