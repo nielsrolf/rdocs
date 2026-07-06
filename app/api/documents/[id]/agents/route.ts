@@ -120,7 +120,7 @@ async function runAgentConversationInBackground(input: {
       await recordAiRunEvent({
         aiRunId,
         role: "system",
-        message: `No AI credential connected — running on the free local model (${effectiveAgentConfig.model}). Connect a credential under AI credentials in the topbar to use Claude.`
+        message: `No AI credential connected — running on the free local model (${effectiveAgentConfig.model}). It is much slower than Claude (first output can take a few minutes). Connect a credential under AI credentials in the topbar to use Claude.`
       });
     }
     const result = await getAgentRunner().run({
