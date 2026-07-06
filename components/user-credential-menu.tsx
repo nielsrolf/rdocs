@@ -7,6 +7,7 @@ import {
   looksLikeMcpToken,
   type CredentialProvider
 } from "@/lib/credential-detect";
+import { emitTourEvent } from "@/components/onboarding-tour";
 
 type MaskedCredential = {
   provider: CredentialProvider;
@@ -210,6 +211,7 @@ export function UserCredentialMenu() {
       setCredentials(data.credentials ?? []);
       setValueDraft("");
       setFallbackProvider("");
+      emitTourEvent("credential-connected");
     } finally {
       setBusy(false);
     }
@@ -246,7 +248,7 @@ export function UserCredentialMenu() {
   );
 
   return (
-    <details className="header-menu header-menu-right" ref={detailsRef}>
+    <details className="header-menu header-menu-right" data-tour="ai-credentials" ref={detailsRef}>
       <summary>AI credentials</summary>
       <div className="header-menu-panel env-panel credentials-panel">
         <section className="credentials-section">

@@ -41,18 +41,18 @@ test("onboarding tour walks from dashboard through the document steps", async ({
 
     // Step 1's primary button creates the document (it must never just
     // advance the tour without creating one).
-    await expect(page.getByText("Step 1 of 9")).toBeVisible();
+    await expect(page.getByText("Step 1 of 10")).toBeVisible();
     await page.getByRole("button", { name: "Create document" }).click();
 
     // Crossing into the document advances to the title step.
-    await expect(page.getByText("Step 2 of 9")).toBeVisible();
+    await expect(page.getByText("Step 2 of 10")).toBeVisible();
     await page.getByLabel("Document title").fill("How to use r-docs");
     await page.getByRole("button", { name: "Next" }).click();
 
     // Headings step offers starter content; inserting it fills the editor.
     // The editor is a tall anchor, so the tooltip docks — and must be fully
     // inside the viewport (it used to run off the top of the screen).
-    await expect(page.getByText("Step 3 of 9")).toBeVisible();
+    await expect(page.getByText("Step 3 of 10")).toBeVisible();
     const tooltipBox = await page.locator(".tour-tooltip").boundingBox();
     const viewport = page.viewportSize()!;
     expect(tooltipBox!.y).toBeGreaterThanOrEqual(0);
@@ -63,24 +63,29 @@ test("onboarding tour walks from dashboard through the document steps", async ({
     await page.getByRole("button", { name: "Next" }).click();
 
     // Repo step advances on the repo-linked app event.
-    await expect(page.getByText("Step 4 of 9")).toBeVisible();
+    await expect(page.getByText("Step 4 of 10")).toBeVisible();
     await expect(page.getByText("github.com/nielsrolf/rdocs")).toBeVisible();
     await page.evaluate(fireTourEvent("repo-linked"));
 
+    // Credentials step: connect (event) or skip — the free-qwen path is named.
+    await expect(page.getByText("Step 5 of 10")).toBeVisible();
+    await expect(page.getByText(/free local qwen model/)).toBeVisible();
+    await page.evaluate(fireTourEvent("credential-connected"));
+
     // AI edit step → comment step → Ask AI step → agent step, via their events.
-    await expect(page.getByText("Step 5 of 9")).toBeVisible();
+    await expect(page.getByText("Step 6 of 10")).toBeVisible();
     await page.evaluate(fireTourEvent("ai-edit-started"));
-    await expect(page.getByText("Step 6 of 9")).toBeVisible();
+    await expect(page.getByText("Step 7 of 10")).toBeVisible();
     await page.evaluate(fireTourEvent("comment-created"));
-    await expect(page.getByText("Step 7 of 9")).toBeVisible();
+    await expect(page.getByText("Step 8 of 10")).toBeVisible();
     await page.evaluate(fireTourEvent("ask-ai"));
-    await expect(page.getByText("Step 8 of 9")).toBeVisible();
+    await expect(page.getByText("Step 9 of 10")).toBeVisible();
     await page.evaluate(fireTourEvent("agent-run-started"));
 
     // Final step → Finish persists completion.
-    await expect(page.getByText("Step 9 of 9")).toBeVisible();
+    await expect(page.getByText("Step 10 of 10")).toBeVisible();
     await page.getByRole("button", { name: "Finish" }).click();
-    await expect(page.getByText("Step 9 of 9")).not.toBeVisible();
+    await expect(page.getByText("Step 10 of 10")).not.toBeVisible();
 
     const stored = await page.evaluate(() => window.localStorage.getItem("rdocs-tour-v1"));
     expect(stored).toContain("completedAt");

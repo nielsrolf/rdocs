@@ -14,6 +14,7 @@ const TOUR_EVENT = "rdocs-tour-event";
 
 export type TourEventName =
   | "repo-linked"
+  | "credential-connected"
   | "ai-edit-started"
   | "comment-created"
   | "ask-ai"
@@ -117,6 +118,21 @@ const STEPS: TourStep[] = [
       </>
     ),
     advanceOn: "repo-linked",
+    dock: true
+  },
+  {
+    surface: "doc",
+    target: '[data-tour="ai-credentials"]',
+    title: "Connect AI credentials — or skip",
+    body: (
+      <>
+        Open <strong>AI credentials</strong> in the topbar and paste an Anthropic API key or a{" "}
+        <code>claude setup-token</code> subscription token — one field, the type is detected
+        automatically. Or skip this step: AI runs fall back to the free local qwen model, which
+        works but is <em>very</em> slow (minutes, not seconds).
+      </>
+    ),
+    advanceOn: "credential-connected",
     dock: true
   },
   {
