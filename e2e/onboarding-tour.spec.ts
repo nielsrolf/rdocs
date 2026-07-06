@@ -57,7 +57,7 @@ test("onboarding tour walks from dashboard through the document steps", async ({
 
     // Repo step advances on the repo-linked app event.
     await expect(page.getByText("Step 4 of 9")).toBeVisible();
-    await expect(page.getByText("github.com/nielsrolf/gdocs-ai")).toBeVisible();
+    await expect(page.getByText("github.com/nielsrolf/rdocs")).toBeVisible();
     await page.evaluate(fireTourEvent("repo-linked"));
 
     // AI edit step → comment step → Ask AI step → agent step, via their events.

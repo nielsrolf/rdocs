@@ -52,7 +52,7 @@ function writeState(state: TourState) {
   }
 }
 
-export const REPO_TOUR_URL = "https://github.com/nielsrolf/gdocs-ai";
+export const REPO_TOUR_URL = "https://github.com/nielsrolf/rdocs";
 
 type TourStep = {
   surface: "list" | "doc";
