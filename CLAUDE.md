@@ -9,16 +9,22 @@ The service runs via `./gdocs-ai.sh`, which loads `.env`, runs `npm ci`, `prisma
 You are allowed to manage the service yourself when debugging — restart it whenever a server-side change needs to be live. The standard restart recipe:
 
 ```bash
-# 1. Stop the running instance, if any.
-if [ -s .service.pid ]; then kill "$(cat .service.pid)" 2>/dev/null || true; fi
-
-# 2. Start a fresh build+run in the background, capturing logs and PID.
+# 1. Start a fresh build+run in the background. Do NOT kill .service.pid
+#    yourself — gdocs-ai.sh frees the port itself: it kills any previous
+#    listener AND any SIGTERM-surviving old next-server still holding
+#    keep-alive connections. (Killing only the pid-file process orphans the
+#    next-server child: it keeps serving the OLD build through cloudflared's
+#    pinned connections while the new run rebuilds .next under it and then
+#    dies with EADDRINUSE — users see ChunkLoadError. This happened for real.)
 LOG="logs/service_$(date +%Y%m%d_%H%M%S).log"
 nohup ./gdocs-ai.sh > "$LOG" 2>&1 &
 echo $! > .service.pid
 
-# 3. Wait for "Ready in" before exercising the API.
+# 2. Wait for "Ready in" before exercising the API.
 until grep -q "Ready in" "$LOG" 2>/dev/null; do sleep 2; done
+
+# 3. Verify exactly one server survived — anything else means a zombie build.
+lsof -nP -iTCP:14141 -sTCP:LISTEN; ps aux | grep next-server | grep -v grep
 ```
 
 The `npm ci` + `npm run build` step typically takes 30–90 seconds, so run the restart in the background (or via Bash `run_in_background`) and poll/monitor the log for `Ready in`. Do not start the dev server (`npm run dev`); production `npm run start` is what the deploy uses.
@@ -168,3 +174,4 @@ Prefer the cheapest layer that genuinely reproduces the bug: a headless test in 
 - **Selection marker lost during long agent runs.** Any doc mutation while the agent is working can strip the `aiEditRange` mark. Diagnosed via `scope:ai-edit-marker-lost`'s `presence` payload.
 - **Iframe self-feedback in widget views.** Plotly-style autosize widgets used to inflate to 6× viewport height. `EmbeddedWidgetView` in `nodes.tsx` now ignores `ResizeObserver` ticks that look like echoes of its own height changes.
 - **Comments on atom block nodes** (widget / repoImage / image). Originally impossible because `commentAnchor` is an inline Mark. Now stored as `commentThreadIds` attribute on the block node.
+- **Orphaned next-server serving a stale build.** Killing the `.service.pid` process leaves the `next-server` child alive; it survives SIGTERM, keeps serving the old build over cloudflared's established keep-alive connections even after losing its listener, and the next deploy's `npm run build` rewrites `.next` under it (old HTML → missing chunks → `ChunkLoadError: Loading chunk N failed`) before dying with EADDRINUSE. Diagnose with `ps aux | grep next-server` (more than one = bug) and per-process `lsof` on the log fds; fix is in `gdocs-ai.sh` (frees the port + kills established-connection holders) plus `ChunkReloadRecovery` client-side.
