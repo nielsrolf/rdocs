@@ -39,9 +39,10 @@ test("onboarding tour walks from dashboard through the document steps", async ({
     await expect(offer).toBeVisible();
     await offer.getByRole("button", { name: "Start the tour" }).click();
 
-    // Step 1 anchors to the New document button.
+    // Step 1's primary button creates the document (it must never just
+    // advance the tour without creating one).
     await expect(page.getByText("Step 1 of 9")).toBeVisible();
-    await page.getByRole("button", { name: "New document" }).click();
+    await page.getByRole("button", { name: "Create document" }).click();
 
     // Crossing into the document advances to the title step.
     await expect(page.getByText("Step 2 of 9")).toBeVisible();
@@ -49,7 +50,13 @@ test("onboarding tour walks from dashboard through the document steps", async ({
     await page.getByRole("button", { name: "Next" }).click();
 
     // Headings step offers starter content; inserting it fills the editor.
+    // The editor is a tall anchor, so the tooltip docks — and must be fully
+    // inside the viewport (it used to run off the top of the screen).
     await expect(page.getByText("Step 3 of 9")).toBeVisible();
+    const tooltipBox = await page.locator(".tour-tooltip").boundingBox();
+    const viewport = page.viewportSize()!;
+    expect(tooltipBox!.y).toBeGreaterThanOrEqual(0);
+    expect(tooltipBox!.y + tooltipBox!.height).toBeLessThanOrEqual(viewport.height);
     await page.getByRole("button", { name: "Insert starter content" }).click();
     await expect(editor(page)).toContainText("How to use r-docs");
     await expect(editor(page)).toContainText("AI credentials and GitHub PAT");

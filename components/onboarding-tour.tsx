@@ -63,6 +63,18 @@ type TourStep = {
   advanceOn?: TourEventName;
   /** Render the "Insert starter content" convenience button. */
   offerStarter?: boolean;
+  /**
+   * Primary button clicks the anchor element instead of advancing — for steps
+   * where "Next" would skip the action the step is about (e.g. actually
+   * creating the document).
+   */
+  actionLabel?: string;
+  /**
+   * Pin the tooltip to the bottom-left corner instead of anchoring it to the
+   * target — for steps whose target grows UI (dropdown panels) the tooltip
+   * would otherwise cover. Tall anchors (the editor) dock automatically.
+   */
+  dock?: boolean;
 };
 
 const STEPS: TourStep[] = [
@@ -70,7 +82,8 @@ const STEPS: TourStep[] = [
     surface: "list",
     target: '[data-tour="new-doc"]',
     title: "Create a document",
-    body: "Let's build a \"How to use r-docs\" guide together. Click New document to start."
+    body: "Let's build a \"How to use r-docs\" guide together. Click New document to start.",
+    actionLabel: "Create document"
   },
   {
     surface: "doc",
@@ -98,12 +111,13 @@ const STEPS: TourStep[] = [
     title: "Connect a repository",
     body: (
       <>
-        Documents can drive a real repo. Open <strong>Repo</strong>, paste{" "}
+        Documents can drive a real repo. Open <strong>Repo</strong> in the topbar, paste{" "}
         <code>{REPO_TOUR_URL}</code> (the r-docs source itself) and press Save. Agents get an
         isolated checkout and can answer questions from the code.
       </>
     ),
-    advanceOn: "repo-linked"
+    advanceOn: "repo-linked",
+    dock: true
   },
   {
     surface: "doc",
@@ -291,22 +305,29 @@ export function OnboardingTour({
   }, [visible, step]);
 
   const tooltipStyle = useMemo(() => {
-    if (!targetRect) {
-      return { bottom: "1.25rem", right: "1.25rem" } as const;
+    const dockStyle = { bottom: "1.25rem", left: "1.25rem" } as const;
+    if (!targetRect || typeof window === "undefined") {
+      return dockStyle;
+    }
+    // Steps whose target grows UI (dropdown panels), and tall anchors like the
+    // editor, get the docked corner — an anchored tooltip would either cover
+    // what the step asks the user to interact with or land off-screen.
+    if (step?.dock || targetRect.height > window.innerHeight * 0.4) {
+      return dockStyle;
     }
     const margin = 12;
     const width = 340;
-    const below = targetRect.bottom + margin;
-    const left = Math.max(
-      12,
-      Math.min(targetRect.left, (typeof window !== "undefined" ? window.innerWidth : 1200) - width - 12)
-    );
-    // Place below the anchor unless that would run off-screen — then above.
-    if (typeof window !== "undefined" && below + 220 > window.innerHeight) {
-      return { bottom: `${window.innerHeight - targetRect.top + margin}px`, left: `${left}px` } as const;
+    const estimatedHeight = 240;
+    const left = Math.max(12, Math.min(targetRect.left, window.innerWidth - width - 12));
+    // Below the anchor when it fits, above when it doesn't — always clamped
+    // fully inside the viewport so no text can run off-screen.
+    let top = targetRect.bottom + margin;
+    if (top + estimatedHeight > window.innerHeight) {
+      top = targetRect.top - margin - estimatedHeight;
     }
-    return { top: `${below}px`, left: `${left}px` } as const;
-  }, [targetRect]);
+    top = Math.max(12, Math.min(top, window.innerHeight - estimatedHeight - 12));
+    return { top: `${top}px`, left: `${left}px` } as const;
+  }, [targetRect, step]);
 
   function handleInsertStarter() {
     if (!editor) return;
@@ -376,9 +397,19 @@ export function OnboardingTour({
             Back
           </button>
         ) : null}
-        <button className="primary-button" onClick={advance} type="button">
-          {state.step >= STEPS.length - 1 ? "Finish" : step.advanceOn ? "Skip step" : "Next"}
-        </button>
+        {step.actionLabel ? (
+          <button
+            className="primary-button"
+            onClick={() => document.querySelector<HTMLElement>(step.target)?.click()}
+            type="button"
+          >
+            {step.actionLabel}
+          </button>
+        ) : (
+          <button className="primary-button" onClick={advance} type="button">
+            {state.step >= STEPS.length - 1 ? "Finish" : step.advanceOn ? "Skip step" : "Next"}
+          </button>
+        )}
       </div>
     </div>
   );
