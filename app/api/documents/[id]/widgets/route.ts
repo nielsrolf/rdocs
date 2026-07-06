@@ -36,7 +36,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
   }
 
-  const linkedRepo = await ensureLinkedRepository(id, { requireClean: false });
+  const linkedRepo = await ensureLinkedRepository(id, { requireClean: false, runnerUserId: user?.id ?? null });
   let lastBuiltAt: Date | null = null;
   let lastError: string | null = null;
   let workspacePath: string | null = null;

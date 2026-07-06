@@ -1,8 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
-type CredentialProvider = "anthropic" | "openrouter" | "litellm";
+import {
+  detectCredential,
+  looksLikeMcpToken,
+  type CredentialProvider
+} from "@/lib/credential-detect";
 
 type MaskedCredential = {
   provider: CredentialProvider;
@@ -15,14 +19,49 @@ type MaskedCredential = {
 function credentialLabel(credential: MaskedCredential): string {
   if (credential.provider === "openrouter") return "OpenRouter API key";
   if (credential.provider === "litellm") return "LiteLLM API key";
-  return credential.kind === "oauth" ? "Claude subscription (OAuth token)" : "Anthropic API key";
+  if (credential.provider === "github") return "GitHub access token";
+  return credential.kind === "oauth" ? "Claude subscription" : "Anthropic API key";
 }
 
-const PROVIDER_OPTIONS: Array<{ value: CredentialProvider; label: string; placeholder: string }> = [
-  { value: "anthropic", label: "Anthropic", placeholder: "sk-ant-… or sk-ant-oat…" },
-  { value: "openrouter", label: "OpenRouter", placeholder: "sk-or-v1-…" },
-  { value: "litellm", label: "LiteLLM", placeholder: "sk-…" }
+// Only offered when the pasted value's format is unrecognizable — every other
+// provider is detected from its prefix.
+const FALLBACK_PROVIDER_OPTIONS: Array<{ value: CredentialProvider; label: string }> = [
+  { value: "litellm", label: "LiteLLM API key" },
+  { value: "openrouter", label: "OpenRouter API key" },
+  { value: "github", label: "GitHub access token" }
 ];
+
+// Shown under the add-row for the detected/selected provider.
+const PROVIDER_HINTS: Record<CredentialProvider, ReactNode> = {
+  anthropic: (
+    <>
+      Paste an API key (<code>sk-ant-…</code>) or a subscription token from{" "}
+      <code>claude setup-token</code> (<code>sk-ant-oat…</code>) — the kind is detected
+      automatically. The subscription path uses your Claude subscription, subject to
+      Anthropic&apos;s ToS; use with your own account at your own risk.
+    </>
+  ),
+  openrouter: (
+    <>
+      Unlocks OpenRouter models on every document you own — pick one under Agents → Model.
+    </>
+  ),
+  litellm: (
+    <>
+      Unlocks LiteLLM models on every document you own — pick one under Agents → Model. If this
+      server doesn&apos;t provide a default, also set <code>LITELLM_BASE_URL</code> in the
+      document&apos;s Env menu.
+    </>
+  ),
+  github: (
+    <>
+      Used to clone and push the repositories you link to documents. Create a{" "}
+      <strong>fine-grained personal access token</strong> (GitHub → Settings → Developer settings)
+      scoped to just those repositories, with <em>Contents: read &amp; write</em>. Runs you trigger
+      use your token; without one, only public repositories work (read-only).
+    </>
+  )
+};
 
 type McpToken = {
   id: string;
@@ -43,8 +82,9 @@ export function UserCredentialMenu() {
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [providerDraft, setProviderDraft] = useState<CredentialProvider>("anthropic");
   const [valueDraft, setValueDraft] = useState("");
+  // Provider picked manually when the pasted value's format is unrecognizable.
+  const [fallbackProvider, setFallbackProvider] = useState<CredentialProvider | "">("");
   const [busy, setBusy] = useState(false);
   const [mcpTokens, setMcpTokens] = useState<McpToken[]>([]);
   // The plaintext command is only available right after creating a token.
@@ -152,14 +192,15 @@ export function UserCredentialMenu() {
 
   async function handleSave() {
     const value = valueDraft.trim();
-    if (!value || busy) return;
+    const provider = detectCredential(value)?.provider ?? fallbackProvider;
+    if (!value || !provider || busy) return;
     setBusy(true);
     setError(null);
     try {
       const response = await fetch("/api/user/credentials", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: providerDraft, value })
+        body: JSON.stringify({ provider, value })
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) {
@@ -168,6 +209,7 @@ export function UserCredentialMenu() {
       }
       setCredentials(data.credentials ?? []);
       setValueDraft("");
+      setFallbackProvider("");
     } finally {
       setBusy(false);
     }
@@ -194,121 +236,142 @@ export function UserCredentialMenu() {
     }
   }
 
-  const providerOption = PROVIDER_OPTIONS.find((option) => option.value === providerDraft)!;
-  const providerConnected = credentials.some((credential) => credential.provider === providerDraft);
+  const trimmedDraft = valueDraft.trim();
+  const detected = detectCredential(trimmedDraft);
+  const isMcpToken = looksLikeMcpToken(trimmedDraft);
+  const needsFallbackChoice = Boolean(trimmedDraft) && !detected && !isMcpToken;
+  const effectiveProvider = detected?.provider ?? (needsFallbackChoice ? fallbackProvider || null : null);
+  const providerConnected = Boolean(
+    effectiveProvider && credentials.some((credential) => credential.provider === effectiveProvider)
+  );
 
   return (
     <details className="header-menu header-menu-right" ref={detailsRef}>
       <summary>AI credentials</summary>
-      <div className="header-menu-panel env-panel">
-        <div>
-          <strong>Your AI credentials</strong>
+      <div className="header-menu-panel env-panel credentials-panel">
+        <section className="credentials-section">
+          <strong className="credentials-section-title">Your AI credentials</strong>
           <p>
-            Connect one credential per provider; every document you own uses them for AI edits and
-            replies. Write-only — shown masked, never in full. A key set in a document&apos;s Env
-            menu overrides these for that document.
-          </p>
-        </div>
-
-        <div className="env-var-list">
-          {loading ? (
-            <div className="env-empty">Loading…</div>
-          ) : credentials.length > 0 ? (
-            credentials.map((credential) => (
-              <div className="env-var-row" key={credential.provider}>
-                <span className="env-var-key">{credentialLabel(credential)}</span>
-                <span className="env-var-value">{credential.masked}</span>
-                <button
-                  aria-label={`Remove ${credentialLabel(credential)}`}
-                  className="env-var-delete"
-                  disabled={busy}
-                  onClick={() => handleDelete(credential.provider)}
-                  title="Remove"
-                  type="button"
-                >
-                  ✕
-                </button>
-              </div>
-            ))
-          ) : loaded ? (
-            <div className="env-empty">No credentials connected.</div>
-          ) : null}
-        </div>
-
-        <div className="env-add-row">
-          <select
-            aria-label="Credential provider"
-            onChange={(event) => setProviderDraft(event.target.value as CredentialProvider)}
-            value={providerDraft}
-          >
-            {PROVIDER_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-          <input
-            aria-label={`${providerOption.label} credential`}
-            onChange={(event) => setValueDraft(event.target.value)}
-            placeholder={providerOption.placeholder}
-            type="password"
-            value={valueDraft}
-          />
-          <button
-            className="ghost-button"
-            disabled={busy || !valueDraft.trim()}
-            onClick={handleSave}
-            type="button"
-          >
-            {busy ? "Saving…" : providerConnected ? "Replace" : "Connect"}
-          </button>
-        </div>
-
-        <p className="subtle-pill" style={{ display: "block", whiteSpace: "normal", lineHeight: 1.4 }}>
-          <strong>Anthropic</strong> — paste an API key (<code>sk-ant-…</code>) or a subscription
-          token from <code>claude setup-token</code> (<code>sk-ant-oat…</code>); the kind is
-          detected automatically. The subscription path uses your Claude subscription — subject to
-          Anthropic&apos;s ToS; use with your own account at your own risk.
-        </p>
-
-        <p className="subtle-pill" style={{ display: "block", whiteSpace: "normal", lineHeight: 1.4 }}>
-          <strong>OpenRouter / LiteLLM</strong> — connect that provider&apos;s API key here to use
-          its models on every document you own, then pick the model under Agents → Model. (For
-          LiteLLM also set <code>LITELLM_BASE_URL</code> in the document&apos;s Env menu if this
-          server doesn&apos;t provide a default.)
-        </p>
-
-        <div style={{ borderTop: "1px solid var(--border, #444)", paddingTop: 12 }}>
-          <strong>Connect via MCP</strong>
-          <p>
-            Let a local Claude Code (or any MCP client) read and edit your documents as you. Creating
-            a token copies a ready-to-paste <code>claude mcp add</code> command; the token is shown
-            only once.
+            One credential per provider, used for AI edits and replies on every document you own.
+            Values are write-only — shown masked, never in full. A key set in a document&apos;s
+            Env menu overrides these for that document.
           </p>
 
           <div className="env-var-list">
-            {mcpTokens.map((token) => (
-              <div className="env-var-row" key={token.id}>
-                <span className="env-var-key">{token.label ?? "MCP token"}</span>
-                <span className="env-var-value">
-                  created {new Date(token.createdAt).toLocaleDateString()}
-                  {token.lastUsedAt ? ` · last used ${new Date(token.lastUsedAt).toLocaleDateString()}` : " · never used"}
-                </span>
-                <button
-                  aria-label="Revoke MCP token"
-                  className="env-var-delete"
-                  disabled={mcpBusy}
-                  onClick={() => handleRevokeMcpToken(token.id)}
-                  title="Revoke"
-                  type="button"
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
+            {loading ? (
+              <div className="env-empty">Loading…</div>
+            ) : credentials.length > 0 ? (
+              credentials.map((credential) => (
+                <div className="env-var-row" key={credential.provider}>
+                  <span className="env-var-key">{credentialLabel(credential)}</span>
+                  <span className="env-var-value">{credential.masked}</span>
+                  <button
+                    aria-label={`Remove ${credentialLabel(credential)}`}
+                    className="env-var-delete"
+                    disabled={busy}
+                    onClick={() => handleDelete(credential.provider)}
+                    title="Remove"
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))
+            ) : loaded ? (
+              <div className="env-empty">No credentials connected.</div>
+            ) : null}
           </div>
 
-          <div className="env-add-row">
+          <div className="env-add-row credentials-add-row">
+            <input
+              aria-label="Credential"
+              onChange={(event) => setValueDraft(event.target.value)}
+              placeholder="Paste any credential: sk-ant-…, sk-or-…, github_pat_…, LiteLLM key"
+              type="password"
+              value={valueDraft}
+            />
+            <button
+              className="ghost-button"
+              disabled={busy || !trimmedDraft || !effectiveProvider}
+              onClick={handleSave}
+              type="button"
+            >
+              {busy ? "Saving…" : providerConnected ? "Replace" : "Connect"}
+            </button>
+          </div>
+
+          {detected ? (
+            <p className="env-note">
+              <strong>Detected: {detected.label}.</strong> {PROVIDER_HINTS[detected.provider]}
+            </p>
+          ) : isMcpToken ? (
+            <p className="env-note env-note-error">
+              That is a gdocs-ai MCP token (<code>gdai_…</code>), not a provider credential — use
+              it with <code>claude mcp add</code> instead.
+            </p>
+          ) : needsFallbackChoice ? (
+            <div className="env-note">
+              <p className="credentials-fallback-label">
+                Couldn&apos;t recognize this key&apos;s format. What is it?
+              </p>
+              <div className="credentials-fallback-options" role="radiogroup" aria-label="Credential type">
+                {FALLBACK_PROVIDER_OPTIONS.map((option) => (
+                  <button
+                    aria-pressed={fallbackProvider === option.value}
+                    className={`ghost-button${fallbackProvider === option.value ? " active" : ""}`}
+                    key={option.value}
+                    onClick={() => setFallbackProvider(option.value)}
+                    type="button"
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              {fallbackProvider ? <p>{PROVIDER_HINTS[fallbackProvider]}</p> : null}
+            </div>
+          ) : (
+            <p className="env-note">
+              One field for everything: Anthropic API keys (<code>sk-ant-…</code>), Claude
+              subscription tokens (<code>sk-ant-oat…</code>, from <code>claude setup-token</code>),
+              OpenRouter keys (<code>sk-or-…</code>), GitHub tokens (<code>github_pat_…</code> /{" "}
+              <code>ghp_…</code>) and LiteLLM keys — the type is detected as you paste.
+            </p>
+          )}
+        </section>
+
+        <section className="credentials-section">
+          <strong className="credentials-section-title">Connect via MCP</strong>
+          <p>
+            Let a local Claude Code (or any MCP client) read and edit your documents as you.
+            Creating a token copies a ready-to-paste <code>claude mcp add</code> command; the
+            token is shown only once.
+          </p>
+
+          {mcpTokens.length > 0 ? (
+            <div className="env-var-list">
+              {mcpTokens.map((token) => (
+                <div className="env-var-row" key={token.id}>
+                  <span className="env-var-key">{token.label ?? "MCP token"}</span>
+                  <span className="env-var-value">
+                    created {new Date(token.createdAt).toLocaleDateString()}
+                    {token.lastUsedAt ? ` · last used ${new Date(token.lastUsedAt).toLocaleDateString()}` : " · never used"}
+                  </span>
+                  <button
+                    aria-label="Revoke MCP token"
+                    className="env-var-delete"
+                    disabled={mcpBusy}
+                    onClick={() => handleRevokeMcpToken(token.id)}
+                    title="Revoke"
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="credentials-actions">
             <button className="ghost-button" disabled={mcpBusy} onClick={handleCreateMcpToken} type="button">
               {mcpBusy ? "Working…" : "Connect via MCP"}
             </button>
@@ -320,16 +383,14 @@ export function UserCredentialMenu() {
           </div>
 
           {mcpCommand ? (
-            <p className="subtle-pill" style={{ display: "block", whiteSpace: "normal", lineHeight: 1.4 }}>
+            <p className="env-note">
               Run this in your terminal{mcpCopied ? " (already in your clipboard)" : ""}:
-              <code style={{ display: "block", marginTop: 6, wordBreak: "break-all", userSelect: "all" }}>
-                {mcpCommand}
-              </code>
+              <code className="env-note-command">{mcpCommand}</code>
             </p>
           ) : null}
-        </div>
+        </section>
 
-        {error ? <span className="subtle-pill env-error">{error}</span> : null}
+        {error ? <p className="env-note env-note-error">{error}</p> : null}
       </div>
     </details>
   );

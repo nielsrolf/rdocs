@@ -48,7 +48,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Widget not found." }, { status: 404 });
   }
 
-  const linkedRepo = await ensureLinkedRepository(id, { requireClean: false });
+  const linkedRepo = await ensureLinkedRepository(id, { requireClean: false, runnerUserId: user?.id ?? null });
   if (!linkedRepo) {
     return NextResponse.json({ error: "Link a repository before refreshing widgets." }, { status: 400 });
   }

@@ -33,8 +33,11 @@ const ALLOWLIST_EXACT = new Set([
   "NODE_EXTRA_CA_CERTS",
   // App-specific bits the agent relies on.
   "PYTHON_BIN",
-  "GITHUB_TOKEN",
-  "GH_TOKEN",
+  // GITHUB_TOKEN / GH_TOKEN are deliberately NOT allowlisted: the host token is
+  // the shared bot account, and copying it into every (untrusted) agent run
+  // would let any user act on every repo the bot can see. GitHub auth arrives
+  // via the per-document resolution (doc env → user PAT → allowlisted host)
+  // injected into the document env by loadAgentEnvForDocument.
   // Host-provided default endpoint for the LiteLLM provider. Only the URL —
   // LITELLM_API_KEY is deliberately NOT allowlisted (like OPENROUTER_API_KEY,
   // it must come from the document env so a host key is never silently billed

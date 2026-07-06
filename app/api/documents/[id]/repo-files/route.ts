@@ -53,7 +53,7 @@ export async function GET(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Missing file path." }, { status: 400 });
   }
 
-  const linkedRepo = await ensureLinkedRepository(id, { requireClean: false });
+  const linkedRepo = await ensureLinkedRepository(id, { requireClean: false, runnerUserId: user?.id ?? null });
   if (!linkedRepo) {
     return NextResponse.json({ error: "Repository is not linked." }, { status: 400 });
   }

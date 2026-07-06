@@ -2,6 +2,12 @@ import crypto from "node:crypto";
 
 import { agentModelProvider } from "@/agent-core";
 import { maskSecret, type DocumentEnv } from "@/lib/agent-env";
+import {
+  detectCredential,
+  looksLikeMcpToken,
+  type CredentialKind,
+  type CredentialProvider
+} from "@/lib/credential-detect";
 import { hasAnthropicCredential } from "@/lib/agent-runner/agent-credential";
 import { db } from "@/lib/db";
 import { loadDocumentEnv } from "@/lib/document-env";
@@ -20,9 +26,7 @@ import { loadDocumentEnv } from "@/lib/document-env";
 //   ~/.claude fallback (Anthropic only, handled downstream in
 //   agent-credential.ts).
 
-export type CredentialProvider = "anthropic" | "openrouter" | "litellm";
-
-export type CredentialKind = "api_key" | "oauth";
+export type { CredentialKind, CredentialProvider } from "@/lib/credential-detect";
 
 export type OwnerCredential = { kind: CredentialKind; value: string };
 
@@ -31,7 +35,8 @@ export type NormalizedCredentialInput = OwnerCredential & { provider: Credential
 export const CREDENTIAL_PROVIDERS: readonly CredentialProvider[] = [
   "anthropic",
   "openrouter",
-  "litellm"
+  "litellm",
+  "github"
 ];
 
 export function isCredentialProvider(value: unknown): value is CredentialProvider {
@@ -61,23 +66,35 @@ export function detectCredentialKind(value: string): CredentialKind | null {
 }
 
 /**
- * Validate + normalize a connect request. For "anthropic" (the default) the
- * kind is auto-detected from the prefix; if an explicit kind is supplied it
- * must agree with the detected kind (mismatches are rejected). For
- * "openrouter"/"litellm" the value is an opaque API key (kind "api_key"), but
- * a value that looks like an Anthropic credential is rejected as an almost
- * certain mix-up. Throws an Error with a user-facing message on any invalid
- * input.
+ * Validate + normalize a connect request. Without an explicit provider the
+ * value's format decides (sk-ant… / sk-or… / gh… prefixes); unrecognizable
+ * values must name a provider (in practice: LiteLLM, whose keys are opaque).
+ * For "anthropic" the kind is auto-detected from the prefix; if an explicit
+ * kind is supplied it must agree with the detected kind (mismatches are
+ * rejected). For "openrouter"/"litellm"/"github" the value is an opaque API
+ * key (kind "api_key"), but a value that looks like an Anthropic credential is
+ * rejected as an almost certain mix-up. Throws an Error with a user-facing
+ * message on any invalid input.
  */
 export function normalizeCredentialInput(input: {
   provider?: CredentialProvider | null;
   kind?: CredentialKind | null;
   value: string;
 }): NormalizedCredentialInput {
-  const provider = input.provider ?? "anthropic";
   const value = input.value.trim();
   if (!value) {
     throw new Error("Credential value is required.");
+  }
+  if (looksLikeMcpToken(value)) {
+    throw new Error(
+      "That is a gdocs-ai MCP token (gdai_…), not a provider credential — use it with `claude mcp add` instead."
+    );
+  }
+  const provider = input.provider ?? detectCredential(value)?.provider;
+  if (!provider) {
+    throw new Error(
+      "Couldn't recognize this credential's format. Specify the provider (a LiteLLM key, most likely)."
+    );
   }
   const detected = detectCredentialKind(value);
 
@@ -333,53 +350,164 @@ const CONNECT_CREDENTIAL_MESSAGE =
  * the Anthropic provider (OpenRouter/LiteLLM bring their own keys), and either:
  *   - AGENT_REQUIRE_USER_CREDENTIAL is set (phase-4 multi-tenant mode: host
  *     fallback disabled for everyone), or
- *   - AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS is set and the document owner's
- *     email is not on that comma-separated allowlist (host subscription is
- *     reserved for the listed accounts; everyone else brings their own key).
+ *   - AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS is set and none of the accounts
+ *     behind the run — the triggering user or the document owner — is on that
+ *     comma-separated allowlist (host subscription is reserved for the listed
+ *     accounts; everyone else brings their own key).
  * Returns null otherwise (fallback permitted).
  */
 export function credentialRequirementError(
   agentEnv: DocumentEnv,
   agentModel: string | null | undefined,
-  ownerEmail: string | null | undefined = null,
+  accountEmail: string | null | undefined | Array<string | null | undefined> = null,
   env: Record<string, string | undefined> = process.env
 ): string | null {
   if (agentModelProvider(agentModel) !== "anthropic") return null;
   if (hasAnthropicCredential(agentEnv)) return null;
   if (isFlagEnabled(env.AGENT_REQUIRE_USER_CREDENTIAL)) return CONNECT_CREDENTIAL_MESSAGE;
   const allowlist = parseEmailAllowlist(env.AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS);
-  if (allowlist && !(ownerEmail && allowlist.includes(ownerEmail.trim().toLowerCase()))) {
-    return CONNECT_CREDENTIAL_MESSAGE;
+  if (allowlist) {
+    const emails = (Array.isArray(accountEmail) ? accountEmail : [accountEmail])
+      .filter((email): email is string => Boolean(email))
+      .map((email) => email.trim().toLowerCase());
+    if (!emails.some((email) => allowlist.includes(email))) {
+      return CONNECT_CREDENTIAL_MESSAGE;
+    }
+  }
+  return null;
+}
+
+// --- GitHub auth resolution ------------------------------------------------
+
+// Which GitHub token may act on a document's linked repository. Mirrors the
+// AI-credential precedence so the trust model is uniform:
+//
+//   document env GITHUB_TOKEN (team/shared override)
+//     → the TRIGGERING user's connected GitHub PAT
+//     → the document OWNER's connected GitHub PAT
+//     → the HOST token (the shared bot account), but ONLY when the runner or
+//       owner is on AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS (same trust boundary
+//       as the host Claude credential). Without that gate any user could read
+//       and push every repo the bot account can see by simply linking it.
+//
+// A null result means "operate anonymously": public repos still clone/pull,
+// pushes fail with a clear message.
+
+export type GithubAuthSource = "document-env" | "runner" | "owner" | "host";
+
+export type GithubAuth = { token: string; source: GithubAuthSource };
+
+function hostTokenPermitted(
+  emails: Array<string | null | undefined>,
+  env: Record<string, string | undefined>
+): boolean {
+  const allowlist = parseEmailAllowlist(env.AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS);
+  if (!allowlist) return true;
+  return emails
+    .filter((email): email is string => Boolean(email))
+    .some((email) => allowlist.includes(email.trim().toLowerCase()));
+}
+
+export async function resolveGithubAuthForDocument(
+  documentId: string,
+  runnerUserId: string | null = null,
+  env: Record<string, string | undefined> = process.env
+): Promise<GithubAuth | null> {
+  const [docEnv, doc, runner] = await Promise.all([
+    loadDocumentEnv(documentId),
+    db.document.findUnique({
+      where: { id: documentId },
+      select: { ownerId: true, owner: { select: { email: true } } }
+    }),
+    runnerUserId
+      ? db.user.findUnique({ where: { id: runnerUserId }, select: { id: true, email: true } })
+      : null
+  ]);
+
+  const docEnvToken = docEnv.GITHUB_TOKEN?.trim();
+  if (docEnvToken) return { token: docEnvToken, source: "document-env" };
+
+  const runnerCredential = runner ? await getUserCredential(runner.id, "github") : null;
+  if (runnerCredential) return { token: runnerCredential.value, source: "runner" };
+
+  const ownerCredential =
+    doc?.ownerId && doc.ownerId !== runner?.id ? await getUserCredential(doc.ownerId, "github") : null;
+  if (ownerCredential) return { token: ownerCredential.value, source: "owner" };
+
+  const hostToken = env.GITHUB_TOKEN?.trim();
+  if (hostToken && hostTokenPermitted([runner?.email, doc?.owner?.email], env)) {
+    return { token: hostToken, source: "host" };
+  }
+
+  return null;
+}
+
+/** Same resolution for a user outside any document (e.g. validating a PAT). */
+export async function resolveGithubAuthForUser(
+  userId: string | null,
+  env: Record<string, string | undefined> = process.env
+): Promise<GithubAuth | null> {
+  if (userId) {
+    const credential = await getUserCredential(userId, "github");
+    if (credential) return { token: credential.value, source: "runner" };
+  }
+  const hostToken = env.GITHUB_TOKEN?.trim();
+  if (hostToken) {
+    const user = userId
+      ? await db.user.findUnique({ where: { id: userId }, select: { email: true } })
+      : null;
+    if (hostTokenPermitted([user?.email], env)) return { token: hostToken, source: "host" };
   }
   return null;
 }
 
 /**
- * Build the agent env for a document run: document env, layered with the
- * document OWNER's connected credential for the model's provider, with the
- * phase-4 requirement (Anthropic) / provider-key requirement (OpenRouter,
- * LiteLLM) enforced. Drop-in replacement for loadDocumentEnv at the three
- * agent-run call sites.
+ * Build the agent env for a document run: document env, layered with a
+ * connected UserCredential for the model's provider, with the phase-4
+ * requirement (Anthropic) / provider-key requirement (OpenRouter, LiteLLM)
+ * enforced. Drop-in replacement for loadDocumentEnv at the three agent-run
+ * call sites.
+ *
+ * Credential precedence:
+ *   document env (team/shared override) → the TRIGGERING user's credential
+ *   (runs you start bill your account) → the document OWNER's credential →
+ *   host fallback (Anthropic only, allowlist-gated downstream).
  */
 export async function loadAgentEnvForDocument(
   documentId: string,
-  agentModel: string | null | undefined
+  agentModel: string | null | undefined,
+  runnerUserId: string | null = null
 ): Promise<DocumentEnv> {
-  const [docEnv, doc] = await Promise.all([
+  const [docEnv, doc, runner] = await Promise.all([
     loadDocumentEnv(documentId),
     db.document.findUnique({
       where: { id: documentId },
       select: { ownerId: true, owner: { select: { email: true } } }
-    })
+    }),
+    runnerUserId
+      ? db.user.findUnique({ where: { id: runnerUserId }, select: { id: true, email: true } })
+      : null
   ]);
   const provider = agentModelProvider(agentModel);
-  const ownerCredential = doc?.ownerId ? await getUserCredential(doc.ownerId, provider) : null;
-  const env = applyOwnerCredentialEnv(docEnv, ownerCredential, agentModel);
+  const runnerCredential = runner ? await getUserCredential(runner.id, provider) : null;
+  const ownerCredential =
+    !runnerCredential && doc?.ownerId && doc.ownerId !== runner?.id
+      ? await getUserCredential(doc.ownerId, provider)
+      : null;
+  const env = applyOwnerCredentialEnv(docEnv, runnerCredential ?? ownerCredential, agentModel);
   const requirementError =
-    credentialRequirementError(env, agentModel, doc?.owner?.email ?? null) ??
+    credentialRequirementError(env, agentModel, [runner?.email, doc?.owner?.email]) ??
     providerKeyRequirementError(env, agentModel);
   if (requirementError) {
     throw new Error(requirementError);
+  }
+  // GitHub auth for the run: the host token is no longer allowlisted into the
+  // agent env, so whatever the per-document resolution yields (possibly
+  // nothing) is exactly what the agent gets.
+  const githubAuth = await resolveGithubAuthForDocument(documentId, runnerUserId);
+  if (githubAuth) {
+    if (!env.GITHUB_TOKEN?.trim()) env.GITHUB_TOKEN = githubAuth.token;
+    if (!env.GH_TOKEN?.trim()) env.GH_TOKEN = githubAuth.token;
   }
   return env;
 }

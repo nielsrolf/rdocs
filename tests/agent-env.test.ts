@@ -22,7 +22,6 @@ test("allowlisted toolchain + auth variables pass through", () => {
     HOME: "/home/agent",
     ANTHROPIC_API_KEY: "sk-ant-123",
     CLAUDE_CODE_OAUTH_TOKEN: "oauth-xyz",
-    GITHUB_TOKEN: "ghp_abc",
     PYTHON_BIN: ".venv/bin/python",
     FOO: "bar"
   };
@@ -31,9 +30,23 @@ test("allowlisted toolchain + auth variables pass through", () => {
   assert.equal(env.HOME, "/home/agent");
   assert.equal(env.ANTHROPIC_API_KEY, "sk-ant-123");
   assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "oauth-xyz");
-  assert.equal(env.GITHUB_TOKEN, "ghp_abc");
   assert.equal(env.PYTHON_BIN, ".venv/bin/python");
   assert.equal(env.FOO, undefined);
+});
+
+test("host GitHub tokens never leak into the agent env; doc-resolved ones do", () => {
+  // The host GITHUB_TOKEN is the shared bot account. Handing it to every
+  // (untrusted) agent run lets any user read/push every repo the bot can see.
+  // GitHub auth must arrive via the per-document resolution (doc env → user
+  // PAT → allowlisted host), injected as documentEnv — never the host allowlist.
+  const host = { PATH: "/bin", GITHUB_TOKEN: "ghp_host", GH_TOKEN: "ghp_host" };
+  const env = buildAgentEnv(host);
+  assert.equal(env.GITHUB_TOKEN, undefined);
+  assert.equal(env.GH_TOKEN, undefined);
+
+  const withDocToken = buildAgentEnv(host, { GITHUB_TOKEN: "ghp_doc", GH_TOKEN: "ghp_doc" });
+  assert.equal(withDocToken.GITHUB_TOKEN, "ghp_doc");
+  assert.equal(withDocToken.GH_TOKEN, "ghp_doc");
 });
 
 test("parent Claude Code IPC/session vars are scrubbed, but auth + our config pass", () => {

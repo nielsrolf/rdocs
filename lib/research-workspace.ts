@@ -5,6 +5,8 @@ import path from "node:path";
 import { getAgentRunner } from "@/lib/agent-runner";
 import { describeAttachmentsForOverview, syncAttachmentsIntoWorktree } from "@/lib/attachments";
 import { db } from "@/lib/db";
+import { resolveGithubIdentity } from "@/lib/github-access";
+import { resolveGithubAuthForDocument } from "@/lib/github-auth";
 
 export type LinkedRepository = {
   url: string | null;
@@ -84,11 +86,31 @@ function buildGitEnv() {
   return env;
 }
 
-function buildGitArgs(args: string[]) {
-  const token = process.env.GITHUB_TOKEN;
-  if (!token) return args;
-  const header = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
-  return ["-c", `http.https://github.com/.extraheader=${header}`, ...args];
+// Git auth is per-document, NOT global. The old behavior — stamping the host
+// GITHUB_TOKEN (the shared bot account) onto every git command — let any user
+// read/push every repo the bot could see by linking it to a doc. Instead,
+// ensureLinkedRepository resolves the document's GitHub auth (doc env → user
+// PAT → allowlisted host) and pins it as a repo-local http extraheader, which
+// worktrees share, so background merges/pushes keep working without a user in
+// scope.
+const GITHUB_EXTRAHEADER_KEY = "http.https://github.com/.extraheader";
+
+function githubExtraheaderValue(token: string) {
+  return `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+}
+
+async function applyWorkspaceGithubAuth(workspace: string, token: string | null) {
+  if (token) {
+    await runCommand(
+      "git",
+      ["config", GITHUB_EXTRAHEADER_KEY, githubExtraheaderValue(token)],
+      { cwd: workspace }
+    );
+  } else {
+    await runCommand("git", ["config", "--unset-all", GITHUB_EXTRAHEADER_KEY], {
+      cwd: workspace
+    }).catch(() => null);
+  }
 }
 
 export function isReadOnlyRepoUrl(repoUrl: string | null | undefined) {
@@ -102,10 +124,9 @@ function runCommand(
   options: { cwd?: string; timeoutMs?: number } = {}
 ): Promise<GitResult> {
   const isGit = command === "git";
-  const finalArgs = isGit ? buildGitArgs(args) : args;
   const env = isGit ? buildGitEnv() : process.env;
   return new Promise((resolve, reject) => {
-    const child = spawn(command, finalArgs, {
+    const child = spawn(command, args, {
       cwd: options.cwd ?? process.cwd(),
       env
     });
@@ -170,6 +191,16 @@ async function initLocalWorkspace(workspace: string) {
   await runCommand("git", ["commit", "-m", "initial"], { cwd: workspace });
 }
 
+async function ensureWorkspaceGitIdentity(workspace: string, token: string | null) {
+  const identity = await resolveGithubIdentity(token);
+  const name = identity?.login ?? "gdocs-ai";
+  const email = identity
+    ? `${identity.id}+${identity.login}@users.noreply.github.com`
+    : "ai-agent@r-docs.local";
+  await runCommand("git", ["config", "user.name", name], { cwd: workspace });
+  await runCommand("git", ["config", "user.email", email], { cwd: workspace });
+}
+
 async function hasOriginRemote(workspace: string) {
   try {
     const result = await runCommand("git", ["remote"], { cwd: workspace });
@@ -192,7 +223,7 @@ export function getGithubCommitUrl(repoUrl: string | null | undefined, commitSha
 
 export async function ensureLinkedRepository(
   documentId: string,
-  options: { requireClean?: boolean; pushPendingChanges?: boolean } = {}
+  options: { requireClean?: boolean; pushPendingChanges?: boolean; runnerUserId?: string | null } = {}
 ): Promise<LinkedRepository | null> {
   const document = await db.document.findUnique({
     where: { id: documentId },
@@ -207,6 +238,14 @@ export async function ensureLinkedRepository(
   if (!document) {
     return null;
   }
+
+  // The credential all git ops on this workspace run under. Resolved fresh on
+  // every ensure (doc env → runner PAT → owner PAT → allowlisted host) and
+  // pinned into the repo-local config below, so later background ops (salvage,
+  // reaper merges) reuse the last resolved auth. Null → anonymous git.
+  const githubAuth = document.repoUrl?.startsWith("https://github.com/")
+    ? await resolveGithubAuthForDocument(documentId, options.runnerUserId ?? null)
+    : null;
 
   const workspace = document.repoWorkspace || getWorkspacePath(document.id, document.repoUrl);
   const gitDir = path.join(workspace, ".git");
@@ -225,10 +264,24 @@ export async function ensureLinkedRepository(
         if (document.repoBranch) {
           cloneArgs.splice(1, 0, "--branch", document.repoBranch);
         }
+        if (githubAuth) {
+          // The repo-local config doesn't exist until the clone finishes, so
+          // the clone itself carries the header inline.
+          cloneArgs.unshift("-c", `${GITHUB_EXTRAHEADER_KEY}=${githubExtraheaderValue(githubAuth.token)}`);
+        }
         await runCommand("git", cloneArgs, { timeoutMs: 300_000 });
       } else {
         await initLocalWorkspace(workspace);
       }
+    }
+
+    if (document.repoUrl) {
+      await applyWorkspaceGithubAuth(workspace, githubAuth?.token ?? null);
+      // Pin the commit identity to the account whose token backs this
+      // workspace. Without a repo-local identity, commits fall through to the
+      // host's global git config — the server operator's personal account.
+      // Worktrees share this config, so agent commits are covered too.
+      await ensureWorkspaceGitIdentity(workspace, githubAuth?.token ?? null);
     }
 
     if (options.requireClean ?? true) {
@@ -263,11 +316,13 @@ export async function ensureLinkedRepository(
 
 export async function ensureLinkedRepositoryWorktree(
   documentId: string,
-  runId: string
+  runId: string,
+  runnerUserId: string | null = null
 ): Promise<LinkedRepositoryWorktree | null> {
   const linked = await ensureLinkedRepository(documentId, {
     requireClean: true,
-    pushPendingChanges: true
+    pushPendingChanges: true,
+    runnerUserId
   });
 
   if (!linked) {

@@ -316,7 +316,8 @@ const uploadFiles = defineTool({
     const result = await commitFilesToWorkspace({
       documentId,
       files,
-      message: args.message?.trim() || `MCP upload by ${ctx.user.name}`
+      message: args.message?.trim() || `MCP upload by ${ctx.user.name}`,
+      userId: ctx.user.id
     });
     return {
       ok: true,
@@ -368,11 +369,15 @@ const createWidget = defineTool({
           content: file.content,
           contentBase64: file.content_base64
         })),
-        message: `Add widget "${args.label}" (MCP upload by ${ctx.user.name})`
+        message: `Add widget "${args.label}" (MCP upload by ${ctx.user.name})`,
+        userId: ctx.user.id
       });
       workspace = uploaded.linked.workspace;
     } else {
-      const linked = await ensureLinkedRepository(documentId, { requireClean: false });
+      const linked = await ensureLinkedRepository(documentId, {
+        requireClean: false,
+        runnerUserId: ctx.user.id
+      });
       if (!linked) throw new McpToolError("Document workspace is unavailable.");
       workspace = linked.workspace;
     }

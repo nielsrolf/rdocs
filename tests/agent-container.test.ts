@@ -75,6 +75,8 @@ test("buildContainerEnv keeps secrets/tokens but drops host filesystem vars", ()
   const env = buildContainerEnv(
     {
       ANTHROPIC_API_KEY: "sk-ant-123",
+      // The host GITHUB_TOKEN is the shared bot account — it must never reach
+      // the container; per-document GitHub auth arrives via the doc env.
       GITHUB_TOKEN: "gh-456",
       LANG: "en_US.UTF-8",
       // host-filesystem vars that are wrong inside the container:
@@ -85,11 +87,11 @@ test("buildContainerEnv keeps secrets/tokens but drops host filesystem vars", ()
       // a non-allowlisted host secret that must never reach the agent:
       AWS_SECRET_ACCESS_KEY: "should-be-dropped-by-allowlist"
     },
-    { MY_DOC_SECRET: "doc-secret" }
+    { MY_DOC_SECRET: "doc-secret", GITHUB_TOKEN: "gh-doc-resolved" }
   );
 
   assert.equal(env.ANTHROPIC_API_KEY, "sk-ant-123");
-  assert.equal(env.GITHUB_TOKEN, "gh-456");
+  assert.equal(env.GITHUB_TOKEN, "gh-doc-resolved");
   assert.equal(env.LANG, "en_US.UTF-8");
   assert.equal(env.MY_DOC_SECRET, "doc-secret");
   // host filesystem vars removed (the container supplies its own):

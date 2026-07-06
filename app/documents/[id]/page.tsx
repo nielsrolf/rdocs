@@ -122,17 +122,29 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
     ...member,
     permission: member.permission as PermissionLevelValue
   }));
-  // Third-party model gating: a document env key OR a per-user credential the
-  // document OWNER connected (owner keys apply to every doc they own).
-  const [envHasOpenRouterKey, envHasLiteLlmKey, ownerHasOpenRouterKey, ownerHasLiteLlmKey] =
-    await Promise.all([
-      hasDocumentEnvKey(id, "OPENROUTER_API_KEY"),
-      hasDocumentEnvKey(id, "LITELLM_API_KEY"),
-      hasUserCredential(access.document.ownerId, "openrouter"),
-      hasUserCredential(access.document.ownerId, "litellm")
-    ]);
-  const initialHasOpenRouterKey = envHasOpenRouterKey || ownerHasOpenRouterKey;
-  const initialHasLiteLlmKey = envHasLiteLlmKey || ownerHasLiteLlmKey;
+  // Third-party model gating: a document env key OR a per-user credential
+  // that would back a run — the current viewer's (their runs bill their key)
+  // or the document owner's (owner keys apply to every doc they own).
+  const viewerId = user?.id && user.id !== access.document.ownerId ? user.id : null;
+  const [
+    envHasOpenRouterKey,
+    envHasLiteLlmKey,
+    ownerHasOpenRouterKeyOnly,
+    ownerHasLiteLlmKeyOnly,
+    viewerHasOpenRouterKey,
+    viewerHasLiteLlmKey
+  ] = await Promise.all([
+    hasDocumentEnvKey(id, "OPENROUTER_API_KEY"),
+    hasDocumentEnvKey(id, "LITELLM_API_KEY"),
+    hasUserCredential(access.document.ownerId, "openrouter"),
+    hasUserCredential(access.document.ownerId, "litellm"),
+    viewerId ? hasUserCredential(viewerId, "openrouter") : Promise.resolve(false),
+    viewerId ? hasUserCredential(viewerId, "litellm") : Promise.resolve(false)
+  ]);
+  const credentialHasOpenRouterKey = ownerHasOpenRouterKeyOnly || viewerHasOpenRouterKey;
+  const credentialHasLiteLlmKey = ownerHasLiteLlmKeyOnly || viewerHasLiteLlmKey;
+  const initialHasOpenRouterKey = envHasOpenRouterKey || credentialHasOpenRouterKey;
+  const initialHasLiteLlmKey = envHasLiteLlmKey || credentialHasLiteLlmKey;
   const initialCollaborationVersion = await getCollaborationVersion(
     access.document.id,
     access.document.content,
@@ -159,8 +171,8 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         initialAgentEffort={access.document.agentEffort}
         initialHasOpenRouterKey={initialHasOpenRouterKey}
         initialHasLiteLlmKey={initialHasLiteLlmKey}
-        ownerHasOpenRouterKey={ownerHasOpenRouterKey}
-        ownerHasLiteLlmKey={ownerHasLiteLlmKey}
+        credentialHasOpenRouterKey={credentialHasOpenRouterKey}
+        credentialHasLiteLlmKey={credentialHasLiteLlmKey}
         initialThreads={normalizedThreads}
         initialTitle={access.document.title}
         isAuthenticated={Boolean(user)}

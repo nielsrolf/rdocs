@@ -221,8 +221,8 @@ export function DocumentWorkspace({
   initialAgentEffort,
   initialHasOpenRouterKey,
   initialHasLiteLlmKey,
-  ownerHasOpenRouterKey,
-  ownerHasLiteLlmKey,
+  credentialHasOpenRouterKey,
+  credentialHasLiteLlmKey,
   isAuthenticated,
   isOwner,
   shareToken,
@@ -241,6 +241,10 @@ export function DocumentWorkspace({
   const [hasLiteLlmKey, setHasLiteLlmKey] = useState(initialHasLiteLlmKey);
   const [repoBusy, setRepoBusy] = useState(false);
   const [repoNotice, setRepoNotice] = useState<string | null>(null);
+  const [repoAccessIssue, setRepoAccessIssue] = useState<{
+    login: string | null;
+    tokenSource: string;
+  } | null>(null);
   // Bumped on every doc-changing transaction (local or remote) so anchor-derived
   // memos (e.g. visibleThreads) recompute when content — and its comment anchors —
   // is deleted. Keeps orphaned comments from lingering after a select-all delete.
@@ -1837,7 +1841,34 @@ export function DocumentWorkspace({
 
     setRepoUrl(data.repository.repoUrl ?? "");
     setRepoBranch(data.repository.repoBranch ?? "");
-    setRepoNotice(data.repository.repoUrl ? "Repository linked" : "Repository link removed");
+    const accessDenied = data.access?.reason === "no-access";
+    setRepoAccessIssue(
+      accessDenied
+        ? { login: data.access?.login ?? null, tokenSource: data.access?.tokenSource ?? "none" }
+        : null
+    );
+    if (accessDenied) {
+      setRepoNotice(null);
+      logClientEvent({
+        scope: "repo-access",
+        level: "warn",
+        message: "Linked repository is not accessible.",
+        data: {
+          documentId,
+          repoUrl: data.repository.repoUrl,
+          login: data.access?.login ?? null,
+          tokenSource: data.access?.tokenSource ?? "none"
+        }
+      });
+    } else {
+      setRepoNotice(
+        data.repository.repoUrl
+          ? data.access?.acceptedInvitation
+            ? "Repository linked — collaborator invite accepted"
+            : "Repository linked"
+          : "Repository link removed"
+      );
+    }
     setRepoBusy(false);
   }
 
@@ -4238,6 +4269,37 @@ export function DocumentWorkspace({
                 </div>
               ) : null}
               {repoNotice ? <span className="subtle-pill">{repoNotice}</span> : null}
+              {repoAccessIssue ? (
+                <div className="repo-access-warning" role="alert">
+                  <strong>We don&apos;t have access to this repository.</strong>
+                  {repoAccessIssue.tokenSource === "none" ? (
+                    <p>
+                      No GitHub credential is connected for this document. If the repository is
+                      private (or you want the AI to push to it), connect a GitHub personal access
+                      token with access to it under <em>AI credentials</em> in the topbar, then
+                      press Save again. Public repositories work read-only without a token — so
+                      also check the URL for typos.
+                    </p>
+                  ) : (
+                    <p>
+                      This document&apos;s git access runs as{" "}
+                      {repoAccessIssue.login ? <code>{repoAccessIssue.login}</code> : "a GitHub account"}{" "}
+                      which can&apos;t see the repository. Invite that account as a collaborator
+                      (repo → Settings → Collaborators → Add people) and press Save again — the
+                      invite is accepted automatically. Or connect your own GitHub token under{" "}
+                      <em>AI credentials</em>, or fix a typo in the URL.
+                    </p>
+                  )}
+                  <button
+                    className="ghost-button"
+                    disabled={repoBusy}
+                    onClick={handleSaveRepository}
+                    type="button"
+                  >
+                    {repoBusy ? "Checking..." : "Check again"}
+                  </button>
+                </div>
+              ) : null}
             </div>
           </details>
 
@@ -4246,8 +4308,8 @@ export function DocumentWorkspace({
               documentId={documentId}
               shareToken={shareToken}
               onKeysChanged={(keys) => {
-                setHasOpenRouterKey(keys.includes("OPENROUTER_API_KEY") || ownerHasOpenRouterKey);
-                setHasLiteLlmKey(keys.includes("LITELLM_API_KEY") || ownerHasLiteLlmKey);
+                setHasOpenRouterKey(keys.includes("OPENROUTER_API_KEY") || credentialHasOpenRouterKey);
+                setHasLiteLlmKey(keys.includes("LITELLM_API_KEY") || credentialHasLiteLlmKey);
               }}
             />
           ) : null}

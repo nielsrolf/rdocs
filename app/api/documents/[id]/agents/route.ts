@@ -68,7 +68,7 @@ async function runAgentConversationInBackground(input: {
   try {
     const { history: conversationHistory } = await buildConversationHistory(documentId, previousRunId);
 
-    linkedRepo = await ensureLinkedRepositoryWorktree(documentId, aiRunId);
+    linkedRepo = await ensureLinkedRepositoryWorktree(documentId, aiRunId, createdById);
     if (linkedRepo) {
       await db.aiRun.update({
         where: { id: aiRunId },
@@ -111,7 +111,7 @@ async function runAgentConversationInBackground(input: {
       }
     });
     const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, documentId);
-    const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model);
+    const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model, createdById);
     const result = await getAgentRunner().run({
       mode: "conversation",
       documentTitle,

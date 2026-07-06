@@ -83,10 +83,11 @@ export type DocumentWorkspaceProps = {
   initialAgentEffort: string | null;
   initialHasOpenRouterKey: boolean;
   initialHasLiteLlmKey: boolean;
-  /** Whether the document OWNER has a per-user key for the provider — env-menu
-   * edits can't change these, so they keep the model groups unlocked. */
-  ownerHasOpenRouterKey: boolean;
-  ownerHasLiteLlmKey: boolean;
+  /** Whether a per-user key for the provider backs this session's runs (the
+   * viewer's own, or the document owner's) — env-menu edits can't change
+   * these, so they keep the model groups unlocked. */
+  credentialHasOpenRouterKey: boolean;
+  credentialHasLiteLlmKey: boolean;
   isAuthenticated: boolean;
   isOwner: boolean;
   shareToken: string | null;

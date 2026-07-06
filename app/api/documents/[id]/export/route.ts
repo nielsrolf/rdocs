@@ -111,13 +111,17 @@ async function buildLatexZip(input: {
   documentId: string;
   title: string;
   content: unknown;
+  userId: string | null;
 }): Promise<Buffer> {
   const refs = collectDocumentImages(input.content).slice(0, MAX_IMAGES);
 
   // The document's linked repo workspace, resolved once (only if there are repo images).
   let baseWorkspace: string | null = null;
   if (refs.some((ref) => ref.kind === "repoImage")) {
-    const linked = await ensureLinkedRepository(input.documentId, { requireClean: false }).catch(() => null);
+    const linked = await ensureLinkedRepository(input.documentId, {
+      requireClean: false,
+      runnerUserId: input.userId
+    }).catch(() => null);
     baseWorkspace = linked?.workspace ?? null;
   }
 
@@ -185,7 +189,7 @@ export async function GET(request: Request, { params }: RouteContext) {
   const slug = slugify(title);
 
   if (format === "latex" || format === "overleaf" || format === "zip") {
-    const zip = await buildLatexZip({ documentId: id, title, content });
+    const zip = await buildLatexZip({ documentId: id, title, content, userId: user?.id ?? null });
     // Copy into a fresh ArrayBuffer-backed view so the type is an unambiguous
     // BodyInit (Buffer's ArrayBufferLike backing is not accepted directly).
     const body = new Uint8Array(zip.byteLength);

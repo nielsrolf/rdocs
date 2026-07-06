@@ -2229,6 +2229,50 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   padding: 0.58rem 0.7rem;
 }
 
+.credentials-add-row input {
+  flex: 1;
+  min-width: 260px;
+}
+
+.credentials-fallback-label {
+  margin: 0 0 0.35rem;
+  font-weight: 600;
+}
+
+.credentials-fallback-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.35rem;
+}
+
+.credentials-fallback-options .ghost-button.active {
+  border-color: var(--accent, #6366f1);
+  color: var(--accent, #6366f1);
+}
+
+.repo-access-warning {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  align-items: flex-start;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid rgba(217, 119, 6, 0.45);
+  border-radius: 10px;
+  background: rgba(217, 119, 6, 0.08);
+  font-size: 0.9rem;
+}
+
+.repo-access-warning p {
+  margin: 0;
+  color: inherit;
+}
+
+.repo-access-warning code {
+  font-weight: 600;
+}
+
 .env-panel {
   display: flex;
   flex-direction: column;
@@ -2315,6 +2359,97 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
 
 .env-error {
   color: #d93025;
+}
+
+/* "AI credentials" topbar dropdown. Sits in the app topbar, which lacks the
+   compact control overrides of the document topbar — so the panel scopes its
+   own: quieter note blocks (not pills), tighter inputs/buttons, wider panel. */
+.credentials-panel {
+  width: min(480px, calc(100vw - 2rem));
+  max-height: min(78vh, 640px);
+  overflow-y: auto;
+  padding: 0.9rem 1rem;
+  gap: 0.9rem;
+}
+
+.credentials-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.credentials-section + .credentials-section {
+  border-top: 1px solid var(--border);
+  padding-top: 0.9rem;
+}
+
+.credentials-section-title {
+  font-size: 0.92rem;
+}
+
+.credentials-panel select,
+.credentials-panel input {
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.88rem;
+  background: white;
+}
+
+.credentials-panel .env-add-row {
+  grid-template-columns: minmax(120px, auto) minmax(0, 1fr) auto;
+}
+
+.credentials-panel .ghost-button {
+  border-radius: 8px;
+  padding: 0.45rem 0.8rem;
+  font-size: 0.88rem;
+  background: white;
+  border-color: var(--border);
+}
+
+.credentials-panel .ghost-button:hover:not(:disabled) {
+  transform: none;
+  background: rgba(60, 64, 67, 0.06);
+}
+
+.credentials-panel .ghost-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.credentials-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.env-panel .env-note {
+  margin: 0;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+  background: rgba(95, 99, 104, 0.08);
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.env-note code {
+  font-size: 0.76rem;
+}
+
+.env-note-command {
+  display: block;
+  margin-top: 0.45rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 6px;
+  background: rgba(32, 33, 36, 0.08);
+  word-break: break-all;
+  user-select: all;
+}
+
+.env-panel .env-note-error {
+  background: rgba(217, 48, 37, 0.08);
+  color: #b3261e;
 }
 
 .editor-toolbar-group {

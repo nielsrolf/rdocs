@@ -45,8 +45,14 @@ test("normalizeCredentialInput auto-detects kind and rejects mismatches", () => 
   });
   // Explicit kind that disagrees is rejected.
   assert.throws(() => normalizeCredentialInput({ kind: "api_key", value: "sk-ant-oat01-abc" }), /looks like/i);
-  // Unrecognized prefix rejected.
-  assert.throws(() => normalizeCredentialInput({ value: "garbage" }), /Anthropic API key/i);
+  // Unrecognized format without an explicit provider → asks for the provider
+  // (single-field detect mode; only LiteLLM keys are legitimately opaque).
+  assert.throws(() => normalizeCredentialInput({ value: "garbage" }), /specify the provider/i);
+  // Anthropic asked for explicitly still demands an Anthropic-looking value.
+  assert.throws(
+    () => normalizeCredentialInput({ provider: "anthropic", value: "garbage" }),
+    /Anthropic API key/i
+  );
   // Empty rejected.
   assert.throws(() => normalizeCredentialInput({ value: "   " }), /required/i);
 });

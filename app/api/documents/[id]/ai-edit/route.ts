@@ -166,7 +166,7 @@ async function runAiEditInBackground(input: {
       }
     });
 
-    linkedRepo = await ensureLinkedRepositoryWorktree(documentId, aiRunId);
+    linkedRepo = await ensureLinkedRepositoryWorktree(documentId, aiRunId, createdById);
     if (linkedRepo) {
       await db.aiRun.update({
         where: { id: aiRunId },
@@ -180,7 +180,7 @@ async function runAiEditInBackground(input: {
     }
     const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, documentId);
     const assetIntent = detectEditAssetIntent(parsed.instruction);
-    const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model);
+    const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model, createdById);
     // Session continuation: give the agent the prior attempts' transcript so it
     // can pick up where the previous (failed/cancelled) attempt left off. The
     // prior attempt's committed work is already merged into the base checkout,

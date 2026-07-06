@@ -106,7 +106,7 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
         }
       }
     });
-    linkedRepo = await ensureLinkedRepositoryWorktree(thread.documentId, aiRunId);
+    linkedRepo = await ensureLinkedRepositoryWorktree(thread.documentId, aiRunId, createdById);
     if (linkedRepo) {
       await db.aiRun.update({
         where: { id: aiRunId },
@@ -122,7 +122,7 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
       });
     }
     const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, thread.documentId);
-    const agentEnv = await loadAgentEnvForDocument(thread.documentId, thread.document.agentModel);
+    const agentEnv = await loadAgentEnvForDocument(thread.documentId, thread.document.agentModel, createdById);
 
     const aiReply = await getAgentRunner().run({
       mode: "comment_reply",

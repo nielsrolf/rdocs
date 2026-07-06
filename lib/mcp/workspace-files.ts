@@ -71,6 +71,7 @@ export async function commitFilesToWorkspace(input: {
   documentId: string;
   files: UploadedFile[];
   message: string;
+  userId?: string | null;
 }): Promise<{ linked: LinkedRepository; commitSha: string | null; paths: string[] }> {
   if (input.files.length === 0) {
     throw new McpFileError("No files provided.");
@@ -79,7 +80,10 @@ export async function commitFilesToWorkspace(input: {
     throw new McpFileError(`At most ${MAX_FILES} files per call.`);
   }
 
-  const linked = await ensureLinkedRepository(input.documentId, { requireClean: false });
+  const linked = await ensureLinkedRepository(input.documentId, {
+    requireClean: false,
+    runnerUserId: input.userId ?? null
+  });
   if (!linked) {
     throw new McpFileError("Document not found or its workspace is unavailable.");
   }

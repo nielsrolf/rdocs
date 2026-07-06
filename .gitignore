@@ -14,3 +14,8 @@ __pycache__
 tsconfig.tsbuildinfo
 .research-workspaces/
 logs/
+# Runtime state / local scratch
+dev.db
+dev.db-journal
+.service.pid
+scripts/_*
