@@ -4,6 +4,7 @@ import Link from "next/link";
 import "@/app/globals.css";
 import "katex/dist/katex.min.css";
 import { BrandMark } from "@/components/brand-mark";
+import { ChunkReloadRecovery } from "@/components/chunk-reload-recovery";
 import { UserCredentialMenu } from "@/components/user-credential-menu";
 import { getCurrentUser } from "@/lib/auth";
 
@@ -29,6 +30,7 @@ export default async function RootLayout({
   return (
     <html lang="en">
       <body>
+        <ChunkReloadRecovery />
         <div className="app-frame">
           <header className="topbar">
             <Link href="/" className="brand">
