@@ -156,7 +156,7 @@ export function CommentRail({
   const [editDraft, setEditDraft] = useState("");
 
   return (
-    <aside className="comment-rail" style={{ minHeight: railHeight }}>
+    <aside className="comment-rail" data-tour="comment-rail" style={{ minHeight: railHeight }}>
       {threads.length === 0 ? (
         <div className="comment-rail-empty">
           <p>

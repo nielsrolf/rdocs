@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 
 import { DocumentList } from "@/components/document-list";
 import { NewDocumentButton } from "@/components/new-document-button";
+import { OnboardingTour, TourRestartButton } from "@/components/onboarding-tour";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { getDocumentCommentStats } from "@/lib/document-data";
@@ -88,10 +89,14 @@ export default async function DashboardPage() {
           <h1>Your documents</h1>
           <p>Create new docs, open shared work, and manage collaboration from a single dashboard.</p>
         </div>
-        <NewDocumentButton />
+        <div className="dashboard-header-actions">
+          <TourRestartButton />
+          <NewDocumentButton />
+        </div>
       </section>
 
       <DocumentList documents={documents} currentUserId={user.id} />
+      <OnboardingTour surface="list" autoOffer={documents.length === 0} />
     </main>
   );
 }

@@ -25,7 +25,13 @@ export function NewDocumentButton() {
   }
 
   return (
-    <button className="primary-button" disabled={isCreating} onClick={handleCreate} type="button">
+    <button
+      className="primary-button"
+      data-tour="new-doc"
+      disabled={isCreating}
+      onClick={handleCreate}
+      type="button"
+    >
       {isCreating ? "Creating..." : "New document"}
     </button>
   );

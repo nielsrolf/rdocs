@@ -166,6 +166,7 @@ import {
   logClientEvent,
   parseAiRunSelectionId
 } from "./document-workspace/utils";
+import { OnboardingTour, emitTourEvent } from "@/components/onboarding-tour";
 
 function createCollaborationClientId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -1841,6 +1842,9 @@ export function DocumentWorkspace({
 
     setRepoUrl(data.repository.repoUrl ?? "");
     setRepoBranch(data.repository.repoBranch ?? "");
+    if (data.repository.repoUrl) {
+      emitTourEvent("repo-linked");
+    }
     const accessDenied = data.access?.reason === "no-access";
     setRepoAccessIssue(
       accessDenied
@@ -2096,6 +2100,7 @@ export function DocumentWorkspace({
       return;
     }
 
+    emitTourEvent("comment-created");
     setCommentBusy(true);
     setGlobalError(null);
 
@@ -2248,6 +2253,7 @@ export function DocumentWorkspace({
       return;
     }
 
+    emitTourEvent("ai-edit-started");
     const editSelection = selection;
     const instruction = editInstruction.trim();
     const selectedMarkdown = getSelectionMarkdownFromEditor(editor, editSelection.from, editSelection.to);
@@ -2903,6 +2909,7 @@ export function DocumentWorkspace({
   async function handleAskAi(threadId: string) {
     // Mark the thread busy up front so the button can't double-fire while a
     // pending reply draft is being sent.
+    emitTourEvent("ask-ai");
     setAiBusyThreadId(threadId);
     const result = await submitPendingReplyThenAskAi({
       draft: getReplyDraft(threadId),
@@ -3186,6 +3193,7 @@ export function DocumentWorkspace({
       setSelectedConversationId(followUpRootId);
     }
 
+    emitTourEvent("agent-run-started");
     const response = await fetch(`/api/documents/${documentId}/agents`, {
       method: "POST",
       headers: {
@@ -3953,6 +3961,7 @@ export function DocumentWorkspace({
             <input
               aria-label="Document title"
               className="document-title-input"
+              data-tour="doc-title"
               disabled={!canWriteDocument}
               onBlur={handleSaveTitleBlur}
               onChange={(event) => setTitle(event.target.value)}
@@ -4233,7 +4242,7 @@ export function DocumentWorkspace({
             </div>
           </details>
 
-          <details className="header-menu header-menu-wide">
+          <details className="header-menu header-menu-wide" data-tour="repo-menu">
             <summary>Repo</summary>
             <div className="header-menu-panel research-repo-panel">
               <div>
@@ -4333,6 +4342,7 @@ export function DocumentWorkspace({
             ) : null}
             <button
               className="ghost-button"
+              data-tour="agents-button"
               onClick={() => setAgentPanelOpen((open) => !open)}
               type="button"
             >
@@ -4401,7 +4411,7 @@ export function DocumentWorkspace({
               ))}
             </nav>
           ) : null}
-          <div className="editor-page" ref={editorPageRef}>
+          <div className="editor-page" data-tour="editor" ref={editorPageRef}>
             {selection && selectionPopoverMode && (canWriteComments || canWriteDocument) ? (
               <SelectionPopover
                 selection={selection}
@@ -4534,6 +4544,8 @@ export function DocumentWorkspace({
       </div>
       </>
       )}
+
+      {isPublicView ? null : <OnboardingTour surface="doc" editor={editor} />}
 
       {agentPanelOpen ? (
         <AgentPanel

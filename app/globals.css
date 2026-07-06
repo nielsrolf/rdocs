@@ -2229,6 +2229,62 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   padding: 0.58rem 0.7rem;
 }
 
+.dashboard-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* Onboarding tour */
+.tour-tooltip {
+  position: fixed;
+  z-index: 240;
+  width: min(340px, calc(100vw - 24px));
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.85rem 1rem;
+  border-radius: 12px;
+  border: 1px solid rgba(99, 102, 241, 0.5);
+  background: var(--panel, #fff);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.25);
+  font-size: 0.92rem;
+}
+
+.tour-tooltip p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.tour-tooltip code {
+  overflow-wrap: anywhere;
+}
+
+.tour-progress {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.tour-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  margin-top: 0.25rem;
+}
+
+.tour-offer {
+  bottom: 1.25rem;
+  right: 1.25rem;
+}
+
+.tour-target-highlight {
+  outline: 2px solid rgba(99, 102, 241, 0.75);
+  outline-offset: 3px;
+  border-radius: 8px;
+}
+
 .credentials-add-row input {
   flex: 1;
   min-width: 260px;
