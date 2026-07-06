@@ -16,7 +16,7 @@ import { hasDocumentEnvKey } from "@/lib/document-env";
 import { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
 import { db } from "@/lib/db";
 import { resolveDocumentAccess } from "@/lib/permissions";
-import { hasUserCredential } from "@/lib/user-credentials";
+import { freeLocalAgentModel, hasUserCredential } from "@/lib/user-credentials";
 import { getPublicOrigin } from "@/lib/request-origin";
 
 type PageProps = {
@@ -171,6 +171,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         initialAgentEffort={access.document.agentEffort}
         initialHasOpenRouterKey={initialHasOpenRouterKey}
         initialHasLiteLlmKey={initialHasLiteLlmKey}
+        localAgentModel={freeLocalAgentModel()}
         credentialHasOpenRouterKey={credentialHasOpenRouterKey}
         credentialHasLiteLlmKey={credentialHasLiteLlmKey}
         initialThreads={normalizedThreads}

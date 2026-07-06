@@ -288,6 +288,7 @@ export function applyOwnerCredentialEnv(
   agentModel: string | null | undefined
 ): DocumentEnv {
   const provider = agentModelProvider(agentModel);
+  if (provider === "local") return agentEnv;
   if (provider !== "anthropic") {
     const keyVar = PROVIDER_ENV_KEY[provider];
     if (agentEnv[keyVar]?.trim()) return agentEnv;
@@ -316,10 +317,15 @@ export function applyOwnerCredentialEnv(
  */
 export function providerKeyRequirementError(
   agentEnv: DocumentEnv,
-  agentModel: string | null | undefined
+  agentModel: string | null | undefined,
+  env: Record<string, string | undefined> = process.env
 ): string | null {
   const provider = agentModelProvider(agentModel);
   if (provider === "anthropic") return null;
+  if (provider === "local") {
+    if (agentEnv.LOCAL_MODEL_BASE_URL?.trim() || env.LOCAL_MODEL_BASE_URL?.trim()) return null;
+    return "Local model selected but LOCAL_MODEL_BASE_URL is not configured on this server.";
+  }
   const keyVar = PROVIDER_ENV_KEY[provider];
   if (agentEnv[keyVar]?.trim()) return null;
   const label = provider === "openrouter" ? "OpenRouter" : "LiteLLM";
@@ -340,7 +346,7 @@ function parseEmailAllowlist(value: string | undefined): string[] | null {
   return emails.length > 0 ? emails : null;
 }
 
-const CONNECT_CREDENTIAL_MESSAGE =
+export const CONNECT_CREDENTIAL_MESSAGE =
   "Connect an Anthropic credential in settings to run AI features.";
 
 /**
@@ -489,9 +495,10 @@ export async function loadAgentEnvForDocument(
       : null
   ]);
   const provider = agentModelProvider(agentModel);
-  const runnerCredential = runner ? await getUserCredential(runner.id, provider) : null;
+  const runnerCredential =
+    runner && provider !== "local" ? await getUserCredential(runner.id, provider) : null;
   const ownerCredential =
-    !runnerCredential && doc?.ownerId && doc.ownerId !== runner?.id
+    !runnerCredential && provider !== "local" && doc?.ownerId && doc.ownerId !== runner?.id
       ? await getUserCredential(doc.ownerId, provider)
       : null;
   const env = applyOwnerCredentialEnv(docEnv, runnerCredential ?? ownerCredential, agentModel);
@@ -510,4 +517,50 @@ export async function loadAgentEnvForDocument(
     if (!env.GH_TOKEN?.trim()) env.GH_TOKEN = githubAuth.token;
   }
   return env;
+}
+
+/** The deployment's free local model ("local/<name>"), when configured. */
+export function freeLocalAgentModel(
+  env: Record<string, string | undefined> = process.env
+): string | null {
+  const name = env.LOCAL_MODEL_NAME?.trim();
+  const base = env.LOCAL_MODEL_BASE_URL?.trim();
+  return name && base ? `local/${name}` : null;
+}
+
+export type AgentRunEnvResolution = {
+  agentEnv: DocumentEnv;
+  /** Stored-model shape ("local/<name>" when the fallback fired). */
+  agentConfig: { model: string | null; effort: string | null };
+  usedFreeFallback: boolean;
+};
+
+/**
+ * loadAgentEnvForDocument, but an Anthropic-model run with NO credential
+ * anywhere falls back to the deployment's free local model instead of failing
+ * with "Connect an Anthropic credential…" — so brand-new users (e.g. mid
+ * onboarding tour) get a working, free first run. Only that exact failure
+ * triggers the fallback; provider-key errors and unrelated failures still
+ * throw. Callers surface `usedFreeFallback` in the run timeline so nobody
+ * mistakes qwen output for Claude's.
+ */
+export async function loadAgentEnvWithFreeFallback(
+  documentId: string,
+  agentConfig: { model: string | null; effort: string | null },
+  runnerUserId: string | null = null
+): Promise<AgentRunEnvResolution> {
+  try {
+    const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model, runnerUserId);
+    return { agentEnv, agentConfig, usedFreeFallback: false };
+  } catch (error) {
+    const fallbackModel = freeLocalAgentModel();
+    const isCredentialMiss =
+      error instanceof Error && error.message === CONNECT_CREDENTIAL_MESSAGE;
+    if (!fallbackModel || !isCredentialMiss) {
+      throw error;
+    }
+    const fallbackConfig = { model: fallbackModel, effort: agentConfig.effort };
+    const agentEnv = await loadAgentEnvForDocument(documentId, fallbackModel, runnerUserId);
+    return { agentEnv, agentConfig: fallbackConfig, usedFreeFallback: true };
+  }
 }

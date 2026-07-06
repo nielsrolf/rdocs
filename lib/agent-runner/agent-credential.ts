@@ -121,6 +121,14 @@ export function resolveContainerCredentialEnv(
 ): { added: Record<string, string>; warning: string | null; error: string | null } {
   const provider = agentModelProvider(agentModel);
   if (provider !== "anthropic") {
+    if (provider === "local") {
+      // The deployment's llama.cpp server is unauthenticated — nothing to
+      // inject, and the host OAuth token must stay out of the container.
+      const warning = containerEnv.LOCAL_MODEL_BASE_URL?.trim()
+        ? null
+        : "Local model selected but LOCAL_MODEL_BASE_URL is missing from the container env; the run will fail inside the sandbox.";
+      return { added: {}, warning, error: null };
+    }
     const { label, keyVar } = PROVIDER_KEY_VARS[provider];
     const warning = containerEnv[keyVar]?.trim()
       ? null

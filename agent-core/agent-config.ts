@@ -16,8 +16,14 @@
 //     through LiteLLM's Anthropic-compatible /v1/messages endpoint. Requires
 //     LITELLM_API_KEY (document env) and LITELLM_BASE_URL (document env, or a
 //     host default — see applyProviderEnv in agent-env.ts).
+//   - "local": a model served by the deployment's own llama.cpp server
+//     (Anthropic-compatible /v1/messages, tool use verified), stored with a
+//     "local/" prefix (e.g. "local/qwen3.6-27b"). Free — no credential of any
+//     kind; needs only LOCAL_MODEL_BASE_URL (host env, e.g. a tailnet IP so
+//     the server can move machines with a one-line .env change). Also the
+//     automatic fallback for Anthropic-model runs with no credential anywhere.
 
-export type AgentModelProvider = "anthropic" | "openrouter" | "litellm";
+export type AgentModelProvider = "anthropic" | "openrouter" | "litellm" | "local";
 
 export type AgentModelOption = {
   /** Value stored on Document.agentModel. */
@@ -83,6 +89,7 @@ export const DEFAULT_AGENT_EFFORT: AgentEffort = "off";
 
 export const OPENROUTER_MODEL_PREFIX = "openrouter/";
 export const LITELLM_MODEL_PREFIX = "litellm/";
+export const LOCAL_MODEL_PREFIX = "local/";
 
 // An OpenRouter slug is "<author>/<model>", optionally with a ":variant"
 // suffix (e.g. ":free"). Dots and dashes appear in real slugs; spaces, path
@@ -113,6 +120,13 @@ export function isLiteLlmAgentModel(value: unknown): boolean {
   );
 }
 
+export function isLocalAgentModel(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    normalizeAgentModel(value).startsWith(LOCAL_MODEL_PREFIX)
+  );
+}
+
 /**
  * Which provider a stored Document.agentModel routes through. Anything without
  * a recognized provider prefix is treated as Anthropic (canonical ids, legacy
@@ -121,6 +135,7 @@ export function isLiteLlmAgentModel(value: unknown): boolean {
 export function agentModelProvider(value: unknown): AgentModelProvider {
   if (isOpenRouterAgentModel(value)) return "openrouter";
   if (isLiteLlmAgentModel(value)) return "litellm";
+  if (isLocalAgentModel(value)) return "local";
   return "anthropic";
 }
 
@@ -147,6 +162,11 @@ export function isStorableAgentModel(value: unknown): value is string {
   }
   if (normalized.startsWith(LITELLM_MODEL_PREFIX)) {
     const name = normalized.slice(LITELLM_MODEL_PREFIX.length);
+    if (name.includes("..")) return false;
+    return LITELLM_MODEL_RE.test(name);
+  }
+  if (normalized.startsWith(LOCAL_MODEL_PREFIX)) {
+    const name = normalized.slice(LOCAL_MODEL_PREFIX.length);
     if (name.includes("..")) return false;
     return LITELLM_MODEL_RE.test(name);
   }
@@ -223,6 +243,16 @@ export function resolveAgentSdkConfig(
       provider: "litellm",
       thinking: { type: "disabled" },
       label: `litellm:${name}`
+    };
+  }
+
+  if (normalized.startsWith(LOCAL_MODEL_PREFIX)) {
+    const name = normalized.slice(LOCAL_MODEL_PREFIX.length);
+    return {
+      model: name,
+      provider: "local",
+      thinking: { type: "disabled" },
+      label: `local:${name}`
     };
   }
 

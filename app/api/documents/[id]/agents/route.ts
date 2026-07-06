@@ -18,7 +18,7 @@ import { getAgentRunner } from "@/lib/agent-runner";
 import { getCurrentUser } from "@/lib/auth";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
-import { loadAgentEnvForDocument } from "@/lib/user-credentials";
+import { loadAgentEnvWithFreeFallback } from "@/lib/user-credentials";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 import { rateLimit } from "@/lib/rate-limit";
 import { normalizeAgentImages } from "@/lib/ai-edit-submission";
@@ -111,7 +111,18 @@ async function runAgentConversationInBackground(input: {
       }
     });
     const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, documentId);
-    const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model, createdById);
+    const {
+      agentEnv,
+      agentConfig: effectiveAgentConfig,
+      usedFreeFallback
+    } = await loadAgentEnvWithFreeFallback(documentId, agentConfig, createdById);
+    if (usedFreeFallback) {
+      await recordAiRunEvent({
+        aiRunId,
+        role: "system",
+        message: `No AI credential connected — running on the free local model (${effectiveAgentConfig.model}). Connect a credential under AI credentials in the topbar to use Claude.`
+      });
+    }
     const result = await getAgentRunner().run({
       mode: "conversation",
       documentTitle,
@@ -131,7 +142,7 @@ async function runAgentConversationInBackground(input: {
       instruction: message,
       conversationHistory
     }, {
-      agentConfig: { model: agentConfig.model, effort: agentConfig.effort },
+      agentConfig: effectiveAgentConfig,
       agentEnv,
       signal: abort.signal,
       containerName: `gdocs-run-${aiRunId}`,

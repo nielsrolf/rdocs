@@ -222,6 +222,7 @@ export function DocumentWorkspace({
   initialAgentEffort,
   initialHasOpenRouterKey,
   initialHasLiteLlmKey,
+  localAgentModel,
   credentialHasOpenRouterKey,
   credentialHasLiteLlmKey,
   isAuthenticated,
@@ -4564,6 +4565,7 @@ export function DocumentWorkspace({
           agentEffort={agentEffort}
           hasOpenRouterKey={hasOpenRouterKey}
           hasLiteLlmKey={hasLiteLlmKey}
+          localModel={localAgentModel}
           onAgentModelChange={(model) => void handleSaveAgentConfig({ model })}
           onAgentEffortChange={(effort) => void handleSaveAgentConfig({ effort })}
           onClose={() => setAgentPanelOpen(false)}

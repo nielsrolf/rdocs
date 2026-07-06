@@ -60,8 +60,9 @@ export function DivergenceMergeDialog({
   const [loading, setLoading] = useState(true);
   const [committing, setCommitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
-  async function loadServerSnapshot() {
+  async function loadServerSnapshot(): Promise<boolean> {
     setLoading(true);
     setError(null);
     const shareQuery = shareToken ? `?share=${encodeURIComponent(shareToken)}` : "";
@@ -71,24 +72,41 @@ export function DivergenceMergeDialog({
         document?: { content?: DocNode; collaborationVersion?: number };
       } | null;
       if (!response.ok || !data?.document?.content || typeof data.document.collaborationVersion !== "number") {
-        setError("Could not load the latest server copy. Retry, or discard your local changes.");
+        setError("Could not load the latest server copy — retrying automatically. You can also discard your local changes.");
         setLoading(false);
-        return;
+        return false;
       }
       setServerDoc(data.document.content);
       setBaseVersion(data.document.collaborationVersion);
       setResolutions({});
+      return true;
     } catch {
-      setError("Could not load the latest server copy. Retry, or discard your local changes.");
+      setError("Could not load the latest server copy — retrying automatically. You can also discard your local changes.");
+      return false;
     } finally {
       setLoading(false);
     }
   }
 
+  // Load the server snapshot; a divergence often surfaces exactly while the
+  // server is briefly unreachable (deploy restart), so a failed load retries
+  // with backoff instead of dead-ending the dialog. `loadAttempt` also backs
+  // the manual Retry button.
   useEffect(() => {
-    // documentId/shareToken are stable for a mounted dialog.
-    void loadServerSnapshot();
-  }, []);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    void loadServerSnapshot().then((ok) => {
+      if (!ok && !cancelled && loadAttempt < 10) {
+        const delayMs = Math.min(1000 * 2 ** loadAttempt, 10_000);
+        timer = setTimeout(() => setLoadAttempt((n) => n + 1), delayMs);
+      }
+    });
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadAttempt]);
 
   const hunks: MergeHunk[] = useMemo(
     () => (serverDoc ? diffDocumentBlocks(serverDoc, localContent) : []),
@@ -232,6 +250,16 @@ export function DivergenceMergeDialog({
               >
                 Discard my changes &amp; reload
               </button>
+              {error && baseVersion === null ? (
+                <button
+                  className="ghost-button"
+                  disabled={loading}
+                  onClick={() => setLoadAttempt((n) => n + 1)}
+                  type="button"
+                >
+                  Retry now
+                </button>
+              ) : null}
               <button
                 className="primary-button"
                 disabled={committing || baseVersion === null}

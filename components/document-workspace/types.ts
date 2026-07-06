@@ -83,6 +83,8 @@ export type DocumentWorkspaceProps = {
   initialAgentEffort: string | null;
   initialHasOpenRouterKey: boolean;
   initialHasLiteLlmKey: boolean;
+  /** The deployment's free local model ("local/<name>") when configured. */
+  localAgentModel: string | null;
   /** Whether a per-user key for the provider backs this session's runs (the
    * viewer's own, or the document owner's) — env-menu edits can't change
    * these, so they keep the model groups unlocked. */

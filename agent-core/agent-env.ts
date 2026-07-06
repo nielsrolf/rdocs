@@ -42,7 +42,11 @@ const ALLOWLIST_EXACT = new Set([
   // LITELLM_API_KEY is deliberately NOT allowlisted (like OPENROUTER_API_KEY,
   // it must come from the document env so a host key is never silently billed
   // for every document's runs).
-  "LITELLM_BASE_URL"
+  "LITELLM_BASE_URL",
+  // The deployment's free local model (llama.cpp, Anthropic-compatible). URL +
+  // name are configuration, not credentials — safe to pass through.
+  "LOCAL_MODEL_BASE_URL",
+  "LOCAL_MODEL_NAME"
 ]);
 
 // Host variables whose names start with one of these prefixes are copied
@@ -96,11 +100,24 @@ export function applyProviderEnv(
   env: Record<string, string>,
   provider: AgentModelProvider
 ): Record<string, string> {
-  if (provider !== "openrouter" && provider !== "litellm") return env;
+  if (provider !== "openrouter" && provider !== "litellm" && provider !== "local") return env;
 
   let baseUrl: string;
   let key: string | undefined;
-  if (provider === "openrouter") {
+  if (provider === "local") {
+    // The deployment's own llama.cpp server: Anthropic-compatible and unauthenticated,
+    // so the only requirement is the base URL (host env, passed through the allowlist;
+    // a document env override wins like every other doc var).
+    const rawBase = env.LOCAL_MODEL_BASE_URL?.trim();
+    if (!rawBase) {
+      throw new Error(
+        "Local model selected but LOCAL_MODEL_BASE_URL is not configured on this server."
+      );
+    }
+    baseUrl = rawBase.replace(/\/+$/, "");
+    // The SDK requires a non-empty token; llama.cpp ignores it.
+    key = "local-no-key";
+  } else if (provider === "openrouter") {
     baseUrl = OPENROUTER_BASE_URL;
     key = env.OPENROUTER_API_KEY?.trim();
     if (!key) {

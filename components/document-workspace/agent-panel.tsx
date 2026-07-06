@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import {
   AGENT_EFFORTS,
   ANTHROPIC_AGENT_MODELS,
+  LOCAL_MODEL_PREFIX,
+  isLocalAgentModel,
   LITELLM_AGENT_MODELS,
   LITELLM_MODEL_PREFIX,
   OPENROUTER_AGENT_MODELS,
@@ -107,6 +109,7 @@ export function AgentPanel({
   agentEffort,
   hasOpenRouterKey,
   hasLiteLlmKey,
+  localModel,
   onAgentModelChange,
   onAgentEffortChange,
   onClose,
@@ -131,6 +134,8 @@ export function AgentPanel({
   agentEffort: string;
   hasOpenRouterKey: boolean;
   hasLiteLlmKey: boolean;
+  /** The deployment's free local model ("local/<name>") when configured. */
+  localModel: string | null;
   onAgentModelChange: (model: string) => void;
   onAgentEffortChange: (effort: string) => void;
   onClose: () => void;
@@ -159,6 +164,13 @@ export function AgentPanel({
   const normalizedModel = normalizeAgentModel(agentModel);
   const modelIsOpenRouter = isOpenRouterAgentModel(normalizedModel);
   const modelIsLiteLlm = isLiteLlmAgentModel(normalizedModel);
+  const modelIsLocal = isLocalAgentModel(normalizedModel);
+  // Keep a stored local selection visible even if the host stops offering it.
+  const localModelOptions = localModel
+    ? [localModel, ...(modelIsLocal && normalizedModel !== localModel ? [normalizedModel] : [])]
+    : modelIsLocal
+      ? [normalizedModel]
+      : [];
   const modelIsThirdParty = modelIsOpenRouter || modelIsLiteLlm;
   const storedCustomOpenRouterModel =
     modelIsOpenRouter && !OPENROUTER_AGENT_MODELS.some((m) => m.value === normalizedModel)
@@ -233,6 +245,15 @@ export function AgentPanel({
                   </option>
                 ))}
               </optgroup>
+              {localModelOptions.length > 0 ? (
+                <optgroup label="Free (this server)">
+                  {localModelOptions.map((value) => (
+                    <option key={value} value={value}>
+                      {value.slice(LOCAL_MODEL_PREFIX.length)} — free, no credential
+                    </option>
+                  ))}
+                </optgroup>
+              ) : null}
               {showOpenRouterGroup ? (
                 <optgroup label="OpenRouter">
                   {OPENROUTER_AGENT_MODELS.map((model) => (

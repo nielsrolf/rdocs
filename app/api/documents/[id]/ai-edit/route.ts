@@ -20,7 +20,7 @@ import {
   normalizeSubmittedWidget
 } from "@/lib/ai-edit-submission";
 import { db } from "@/lib/db";
-import { loadAgentEnvForDocument } from "@/lib/user-credentials";
+import { loadAgentEnvWithFreeFallback } from "@/lib/user-credentials";
 import { canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
 import { createAgentCommentThreads } from "@/lib/agent-comments";
 import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
@@ -180,7 +180,18 @@ async function runAiEditInBackground(input: {
     }
     const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, documentId);
     const assetIntent = detectEditAssetIntent(parsed.instruction);
-    const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model, createdById);
+    const {
+      agentEnv,
+      agentConfig: effectiveAgentConfig,
+      usedFreeFallback
+    } = await loadAgentEnvWithFreeFallback(documentId, agentConfig, createdById);
+    if (usedFreeFallback) {
+      await recordAiRunEvent({
+        aiRunId,
+        role: "system",
+        message: `No AI credential connected — running on the free local model (${effectiveAgentConfig.model}). Connect a credential under AI credentials in the topbar to use Claude.`
+      });
+    }
     // Session continuation: give the agent the prior attempts' transcript so it
     // can pick up where the previous (failed/cancelled) attempt left off. The
     // prior attempt's committed work is already merged into the base checkout,
@@ -213,7 +224,7 @@ async function runAiEditInBackground(input: {
         conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined
       },
       {
-        agentConfig: { model: agentConfig.model, effort: agentConfig.effort },
+        agentConfig: effectiveAgentConfig,
         agentEnv,
         signal: abort.signal,
         containerName: `gdocs-run-${aiRunId}`,
