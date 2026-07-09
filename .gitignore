@@ -13,6 +13,7 @@ __pycache__
 .python-home
 tsconfig.tsbuildinfo
 .research-workspaces/
+.user-skills/
 logs/
 # Runtime state / local scratch
 dev.db

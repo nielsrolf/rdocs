@@ -25,6 +25,41 @@ model User {
   documentMentions  DocumentMention[]
   credentials       UserCredential[]
   apiTokens         ApiToken[]
+  skills            UserSkill[]
+}
+
+// A reusable agent skill in a user's personal library (a directory with a
+// SKILL.md plus supporting files, Claude Agent SDK format). Files live on disk
+// under the per-user skill store (see lib/skills.ts); this row holds metadata.
+// `name` is the sanitized skill directory name. Skills marked `isDefault` are
+// copied into every document the user creates.
+model UserSkill {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  description String?
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, name])
+}
+
+// An agent skill attached to a document. Files live on disk under the
+// per-document skill store and are materialized into `.claude/skills/<name>`
+// in every agent worktree; the run enables exactly these skills by name.
+model DocumentSkill {
+  id          String   @id @default(cuid())
+  documentId  String
+  name        String
+  description String?
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, name])
 }
 
 // Per-user AI credentials, at most one per provider; every document the user
@@ -89,6 +124,7 @@ model Document {
   envVars         DocumentEnvVar[]
   documentMentions DocumentMention[]
   attachments     Attachment[]
+  skills          DocumentSkill[]
 }
 
 // User-uploaded files attached to a document. The bytes live on disk under the

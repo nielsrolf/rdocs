@@ -8,6 +8,7 @@ import {
   type CredentialProvider
 } from "@/lib/credential-detect";
 import { emitTourEvent } from "@/components/onboarding-tour";
+import { UserSkillsSection, type UserSkillEntry } from "@/components/user-skills-section";
 
 type MaskedCredential = {
   provider: CredentialProvider;
@@ -88,6 +89,7 @@ export function UserCredentialMenu() {
   const [fallbackProvider, setFallbackProvider] = useState<CredentialProvider | "">("");
   const [busy, setBusy] = useState(false);
   const [mcpTokens, setMcpTokens] = useState<McpToken[]>([]);
+  const [skills, setSkills] = useState<UserSkillEntry[]>([]);
   // The plaintext command is only available right after creating a token.
   const [mcpCommand, setMcpCommand] = useState<string | null>(null);
   const [mcpCopied, setMcpCopied] = useState(false);
@@ -109,6 +111,11 @@ export function UserCredentialMenu() {
       const tokenData = await tokenResponse.json().catch(() => null);
       if (tokenResponse.ok) {
         setMcpTokens(tokenData.tokens ?? []);
+      }
+      const skillsResponse = await fetch("/api/user/skills", { cache: "no-store" });
+      const skillsData = await skillsResponse.json().catch(() => null);
+      if (skillsResponse.ok) {
+        setSkills(skillsData.skills ?? []);
       }
     } catch {
       setError("Failed to load credentials.");
@@ -391,6 +398,8 @@ export function UserCredentialMenu() {
             </p>
           ) : null}
         </section>
+
+        <UserSkillsSection onSkillsChanged={setSkills} skills={skills} />
 
         {error ? <p className="env-note env-note-error">{error}</p> : null}
       </div>

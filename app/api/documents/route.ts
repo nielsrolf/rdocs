@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { defaultDocumentContent, serializeDocumentContent } from "@/lib/content";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { copyOwnerDefaultSkillsToDocument } from "@/lib/document-skills";
 
 export async function GET() {
   const user = await getCurrentUser();
@@ -59,6 +60,8 @@ export async function POST() {
       id: true
     }
   });
+
+  await copyOwnerDefaultSkillsToDocument(user.id, document.id);
 
   return NextResponse.json({ id: document.id });
 }

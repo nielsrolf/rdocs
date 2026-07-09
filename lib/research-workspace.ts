@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { getAgentRunner } from "@/lib/agent-runner";
 import { describeAttachmentsForOverview, syncAttachmentsIntoWorktree } from "@/lib/attachments";
+import { syncSkillsIntoWorktree } from "@/lib/skills";
 import { db } from "@/lib/db";
 import { resolveGithubIdentity } from "@/lib/github-access";
 import { resolveGithubAuthForDocument } from "@/lib/github-auth";
@@ -360,6 +361,9 @@ export async function ensureLinkedRepositoryWorktree(
 
   // Make user-uploaded attachments available to the agent inside the worktree.
   await syncAttachmentsIntoWorktree(documentId, worktree);
+  // Materialize the document's agent skills at .claude/skills/<name> so the
+  // SDK discovers them as project skills (enabled by name in agent-core).
+  await syncSkillsIntoWorktree(documentId, worktree);
 
   return {
     ...linked,

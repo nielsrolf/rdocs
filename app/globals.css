@@ -2479,6 +2479,21 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   gap: 0.5rem;
 }
 
+/* User-skill rows carry a fourth cell (the "default" toggle) next to delete. */
+.env-var-row.skill-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
+}
+
+.skill-default-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
 .env-panel .env-note {
   margin: 0;
   padding: 0.55rem 0.7rem;

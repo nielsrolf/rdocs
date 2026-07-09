@@ -61,6 +61,7 @@ import { CommentRail } from "./document-workspace/comment-rail";
 import { DocOutline, OUTLINE_MAX_WIDTH, OUTLINE_MIN_WIDTH } from "./document-workspace/doc-outline";
 import { MoveBlock, SlashTab, StrikeShortcut, TaskItem } from "./document-workspace/editor-extras";
 import { EnvironmentMenu } from "./document-workspace/environment-menu";
+import { SkillsMenu } from "./document-workspace/skills-menu";
 import { ExportMenu } from "./document-workspace/export-menu";
 import { FileMenu } from "./document-workspace/file-menu";
 import { SelectionPopover } from "./document-workspace/selection-popover";
@@ -4323,6 +4324,8 @@ export function DocumentWorkspace({
               }}
             />
           ) : null}
+
+          {canWriteDocument ? <SkillsMenu documentId={documentId} shareToken={shareToken} /> : null}
           </div>
 
           <div className="document-topbar-actions">

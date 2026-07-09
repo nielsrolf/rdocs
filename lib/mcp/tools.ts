@@ -12,6 +12,7 @@ import {
 } from "@/lib/content";
 import { db } from "@/lib/db";
 import { serializeComment, serializeThread } from "@/lib/document-data";
+import { copyOwnerDefaultSkillsToDocument } from "@/lib/document-skills";
 import { applyMarkdownEdit, McpEditError } from "@/lib/mcp/apply-edit";
 import { widgetSourceUrl } from "@/lib/mcp/markdown-doc";
 import { commitFilesToWorkspace, McpFileError, type UploadedFile } from "@/lib/mcp/workspace-files";
@@ -272,6 +273,7 @@ const createDocument = defineTool({
       },
       select: { id: true }
     });
+    await copyOwnerDefaultSkillsToDocument(ctx.user.id, document.id);
     if (args.markdown?.trim()) {
       await applyMarkdownEdit({
         documentId: document.id,

@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
+import fs from "node:fs/promises";
+import { join as joinPath, resolve as resolvePath } from "node:path";
 
 import {
   createSdkMcpServer,
@@ -785,6 +786,32 @@ function normalizeSubmittedOutput(args: unknown): Partial<ClaudeResearchAgentOut
   return out;
 }
 
+// Skill directories materialized into the workspace at `.claude/skills/<name>`
+// (synced from the document's skill store before the run — lib/skills.ts).
+// Their names become the SDK `skills` allowlist, so ONLY the document's own
+// skills are enabled — never skills the host user keeps in ~/.claude/skills,
+// which the SDK would otherwise also discover for in-process runs. Only
+// directories containing a SKILL.md count; the SDK would reject anything else.
+async function discoverWorkspaceSkills(workspacePath: string): Promise<string[]> {
+  const skillsDir = joinPath(workspacePath, ".claude", "skills");
+  let entries;
+  try {
+    entries = await fs.readdir(skillsDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const names: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const hasSkillMd = await fs
+      .stat(joinPath(skillsDir, entry.name, "SKILL.md"))
+      .then((stat) => stat.isFile())
+      .catch(() => false);
+    if (hasSkillMd) names.push(entry.name);
+  }
+  return names.sort();
+}
+
 async function runClaudeResearchAgentOnce(
   input: ClaudeResearchAgentInput,
   options: ClaudeAgentRunOptions = {}
@@ -886,10 +913,16 @@ async function runClaudeResearchAgentOnce(
     };
   };
 
+  const workspaceSkills = await discoverWorkspaceSkills(cwd);
+
   const agentQuery = query({
     prompt: buildUserMessageStream(input),
     options: {
       cwd,
+      // Enable exactly the skills materialized into this workspace (none →
+      // omit the option, preserving pre-skills behavior). Passing the list
+      // also enables the Skill tool without touching allowedTools.
+      ...(workspaceSkills.length > 0 ? { skills: workspaceSkills } : {}),
       systemPrompt: buildSystemPrompt(input),
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
