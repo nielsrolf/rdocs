@@ -10,7 +10,8 @@ import { getCurrentUser } from "@/lib/auth";
 
 export const metadata: Metadata = {
   title: "r-docs",
-  description: "A collaborative document editor with comments, share links, and AI-assisted replies."
+  description:
+    "Google Docs meets Claude Code: collaborative documents linked to repositories, where humans and AI agents write, comment, and commit together."
 };
 
 export const viewport: Viewport = {

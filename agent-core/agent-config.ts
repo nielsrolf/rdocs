@@ -33,6 +33,10 @@ export type AgentModelOption = {
   provider: AgentModelProvider;
 };
 
+export const OPENROUTER_MODEL_PREFIX = "openrouter/";
+export const LITELLM_MODEL_PREFIX = "litellm/";
+export const LOCAL_MODEL_PREFIX = "local/";
+
 export const ANTHROPIC_AGENT_MODELS: readonly AgentModelOption[] = [
   { value: "claude-sonnet-5", label: "Sonnet 5", hint: "Fast, capable default", provider: "anthropic" },
   { value: "claude-fable-5", label: "Fable 5", hint: "Most capable, premium", provider: "anthropic" },
@@ -55,11 +59,17 @@ export const OPENROUTER_AGENT_MODELS: readonly AgentModelOption[] = [
 // names are whatever the LiteLLM deployment routes (config.yaml model_name
 // entries, often provider-prefixed wildcards); any other name is reachable via
 // the custom-model input — this list is just sensible defaults, not a whitelist.
-export const LITELLM_AGENT_MODELS: readonly AgentModelOption[] = [
-  { value: "litellm/anthropic/claude-sonnet-5", label: "Claude Sonnet 5", hint: "Via LiteLLM", provider: "litellm" },
-  { value: "litellm/anthropic/claude-opus-4-8", label: "Claude Opus 4.8", hint: "Via LiteLLM", provider: "litellm" },
-  { value: "litellm/openai/gpt-5", label: "GPT-5", hint: "Via LiteLLM", provider: "litellm" }
-] as const;
+// We mirror the OpenRouter picks so a LiteLLM proxy that passes the same
+// "<author>/<model>" paths through offers the identical quick-select set; the
+// only differences are the "litellm/" prefix and the provider tag.
+export const LITELLM_AGENT_MODELS: readonly AgentModelOption[] = OPENROUTER_AGENT_MODELS.map(
+  (model) => ({
+    value: `${LITELLM_MODEL_PREFIX}${model.value.slice(OPENROUTER_MODEL_PREFIX.length)}`,
+    label: model.label,
+    hint: model.hint,
+    provider: "litellm"
+  })
+);
 
 // Historical values stored on existing Document rows before canonical ids.
 const LEGACY_MODEL_ALIASES: Record<string, string> = {
@@ -86,10 +96,6 @@ export type AgentEffort = (typeof AGENT_EFFORTS)[number]["value"];
 
 export const DEFAULT_AGENT_MODEL = "claude-sonnet-5";
 export const DEFAULT_AGENT_EFFORT: AgentEffort = "off";
-
-export const OPENROUTER_MODEL_PREFIX = "openrouter/";
-export const LITELLM_MODEL_PREFIX = "litellm/";
-export const LOCAL_MODEL_PREFIX = "local/";
 
 // An OpenRouter slug is "<author>/<model>", optionally with a ":variant"
 // suffix (e.g. ":free"). Dots and dashes appear in real slugs; spaces, path

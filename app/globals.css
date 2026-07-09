@@ -4536,3 +4536,378 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
     box-shadow: 0 0 0 3px rgba(251, 188, 4, 0.55);
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Landing page (app/page.tsx) — lp-* classes are landing-only.
+--------------------------------------------------------------------------- */
+
+.marketing-shell.landing {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding-bottom: 4rem;
+}
+
+.lp-hero {
+  display: grid;
+  grid-template-columns: 1.05fr 1fr;
+  gap: 3rem;
+  align-items: center;
+  padding: 3.5rem 0.5rem 3rem;
+}
+
+.lp-hero-copy h1 {
+  font-size: clamp(2.6rem, 5.4vw, 4.2rem);
+  line-height: 1.02;
+  letter-spacing: -0.02em;
+  margin: 1rem 0;
+}
+
+.lp-accent {
+  color: var(--accent);
+}
+
+.lp-lede {
+  font-size: 1.08rem;
+  line-height: 1.6;
+  color: var(--muted);
+  max-width: 34rem;
+  margin: 0 0 1.6rem;
+}
+
+/* --- Hero visual: stylized product mockup ------------------------------- */
+
+.lp-visual {
+  position: relative;
+  min-height: 380px;
+}
+
+.lp-doc-card {
+  position: relative;
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  padding: 0;
+  margin-right: 2.5rem;
+  overflow: visible;
+}
+
+.lp-doc-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.8rem 1.1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.lp-doc-title {
+  font-weight: 700;
+  font-size: 0.92rem;
+}
+
+.lp-repo-chip,
+.lp-commit-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  padding: 0.24rem 0.6rem;
+  white-space: nowrap;
+}
+
+.lp-repo-chip {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.lp-commit-chip {
+  background: rgba(52, 168, 83, 0.12);
+  color: #188038;
+  font-weight: 600;
+}
+
+.lp-doc-body {
+  padding: 1rem 1.1rem 1.3rem;
+  font-size: 0.84rem;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.lp-doc-body p {
+  margin: 0 0 0.7rem;
+}
+
+/* Keep the last line clear of the overlapping comment card. */
+.lp-doc-body p:last-of-type {
+  max-width: 55%;
+  margin-bottom: 0;
+}
+
+.lp-doc-h {
+  font-weight: 700;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+}
+
+.lp-doc-selection {
+  background: var(--accent-soft);
+  border-bottom: 2px solid var(--accent);
+  border-radius: 3px;
+  padding: 0.05rem 0.15rem;
+}
+
+.lp-comment-card {
+  position: absolute;
+  right: -2.5rem;
+  top: 9.4rem;
+  width: 15.5rem;
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  padding: 0.75rem 0.9rem 0.85rem;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.lp-comment-card p {
+  margin: 0.45rem 0 0.55rem;
+  color: var(--text);
+}
+
+.lp-comment-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.lp-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #1a73e8, #174ea6);
+  color: white;
+  font-size: 0.62rem;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+
+.lp-comment-author {
+  font-weight: 600;
+  font-size: 0.78rem;
+}
+
+.lp-runs-card {
+  position: absolute;
+  left: -0.75rem;
+  bottom: -1.4rem;
+  width: 17.5rem;
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  padding: 0.7rem 0.9rem 0.8rem;
+}
+
+.lp-runs-head {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 0.5rem;
+}
+
+.lp-run-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.32rem 0;
+  font-size: 0.8rem;
+}
+
+.lp-run-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lp-run-status {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.lp-run-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+.lp-run-dot.running {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.16);
+  animation: save-indicator-pulse 1.1s ease-in-out infinite;
+}
+
+.lp-run-dot.done {
+  background: #34a853;
+  box-shadow: 0 0 0 3px rgba(52, 168, 83, 0.14);
+}
+
+/* --- Feature cards ------------------------------------------------------- */
+
+.lp-features {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin-top: 3rem;
+}
+
+.lp-feature {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 1.4rem 1.4rem 1.5rem;
+  box-shadow: var(--shadow);
+}
+
+.lp-feature h2 {
+  font-size: 1.08rem;
+  margin: 0.9rem 0 0.5rem;
+}
+
+.lp-feature p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+.lp-feature-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.4rem;
+  height: 2.4rem;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+/* --- How it works + CTA --------------------------------------------------- */
+
+.lp-flow {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin-top: 2.5rem;
+  padding: 1.6rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  box-shadow: var(--shadow);
+}
+
+.lp-flow-step {
+  display: flex;
+  gap: 0.8rem;
+  align-items: flex-start;
+}
+
+.lp-flow-step h3 {
+  margin: 0 0 0.25rem;
+  font-size: 0.98rem;
+}
+
+.lp-flow-step p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.lp-flow-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.8rem;
+  height: 1.8rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: white;
+  font-weight: 700;
+  font-size: 0.86rem;
+  flex: 0 0 auto;
+}
+
+.lp-cta {
+  text-align: center;
+  margin-top: 3.5rem;
+  display: grid;
+  justify-items: center;
+  gap: 1.1rem;
+}
+
+.lp-cta h2 {
+  font-size: clamp(1.5rem, 3vw, 2.1rem);
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+/* --- Responsive ----------------------------------------------------------- */
+
+@media (max-width: 1080px) {
+  .lp-hero {
+    grid-template-columns: 1fr;
+    gap: 2.5rem;
+    padding-top: 2rem;
+  }
+
+  .lp-visual {
+    max-width: 34rem;
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  .lp-features,
+  .lp-flow {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .lp-doc-card {
+    margin-right: 0;
+  }
+
+  .lp-comment-card {
+    position: static;
+    width: auto;
+    margin: 0 1.1rem 1.1rem;
+    box-shadow: none;
+    background: var(--accent-soft);
+    border-color: rgba(26, 115, 232, 0.25);
+  }
+
+  .lp-runs-card {
+    position: static;
+    width: auto;
+    margin-top: 0.9rem;
+  }
+
+  .lp-visual {
+    min-height: 0;
+  }
+}
