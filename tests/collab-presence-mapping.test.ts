@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { collab, getVersion, receiveTransaction, sendableSteps } from "@tiptap/pm/collab";
 import { EditorState } from "@tiptap/pm/state";
+import { Step } from "@tiptap/pm/transform";
 
-import { mapRemotePosition, type ReceivedMappingEntry } from "../components/document-workspace/collaboration";
+import {
+  buildReceivedMappingEntry,
+  mapRemotePosition,
+  type ReceivedMappingEntry
+} from "../components/document-workspace/collaboration";
 import { createDocumentEditorSchema } from "../lib/document-editor-schema";
 
 // Regression coverage for: "in realtime collab mode, the cursor position and
@@ -83,4 +89,89 @@ test("inserting exactly at the selection start respects bias (selection start st
   // expand. Here we only assert the `from` boundary behavior.
   const received = [receivedInsert(0, 7, "__")];
   assert.equal(mapRemotePosition(7, 0, -1, 1, received, []), 7);
+});
+
+// Regression coverage for: "their cursor jumps around while I am typing, and
+// arrives at the correct position after a second."
+//
+// Lifecycle of a local edit relative to a remote collaborator's cursor:
+//   1. While the local steps are UNCONFIRMED, remote positions are shifted by
+//      sendableSteps' maps — correct.
+//   2. When the server accepts the push it echoes our own steps back and we
+//      confirm them via receiveTransaction. That transaction changes nothing
+//      in the local doc, so its `.mapping` is EMPTY. The old code recorded that
+//      empty mapping into the received-mapping buffer; the moment the steps
+//      left the unconfirmed buffer, every remote position snapped back to its
+//      pre-edit spot (the "jump"), staying wrong until the peer re-sent
+//      presence at the new version.
+// The fix: record the server-canonical mapping built from the steps themselves
+// (buildReceivedMappingEntry), which is identical to receiveTr.mapping for
+// foreign steps but stays correct for own-step confirmations.
+
+test("remote cursor does not jump when our own typed steps get confirmed", () => {
+  // Local editor at version 0 with the collab plugin, remote peer's cursor at
+  // position 13 (start of "world"), captured at version 0.
+  let state = EditorState.create({
+    doc: schema.nodeFromJSON({
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "Hello brave world" }] }]
+    }),
+    plugins: [collab({ version: 0, clientID: "me" })]
+  });
+  const remotePos = 13;
+
+  // Type "abc" at position 1 — three steps, all unconfirmed.
+  state = state.apply(state.tr.insertText("a", 1));
+  state = state.apply(state.tr.insertText("b", 2));
+  state = state.apply(state.tr.insertText("c", 3));
+
+  const sendable = sendableSteps(state);
+  assert.ok(sendable && sendable.steps.length === 3);
+
+  // Phase 1: unconfirmed — remote cursor shifts with the pending steps.
+  const unconfirmedMaps = sendable.steps.map((step) => step.getMap());
+  assert.equal(mapRemotePosition(remotePos, 0, -1, getVersion(state), [], unconfirmedMaps), 16);
+
+  // Phase 2: server accepts the push and echoes our steps back. Confirm them
+  // exactly as applyCollaborationPayload does.
+  const echoed = sendable.steps.map((step) => Step.fromJSON(schema, step.toJSON()));
+  const versionBefore = getVersion(state);
+  const receiveTr = receiveTransaction(state, echoed, ["me", "me", "me"], {
+    mapSelectionBackward: true
+  });
+  const entry = buildReceivedMappingEntry(versionBefore, echoed);
+  state = state.apply(receiveTr);
+
+  assert.equal(getVersion(state), 3);
+  assert.equal(sendableSteps(state), null); // nothing unconfirmed anymore
+
+  // The remote cursor (still reported at version 0) must STAY at 16 — with the
+  // old empty-mapping recording it snapped back to 13 until fresh presence
+  // arrived, which is the visible jump.
+  assert.equal(mapRemotePosition(remotePos, 0, -1, getVersion(state), [entry], []), 16);
+
+  // Cursor BEFORE the edit stays put through confirmation.
+  assert.equal(mapRemotePosition(1, 0, -1, getVersion(state), [entry], []), 1);
+
+  // A selection COVERING the edit point expands consistently: from (before the
+  // insert, bias -1) stays, to (after it) shifts.
+  assert.equal(mapRemotePosition(1, 0, -1, getVersion(state), [entry], []), 1);
+  assert.equal(mapRemotePosition(6, 0, 1, getVersion(state), [entry], []), 9);
+});
+
+test("an entry straddling the remote version applies only the steps the remote has not seen", () => {
+  // One confirmed batch covers versions 0..2 (two 1-char inserts at pos 1).
+  // A remote position captured at version 1 must be mapped through only the
+  // SECOND step, not the whole batch (and not skipped entirely).
+  const tr1 = baseState().tr.insertText("X", 1);
+  const state1 = baseState().apply(tr1);
+  const tr2 = state1.tr.insertText("Y", 1);
+  const entry = buildReceivedMappingEntry(0, [...tr1.steps, ...tr2.steps]);
+
+  // Captured at version 0: both steps apply (+2).
+  assert.equal(mapRemotePosition(7, 0, -1, 2, [entry], []), 9);
+  // Captured at version 1: only the second step applies (+1).
+  assert.equal(mapRemotePosition(7, 1, -1, 2, [entry], []), 8);
+  // Captured at version 2: nothing applies.
+  assert.equal(mapRemotePosition(7, 2, -1, 2, [entry], []), 7);
 });

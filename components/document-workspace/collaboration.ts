@@ -1,7 +1,8 @@
 import { Extension } from "@tiptap/core";
 import { collab, getVersion, sendableSteps } from "@tiptap/pm/collab";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
-import type { Mappable, Mapping } from "@tiptap/pm/transform";
+import { Mapping } from "@tiptap/pm/transform";
+import type { Mappable, Step } from "@tiptap/pm/transform";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type { MutableRefObject } from "react";
 
@@ -142,6 +143,23 @@ export type ReceivedMappingEntry = {
   mapping: Mapping;
 };
 
+// Build the received-mapping buffer entry for a confirmed batch of steps
+// (covering server versions [versionBefore, versionBefore + steps.length)).
+//
+// The mapping MUST come from the steps themselves (server-canonical), not from
+// the receiveTransaction that applied them: when the batch is our OWN steps
+// being confirmed after a push, that transaction changes nothing locally and
+// its mapping is empty — recording it made remote cursors snap back to their
+// pre-edit position the moment our typing was confirmed (the "jumping cursor"
+// while a collaborator types). For foreign steps with no local unconfirmed
+// work the two are identical, so step maps are correct in every case.
+export function buildReceivedMappingEntry(
+  versionBefore: number,
+  steps: readonly Step[]
+): ReceivedMappingEntry {
+  return { versionBefore, mapping: new Mapping(steps.map((step) => step.getMap())) };
+}
+
 // Shape of a /collaboration step push/pull response (and the SSE "steps" event).
 export type CollaborationStepResponse = {
   accepted?: boolean;
@@ -172,8 +190,13 @@ export function mapRemotePosition(
   let result = pos;
   if (remoteVersion < localVersion) {
     for (const entry of receivedMappings) {
+      const stepCount = entry.mapping.maps.length;
       if (entry.versionBefore >= remoteVersion) {
         result = entry.mapping.map(result, bias);
+      } else if (entry.versionBefore + stepCount > remoteVersion) {
+        // The batch straddles the remote's version: apply only the step maps
+        // for versions the remote has not yet incorporated.
+        result = entry.mapping.slice(remoteVersion - entry.versionBefore).map(result, bias);
       }
     }
   }

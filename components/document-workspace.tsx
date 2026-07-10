@@ -12,7 +12,6 @@ import Underline from "@tiptap/extension-underline";
 import { getVersion, receiveTransaction, sendableSteps } from "@tiptap/pm/collab";
 import { NodeSelection } from "@tiptap/pm/state";
 import { Step } from "@tiptap/pm/transform";
-import type { Mapping } from "@tiptap/pm/transform";
 import { EditorContent, JSONContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -87,6 +86,7 @@ import {
   type MentionCandidate
 } from "@/lib/mentions";
 import {
+  buildReceivedMappingEntry,
   createCollaborationExtension,
   createRemotePresenceExtension,
   planCollaborationPush,
@@ -737,9 +737,9 @@ export function DocumentWorkspace({
   }
 
   const RECEIVED_MAPPING_BUFFER_LIMIT = 500;
-  function recordReceivedMapping(versionBefore: number, mapping: Mapping) {
+  function recordReceivedMapping(entry: ReceivedMappingEntry) {
     const buffer = receivedMappingsRef.current;
-    buffer.push({ versionBefore, mapping });
+    buffer.push(entry);
     if (buffer.length > RECEIVED_MAPPING_BUFFER_LIMIT) {
       buffer.splice(0, buffer.length - RECEIVED_MAPPING_BUFFER_LIMIT);
     }
@@ -779,7 +779,7 @@ export function DocumentWorkspace({
       // Tell the suggestions interceptor to ignore this apply — foreign steps
       // already carry their author's marks; we must not re-mark them as ours.
       receiveTr.setMeta(suggestionPluginKey, { type: "skip" });
-      recordReceivedMapping(versionBefore, receiveTr.mapping);
+      recordReceivedMapping(buildReceivedMappingEntry(versionBefore, steps));
       editor.view.dispatch(receiveTr);
       if (typeof payload.updatedAt === "string") {
         setDocumentUpdatedAt(payload.updatedAt);
