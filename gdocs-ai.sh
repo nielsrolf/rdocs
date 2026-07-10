@@ -57,6 +57,22 @@ fi
 
 npm ci
 npx prisma generate
+
+# Snapshot the database before anything (schema push or data migration) can
+# touch it, so a bad migration is recoverable. sqlite3 .backup is consistent
+# even mid-write. Keep the 3 most recent snapshots (~7 GB each).
+DB_FILE="prisma/dev.db"
+if [ -f "$DB_FILE" ]; then
+  mkdir -p backups
+  BACKUP_FILE="backups/dev_$(date +%Y%m%d_%H%M%S).db"
+  echo "[gdocs-ai.sh] backing up $DB_FILE -> $BACKUP_FILE"
+  sqlite3 "$DB_FILE" ".backup '$BACKUP_FILE'"
+  ls -t backups/dev_*.db 2>/dev/null | tail -n +4 | while read -r OLD; do
+    echo "[gdocs-ai.sh] pruning old backup $OLD"
+    rm -f "$OLD"
+  done
+fi
+
 npx prisma db push --skip-generate
 npm run db:migrate-security
 npm run build

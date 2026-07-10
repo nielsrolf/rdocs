@@ -16,6 +16,7 @@ tsconfig.tsbuildinfo
 .user-skills/
 logs/
 # Runtime state / local scratch
+backups/
 dev.db
 dev.db-journal
 .service.pid
