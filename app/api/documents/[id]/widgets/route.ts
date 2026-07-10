@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import { canManageDocumentAutomation, resolveDocumentAccess } from "@/lib/permissions";
 import { ensureLinkedRepository, runWidgetBuild } from "@/lib/research-workspace";
 
 export const runtime = "nodejs";
@@ -32,8 +32,8 @@ export async function POST(request: Request, { params }: RouteContext) {
   }
 
   const access = await resolveDocumentAccess(id, user?.id, parsed.data.shareToken ?? null);
-  if (!access || !canEdit(access.permission)) {
-    return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+  if (!access || !canManageDocumentAutomation(access, user?.id)) {
+    return NextResponse.json({ error: "Sign in with collaborator edit access to build widgets." }, { status: 403 });
   }
 
   const linkedRepo = await ensureLinkedRepository(id, { requireClean: false, runnerUserId: user?.id ?? null });

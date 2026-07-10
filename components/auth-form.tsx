@@ -63,18 +63,25 @@ export function AuthForm({ mode, title, subtitle }: AuthFormProps) {
         {mode === "sign-up" && (
           <label>
             <span>Name</span>
-            <input name="name" placeholder="Ada Lovelace" required type="text" />
+            <input autoComplete="name" name="name" placeholder="Ada Lovelace" required type="text" />
           </label>
         )}
         <label>
           <span>Email</span>
-          <input name="email" placeholder="you@example.com" required type="email" />
+          <input autoComplete="email" name="email" placeholder="you@example.com" required type="email" />
         </label>
         <label>
           <span>Password</span>
-          <input name="password" placeholder="At least 8 characters" required type="password" />
+          <input
+            autoComplete={mode === "sign-up" ? "new-password" : "current-password"}
+            minLength={8}
+            name="password"
+            placeholder="At least 8 characters"
+            required
+            type="password"
+          />
         </label>
-        {error ? <div className="error-banner">{error}</div> : null}
+        {error ? <div className="error-banner" role="alert">{error}</div> : null}
         <button className="primary-button wide-button" disabled={isSubmitting} type="submit">
           {isSubmitting ? "Working..." : mode === "sign-up" ? "Create account" : "Sign in"}
         </button>

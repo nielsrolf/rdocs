@@ -5,7 +5,7 @@ import { NextResponse } from "next/server";
 
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import { canManageDocumentAutomation, resolveDocumentAccess } from "@/lib/permissions";
 import { commitWorkspaceChanges, ensureLinkedRepository, runWidgetBuild } from "@/lib/research-workspace";
 
 export const runtime = "nodejs";
@@ -33,8 +33,8 @@ export async function POST(request: Request, { params }: RouteContext) {
   const shareToken = new URL(request.url).searchParams.get("share");
   const access = await resolveDocumentAccess(id, user?.id, shareToken);
 
-  if (!access || !canEdit(access.permission)) {
-    return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+  if (!access || !canManageDocumentAutomation(access, user?.id)) {
+    return NextResponse.json({ error: "Sign in with collaborator edit access to refresh widgets." }, { status: 403 });
   }
 
   const widget = await db.embeddedWidget.findFirst({
@@ -105,8 +105,6 @@ export async function POST(request: Request, { params }: RouteContext) {
 
   return NextResponse.json({
     widget: refreshed,
-    embedUrl: `/api/documents/${id}/widgets/${widget.id}/source${
-      shareToken ? `?share=${encodeURIComponent(shareToken)}` : ""
-    }`
+    embedUrl: `/api/documents/${id}/widgets/${widget.id}/source`
   });
 }

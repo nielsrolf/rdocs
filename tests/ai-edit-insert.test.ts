@@ -91,6 +91,20 @@ test("a widget becomes an embedded-widget node with embedSource and src preserve
   assert.match(html, /embedSource="assets\/fft\.html"/);
   assert.match(html, /src="\/api\/documents\/doc1\/widgets\/w1\/source"/);
   assert.match(html, /buildCmd="python widgets\/build\.py"/);
+  assert.doesNotMatch(html, /shareToken=/, "share capabilities must never be persisted in document nodes");
+});
+
+test("a guest-created repo image keeps its persisted asset URL free of share capabilities", () => {
+  const html = buildAiEditInsertContent({
+    replacementText: "![Plot](assets/plot.png)",
+    sourceLinks: [],
+    images: [],
+    widgets: [],
+    documentId: "doc1",
+    shareToken: "comment-capability"
+  });
+  assert.match(html, /data-repo-image/);
+  assert.doesNotMatch(html, /comment-capability|[?&]share=/);
 });
 
 test("a widget:// placeholder places a NEW array widget INLINE at that position", () => {

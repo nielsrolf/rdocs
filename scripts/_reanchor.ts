@@ -77,7 +77,7 @@ function applyAnchorAtHit(doc: Node, hit: Hit, threadId: string) {
   const content = (block.content ?? []) as Node[];
   const newContent: Node[] = [];
   let cursor = 0;
-  let { startOffset, endOffset } = hit;
+  const { startOffset, endOffset } = hit;
 
   for (const child of content) {
     if (child.type !== "text" || typeof child.text !== "string") {

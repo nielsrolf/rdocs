@@ -7,8 +7,9 @@ import { resolveShareToken, withShareToken } from "../components/document-worksp
 // An owner-created widget bakes an empty shareToken into the node; the guest
 // opens the doc with ?share=TOK. The asset URL must still carry the token.
 
-test("resolveShareToken prefers the node's explicit token", () => {
-  assert.equal(resolveShareToken("node-tok", "?share=page-tok"), "node-tok");
+test("resolveShareToken never trusts a capability token persisted in document content", () => {
+  assert.equal(resolveShareToken("persisted-edit-token", "?share=page-view-token"), "page-view-token");
+  assert.equal(resolveShareToken("persisted-edit-token", ""), null);
 });
 
 test("resolveShareToken falls back to the page's ?share param", () => {
@@ -36,14 +37,18 @@ test("withShareToken preserves existing query params on repo-file URLs", () => {
   assert.equal(url.searchParams.get("share"), "TOK");
 });
 
-test("withShareToken does not clobber a token already present on the URL", () => {
+test("withShareToken replaces a legacy persisted token with the viewer's current capability", () => {
   const rawSrc = "/api/documents/doc1/repo-files?path=fig.png&share=EXISTING";
-  assert.equal(withShareToken(rawSrc, "TOK"), rawSrc);
+  assert.equal(withShareToken(rawSrc, "TOK"), "/api/documents/doc1/repo-files?path=fig.png&share=TOK");
 });
 
-test("withShareToken is a no-op without a token", () => {
+test("withShareToken strips a legacy persisted token when the viewer has no share capability", () => {
   const rawSrc = "/api/documents/doc1/widgets/w1/source";
   assert.equal(withShareToken(rawSrc, null), rawSrc);
+  assert.equal(
+    withShareToken(`${rawSrc}?share=STALE`, null),
+    rawSrc
+  );
 });
 
 test("withShareToken leaves absolute / non-app URLs alone", () => {

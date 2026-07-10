@@ -20,8 +20,9 @@ import {
   normalizeSubmittedWidget
 } from "@/lib/ai-edit-submission";
 import { db } from "@/lib/db";
-import { loadAgentEnvWithFreeFallback } from "@/lib/user-credentials";
-import { canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import { loadAgentEnvWithFreeFallback, restrictAgentEnvForReadOnly } from "@/lib/user-credentials";
+import { agentAccessModeForDocumentAccess, canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import type { AgentAccessMode } from "@/agent-core";
 import { createAgentCommentThreads } from "@/lib/agent-comments";
 import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
 import { getClientIp, rateLimit } from "@/lib/rate-limit";
@@ -65,7 +66,6 @@ const aiEditSchema = z
 async function createAgentWidgets(input: {
   widgets: unknown;
   documentId: string;
-  shareToken: string | null;
   workspace: string | null;
   aiRunId: string | null;
   // When the agent ran in the container runner, widgets were already built and
@@ -123,9 +123,7 @@ async function createAgentWidgets(input: {
       buildCmd: record.buildCmd,
       embedSource: record.embedSource,
       lastError: record.lastError,
-      src: `/api/documents/${input.documentId}/widgets/${record.id}/source${
-        input.shareToken ? `?share=${encodeURIComponent(input.shareToken)}` : ""
-      }`
+      src: `/api/documents/${input.documentId}/widgets/${record.id}/source`
     });
   }
 
@@ -142,8 +140,9 @@ async function runAiEditInBackground(input: {
   documentContentRaw: string;
   createdById: string | null;
   agentConfig: { model: string | null; effort: string | null };
+  agentAccessMode: AgentAccessMode;
 }) {
-  const { documentId, aiRunId, parsed, documentTitle, documentContentRaw, createdById, agentConfig } = input;
+  const { documentId, aiRunId, parsed, documentTitle, documentContentRaw, createdById, agentConfig, agentAccessMode } = input;
   let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
   const stopHeartbeat = startAiRunHeartbeat(aiRunId);
   const abort = registerRunAbortController(aiRunId);
@@ -192,6 +191,13 @@ async function runAiEditInBackground(input: {
         message: `No AI credential connected — running on the free local model (${effectiveAgentConfig.model}). It is much slower than Claude (first output can take a few minutes). Connect a credential under AI credentials in the topbar to use Claude.`
       });
     }
+    if (agentAccessMode === "read_only") {
+      await recordAiRunEvent({
+        aiRunId,
+        role: "system",
+        message: "Share-link agent is read-only: repository writes, commands, document secrets, commits, and pushes are disabled."
+      });
+    }
     // Session continuation: give the agent the prior attempts' transcript so it
     // can pick up where the previous (failed/cancelled) attempt left off. The
     // prior attempt's committed work is already merged into the base checkout,
@@ -203,6 +209,7 @@ async function runAiEditInBackground(input: {
     const result = await getAgentRunner().run(
       {
         mode: "edit_selection",
+        accessMode: agentAccessMode,
         documentTitle,
         documentText,
         documentBlocks,
@@ -225,7 +232,7 @@ async function runAiEditInBackground(input: {
       },
       {
         agentConfig: effectiveAgentConfig,
-        agentEnv,
+        agentEnv: agentAccessMode === "read_only" ? restrictAgentEnvForReadOnly(agentEnv) : agentEnv,
         signal: abort.signal,
         containerName: `gdocs-run-${aiRunId}`,
         onProgress: async (event) => {
@@ -256,9 +263,8 @@ async function runAiEditInBackground(input: {
     ]);
     const images = normalizeAgentImages(result.images, documentId, parsed.shareToken ?? null, aiRunId);
     const widgetResult = await createAgentWidgets({
-      widgets: result.widgets,
+      widgets: agentAccessMode === "workspace" ? result.widgets : [],
       documentId,
-      shareToken: parsed.shareToken ?? null,
       workspace: linkedRepo?.workspace ?? null,
       aiRunId,
       verifyOnly: getAgentRunner().mode !== "inprocess"
@@ -286,7 +292,7 @@ async function runAiEditInBackground(input: {
       );
     }
 
-    const commit = linkedRepo
+    const commit = linkedRepo && agentAccessMode === "workspace"
       ? await commitWorkspaceChanges({
           workspace: linkedRepo.workspace,
           baseWorkspace: linkedRepo.baseWorkspace,
@@ -368,7 +374,7 @@ async function runAiEditInBackground(input: {
       message: result.summary || "Finished AI edit."
     });
   } catch (error) {
-    if (linkedRepo) {
+    if (linkedRepo && agentAccessMode === "workspace") {
       await commitWorkspaceChanges({
         workspace: linkedRepo.workspace,
         baseWorkspace: linkedRepo.baseWorkspace,
@@ -486,7 +492,8 @@ export async function POST(request: Request, { params }: RouteContext) {
     documentTitle: access.document.title,
     documentContentRaw: access.document.content,
     createdById: user?.id ?? null,
-    agentConfig: { model: access.document.agentModel, effort: access.document.agentEffort }
+    agentConfig: { model: access.document.agentModel, effort: access.document.agentEffort },
+    agentAccessMode: agentAccessModeForDocumentAccess(access)
   }).catch((error) => {
     console.error("[ai-edit] background run threw", {
       aiRunId: aiRun.id,

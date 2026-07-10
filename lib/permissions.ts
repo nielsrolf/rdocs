@@ -1,5 +1,6 @@
 import { PermissionLevelValue } from "@/lib/contracts";
 import { db } from "@/lib/db";
+import type { AgentAccessMode } from "@/agent-core";
 
 type AccessResult = {
   document: {
@@ -110,4 +111,18 @@ export function canComment(permission: PermissionLevelValue) {
 
 export function canEdit(permission: PermissionLevelValue) {
   return permission === "EDIT";
+}
+
+export function agentAccessModeForDocumentAccess(access: {
+  permission: PermissionLevelValue;
+  viaShareLink: boolean;
+}): AgentAccessMode {
+  return access.viaShareLink && !canEdit(access.permission) ? "read_only" : "workspace";
+}
+
+export function canManageDocumentAutomation(
+  access: { permission: PermissionLevelValue; viaShareLink: boolean },
+  userId: string | null | undefined
+) {
+  return Boolean(userId) && !access.viaShareLink && canEdit(access.permission);
 }

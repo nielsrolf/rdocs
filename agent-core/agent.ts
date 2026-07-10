@@ -26,7 +26,7 @@ import {
   type AgentSuggestion
 } from "./ai-edit-submission";
 import { evaluateToolPathAccess } from "./agent-sandbox";
-import { CLAUDE_AGENT_TOOLS } from "./ai-tools";
+import { toolsForAgentAccess, type AgentAccessMode } from "./ai-tools";
 import type { AiDocumentBlock } from "./types";
 
 const MAX_PROGRESS_MESSAGE_LENGTH = 1400;
@@ -46,6 +46,8 @@ export function stripLoneSurrogates(value: string): string {
 
 export type ClaudeResearchAgentInput = {
   mode: "comment_reply" | "edit_selection" | "conversation";
+  /** Workspace capability enforced by the SDK tool allowlist. */
+  accessMode?: AgentAccessMode;
   documentTitle: string;
   documentText: string;
   documentBlocks?: AiDocumentBlock[];
@@ -392,13 +394,18 @@ function documentContextForPrompt(input: ClaudeResearchAgentInput) {
 }
 
 export function buildSystemPrompt(input: ClaudeResearchAgentInput) {
+  const workspaceAccess =
+    input.accessMode === "read_only"
+      ? `- READ-ONLY SHARE ACCESS: you may inspect the repository and use web research, but you cannot Write, Edit, MultiEdit, or Bash. Do not create files, widgets, images, commits, or claim that you changed the repository. You may still answer the thread and propose document suggestions for a human to review.
+- The application will not commit or push repository changes from this run.`
+      : `- You are running in the linked repository checkout when one is available. Your current working directory IS that checkout: a writable Git worktree the app set up for this turn. You can freely Write/Edit/Bash inside it — there is no read-only sandbox to escape from. Do not use EnterWorktree, ExitWorktree, plan-mode tools, or any other "get a writable copy" workaround; files written outside this cwd are not visible to the app and will cause widget builds, image embeds, and the auto-commit to silently miss your work.
+- After you finish, the app runs your widget build_cmd from this same cwd and then auto-commits whatever changed here. Anything written elsewhere on disk is discarded.
+- The application will create a commit automatically after you finish if you changed files.`;
   return stripLoneSurrogates(`You are an AI research agent working inside a collaborative document application.
 
 App environment:
 - A document can be linked to one Git repository.
-- You are running in the linked repository checkout when one is available. Your current working directory IS that checkout: a writable Git worktree the app set up for this turn. You can freely Write/Edit/Bash inside it — there is no read-only sandbox to escape from. Do not use EnterWorktree, ExitWorktree, plan-mode tools, or any other "get a writable copy" workaround; files written outside this cwd are not visible to the app and will cause widget builds, image embeds, and the auto-commit to silently miss your work.
-- After you finish, the app runs your widget build_cmd from this same cwd and then auto-commits whatever changed here. Anything written elsewhere on disk is discarded.
-- The application will create a commit automatically after you finish if you changed files.
+${workspaceAccess}
 - The editor renders replacementText as Markdown. Use Markdown structure deliberately: ##/### headings, short paragraphs, bullet or numbered lists, blockquotes, fenced code blocks, and Markdown tables when they improve scanability. Avoid returning one long paragraph.
 - The editor supports LaTeX math in Markdown text with $inline$ and $$display$$ delimiters.
 - The editor converts repo-local Markdown images in replacementText into document figure nodes. Use ![Concise figure caption](assets/plot.png), and put a useful caption in the alt text. Do not use HTML image tags.
@@ -913,7 +920,8 @@ async function runClaudeResearchAgentOnce(
     };
   };
 
-  const workspaceSkills = await discoverWorkspaceSkills(cwd);
+  const workspaceSkills =
+    input.accessMode === "read_only" ? [] : await discoverWorkspaceSkills(cwd);
 
   const agentQuery = query({
     prompt: buildUserMessageStream(input),
@@ -926,7 +934,7 @@ async function runClaudeResearchAgentOnce(
       systemPrompt: buildSystemPrompt(input),
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
-      allowedTools: [...CLAUDE_AGENT_TOOLS, SUBMIT_TOOL_NAME],
+      allowedTools: [...toolsForAgentAccess(input.accessMode), SUBMIT_TOOL_NAME],
       disallowedTools: [
         "EnterWorktree",
         "ExitWorktree",
@@ -957,7 +965,14 @@ async function runClaudeResearchAgentOnce(
             failIfUnavailable: false,
             autoAllowBashIfSandboxed: true
           },
-      hooks: isolatedRuntime ? {} : { PreToolUse: [{ hooks: [preToolUseGuard] }] },
+      // Container isolation protects the host, but a read-only share run must
+      // also be unable to Read /proc/self/environ or runtime credential files
+      // from inside the container. Keep the path guard for that mode so Read,
+      // Grep, and Glob remain confined to /workspace.
+      hooks:
+        isolatedRuntime && input.accessMode !== "read_only"
+          ? {}
+          : { PreToolUse: [{ hooks: [preToolUseGuard] }] },
       abortController
     }
   });

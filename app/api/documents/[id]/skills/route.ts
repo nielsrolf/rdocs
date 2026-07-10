@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import { canManageDocumentAutomation, resolveDocumentAccess } from "@/lib/permissions";
 import {
   copySkillDir,
   getDocumentSkillDir,
@@ -77,7 +77,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     }
 
     const access = await resolveDocumentAccess(id, user?.id, parsed.data.share ?? null);
-    if (!access || !canEdit(access.permission)) {
+    if (!access || !canManageDocumentAutomation(access, user?.id)) {
       return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
     }
     if (!user) {
@@ -112,8 +112,8 @@ export async function POST(request: Request, { params }: RouteContext) {
   const shareToken = typeof formData.get("share") === "string" ? (formData.get("share") as string) : null;
 
   const access = await resolveDocumentAccess(id, user?.id, shareToken);
-  if (!access || !canEdit(access.permission)) {
-    return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+  if (!access || !canManageDocumentAutomation(access, user?.id)) {
+    return NextResponse.json({ error: "Sign in with collaborator edit access to manage agent skills." }, { status: 403 });
   }
 
   let prepared;

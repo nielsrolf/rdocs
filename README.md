@@ -5,11 +5,15 @@ Short for **research-docs** and **repo-docs**: a Google Docs-style workspace whe
 Features:
 
 - rich text editing
-- threaded comments on selected text
-- an `Ask AI` button on each comment thread
+- realtime collaboration, suggestions, presence, mentions, and version history
+- threaded comments on text and block assets, with an `Ask AI` action
 - user sign-up/sign-in
 - direct collaborator sharing by email
 - permissioned share links for `view`, `comment`, and `edit`
+- document-level and selection-level agents with progress, cancellation, and continuations
+- isolated repository worktrees, commits, widgets, images, attachments, and exports
+- per-user AI/GitHub credentials plus per-document encrypted environment variables
+- an MCP bridge for external agents
 
 The app is built as a Next.js frontend/server app with Prisma + SQLite for persistence. Claude agent work runs through the TypeScript `@anthropic-ai/claude-agent-sdk` package.
 
@@ -39,14 +43,15 @@ cp .env.example .env
 3. Set at least:
 
 - `SESSION_SECRET`
-- `ANTHROPIC_API_KEY`
-- optionally `CLAUDE_AGENT_MODEL` if you want a model other than the SDK default alias
+- `CREDENTIAL_ENCRYPTION_KEY` (generate with `openssl rand -base64 32`)
+- an AI provider credential, or `LOCAL_MODEL_BASE_URL` + `LOCAL_MODEL_NAME` for the free local fallback
 
 4. Initialize the database:
 
 ```bash
 npx prisma generate
 npx prisma db push
+npm run db:migrate-security
 ```
 
 5. Start the app:
@@ -55,15 +60,28 @@ npx prisma db push
 npm run dev
 ```
 
-## Notes
+## Security model
 
-- Anonymous users can open shared documents via a share link, but commenting/replying currently requires a signed-in user account.
-- Comment anchors store both the selected text and current editor positions. That is enough for an MVP, but if the document changes heavily you will want a more resilient anchor strategy.
-- The codebase is intentionally structured so you can add AI edit-on-selection next by reusing the same permission and document persistence paths.
+- Agent runs use the configured runner (`container` is the production target); repository work is isolated per run.
+- Comment-link agents are read-only; edit-link agents receive workspace command and repository access. View links cannot start agents.
+- Share tokens are runtime capabilities and are never persisted in document nodes or asset URLs.
+- Agent-authored widgets run in an opaque-origin iframe sandbox.
+- Personal credentials and per-document environment values are encrypted at rest.
+
+## Checks
+
+```bash
+npm test
+npx tsc --noEmit -p .
+npm run lint
+npm audit --omit=dev
+```
 
 ## Key paths
 
 - `app/documents/[id]/page.tsx`: document workspace page
 - `components/document-workspace.tsx`: editor, comments, share links, Ask AI UI
-- `app/api/comments/[threadId]/ask-ai/route.ts`: Claude reply endpoint
-- `lib/ai.ts`: Claude Agent SDK runner and document-output parsing
+- `app/api/comments/[threadId]/ask-ai/route.ts`: asynchronous comment-agent endpoint
+- `agent-core/`: provider-neutral agent runtime, prompts, tools, and validation
+- `lib/agent-runner/`: in-process/container/remote execution seam
+- `lib/mcp/`: authenticated MCP bridge and collaboration-backed edits

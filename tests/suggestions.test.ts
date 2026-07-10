@@ -70,7 +70,7 @@ test("typing in suggesting mode marks only the inserted text as suggestedInserti
 });
 
 test("appendTransaction does not loop / re-mark its own rewrite", () => {
-  let state = enable(stateWith("abc"));
+  const state = enable(stateWith("abc"));
   const { state: next, transactions } = state.applyTransaction(state.tr.insertText("X", 4));
   // One user transaction + at most one appended marking transaction.
   assert.ok(transactions.length <= 2, `expected <=2 transactions, got ${transactions.length}`);

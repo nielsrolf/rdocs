@@ -253,7 +253,7 @@ test("normalizeAgentImages builds repo-file URLs and filters invalid entries", (
   assert.equal(images[0].path, "assets/plot.png");
   assert.match(images[0].src, /\/api\/documents\/doc123\/repo-files\?/);
   assert.match(images[0].src, /path=assets%2Fplot\.png/);
-  assert.match(images[0].src, /share=share-tok/);
+  assert.doesNotMatch(images[0].src, /share=|share-tok/);
   assert.match(images[0].src, /run=run-xyz/);
   assert.equal(images[0].alt, "A plot");
   assert.equal(images[1].alt, "assets/two.svg"); // alt defaults to path

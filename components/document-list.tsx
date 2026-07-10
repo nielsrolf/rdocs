@@ -28,11 +28,9 @@ const SORT_OPTIONS: Array<{ value: SortKey; label: string }> = [
 ];
 
 export function DocumentList({
-  documents,
-  currentUserId
+  documents
 }: {
   documents: DashboardDoc[];
-  currentUserId: string;
 }) {
   const router = useRouter();
   const [query, setQuery] = useState("");

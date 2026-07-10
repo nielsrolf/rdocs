@@ -95,7 +95,7 @@ export default async function DashboardPage() {
         </div>
       </section>
 
-      <DocumentList documents={documents} currentUserId={user.id} />
+      <DocumentList documents={documents} />
       <OnboardingTour surface="list" autoOffer={documents.length === 0} />
     </main>
   );

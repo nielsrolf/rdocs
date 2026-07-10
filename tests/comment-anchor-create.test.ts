@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { AllSelection, EditorState, NodeSelection, TextSelection } from "@tiptap/pm/state";
+import { AllSelection, EditorState, NodeSelection } from "@tiptap/pm/state";
 
 import {
   buildCommentAnchorTransaction,

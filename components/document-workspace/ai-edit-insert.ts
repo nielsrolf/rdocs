@@ -3,19 +3,20 @@ import type { JSONContent } from "@tiptap/react";
 import { buildAiEditHtml } from "./markdown";
 import type { AiEditImage, AiEditWidget } from "./types";
 import { escapeHtml, getImagePathFromSource, isImageSource } from "./utils";
+import { withShareToken } from "./share-url";
 
 function toRepoImageNode(image: AiEditImage) {
-  return `<figure data-repo-image src="${escapeHtml(image.src)}" alt="${escapeHtml(image.alt)}" caption="${escapeHtml(
+  return `<figure data-repo-image src="${escapeHtml(withShareToken(image.src, null))}" alt="${escapeHtml(image.alt)}" caption="${escapeHtml(
     image.caption ?? ""
   )}" path="${escapeHtml(image.path ?? image.src)}"></figure>`;
 }
 
-function toWidgetNode(widget: AiEditWidget, documentId: string, shareToken: string | null) {
+function toWidgetNode(widget: AiEditWidget, documentId: string) {
   return `<div data-embedded-widget widgetId="${escapeHtml(widget.id)}" documentId="${escapeHtml(
     documentId
-  )}" shareToken="${escapeHtml(shareToken ?? "")}" label="${escapeHtml(widget.label)}" buildCmd="${escapeHtml(
+  )}" label="${escapeHtml(widget.label)}" buildCmd="${escapeHtml(
     widget.buildCmd
-  )}" embedSource="${escapeHtml(widget.embedSource)}" src="${escapeHtml(widget.src)}" collapsed="true"></div>`;
+  )}" embedSource="${escapeHtml(widget.embedSource)}" src="${escapeHtml(withShareToken(widget.src, null))}" collapsed="true"></div>`;
 }
 
 // An embeddedWidget already present in the current document, keyed for resolving
@@ -73,9 +74,7 @@ function resolveMarkdownImage(input: {
   const isRemoteOrAppSource = /^(https?:|data:|blob:|\/api\/)/i.test(input.src.trim());
   const src = isRemoteOrAppSource
     ? input.src.trim()
-    : `/api/documents/${input.documentId}/repo-files?path=${encodeURIComponent(path)}${
-        input.shareToken ? `&share=${encodeURIComponent(input.shareToken)}` : ""
-      }`;
+    : `/api/documents/${input.documentId}/repo-files?path=${encodeURIComponent(path)}`;
 
   return {
     path,
@@ -121,8 +120,7 @@ export function buildAiEditInsertContent(input: {
   const existingWidgetNode = (widget: ExistingWidget) =>
     toWidgetNode(
       { id: widget.widgetId, label: widget.label, buildCmd: widget.buildCmd, embedSource: widget.embedSource, src: widget.src },
-      input.documentId,
-      input.shareToken
+      input.documentId
     );
 
   // Pick an unconsumed freshly-submitted widget: prefer a label match, else the
@@ -135,7 +133,7 @@ export function buildAiEditInsertContent(input: {
     const widget = byLabel ?? submittedWidgets.find((w) => !consumedWidgetIds.has(w.id));
     if (!widget) return null;
     consumedWidgetIds.add(widget.id);
-    return toWidgetNode(widget, input.documentId, input.shareToken);
+    return toWidgetNode(widget, input.documentId);
   }
 
   // Resolve a widget://<ref> placeholder. "new"/"new/<label>" -> a submitted
@@ -160,7 +158,7 @@ export function buildAiEditInsertContent(input: {
     const submitted = submittedWidgets.find((widget) => widget.id === trimmedRef && !consumedWidgetIds.has(widget.id));
     if (submitted) {
       consumedWidgetIds.add(submitted.id);
-      return toWidgetNode(submitted, input.documentId, input.shareToken);
+      return toWidgetNode(submitted, input.documentId);
     }
     return null;
   }
@@ -173,7 +171,7 @@ export function buildAiEditInsertContent(input: {
     const submitted = submittedWidgets.find((widget) => widget.label.trim() === wanted && !consumedWidgetIds.has(widget.id));
     if (submitted) {
       consumedWidgetIds.add(submitted.id);
-      return toWidgetNode(submitted, input.documentId, input.shareToken);
+      return toWidgetNode(submitted, input.documentId);
     }
     const existing = (input.existingWidgets ?? []).find((widget) => widget.label.trim() === wanted);
     if (existing) return existingWidgetNode(existing);
@@ -229,7 +227,7 @@ export function buildAiEditInsertContent(input: {
       alt,
       imagesByPath,
       documentId: input.documentId,
-      shareToken: input.shareToken
+      shareToken: null
     });
     if (!image) {
       continue;
@@ -260,7 +258,7 @@ export function buildAiEditInsertContent(input: {
   submittedWidgets
     .filter((widget) => !consumedWidgetIds.has(widget.id))
     .forEach((widget) => {
-      content.push(toWidgetNode(widget, input.documentId, input.shareToken));
+      content.push(toWidgetNode(widget, input.documentId));
     });
 
   return content.length > 0 ? content.join("\n") : "<p></p>";

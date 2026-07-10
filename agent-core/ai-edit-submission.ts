@@ -10,13 +10,10 @@ import path from "node:path";
 export function buildRepoFileUrl(
   documentId: string,
   filePath: string,
-  shareToken: string | null,
+  _shareToken: string | null,
   aiRunId: string | null
 ) {
   const params = new URLSearchParams({ path: filePath });
-  if (shareToken) {
-    params.set("share", shareToken);
-  }
   if (aiRunId) {
     params.set("run", aiRunId);
   }

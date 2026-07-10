@@ -23,8 +23,52 @@ export const defaultDocumentContent: DocumentContent = {
   ]
 };
 
+function stripShareFromAppUrl(value: unknown): unknown {
+  if (typeof value !== "string" || !value.startsWith("/api/")) return value;
+  const [pathname, query = ""] = value.split("?");
+  if (!query) return value;
+  const params = new URLSearchParams(query);
+  if (!params.has("share")) return value;
+  params.delete("share");
+  const nextQuery = params.toString();
+  return nextQuery ? `${pathname}?${nextQuery}` : pathname;
+}
+
+/**
+ * Remove bearer capabilities accidentally persisted by legacy clients. This is
+ * applied both when reading and writing so old snapshots are safe to display and
+ * every subsequent save gradually scrubs the stored document as well.
+ */
+export function stripPersistedDocumentCapabilities(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(stripPersistedDocumentCapabilities);
+  }
+  if (!value || typeof value !== "object") return value;
+
+  const result: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "shareToken") continue;
+    if (key === "src" || key === "href") {
+      result[key] = stripShareFromAppUrl(child);
+      continue;
+    }
+    result[key] = stripPersistedDocumentCapabilities(child);
+  }
+  return result;
+}
+
+export function scrubSerializedDocumentCapabilities(raw: string): string {
+  try {
+    return JSON.stringify(stripPersistedDocumentCapabilities(JSON.parse(raw)));
+  } catch {
+    // Preserve malformed content for recovery instead of replacing it during a
+    // security migration. Normal reads still fall back safely.
+    return raw;
+  }
+}
+
 export function serializeDocumentContent(content: unknown) {
-  return JSON.stringify(content);
+  return JSON.stringify(stripPersistedDocumentCapabilities(content));
 }
 
 // Walks a doc-content JSON tree looking for any commentAnchor mark on a text
@@ -63,7 +107,7 @@ export function documentHasAnchorForThread(content: unknown, threadId: string): 
 
 export function parseDocumentContent(raw: string): DocumentContent {
   try {
-    return JSON.parse(raw) as DocumentContent;
+    return JSON.parse(scrubSerializedDocumentCapabilities(raw)) as DocumentContent;
   } catch (error) {
     console.error("parseDocumentContent: failed to parse stored document JSON", {
       error: error instanceof Error ? error.message : error,

@@ -19,8 +19,9 @@ import {
   parseDocumentContent
 } from "@/lib/content";
 import { db } from "@/lib/db";
-import { loadAgentEnvWithFreeFallback } from "@/lib/user-credentials";
-import { canComment, resolveDocumentAccess } from "@/lib/permissions";
+import { loadAgentEnvWithFreeFallback, restrictAgentEnvForReadOnly } from "@/lib/user-credentials";
+import { agentAccessModeForDocumentAccess, canComment, resolveDocumentAccess } from "@/lib/permissions";
+import type { AgentAccessMode } from "@/agent-core";
 import { normalizeAgentImages } from "@/lib/ai-edit-submission";
 import { createAgentCommentThreads } from "@/lib/agent-comments";
 import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
@@ -65,8 +66,13 @@ type ThreadForReply = {
 // 202 immediately; the client tracks completion via AiRun polling and receives
 // the posted comment over the SSE `comment-created` broadcast. This avoids the
 // Cloudflare ~100s origin timeout (524) that killed long synchronous replies.
-async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForReply; createdById: string | null }) {
-  const { aiRunId, thread, createdById } = input;
+async function runAskAiInBackground(input: {
+  aiRunId: string;
+  thread: ThreadForReply;
+  createdById: string | null;
+  agentAccessMode: AgentAccessMode;
+}) {
+  const { aiRunId, thread, createdById, agentAccessMode } = input;
   let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
   const stopHeartbeat = startAiRunHeartbeat(aiRunId);
   const abort = registerRunAbortController(aiRunId);
@@ -138,9 +144,17 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
         message: `No AI credential connected — running on the free local model (${effectiveAgentConfig.model}). It is much slower than Claude (first output can take a few minutes). Connect a credential under AI credentials in the topbar to use Claude.`
       });
     }
+    if (agentAccessMode === "read_only") {
+      await recordAiRunEvent({
+        aiRunId,
+        role: "system",
+        message: "Share-link agent is read-only: repository writes, commands, document secrets, commits, and pushes are disabled."
+      });
+    }
 
     const aiReply = await getAgentRunner().run({
       mode: "comment_reply",
+      accessMode: agentAccessMode,
       documentTitle: thread.document.title,
       documentText,
       documentBlocks,
@@ -164,7 +178,7 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
       }))
     }, {
       agentConfig: effectiveAgentConfig,
-      agentEnv,
+      agentEnv: agentAccessMode === "read_only" ? restrictAgentEnvForReadOnly(agentEnv) : agentEnv,
       signal: abort.signal,
       containerName: `gdocs-run-${aiRunId}`,
       validation: { kind: "comment_reply", documentText: suggestionAnchorText },
@@ -182,7 +196,7 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
         ]).catch(() => null);
       }
     });
-    const commit = linkedRepo
+    const commit = linkedRepo && agentAccessMode === "workspace"
       ? await commitWorkspaceChanges({
           workspace: linkedRepo.workspace,
           baseWorkspace: linkedRepo.baseWorkspace,
@@ -276,7 +290,7 @@ async function runAskAiInBackground(input: { aiRunId: string; thread: ThreadForR
       comment: serialized
     });
   } catch (error) {
-    if (linkedRepo) {
+    if (linkedRepo && agentAccessMode === "workspace") {
       await commitWorkspaceChanges({
         workspace: linkedRepo.workspace,
         baseWorkspace: linkedRepo.baseWorkspace,
@@ -419,7 +433,12 @@ export async function POST(request: Request, { params }: RouteContext) {
 
   // Kick the agent off in the background and return immediately. The client
   // tracks the run via polling and gets the posted comment over SSE.
-  void runAskAiInBackground({ aiRunId: aiRun.id, thread, createdById: user?.id ?? null }).catch((error) => {
+  void runAskAiInBackground({
+    aiRunId: aiRun.id,
+    thread,
+    createdById: user?.id ?? null,
+    agentAccessMode: agentAccessModeForDocumentAccess(access)
+  }).catch((error) => {
     console.error("[ask-ai] background run threw", {
       threadId: thread.id,
       aiRunId: aiRun.id,

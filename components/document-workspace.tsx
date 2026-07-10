@@ -80,7 +80,6 @@ import {
   createMentionDecorationExtension,
   Mention
 } from "./document-workspace/mention";
-import { MentionTextarea } from "./document-workspace/mention-textarea";
 import {
   filterMentionCandidates,
   findActiveMentionQuery,
@@ -426,6 +425,7 @@ export function DocumentWorkspace({
   // server resolves their access from the token, like collab pushes and AI edits.
   const canWriteComments = (isAuthenticated || Boolean(shareToken)) && initialPermission !== "VIEW";
   const canWriteDocument = initialPermission === "EDIT";
+  const canManageAutomation = canWriteDocument && isAuthenticated && !viaShareLink;
   // Comment-access users (can comment but not edit) are locked into suggesting
   // mode: the editor is interactive for them, but every change is forced into a
   // tracked-change suggestion. Editors default to direct editing and can toggle.
@@ -535,7 +535,6 @@ export function DocumentWorkspace({
     const timer = window.setTimeout(() => setFlashCommentIds(new Set()), 6000);
     return () => window.clearTimeout(timer);
     // Mount-only: the notification context is fixed for this page load.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -1879,7 +1878,7 @@ export function DocumentWorkspace({
   }
 
   async function handleInsertWidget() {
-    if (!editor || !canWriteDocument) {
+    if (!editor || !canManageAutomation) {
       return;
     }
 
@@ -1888,7 +1887,7 @@ export function DocumentWorkspace({
   }
 
   async function handleCreateWidget() {
-    if (!editor || !canWriteDocument || widgetBusy) {
+    if (!editor || !canManageAutomation || widgetBusy) {
       return;
     }
 
@@ -1931,9 +1930,7 @@ export function DocumentWorkspace({
       return;
     }
 
-    const src = `/api/documents/${documentId}/widgets/${data.widget.id}/source${
-      shareToken ? `?share=${encodeURIComponent(shareToken)}` : ""
-    }`;
+    const src = `/api/documents/${documentId}/widgets/${data.widget.id}/source`;
     editor
       .chain()
       .focus()
@@ -1942,7 +1939,6 @@ export function DocumentWorkspace({
         attrs: {
           widgetId: data.widget.id,
           documentId,
-          shareToken,
           label,
           buildCmd,
           embedSource,
@@ -2010,7 +2006,6 @@ export function DocumentWorkspace({
         attrs: {
           attachmentId: attachment.id,
           documentId,
-          shareToken,
           fileName: attachment.fileName,
           mimeType: attachment.mimeType,
           size: attachment.size,
@@ -4165,7 +4160,7 @@ export function DocumentWorkspace({
                   onClick={() => editor?.chain().focus().toggleBlockquote().run()}
                 />
                 <ToolbarButton
-                  disabled={!canWriteDocument || !editor}
+                  disabled={!canManageAutomation || !editor}
                   label="Widget"
                   onClick={handleInsertWidget}
                 />
@@ -4314,7 +4309,7 @@ export function DocumentWorkspace({
             </div>
           </details>
 
-          {canWriteDocument ? (
+          {canManageAutomation ? (
             <EnvironmentMenu
               documentId={documentId}
               shareToken={shareToken}
@@ -4325,11 +4320,29 @@ export function DocumentWorkspace({
             />
           ) : null}
 
-          {canWriteDocument ? <SkillsMenu documentId={documentId} shareToken={shareToken} /> : null}
+          {canManageAutomation ? <SkillsMenu documentId={documentId} shareToken={shareToken} /> : null}
           </div>
 
           <div className="document-topbar-actions">
             {remoteNotice ? <span className="subtle-pill">{remoteNotice}</span> : null}
+            {viaShareLink ? (
+              <span
+                className="subtle-pill"
+                title={
+                  initialPermission === "EDIT"
+                    ? "This edit link can run workspace agents, including commands and repository changes."
+                    : initialPermission === "COMMENT"
+                      ? "Agents can research and suggest, but cannot run commands, change repository files, access document secrets, commit, or push."
+                      : "This view link cannot start agents."
+                }
+              >
+                {initialPermission === "EDIT"
+                  ? "Shared edit access · AI workspace"
+                  : initialPermission === "COMMENT"
+                    ? "Shared comment access · AI read-only"
+                    : "Shared view access · AI unavailable"}
+              </span>
+            ) : null}
             {remotePresence.length > 0 ? (
               <div className="collaboration-presence-list" aria-label="Active collaborators">
                 {remotePresence.slice(0, 4).map((presence) => (

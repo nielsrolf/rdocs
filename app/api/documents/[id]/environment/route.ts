@@ -8,7 +8,7 @@ import {
   listDocumentEnvMasked,
   upsertDocumentEnv
 } from "@/lib/document-env";
-import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import { canManageDocumentAutomation, resolveDocumentAccess } from "@/lib/permissions";
 
 export const runtime = "nodejs";
 
@@ -36,8 +36,8 @@ async function requireEditAccess(id: string, shareToken: string | null) {
   if (!access) {
     return { error: NextResponse.json({ error: "Document not found." }, { status: 404 }) };
   }
-  if (!canEdit(access.permission)) {
-    return { error: NextResponse.json({ error: "You do not have edit access." }, { status: 403 }) };
+  if (!canManageDocumentAutomation(access, user?.id)) {
+    return { error: NextResponse.json({ error: "Sign in with collaborator edit access to manage secrets." }, { status: 403 }) };
   }
   return { access };
 }

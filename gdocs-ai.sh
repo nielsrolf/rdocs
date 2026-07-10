@@ -58,6 +58,7 @@ fi
 npm ci
 npx prisma generate
 npx prisma db push --skip-generate
+npm run db:migrate-security
 npm run build
 
 exec npm run start

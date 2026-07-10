@@ -1,5 +1,3 @@
-import crypto from "node:crypto";
-
 import { agentModelProvider } from "@/agent-core";
 import { maskSecret, type DocumentEnv } from "@/lib/agent-env";
 import {
@@ -11,6 +9,9 @@ import {
 import { hasAnthropicCredential } from "@/lib/agent-runner/agent-credential";
 import { db } from "@/lib/db";
 import { loadDocumentEnv } from "@/lib/document-env";
+import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
+
+export { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
 
 // Per-user AI credential store, at most one credential per provider. For
 // "anthropic" a user connects EITHER an Anthropic API key OR a
@@ -121,68 +122,6 @@ export function normalizeCredentialInput(input: {
     );
   }
   return { provider, kind: detected, value };
-}
-
-// --- Encryption at rest (AES-256-GCM) -------------------------------------
-
-const ALGORITHM = "aes-256-gcm";
-const IV_BYTES = 12;
-
-// Parse the 32-byte encryption key from CREDENTIAL_ENCRYPTION_KEY (base64 or
-// hex). Fails loudly with an actionable message when missing/malformed so we
-// never silently store or read a credential without encryption.
-function getEncryptionKey(): Buffer {
-  const raw = process.env.CREDENTIAL_ENCRYPTION_KEY;
-  if (!raw || !raw.trim()) {
-    throw new Error(
-      "CREDENTIAL_ENCRYPTION_KEY is not set. Generate one with `openssl rand -base64 32` and add it to .env."
-    );
-  }
-  const trimmed = raw.trim();
-  let key: Buffer | null = null;
-  if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
-    key = Buffer.from(trimmed, "hex");
-  } else {
-    try {
-      const decoded = Buffer.from(trimmed, "base64");
-      if (decoded.length === 32) key = decoded;
-    } catch {
-      key = null;
-    }
-  }
-  if (!key || key.length !== 32) {
-    throw new Error(
-      "CREDENTIAL_ENCRYPTION_KEY must decode to 32 bytes (base64 e.g. `openssl rand -base64 32`, or 64 hex chars)."
-    );
-  }
-  return key;
-}
-
-/** Encrypt a secret to a self-describing `iv:tag:ciphertext` base64 string. */
-export function encryptSecret(plaintext: string): string {
-  const key = getEncryptionKey();
-  const iv = crypto.randomBytes(IV_BYTES);
-  const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
-  const enc = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return `${iv.toString("base64")}:${tag.toString("base64")}:${enc.toString("base64")}`;
-}
-
-/** Reverse encryptSecret. Throws if the key is missing or the payload is corrupt. */
-export function decryptSecret(stored: string): string {
-  const key = getEncryptionKey();
-  const parts = stored.split(":");
-  if (parts.length !== 3) {
-    throw new Error("Stored credential is malformed (expected iv:tag:ciphertext).");
-  }
-  const [ivB64, tagB64, dataB64] = parts;
-  const decipher = crypto.createDecipheriv(ALGORITHM, key, Buffer.from(ivB64, "base64"));
-  decipher.setAuthTag(Buffer.from(tagB64, "base64"));
-  const dec = Buffer.concat([
-    decipher.update(Buffer.from(dataB64, "base64")),
-    decipher.final()
-  ]);
-  return dec.toString("utf8");
 }
 
 // --- DB access ------------------------------------------------------------
@@ -534,6 +473,28 @@ export type AgentRunEnvResolution = {
   agentConfig: { model: string | null; effort: string | null };
   usedFreeFallback: boolean;
 };
+
+// A share-link commenter's agent may use the selected model, but it must not
+// inherit document-defined secrets or repository credentials. Keep only the
+// variables needed to reach the configured model provider; the SDK adds normal
+// host toolchain variables separately through buildAgentEnv.
+const READ_ONLY_AGENT_ENV_KEYS = new Set([
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "OPENROUTER_API_KEY",
+  "LITELLM_API_KEY",
+  "LITELLM_BASE_URL",
+  "LOCAL_MODEL_BASE_URL",
+  "LOCAL_MODEL_NAME"
+]);
+
+export function restrictAgentEnvForReadOnly(agentEnv: DocumentEnv): DocumentEnv {
+  return Object.fromEntries(
+    Object.entries(agentEnv).filter(([key]) => READ_ONLY_AGENT_ENV_KEYS.has(key))
+  );
+}
 
 /**
  * loadAgentEnvForDocument, but an Anthropic-model run with NO credential

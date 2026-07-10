@@ -129,7 +129,9 @@ const STEPS: TourStep[] = [
         Open <strong>AI credentials</strong> in the topbar and paste an Anthropic API key or a{" "}
         <code>claude setup-token</code> subscription token — one field, the type is detected
         automatically. Or skip this step: AI runs fall back to the free local qwen model, which
-        works but is <em>very</em> slow (minutes, not seconds).
+        works but is <em>very</em> slow (minutes, not seconds). Your key is encrypted at rest, and
+        agents started through comment links run read-only without document or repository secrets.
+        Edit links grant full workspace agent access.
       </>
     ),
     advanceOn: "credential-connected",
@@ -195,8 +197,10 @@ const STEPS: TourStep[] = [
     body: (
       <>
         The agent commits its work to the linked repo as it goes — watch progress in the Agents
-        panel. Explore the rest at your own pace: share links, suggestion mode, exports, and the
-        MCP bridge under AI credentials.
+        panel. Comment links get a read-only agent that can research and suggest without changing
+        the repo; edit links also allow workspace commands and repository changes. Explore the rest
+        at your own pace: share links, suggestion mode, exports, and the MCP bridge under AI
+        credentials.
       </>
     )
   }
@@ -270,7 +274,6 @@ export function OnboardingTour({
     if (surface === "doc" && state.active && state.step === 0) {
       update({ ...state, step: 1 });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [surface, state.active, state.step]);
 
   const step = state.active ? STEPS[state.step] : undefined;
@@ -362,7 +365,7 @@ export function OnboardingTour({
       return (
         <div className="tour-tooltip tour-offer" role="dialog" aria-label="Take the tour">
           <strong>New here?</strong>
-          <p>Take a two-minute tour: build a &quot;How to use r-docs&quot; document with AI edits, comments and an agent run.</p>
+          <p>Take a guided tour: build a &quot;How to use r-docs&quot; document with AI edits, comments and an agent run.</p>
           <div className="tour-actions">
             <button className="ghost-button" onClick={dismiss} type="button">
               No thanks

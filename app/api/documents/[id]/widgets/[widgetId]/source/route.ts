@@ -4,7 +4,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { resolveDocumentAccess } from "@/lib/permissions";
 import { ensureLinkedRepository } from "@/lib/research-workspace";
-import { readEmbedSourceFromCandidates } from "@/lib/widget-source";
+import { addWidgetIsolationBridge, readEmbedSourceFromCandidates } from "@/lib/widget-source";
 
 export const runtime = "nodejs";
 
@@ -48,7 +48,7 @@ export async function GET(request: Request, { params }: RouteContext) {
     widget.embedSource
   );
   if (html !== null) {
-    return new NextResponse(html, {
+    return new NextResponse(addWidgetIsolationBridge(html), {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Content-Security-Policy": [
@@ -57,8 +57,11 @@ export async function GET(request: Request, { params }: RouteContext) {
           "script-src 'self' 'unsafe-inline' https://cdn.plot.ly https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://d3js.org",
           "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://fonts.googleapis.com",
           "font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com",
-          "connect-src 'self' https://cdn.plot.ly https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com"
-        ].join("; ")
+          "connect-src https://cdn.plot.ly https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com",
+          "frame-ancestors 'self'"
+        ].join("; "),
+        "Cross-Origin-Resource-Policy": "same-origin",
+        "X-Content-Type-Options": "nosniff"
       }
     });
   }
@@ -84,7 +87,9 @@ export async function GET(request: Request, { params }: RouteContext) {
   return new NextResponse(errorHtml, {
     status: 404,
     headers: {
-      "Content-Type": "text/html; charset=utf-8"
+      "Content-Type": "text/html; charset=utf-8",
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'",
+      "X-Content-Type-Options": "nosniff"
     }
   });
 }

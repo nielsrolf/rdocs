@@ -9,7 +9,7 @@ import { listDocumentThreads, maybeCreateVersionSnapshot } from "@/lib/document-
 import { hasDocumentEnvKey } from "@/lib/document-env";
 import { parseDocumentContent, serializeDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
-import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import { canEdit, canManageDocumentAutomation, resolveDocumentAccess } from "@/lib/permissions";
 import { hasUserCredential } from "@/lib/user-credentials";
 import { normalizeSourceLinks } from "@/lib/sources";
 
@@ -63,6 +63,15 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       permission: access?.permission ?? null
     });
     return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+  }
+  if (
+    (parsed.data.agentModel !== undefined || parsed.data.agentEffort !== undefined) &&
+    !canManageDocumentAutomation(access, user?.id)
+  ) {
+    return NextResponse.json(
+      { error: "Sign in with collaborator edit access to change agent settings." },
+      { status: 403 }
+    );
   }
 
   const nextTitle = parsed.data.title.trim();

@@ -18,9 +18,10 @@ import { getAgentRunner } from "@/lib/agent-runner";
 import { getCurrentUser } from "@/lib/auth";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
-import { loadAgentEnvWithFreeFallback } from "@/lib/user-credentials";
-import { canComment, resolveDocumentAccess } from "@/lib/permissions";
-import { rateLimit } from "@/lib/rate-limit";
+import { loadAgentEnvWithFreeFallback, restrictAgentEnvForReadOnly } from "@/lib/user-credentials";
+import { agentAccessModeForDocumentAccess, canComment, resolveDocumentAccess } from "@/lib/permissions";
+import type { AgentAccessMode } from "@/agent-core";
+import { getClientIp, rateLimit } from "@/lib/rate-limit";
 import { normalizeAgentImages } from "@/lib/ai-edit-submission";
 import { createAgentCommentThreads } from "@/lib/agent-comments";
 import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
@@ -56,11 +57,21 @@ async function runAgentConversationInBackground(input: {
   previousRunId: string | null;
   documentTitle: string;
   documentContent: string;
-  createdById: string;
+  createdById: string | null;
   agentConfig: { model: string | null; effort: string | null };
+  agentAccessMode: AgentAccessMode;
 }) {
-  const { documentId, aiRunId, message, previousRunId, documentTitle, documentContent, createdById, agentConfig } =
-    input;
+  const {
+    documentId,
+    aiRunId,
+    message,
+    previousRunId,
+    documentTitle,
+    documentContent,
+    createdById,
+    agentConfig,
+    agentAccessMode
+  } = input;
   let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
   const stopHeartbeat = startAiRunHeartbeat(aiRunId);
   const abort = registerRunAbortController(aiRunId);
@@ -123,8 +134,16 @@ async function runAgentConversationInBackground(input: {
         message: `No AI credential connected — running on the free local model (${effectiveAgentConfig.model}). It is much slower than Claude (first output can take a few minutes). Connect a credential under AI credentials in the topbar to use Claude.`
       });
     }
+    if (agentAccessMode === "read_only") {
+      await recordAiRunEvent({
+        aiRunId,
+        role: "system",
+        message: "Share-link agent is read-only: repository writes, commands, document secrets, commits, and pushes are disabled."
+      });
+    }
     const result = await getAgentRunner().run({
       mode: "conversation",
+      accessMode: agentAccessMode,
       documentTitle,
       documentText,
       documentBlocks,
@@ -143,7 +162,7 @@ async function runAgentConversationInBackground(input: {
       conversationHistory
     }, {
       agentConfig: effectiveAgentConfig,
-      agentEnv,
+      agentEnv: agentAccessMode === "read_only" ? restrictAgentEnvForReadOnly(agentEnv) : agentEnv,
       signal: abort.signal,
       containerName: `gdocs-run-${aiRunId}`,
       validation: { kind: "conversation", documentText: suggestionAnchorText },
@@ -162,7 +181,7 @@ async function runAgentConversationInBackground(input: {
       }
     });
 
-    const commit = linkedRepo
+    const commit = linkedRepo && agentAccessMode === "workspace"
       ? await commitWorkspaceChanges({
           workspace: linkedRepo.workspace,
           baseWorkspace: linkedRepo.baseWorkspace,
@@ -204,7 +223,7 @@ async function runAgentConversationInBackground(input: {
       replacementImages: JSON.stringify(normalizeAgentImages(result.images, documentId, null, aiRunId))
     });
   } catch (error) {
-    if (linkedRepo) {
+    if (linkedRepo && agentAccessMode === "workspace") {
       await commitWorkspaceChanges({
         workspace: linkedRepo.workspace,
         baseWorkspace: linkedRepo.baseWorkspace,
@@ -246,9 +265,6 @@ async function runAgentConversationInBackground(input: {
 export async function POST(request: Request, { params }: RouteContext) {
   const { id } = await params;
   const user = await getCurrentUser();
-  if (!user) {
-    return NextResponse.json({ error: "You must be signed in to message an agent." }, { status: 401 });
-  }
 
   const body = await request.json().catch(() => null);
   const parsed = agentConversationSchema.safeParse(body);
@@ -256,13 +272,14 @@ export async function POST(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Invalid agent message payload." }, { status: 400 });
   }
 
-  const access = await resolveDocumentAccess(id, user.id, parsed.data.shareToken ?? null);
+  const access = await resolveDocumentAccess(id, user?.id, parsed.data.shareToken ?? null);
   if (!access || !canComment(access.permission)) {
     return NextResponse.json({ error: "You do not have agent access." }, { status: 403 });
   }
 
   // Agent runs are expensive; cap how many a single user can kick off per minute.
-  const runLimit = rateLimit(`ai-run:user:${user.id}`, 10, 60_000);
+  const runLimitKey = user ? `ai-run:user:${user.id}` : `ai-run:ip:${getClientIp(request)}`;
+  const runLimit = rateLimit(runLimitKey, 10, 60_000);
   if (!runLimit.allowed) {
     return NextResponse.json(
       { error: "You're messaging the agent too quickly. Try again shortly." },
@@ -296,8 +313,9 @@ export async function POST(request: Request, { params }: RouteContext) {
     previousRunId: parsed.data.previousRunId ?? null,
     documentTitle: access.document.title,
     documentContent: access.document.content,
-    createdById: user.id,
-    agentConfig: { model: access.document.agentModel, effort: access.document.agentEffort }
+    createdById: user?.id ?? null,
+    agentConfig: { model: access.document.agentModel, effort: access.document.agentEffort },
+    agentAccessMode: agentAccessModeForDocumentAccess(access)
   }).catch((error) => {
     console.error("[agents] background run threw", {
       documentId: id,

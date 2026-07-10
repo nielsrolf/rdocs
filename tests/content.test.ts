@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { aiEditMarkdown } from "../components/document-workspace/markdown";
-import { getDocumentAiBlocks, getDocumentMarkdown, getDocumentPlainText } from "../lib/content";
+import { getDocumentAiBlocks, getDocumentMarkdown, getDocumentPlainText, parseDocumentContent } from "../lib/content";
 import { buildAiEditInsertContent } from "../components/document-workspace/ai-edit-insert";
 
 const tableDoc = {
@@ -86,6 +86,25 @@ const richDoc = {
     }
   ]
 };
+
+test("parseDocumentContent strips legacy share capabilities from attrs and asset URLs", () => {
+  const parsed = parseDocumentContent(JSON.stringify({
+    type: "doc",
+    content: [
+      {
+        type: "embeddedWidget",
+        attrs: {
+          shareToken: "edit-capability",
+          src: "/api/documents/doc/widgets/w/source?share=edit-capability&t=1"
+        }
+      }
+    ]
+  })) as unknown as { content: Array<{ attrs: Record<string, unknown> }> };
+
+  assert.equal(parsed.content[0].attrs.shareToken, undefined);
+  assert.equal(parsed.content[0].attrs.src, "/api/documents/doc/widgets/w/source?t=1");
+  assert.doesNotMatch(JSON.stringify(parsed), /edit-capability/);
+});
 
 test("getDocumentMarkdown serializes headings, lists, marks, and links", () => {
   const md = getDocumentMarkdown(richDoc);

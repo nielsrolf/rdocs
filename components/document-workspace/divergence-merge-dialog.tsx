@@ -105,7 +105,6 @@ export function DivergenceMergeDialog({
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadAttempt]);
 
   const hunks: MergeHunk[] = useMemo(

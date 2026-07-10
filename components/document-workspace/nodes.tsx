@@ -39,18 +39,14 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
   const [frameHeight, setFrameHeight] = useState(120);
   const [error, setError] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
-  const lastSelfResizeAtRef = useRef(0);
-  const lastAppliedHeightRef = useRef(0);
   const widgetId = node.attrs.widgetId as string;
   const documentId = node.attrs.documentId as string;
   const label = (node.attrs.label as string) || "Interactive widget";
   const buildCmd = (node.attrs.buildCmd as string) || "";
   const embedSource = (node.attrs.embedSource as string) || "";
-  // Prefer the node's baked shareToken; fall back to the page's ?share param so a
-  // guest on a view/comment-only link can load a widget the owner created (whose
-  // baked token is empty). Parity with RepoImageView / AttachmentChipView.
+  // Capabilities come from the current page, never from persisted node attrs.
   const shareToken = resolveShareToken(
-    node.attrs.shareToken as string | null,
+    null,
     typeof window !== "undefined" ? window.location.search : ""
   );
   const src = withShareToken(
@@ -58,8 +54,20 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
     shareToken
   );
 
+  // The widget iframe intentionally has an opaque origin. A one-way bridge
+  // injected by the source route reports only its height; validate the source
+  // window and payload before applying it.
   useEffect(() => {
-    window.requestAnimationFrame(resizeFrame);
+    if (!showInlineFrame) return;
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== iframeRef.current?.contentWindow) return;
+      const data = event.data as { type?: unknown; height?: unknown } | null;
+      if (!data || data.type !== "gdocs-widget-size" || typeof data.height !== "number") return;
+      const nextHeight = Math.max(120, Math.min(8000, Math.round(data.height)));
+      setFrameHeight(nextHeight);
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
   }, [showInlineFrame, src]);
 
   // Lock body scroll and wire Escape to exit while full-screen.
@@ -76,40 +84,6 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [fullscreen]);
-
-  useEffect(() => {
-    if (!showInlineFrame) return;
-    const frame = iframeRef.current;
-    if (!frame) return;
-
-    let observer: ResizeObserver | null = null;
-    let mutationObserver: MutationObserver | null = null;
-
-    function attachObservers() {
-      const doc = frame?.contentDocument;
-      if (!doc?.body) return;
-      observer = new ResizeObserver(() => resizeFrame());
-      observer.observe(doc.body);
-      if (doc.documentElement) observer.observe(doc.documentElement);
-      mutationObserver = new MutationObserver(() => resizeFrame());
-      mutationObserver.observe(doc.body, { childList: true, subtree: true, attributes: true });
-    }
-
-    attachObservers();
-    const onLoad = () => {
-      observer?.disconnect();
-      mutationObserver?.disconnect();
-      attachObservers();
-      resizeFrame();
-    };
-    frame.addEventListener("load", onLoad);
-
-    return () => {
-      frame.removeEventListener("load", onLoad);
-      observer?.disconnect();
-      mutationObserver?.disconnect();
-    };
-  }, [showInlineFrame, src]);
 
   async function refreshWidget() {
     setRefreshing(true);
@@ -135,66 +109,6 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
     setRefreshing(false);
   }
 
-  function resizeFrame() {
-    if (!showInlineFrame) {
-      lastAppliedHeightRef.current = 0;
-      setFrameHeight(0);
-      return;
-    }
-
-    const frame = iframeRef.current;
-    const body = frame?.contentDocument?.body;
-    const documentElement = frame?.contentDocument?.documentElement;
-    if (!frame || !body) return;
-
-    // Suppress observer ticks that fire as a direct echo of our own resize.
-    // Plotly/D3/etc. with autosize redraw to fill the iframe, which causes
-    // scrollHeight to creep up by a few px on every tick — that feedback loop
-    // is what was making widgets grow unboundedly over hundreds of frames.
-    const sinceSelfResize = Date.now() - lastSelfResizeAtRef.current;
-
-    const contentHeight = Math.max(
-      body.scrollHeight,
-      body.offsetHeight,
-      documentElement?.scrollHeight ?? 0,
-      documentElement?.offsetHeight ?? 0
-    );
-    if (contentHeight <= 0) return;
-
-    const frameClient = frame.clientHeight;
-    const currentApplied = lastAppliedHeightRef.current;
-    // If the body is just filling the iframe (i.e. content uses height:100% /
-    // autosize), scrollHeight ~= clientHeight. Don't keep growing in that case.
-    const realOverflow = contentHeight - frameClient;
-
-    // Within ~400ms of our own resize, only accept changes that look like real
-    // new content (a meaningful delta), not small autosize echoes.
-    if (sinceSelfResize < 400 && Math.abs(contentHeight - currentApplied) < 32) {
-      return;
-    }
-
-    // Only grow when there is actual overflow beyond the current iframe size.
-    // Allow shrink only when content is clearly smaller than the iframe.
-    let nextHeight = currentApplied;
-    if (realOverflow > 4) {
-      nextHeight = contentHeight + 4;
-    } else if (contentHeight + 48 < currentApplied) {
-      nextHeight = contentHeight + 4;
-    } else if (currentApplied === 0) {
-      // First measurement after mount/expand.
-      nextHeight = contentHeight + 4;
-    } else {
-      return;
-    }
-
-    nextHeight = Math.max(0, Math.min(nextHeight, 8000));
-    if (nextHeight === currentApplied) return;
-
-    lastSelfResizeAtRef.current = Date.now();
-    lastAppliedHeightRef.current = nextHeight;
-    setFrameHeight(nextHeight);
-  }
-
   function setMode(next: "minimized" | "inline" | "fullscreen") {
     if (next === "fullscreen") {
       setFullscreen(true);
@@ -202,12 +116,9 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
     }
     setFullscreen(false);
     if ((next === "inline") === inlineExpanded) {
-      // Persisted state already matches — just make sure the frame is sized.
-      window.requestAnimationFrame(resizeFrame);
       return;
     }
     updateAttributes({ collapsed: next === "minimized" });
-    window.requestAnimationFrame(resizeFrame);
   }
 
   return (
@@ -247,7 +158,7 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
               Full screen
             </button>
           </div>
-          <button className="ghost-button" disabled={refreshing || !editor.isEditable} onClick={refreshWidget} type="button">
+          <button className="ghost-button" disabled={refreshing || !editor.isEditable || Boolean(shareToken)} onClick={refreshWidget} type="button">
             {refreshing ? "Refreshing..." : "Refresh"}
           </button>
           {editor.isEditable ? (
@@ -265,7 +176,7 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
               <div className="embedded-widget-actions">
                 <button
                   className="ghost-button"
-                  disabled={refreshing || !editor.isEditable}
+                  disabled={refreshing || !editor.isEditable || Boolean(shareToken)}
                   onClick={refreshWidget}
                   type="button"
                 >
@@ -279,9 +190,8 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
           ) : null}
           <iframe
             className="embedded-widget-frame"
-            onLoad={resizeFrame}
             ref={iframeRef}
-            sandbox="allow-scripts allow-same-origin"
+            sandbox="allow-scripts"
             src={src}
             scrolling={fullscreen ? "auto" : "no"}
             style={fullscreen ? undefined : { height: frameHeight }}
@@ -359,10 +269,9 @@ function AttachmentChipView({ deleteNode, editor, node, selected }: NodeViewProp
   const size = typeof node.attrs.size === "number" ? node.attrs.size : 0;
   const sizeLabel = formatAttachmentSize(size);
 
-  // Prefer the explicit shareToken attr; fall back to the page's ?share param so
-  // a guest viewing a shared link can still download (parity with RepoImageView).
+  // Capabilities come from the current page, never from persisted node attrs.
   const shareToken = resolveShareToken(
-    node.attrs.shareToken as string | null,
+    null,
     typeof window !== "undefined" ? window.location.search : ""
   );
 
