@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useRef, type ReactNode } from "react";
 
 import { cn, truncate } from "@/lib/utils";
 
@@ -123,51 +123,83 @@ export function formatToolResult(message: string): string {
   return trimmed;
 }
 
-function AgentToolBlock({ call, result }: { call: AiRunEventView; result: AiRunEventView | null }) {
-  const parsed = parseToolMessage(call.message);
-  const name = parsed?.name ?? "tool";
-  const summary = parsed ? renderToolSummary(parsed) : (
-    <code className="agent-tool-arg">{truncate(call.message, 120)}</code>
-  );
-  const resultText = result ? formatToolResult(result.message) : "";
-  const argsPretty = parsed?.args ? JSON.stringify(parsed.args, null, 2) : null;
-  const hasDetails = Boolean(argsPretty || resultText);
+function describeToolResult(resultText: string): string {
+  if (!resultText) {
+    return "done";
+  }
+  const lines = resultText.split("\n").length;
+  return lines === 1 ? truncate(resultText, 40) : `${lines} lines`;
+}
 
-  if (!hasDetails) {
+// One collapsed row per tool call, codex-style: the summary line carries the
+// tool name, its key argument and a size hint of the output; expanding reveals
+// the full input/output. Always a <details> element — a result arriving later
+// must not change the element type, or React remounts the block and throws
+// away its open state (and any text selection inside it). Memoized so poll
+// re-renders leave settled blocks' DOM completely untouched.
+const AgentToolBlock = memo(
+  function AgentToolBlock({
+    call,
+    result,
+    running
+  }: {
+    call: AiRunEventView;
+    result: AiRunEventView | null;
+    running: boolean;
+  }) {
+    const parsed = parseToolMessage(call.message);
+    const name = parsed?.name ?? "tool";
+    const summary = parsed ? renderToolSummary(parsed) : (
+      <code className="agent-tool-arg">{truncate(call.message, 120)}</code>
+    );
+    const resultText = result ? formatToolResult(result.message) : "";
+    const argsPretty = parsed?.args ? JSON.stringify(parsed.args, null, 2) : null;
+    const hasDetails = Boolean(argsPretty || resultText);
+    const meta = result ? describeToolResult(resultText) : running ? "running…" : null;
+
     return (
-      <div className="agent-tool">
-        <div className="agent-tool-header agent-tool-header-static">
+      <details className={cn("agent-tool", !hasDetails && "agent-tool-empty")}>
+        <summary
+          className="agent-tool-header"
+          onClick={(event) => {
+            if (!hasDetails) {
+              event.preventDefault();
+            }
+          }}
+        >
+          <span className="agent-tool-caret" aria-hidden />
           <span className="agent-tool-name">{name}</span>
           <span className="agent-tool-summary">{summary}</span>
-        </div>
-      </div>
+          {meta ? (
+            <span className={cn("agent-tool-meta", !result && "agent-tool-meta-running")}>{meta}</span>
+          ) : null}
+        </summary>
+        {hasDetails ? (
+          <div className="agent-tool-body">
+            {argsPretty ? (
+              <>
+                <div className="agent-tool-label">Input</div>
+                <pre className="agent-tool-pre">{argsPretty}</pre>
+              </>
+            ) : null}
+            {resultText ? (
+              <>
+                <div className="agent-tool-label">Output</div>
+                <pre className="agent-tool-pre">{resultText}</pre>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+      </details>
     );
-  }
-
-  return (
-    <details className="agent-tool">
-      <summary className="agent-tool-header">
-        <span className="agent-tool-name">{name}</span>
-        <span className="agent-tool-summary">{summary}</span>
-        <span className="agent-tool-toggle" aria-hidden />
-      </summary>
-      <div className="agent-tool-body">
-        {argsPretty ? (
-          <>
-            <div className="agent-tool-label">Input</div>
-            <pre className="agent-tool-pre">{argsPretty}</pre>
-          </>
-        ) : null}
-        {resultText ? (
-          <>
-            <div className="agent-tool-label">Output</div>
-            <pre className="agent-tool-pre">{resultText}</pre>
-          </>
-        ) : null}
-      </div>
-    </details>
-  );
-}
+  },
+  (prev, next) =>
+    prev.call.id === next.call.id &&
+    prev.call.message === next.call.message &&
+    (prev.result?.id ?? null) === (next.result?.id ?? null) &&
+    (prev.result?.message ?? null) === (next.result?.message ?? null) &&
+    prev.running === next.running
+);
 
 type GroupedAgentEvent =
   | { kind: "message"; role: "user" | "agent" | "system" | "error"; event: AiRunEventView; key: string }
@@ -214,11 +246,17 @@ function groupAgentEvents(events: AiRunEventView[]): GroupedAgentEvent[] {
 export function AgentTimeline({
   events,
   progress,
-  status
+  status,
+  intro,
+  outro
 }: {
   events: AiRunEventView[];
   progress: string | null;
   status: string;
+  /** Rendered inside the scroll area, above the events (trigger context card). */
+  intro?: ReactNode;
+  /** Rendered inside the scroll area, after the events (final-edit payload). */
+  outro?: ReactNode;
 }) {
   const grouped = useMemo(() => groupAgentEvents(events), [events]);
   const isRunning = status === "RUNNING";
@@ -240,15 +278,16 @@ export function AgentTimeline({
     el.scrollTop = el.scrollHeight;
   }, [grouped.length, isRunning, progress]);
 
-  if (grouped.length === 0 && !isRunning) {
+  if (grouped.length === 0 && !isRunning && !intro && !outro) {
     return <div className="agent-timeline-empty">No events yet.</div>;
   }
 
   return (
     <div className="agent-timeline" ref={scrollRef}>
+      {intro}
       {grouped.map((item, idx) => {
         if (item.kind === "tool") {
-          return <AgentToolBlock call={item.call} key={item.key} result={item.result} />;
+          return <AgentToolBlock call={item.call} key={item.key} result={item.result} running={isRunning} />;
         }
         const { event, role } = item;
         const prev = idx > 0 ? grouped[idx - 1] : null;
@@ -310,6 +349,7 @@ export function AgentTimeline({
           <span>{progress ?? "Working…"}</span>
         </div>
       ) : null}
+      {outro}
     </div>
   );
 }

@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { AGENT_EFFORTS, isStorableAgentModel } from "@/lib/agent-config";
 import { getCurrentUser } from "@/lib/auth";
-import { failAbandonedAiRuns, serializeAiRun } from "@/lib/ai-runs";
+import { failAbandonedAiRuns, fetchDocumentAiRuns, serializeAiRun } from "@/lib/ai-runs";
 import { getCollaborationVersion } from "@/lib/collaboration";
 import { listDocumentThreads, maybeCreateVersionSnapshot } from "@/lib/document-data";
 import { hasDocumentEnvKey } from "@/lib/document-env";
@@ -188,40 +188,7 @@ export async function GET(request: Request, { params }: RouteContext) {
 
   const [threads, aiRuns] = await Promise.all([
     listDocumentThreads(id, user?.id ?? null),
-    db.aiRun.findMany({
-      where: { documentId: id },
-      orderBy: { startedAt: "desc" },
-      take: 12,
-      select: {
-        id: true,
-        triggerType: true,
-        triggerId: true,
-        selectionId: true,
-        parentRunId: true,
-        instruction: true,
-        status: true,
-        progress: true,
-        model: true,
-        workspacePath: true,
-        branchName: true,
-        commitSha: true,
-        commitUrl: true,
-        error: true,
-        startedAt: true,
-        finishedAt: true,
-        appliedAt: true,
-        events: {
-          orderBy: { createdAt: "asc" },
-          take: 80,
-          select: {
-            id: true,
-            role: true,
-            message: true,
-            createdAt: true
-          }
-        }
-      }
-    })
+    fetchDocumentAiRuns(id)
   ]);
 
   const reaped = await failAbandonedAiRuns(aiRuns);

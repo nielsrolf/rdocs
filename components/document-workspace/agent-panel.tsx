@@ -19,13 +19,16 @@ import { cn, truncate } from "@/lib/utils";
 import { AgentTimeline } from "./agent-timeline";
 import type { AgentConversation } from "./conversations";
 import { MarkdownBody } from "./markdown";
-import type { ActiveAiRunView } from "./types";
+import type { ActiveAiRunView, ThreadView } from "./types";
 import { formatRelativeTime } from "./utils";
 
 // The final edit a SUCCEEDED selection-edit run produced. The polled run list
 // intentionally omits the (potentially large) replacement payload, so this
 // fetches the run detail once per run id and renders it with a copy affordance
 // — previously the session view never showed WHAT the agent actually wrote.
+// Rendered at the END of the timeline scroll, collapsed by default: the edit
+// is already applied to the document, so it should be reachable, not pinned
+// over the conversation.
 function RunResultBlock({
   documentId,
   run,
@@ -63,9 +66,11 @@ function RunResultBlock({
   }
 
   return (
-    <details className="agent-result" open>
+    <details className="agent-result">
       <summary className="agent-result-header">
+        <span className="agent-tool-caret" aria-hidden />
         <span className="agent-result-title">Final edit</span>
+        <span className="agent-result-hint">{`${replacementText.split("\n").length} lines`}</span>
         <button
           className="ghost-button agent-result-copy"
           onClick={(event) => {
@@ -86,6 +91,91 @@ function RunResultBlock({
   );
 }
 
+// Long text with a local "Show more" toggle. Poll re-renders preserve the
+// expansion because the state lives in the component, not the run payload.
+function ExpandableText({ text, limit, className }: { text: string; limit: number; className?: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const needsToggle = text.length > limit;
+  const shown = expanded || !needsToggle ? text : `${text.slice(0, limit).trimEnd()}…`;
+  return (
+    <div className={className}>
+      <span style={{ whiteSpace: "pre-wrap" }}>{shown}</span>
+      {needsToggle ? (
+        <button className="agent-context-toggle" onClick={() => setExpanded((v) => !v)} type="button">
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+// What kicked this conversation off. The sidebar and header only have room for
+// a truncated first line, and for selection edits / comment replies the
+// instruction alone doesn't tell you WHERE the run was aimed — this card shows
+// the full prompt, the selected text the edit targeted, or the comment thread
+// (with a jump back to it in the document).
+function ConversationContextCard({
+  conversation,
+  threads,
+  onOpenThread
+}: {
+  conversation: AgentConversation;
+  threads: ThreadView[];
+  onOpenThread?: (thread: ThreadView) => void;
+}) {
+  const root = conversation.runs[0];
+  if (!root) return null;
+
+  if (root.triggerType === "SELECTION_EDIT") {
+    return (
+      <div className="agent-context">
+        <div className="agent-context-kind">Edit request on a selection</div>
+        <ExpandableText className="agent-context-prompt" limit={420} text={conversation.rootInstruction} />
+        {root.selectedText ? (
+          <>
+            <div className="agent-context-label">Selected text</div>
+            <ExpandableText className="agent-context-quote" limit={360} text={root.selectedText} />
+          </>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (root.triggerType === "COMMENT_THREAD") {
+    const thread = root.triggerId ? threads.find((t) => t.id === root.triggerId) ?? null : null;
+    return (
+      <div className="agent-context">
+        <div className="agent-context-kind">
+          <span>Reply for a comment thread</span>
+          {thread && onOpenThread ? (
+            <button className="ghost-button agent-context-open" onClick={() => onOpenThread(thread)} type="button">
+              Open thread
+            </button>
+          ) : null}
+        </div>
+        {thread ? (
+          <>
+            <div className="agent-context-label">Anchored to</div>
+            <ExpandableText className="agent-context-quote" limit={360} text={thread.anchorText} />
+            <div className="agent-context-meta">
+              {thread.comments.length} {thread.comments.length === 1 ? "comment" : "comments"}
+              {thread.comments[0]
+                ? ` · ${thread.comments[0].author?.name ?? thread.comments[0].guestName ?? "Claude"}: ${thread.comments[0].body.slice(0, 120)}${thread.comments[0].body.length > 120 ? "…" : ""}`
+                : ""}
+            </div>
+          </>
+        ) : (
+          <div className="agent-context-meta">The comment thread no longer exists.</div>
+        )}
+      </div>
+    );
+  }
+
+  // Plain conversations open with the full first message as a user bubble
+  // right below — no card needed.
+  return null;
+}
+
 type ComposeMode = "selected" | "new";
 
 type AgentConversationOptions = {
@@ -99,6 +189,8 @@ export function AgentPanel({
   shareToken,
   activeAiRuns,
   conversations,
+  threads,
+  onOpenThread,
   selectedConversation,
   composeMode,
   agentMessage,
@@ -124,6 +216,10 @@ export function AgentPanel({
   shareToken?: string | null;
   activeAiRuns: ActiveAiRunView[];
   conversations: AgentConversation[];
+  /** Comment threads of the document — used to show what a COMMENT_THREAD run was triggered by. */
+  threads: ThreadView[];
+  /** Jump back to the triggering comment thread in the document. */
+  onOpenThread?: (thread: ThreadView) => void;
   selectedConversation: AgentConversation | null;
   composeMode: ComposeMode;
   agentMessage: string;
@@ -449,12 +545,22 @@ export function AgentPanel({
                 events={selectedConversation.events}
                 progress={selectedConversation.progress}
                 status={selectedConversation.status}
-              />
-
-              <RunResultBlock
-                documentId={documentId}
-                run={selectedConversation.latestRun}
-                shareToken={shareToken}
+                intro={
+                  <ConversationContextCard
+                    conversation={selectedConversation}
+                    key={`context-${selectedConversation.rootId}`}
+                    onOpenThread={onOpenThread}
+                    threads={threads}
+                  />
+                }
+                outro={
+                  <RunResultBlock
+                    documentId={documentId}
+                    key={`result-${selectedConversation.latestRun.id}`}
+                    run={selectedConversation.latestRun}
+                    shareToken={shareToken}
+                  />
+                }
               />
 
               {canWriteComments ? (

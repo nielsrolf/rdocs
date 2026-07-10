@@ -169,11 +169,61 @@ export async function recordAiRunEvent(input: {
   });
 }
 
+// How many run rows the document poll returns, and how many of each run's
+// events. The event window must show the LATEST activity — a run that outgrows
+// it should drop its oldest events, not freeze.
+export const AI_RUN_LIST_LIMIT = 12;
+export const AI_RUN_EVENT_WINDOW = 80;
+
+// The run list the document poll (and the agent view) is built from. Shared
+// with tests so the event-window behavior is pinned by a regression test.
+export async function fetchDocumentAiRuns(documentId: string) {
+  const runs = await db.aiRun.findMany({
+    where: { documentId },
+    orderBy: { startedAt: "desc" },
+    take: AI_RUN_LIST_LIMIT,
+    select: {
+      id: true,
+      triggerType: true,
+      triggerId: true,
+      selectionId: true,
+      selectedText: true,
+      parentRunId: true,
+      instruction: true,
+      status: true,
+      progress: true,
+      model: true,
+      workspacePath: true,
+      branchName: true,
+      commitSha: true,
+      commitUrl: true,
+      error: true,
+      startedAt: true,
+      finishedAt: true,
+      appliedAt: true,
+      events: {
+        // Newest N, then flipped back to chronological below — asc+take would
+        // pin the window to a long run's FIRST N events and freeze the timeline.
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: AI_RUN_EVENT_WINDOW,
+        select: {
+          id: true,
+          role: true,
+          message: true,
+          createdAt: true
+        }
+      }
+    }
+  });
+  return runs.map((run) => ({ ...run, events: [...run.events].reverse() }));
+}
+
 export function serializeAiRun(run: {
   id: string;
   triggerType: string;
   triggerId: string | null;
   selectionId?: string | null;
+  selectedText?: string | null;
   parentRunId?: string | null;
   instruction: string;
   status: string;
@@ -197,6 +247,7 @@ export function serializeAiRun(run: {
   return {
     ...run,
     selectionId: run.selectionId ?? null,
+    selectedText: run.selectedText ?? null,
     parentRunId: run.parentRunId ?? null,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt ?? null,

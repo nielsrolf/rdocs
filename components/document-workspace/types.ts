@@ -134,6 +134,8 @@ export type ActiveAiRunView = {
   triggerType: string;
   triggerId?: string | null;
   selectionId?: string | null;
+  /** Truncated copy of the text selected when a SELECTION_EDIT run started. */
+  selectedText?: string | null;
   parentRunId?: string | null;
   instruction: string;
   status: string;

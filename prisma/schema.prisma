@@ -313,6 +313,10 @@ model AiRun {
   // AiRunEvents) from "owning server died" for the stale-run reaper.
   heartbeatAt   DateTime?
   selectionId        String?
+  // The document text that was selected when a SELECTION_EDIT run started
+  // (truncated). The live marker can vanish long before anyone reads the run
+  // history, so the agent view needs its own copy to show what the run was on.
+  selectedText       String?
   replacementText    String?
   replacementImages  String?
   replacementWidgets String?

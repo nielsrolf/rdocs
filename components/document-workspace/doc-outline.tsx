@@ -1,7 +1,8 @@
 import type { Editor } from "@tiptap/react";
 import { useEffect, useRef, useState } from "react";
 
-import { type TabSummary } from "./tabs";
+import { createHeadingHashNav } from "./heading-hash-nav";
+import { getActiveTabId, type TabSummary } from "./tabs";
 
 type OutlineEntry = {
   // Absolute position of the heading in the doc.
@@ -239,35 +240,52 @@ export function DocOutline({
     }, 1500);
   }
 
+  const entriesRef = useRef<OutlineEntry[]>([]);
+  entriesRef.current = entries;
+  const attemptHashScrollRef = useRef<(entry: OutlineEntry) => boolean>(() => false);
+  attemptHashScrollRef.current = (entry: OutlineEntry) => {
+    if (!editor) return false;
+    if (entry.tabId && entry.tabId !== (getActiveTabId(editor) ?? activeTabId)) {
+      onSelectTab?.(entry.tabId);
+    }
+    const docSize = editor.state.doc.content.size;
+    if (entry.pos < 0 || entry.pos >= docSize) return false;
+    const inside = Math.min(entry.pos + 1, docSize);
+    try {
+      // Throws while the heading is display:none inside an inactive tab —
+      // the nav controller retries after the tab switch above lands.
+      const coords = editor.view.coordsAtPos(inside);
+      editor.commands.focus();
+      editor.commands.setTextSelection(inside);
+      window.scrollTo({ top: window.scrollY + coords.top - 96, behavior: "smooth" });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const hashNavRef = useRef<ReturnType<typeof createHeadingHashNav> | null>(null);
   useEffect(() => {
     if (!editor || typeof window === "undefined") return;
-    const hash = window.location.hash.replace(/^#/, "");
-    if (!hash) return;
-    if (entries.length === 0) return;
-    const match: OutlineEntry | undefined = entries.find((entry) => entry.slug === hash);
-    if (!match) return;
-    const target: OutlineEntry = match;
-    const dedupKey = `${window.location.pathname}#${hash}`;
-    const w = window as unknown as { __gdocsLastHashKey?: string };
-    if (w.__gdocsLastHashKey === dedupKey) return;
-    w.__gdocsLastHashKey = dedupKey;
-
-    // Layout settles after images/widgets load — re-scroll a few times so the
-    // user ends up on the right heading even if content above grows.
-    const delays = [0, 250, 800, 2000];
-    const timers: number[] = [];
-    for (const delay of delays) {
-      timers.push(window.setTimeout(() => scrollToHeading(target), delay));
-    }
-    function onWindowLoad() {
-      scrollToHeading(target);
-    }
-    window.addEventListener("load", onWindowLoad, { once: true });
+    const nav = createHeadingHashNav({
+      getHash: () => window.location.hash.replace(/^#/, ""),
+      getEntries: () => entriesRef.current,
+      attemptScroll: (entry) => attemptHashScrollRef.current(entry as OutlineEntry)
+    });
+    hashNavRef.current = nav;
+    const onHashChange = () => nav.onHashChange();
+    window.addEventListener("hashchange", onHashChange);
+    nav.onEntriesChanged();
     return () => {
-      for (const id of timers) window.clearTimeout(id);
-      window.removeEventListener("load", onWindowLoad);
+      window.removeEventListener("hashchange", onHashChange);
+      nav.stop();
+      hashNavRef.current = null;
     };
-  }, [editor, entries]);
+  }, [editor]);
+
+  useEffect(() => {
+    hashNavRef.current?.onEntriesChanged();
+  }, [entries]);
 
   if (collapsed) {
     return (

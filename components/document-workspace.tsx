@@ -101,7 +101,7 @@ import { useCollaborationStream } from "./document-workspace/use-collaboration-s
 import { usePresence } from "./document-workspace/use-presence";
 import { FindBar } from "./document-workspace/find-bar";
 import { SearchExtension } from "./document-workspace/search";
-import { aiRunsFingerprint, buildConversations } from "./document-workspace/conversations";
+import { aiRunsFingerprint, buildConversations, selectionBlocksRunSync } from "./document-workspace/conversations";
 import { createLatexRenderExtension } from "./document-workspace/latex";
 import { AttachmentChip, EmbeddedWidget, RepoImage, TabBreak } from "./document-workspace/nodes";
 import {
@@ -404,6 +404,10 @@ export function DocumentWorkspace({
   const activeThreadIdRef = useRef<string | null>(initialThreads[0]?.id ?? null);
   const previousAiRunsRef = useRef<Record<string, string>>({});
   const lastAiRunsFingerprintRef = useRef<string>("");
+  // Run payload withheld because the user is selecting text in the agent view;
+  // flushed by the selectionchange listener below (or superseded by the next poll).
+  const pendingAiRunsRef = useRef<ActiveAiRunView[] | null>(null);
+  const syncAiRunsRef = useRef<(runs: ActiveAiRunView[]) => void>(() => {});
   const remotePresenceRef = useRef<RemotePresenceView[]>([]);
   const receivedMappingsRef = useRef<ReceivedMappingEntry[]>([]);
   const currentUserIdRef = useRef<string | null>(currentUserId);
@@ -646,6 +650,16 @@ export function DocumentWorkspace({
     if (fingerprint === lastAiRunsFingerprintRef.current) {
       return;
     }
+    // A genuinely-changed payload still must not land while the user is
+    // selecting text in the agent view — re-rendering the timeline mutates the
+    // DOM under the selection and destroys it. Hold the payload; the
+    // selectionchange listener flushes it the moment the selection is done.
+    const agentScreen = document.querySelector(".agent-screen");
+    if (selectionBlocksRunSync(window.getSelection(), agentScreen)) {
+      pendingAiRunsRef.current = nextRuns;
+      return;
+    }
+    pendingAiRunsRef.current = null;
     lastAiRunsFingerprintRef.current = fingerprint;
 
     const previous = previousAiRunsRef.current;
@@ -663,6 +677,24 @@ export function DocumentWorkspace({
     setActiveAiRuns(nextRuns.filter((run) => run.status === "RUNNING"));
     setActiveAiRun(nextRuns.find((run) => run.status === "RUNNING") ?? null);
   }
+  syncAiRunsRef.current = syncAiRuns;
+
+  // Flushes a run payload held back by syncAiRuns as soon as the user's text
+  // selection in the agent view collapses or moves out of it. Without this the
+  // panel would stay stale until the next poll after the selection ends.
+  useEffect(() => {
+    function flushPendingAiRuns() {
+      const pending = pendingAiRunsRef.current;
+      if (!pending) return;
+      if (selectionBlocksRunSync(window.getSelection(), document.querySelector(".agent-screen"))) {
+        return;
+      }
+      pendingAiRunsRef.current = null;
+      syncAiRunsRef.current(pending);
+    }
+    document.addEventListener("selectionchange", flushPendingAiRuns);
+    return () => document.removeEventListener("selectionchange", flushPendingAiRuns);
+  }, []);
 
   function updateThreadOffsets() {
     if (!editor || !editorPageRef.current) {
@@ -4573,6 +4605,11 @@ export function DocumentWorkspace({
           shareToken={shareToken}
           activeAiRuns={activeAiRuns}
           conversations={conversations}
+          threads={threads}
+          onOpenThread={(thread) => {
+            setAgentPanelOpen(false);
+            focusThread(thread);
+          }}
           selectedConversation={selectedConversation}
           composeMode={composeMode}
           agentMessage={agentMessage}

@@ -816,18 +816,21 @@ body.public-view-shell .document-page-shell {
   letter-spacing: 0.05em;
 }
 
-/* --- Tool call chips --- */
+/* --- Tool call rows (codex-style: one quiet line each, expandable) --- */
 
 .agent-tool {
-  border: 1px solid rgba(117, 85, 204, 0.3);
-  border-left: 3px solid #7555cc;
-  border-radius: 8px;
-  background: rgba(247, 245, 255, 0.85);
-  font-size: 0.85rem;
+  border-radius: 6px;
+  font-size: 0.82rem;
+}
+
+/* Consecutive tool rows read as one work block. */
+.agent-timeline > .agent-tool + .agent-tool {
+  margin-top: -0.72rem;
 }
 
 details.agent-tool[open] {
   background: var(--surface-strong);
+  border: 1px solid rgba(117, 85, 204, 0.25);
   box-shadow: 0 1px 4px rgba(117, 85, 204, 0.08);
 }
 
@@ -836,16 +839,32 @@ details.agent-tool > summary {
   cursor: pointer;
 }
 
+details.agent-tool.agent-tool-empty > summary {
+  cursor: default;
+}
+
 details.agent-tool > summary::-webkit-details-marker {
   display: none;
 }
 
-details.agent-tool > summary .agent-tool-toggle::before {
-  content: "Details";
+.agent-tool-caret {
+  flex: 0 0 auto;
+  width: 0.85rem;
+  color: var(--muted);
+  font-size: 0.6rem;
+  transition: transform 0.12s ease;
 }
 
-details.agent-tool[open] > summary .agent-tool-toggle::before {
-  content: "Hide";
+.agent-tool-caret::before {
+  content: "▸";
+}
+
+details.agent-tool[open] > summary .agent-tool-caret {
+  transform: rotate(90deg);
+}
+
+details.agent-tool.agent-tool-empty .agent-tool-caret {
+  visibility: hidden;
 }
 
 .agent-tool-arg-muted {
@@ -853,50 +872,30 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   font-style: italic;
 }
 
-.agent-tool-header-static {
-  cursor: default;
-}
-
-.agent-tool-expanded {
-  background: var(--surface-strong);
-  box-shadow: 0 1px 4px rgba(117, 85, 204, 0.08);
-}
-
 .agent-tool-header {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: 0.5rem;
   width: 100%;
-  padding: 0.5rem 0.75rem;
+  padding: 0.28rem 0.5rem;
   border: 0;
   background: transparent;
   text-align: left;
   color: inherit;
   font: inherit;
+  border-radius: 6px;
 }
 
-.agent-tool-header:not(:disabled):hover {
-  background: rgba(117, 85, 204, 0.06);
-}
-
-.agent-tool-header:disabled {
-  cursor: default;
+details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
+  background: rgba(117, 85, 204, 0.07);
 }
 
 .agent-tool-name {
   flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  font-size: 0.72rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #fff;
-  background: #7555cc;
-  border-radius: 4px;
-  padding: 0.18rem 0.5rem;
-  min-width: 3rem;
-  justify-content: center;
+  color: #7555cc;
 }
 
 .agent-tool-summary {
@@ -905,28 +904,31 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text);
+  color: var(--muted);
 }
 
 .agent-tool-arg {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.82rem;
-  color: var(--text);
+  font-size: 0.78rem;
+  color: var(--muted);
   background: transparent;
   padding: 0;
 }
 
-.agent-tool-toggle {
+.agent-tool-meta {
   flex: 0 0 auto;
   font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: #7555cc;
-  text-transform: uppercase;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.agent-tool-header:not(:disabled):hover .agent-tool-toggle {
-  text-decoration: underline;
+.agent-tool-meta-running {
+  color: #7555cc;
+  font-style: italic;
 }
 
 .agent-tool-body {
@@ -994,25 +996,19 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
 
 /* --- Composer --- */
 
-/* Final-edit payload of a succeeded selection-edit run, shown under the
-   timeline so the session view exposes WHAT the agent wrote. */
+/* Final-edit payload of a succeeded selection-edit run. Lives at the END of
+   the timeline scroll, collapsed by default — the edit is already applied to
+   the document, so it must be reachable without covering the conversation. */
 .agent-result {
-  margin: 0 1rem 0.75rem;
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
   border-radius: 8px;
   background: var(--surface-strong);
-  flex-shrink: 0;
-  max-height: 40vh;
-  overflow-y: auto;
 }
 
 .agent-result > summary {
   list-style: none;
   cursor: pointer;
-  position: sticky;
-  top: 0;
-  background: inherit;
 }
 
 .agent-result > summary::-webkit-details-marker {
@@ -1022,7 +1018,6 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
 .agent-result-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 0.5rem;
   padding: 0.45rem 0.75rem;
 }
@@ -1035,6 +1030,13 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   color: var(--muted);
 }
 
+.agent-result-hint {
+  flex: 1 1 auto;
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 .agent-result-copy {
   font-size: 0.75rem;
   padding: 0.15rem 0.6rem;
@@ -1044,6 +1046,83 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   padding: 0 0.85rem 0.75rem;
   font-size: 0.88rem;
   user-select: text;
+  border-top: 1px solid var(--border);
+  padding-top: 0.6rem;
+}
+
+/* --- Conversation context card (what triggered the run) --- */
+
+.agent-context {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-strong);
+  padding: 0.7rem 0.9rem 0.8rem;
+  display: grid;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+}
+
+.agent-context-kind {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.agent-context-open {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.55rem;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
+}
+
+.agent-context-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: 0.2rem;
+}
+
+.agent-context-prompt {
+  color: var(--text);
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.agent-context-quote {
+  margin: 0;
+  border-left: 3px solid var(--border);
+  padding-left: 0.7rem;
+  color: var(--muted);
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.agent-context-meta {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.agent-context-toggle {
+  margin-left: 0.45rem;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--accent-strong);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.agent-context-toggle:hover {
+  text-decoration: underline;
 }
 
 .agent-stop-button {
@@ -3545,7 +3624,10 @@ details.agent-tool[open] > summary .agent-tool-toggle::before {
   color: var(--muted);
   cursor: pointer;
   box-shadow: 0 2px 6px rgba(15, 23, 42, 0.06);
-  z-index: 20;
+  /* Above document content only — must stay below the sticky chrome (12) and
+     in-page overlays like the selection bubble (10), or it paints over
+     expanded menus. */
+  z-index: 6;
   transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
 }
 

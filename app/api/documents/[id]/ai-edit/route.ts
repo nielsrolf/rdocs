@@ -472,6 +472,9 @@ export async function POST(request: Request, { params }: RouteContext) {
       triggerType: "SELECTION_EDIT",
       triggerId: parsed.data.selectionId ? `selection:${parsed.data.selectionId}` : null,
       selectionId: parsed.data.selectionId ?? null,
+      // Kept (truncated) so the agent view can show what the run was triggered
+      // on after the live selection marker is gone.
+      selectedText: parsed.data.selectedText.trim().slice(0, 1500) || null,
       parentRunId,
       instruction: parsed.data.instruction.trim(),
       progress: "Starting Claude research agent.",

@@ -9,6 +9,23 @@ export function aiRunsFingerprint(runs: ActiveAiRunView[]): string {
   return JSON.stringify(runs);
 }
 
+// True while the user has an actual (non-collapsed) text selection anchored
+// inside the agent view. Applying a changed run list at that moment re-renders
+// the timeline and mutates DOM under the selection (growing tool output,
+// progress line, relative timestamps), which destroys it — making streamed
+// output impossible to copy. Callers defer the update and flush it once the
+// selection collapses or leaves the panel. Structural types keep this testable
+// without a browser DOM.
+export function selectionBlocksRunSync(
+  selection: { isCollapsed: boolean; anchorNode: unknown } | null,
+  panelRoot: { contains(node: unknown): boolean } | null
+): boolean {
+  if (!selection || !panelRoot || selection.isCollapsed || !selection.anchorNode) {
+    return false;
+  }
+  return panelRoot.contains(selection.anchorNode);
+}
+
 export type AgentConversation = {
   rootId: string;
   runs: ActiveAiRunView[];
