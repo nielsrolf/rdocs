@@ -16,7 +16,15 @@ import { EditorContent, JSONContent, useEditor, type Editor } from "@tiptap/reac
 import StarterKit from "@tiptap/starter-kit";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { DEFAULT_AGENT_EFFORT, DEFAULT_AGENT_MODEL } from "@/lib/agent-config";
+import {
+  DEFAULT_AGENT_EFFORT,
+  DEFAULT_AGENT_MODEL,
+  LOCAL_MODEL_PREFIX,
+  isLiteLlmAgentModel,
+  isLocalAgentModel,
+  isOpenRouterAgentModel,
+  normalizeAgentModel
+} from "@/lib/agent-config";
 import type { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
 import { toggleReactionLocal, type ReactionSummary } from "@/lib/reactions";
 
@@ -223,6 +231,7 @@ export function DocumentWorkspace({
   initialHasOpenRouterKey,
   initialHasLiteLlmKey,
   localAgentModel,
+  anthropicFreeFallback,
   credentialHasOpenRouterKey,
   credentialHasLiteLlmKey,
   isAuthenticated,
@@ -275,6 +284,27 @@ export function DocumentWorkspace({
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [docStats, setDocStats] = useState<{ words: number; characters: number }>({ words: 0, characters: 0 });
   const [globalError, setGlobalError] = useState<string | null>(null);
+  // One-time (per page load) popup shown when the user starts an AI run that
+  // will silently use the free local model because no credential is connected.
+  const [freeFallbackNotice, setFreeFallbackNotice] = useState<string | null>(null);
+  const freeFallbackNoticeShownRef = useRef(false);
+  const maybeShowFreeFallbackNotice = useCallback(() => {
+    if (!anthropicFreeFallback || freeFallbackNoticeShownRef.current) return;
+    const model = normalizeAgentModel(agentModel);
+    const usesAnthropic =
+      !isOpenRouterAgentModel(model) && !isLiteLlmAgentModel(model) && !isLocalAgentModel(model);
+    if (!usesAnthropic) return;
+    freeFallbackNoticeShownRef.current = true;
+    const localName = localAgentModel ? localAgentModel.slice(LOCAL_MODEL_PREFIX.length) : "the local model";
+    setFreeFallbackNotice(
+      `No AI credential connected — this run uses the free local model ${localName}, which is very slow. To use Claude, add a credential in the AI credentials menu (topbar).`
+    );
+  }, [anthropicFreeFallback, agentModel, localAgentModel]);
+  // Optimistic progress line for a just-started run — must not claim "Claude"
+  // when the credential-less free fallback will do the work.
+  const startingProgress = anthropicFreeFallback
+    ? "Starting free local model agent (no credential connected — this is slow)."
+    : "Starting Claude research agent.";
   const reportClientError = useCallback(
     (message: string, scope: string, data?: unknown) => {
       setGlobalError(message);
@@ -2285,6 +2315,7 @@ export function DocumentWorkspace({
     }
 
     emitTourEvent("ai-edit-started");
+    maybeShowFreeFallbackNotice();
     const editSelection = selection;
     const instruction = editInstruction.trim();
     const selectedMarkdown = getSelectionMarkdownFromEditor(editor, editSelection.from, editSelection.to);
@@ -2297,7 +2328,7 @@ export function DocumentWorkspace({
         id: selectionId,
         from: editSelection.from,
         to: editSelection.to,
-        progress: "Starting Claude research agent."
+        progress: startingProgress
       })
     );
     setActiveAiRun({
@@ -2307,7 +2338,7 @@ export function DocumentWorkspace({
       selectionId,
       instruction,
       status: "RUNNING",
-      progress: "Starting Claude research agent.",
+      progress: startingProgress,
       startedAt: new Date().toISOString()
     });
     setSelectionPopoverMode(null);
@@ -2941,6 +2972,7 @@ export function DocumentWorkspace({
     // Mark the thread busy up front so the button can't double-fire while a
     // pending reply draft is being sent.
     emitTourEvent("ask-ai");
+    maybeShowFreeFallbackNotice();
     setAiBusyThreadId(threadId);
     const result = await submitPendingReplyThenAskAi({
       draft: getReplyDraft(threadId),
@@ -2968,7 +3000,7 @@ export function DocumentWorkspace({
       triggerId: threadId,
       instruction: "Write the next assistant reply for this comment thread.",
       status: "RUNNING",
-      progress: "Starting Claude research agent.",
+      progress: startingProgress,
       startedAt: new Date().toISOString()
     });
 
@@ -3093,7 +3125,7 @@ export function DocumentWorkspace({
       selectionId: selectionId ?? null,
       instruction: message,
       status: "RUNNING",
-      progress: "Starting Claude research agent.",
+      progress: startingProgress,
       startedAt: new Date().toISOString(),
       events: [
         {
@@ -3182,6 +3214,7 @@ export function DocumentWorkspace({
     if (!message) {
       return;
     }
+    maybeShowFreeFallbackNotice();
 
     const previousRunId = options?.previousRunId ?? null;
     const followUpRootId = options?.rootId ?? previousRunId ?? null;
@@ -3206,7 +3239,7 @@ export function DocumentWorkspace({
       parentRunId: previousRunId,
       instruction: message,
       status: "RUNNING",
-      progress: "Starting Claude research agent.",
+      progress: startingProgress,
       startedAt: new Date().toISOString(),
       events: [
         {
@@ -3979,6 +4012,24 @@ export function DocumentWorkspace({
         </div>
       ) : null}
 
+      {freeFallbackNotice ? (
+        <div className="ai-edit-retry-toast" role="status" aria-live="polite">
+          <div className="ai-edit-retry-toast__body">
+            <strong>Running on the free local model</strong>
+            <span className="ai-edit-retry-toast__detail">{freeFallbackNotice}</span>
+          </div>
+          <div className="ai-edit-retry-toast__actions">
+            <button
+              type="button"
+              className="ai-edit-retry-toast__dismiss"
+              onClick={() => setFreeFallbackNotice(null)}
+            >
+              Got it
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {findOpen && editor ? (
         <FindBar editor={editor} canReplace={canWriteDocument} onClose={() => setFindOpen(false)} />
       ) : null}
@@ -4621,6 +4672,7 @@ export function DocumentWorkspace({
           hasOpenRouterKey={hasOpenRouterKey}
           hasLiteLlmKey={hasLiteLlmKey}
           localModel={localAgentModel}
+          anthropicFreeFallback={anthropicFreeFallback}
           onAgentModelChange={(model) => void handleSaveAgentConfig({ model })}
           onAgentEffortChange={(effort) => void handleSaveAgentConfig({ effort })}
           onClose={() => setAgentPanelOpen(false)}

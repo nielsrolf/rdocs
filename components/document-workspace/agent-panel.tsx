@@ -202,6 +202,7 @@ export function AgentPanel({
   hasOpenRouterKey,
   hasLiteLlmKey,
   localModel,
+  anthropicFreeFallback,
   onAgentModelChange,
   onAgentEffortChange,
   onClose,
@@ -232,6 +233,10 @@ export function AgentPanel({
   hasLiteLlmKey: boolean;
   /** The deployment's free local model ("local/<name>") when configured. */
   localModel: string | null;
+  /** No Anthropic credential anywhere: Anthropic-model runs would actually
+   * execute on the free local model. Never display an Anthropic name as if it
+   * will run. */
+  anthropicFreeFallback: boolean;
   onAgentModelChange: (model: string) => void;
   onAgentEffortChange: (effort: string) => void;
   onClose: () => void;
@@ -268,6 +273,11 @@ export function AgentPanel({
       ? [normalizedModel]
       : [];
   const modelIsThirdParty = modelIsOpenRouter || modelIsLiteLlm;
+  const modelIsAnthropic = !modelIsThirdParty && !modelIsLocal;
+  // Without a credential, an "Anthropic" selection actually runs the free
+  // local model — say so in the option labels and below the selector.
+  const anthropicSuffix = anthropicFreeFallback ? " — no credential, runs free local model" : "";
+  const fallbackModelName = localModel ? localModel.slice(LOCAL_MODEL_PREFIX.length) : null;
   const storedCustomOpenRouterModel =
     modelIsOpenRouter && !OPENROUTER_AGENT_MODELS.some((m) => m.value === normalizedModel)
       ? normalizedModel
@@ -338,6 +348,7 @@ export function AgentPanel({
                 {ANTHROPIC_AGENT_MODELS.map((model) => (
                   <option key={model.value} value={model.value}>
                     {model.label}
+                    {anthropicSuffix}
                   </option>
                 ))}
               </optgroup>
@@ -432,7 +443,14 @@ export function AgentPanel({
               {customError ? <span className="agent-config-hint agent-config-error">{customError}</span> : null}
             </div>
           ) : null}
-          {modelIsOpenRouter && !hasOpenRouterKey ? (
+          {modelIsAnthropic && anthropicFreeFallback ? (
+            <span className="agent-config-hint agent-config-error">
+              No AI credential connected — agents run on the free local model
+              {fallbackModelName ? ` ${fallbackModelName}` : ""} (very slow), not{" "}
+              {ANTHROPIC_AGENT_MODELS.find((m) => m.value === normalizedModel)?.label ?? "Claude"}.
+              Connect a credential in the AI credentials menu to use Claude.
+            </span>
+          ) : modelIsOpenRouter && !hasOpenRouterKey ? (
             <span className="agent-config-hint">
               This model needs an OpenRouter key — add OPENROUTER_API_KEY in the Env menu or connect
               one in AI credentials.

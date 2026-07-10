@@ -85,6 +85,10 @@ export type DocumentWorkspaceProps = {
   initialHasLiteLlmKey: boolean;
   /** The deployment's free local model ("local/<name>") when configured. */
   localAgentModel: string | null;
+  /** True when an Anthropic-model run started by this viewer has no credential
+   * anywhere and would silently run on the free local model instead — the UI
+   * must say so rather than display the Anthropic model name. */
+  anthropicFreeFallback: boolean;
   /** Whether a per-user key for the provider backs this session's runs (the
    * viewer's own, or the document owner's) — env-menu edits can't change
    * these, so they keep the model groups unlocked. */

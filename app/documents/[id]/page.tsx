@@ -16,7 +16,11 @@ import { hasDocumentEnvKey } from "@/lib/document-env";
 import { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
 import { db } from "@/lib/db";
 import { resolveDocumentAccess } from "@/lib/permissions";
-import { freeLocalAgentModel, hasUserCredential } from "@/lib/user-credentials";
+import {
+  anthropicRunUsesFreeFallback,
+  freeLocalAgentModel,
+  hasUserCredential
+} from "@/lib/user-credentials";
 import { getPublicOrigin } from "@/lib/request-origin";
 
 type PageProps = {
@@ -141,6 +145,10 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
     viewerId ? hasUserCredential(viewerId, "openrouter") : Promise.resolve(false),
     viewerId ? hasUserCredential(viewerId, "litellm") : Promise.resolve(false)
   ]);
+  // Whether an Anthropic-model run started by this viewer would actually run
+  // on the free local model (no credential anywhere) — surfaced in the UI so
+  // "Sonnet 5" is never displayed while qwen does the work.
+  const anthropicFreeFallback = await anthropicRunUsesFreeFallback(id, user?.id ?? null);
   const credentialHasOpenRouterKey = ownerHasOpenRouterKeyOnly || viewerHasOpenRouterKey;
   const credentialHasLiteLlmKey = ownerHasLiteLlmKeyOnly || viewerHasLiteLlmKey;
   const initialHasOpenRouterKey = envHasOpenRouterKey || credentialHasOpenRouterKey;
@@ -172,6 +180,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         initialHasOpenRouterKey={initialHasOpenRouterKey}
         initialHasLiteLlmKey={initialHasLiteLlmKey}
         localAgentModel={freeLocalAgentModel()}
+        anthropicFreeFallback={anthropicFreeFallback}
         credentialHasOpenRouterKey={credentialHasOpenRouterKey}
         credentialHasLiteLlmKey={credentialHasLiteLlmKey}
         initialThreads={normalizedThreads}

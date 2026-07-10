@@ -10,6 +10,7 @@ import {
 import { applyProviderEnv } from "../agent-core/agent-env";
 import { db } from "../lib/db";
 import {
+  anthropicRunUsesFreeFallback,
   freeLocalAgentModel,
   loadAgentEnvWithFreeFallback,
   normalizeCredentialInput,
@@ -150,4 +151,29 @@ test("provider-key misses do NOT fall back (only the Anthropic credential miss d
       loadAgentEnvWithFreeFallback(doc.id, { model: "openrouter/openai/gpt-5.2", effort: null }, owner.id),
     /OPENROUTER_API_KEY/
   );
+});
+
+test("anthropicRunUsesFreeFallback: true without a credential, false once one is connected", async () => {
+  const owner = await makeUser("fallback-predicate");
+  const doc = await makeDoc(owner.id);
+
+  assert.equal(await anthropicRunUsesFreeFallback(doc.id, owner.id), true);
+
+  await upsertUserCredential(
+    owner.id,
+    normalizeCredentialInput({ value: "sk-ant-api03-predicate-test" })
+  );
+  assert.equal(await anthropicRunUsesFreeFallback(doc.id, owner.id), false);
+});
+
+test("anthropicRunUsesFreeFallback: false when no local model is configured", async () => {
+  const owner = await makeUser("fallback-predicate-nolocal");
+  const doc = await makeDoc(owner.id);
+  const base = process.env.LOCAL_MODEL_BASE_URL;
+  delete process.env.LOCAL_MODEL_BASE_URL;
+  try {
+    assert.equal(await anthropicRunUsesFreeFallback(doc.id, owner.id), false);
+  } finally {
+    process.env.LOCAL_MODEL_BASE_URL = base;
+  }
 });

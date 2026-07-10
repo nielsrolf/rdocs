@@ -1,4 +1,4 @@
-import { agentModelProvider } from "@/agent-core";
+import { agentModelProvider, DEFAULT_AGENT_MODEL } from "@/agent-core";
 import { maskSecret, type DocumentEnv } from "@/lib/agent-env";
 import {
   detectCredential,
@@ -423,6 +423,28 @@ export async function loadAgentEnvForDocument(
   agentModel: string | null | undefined,
   runnerUserId: string | null = null
 ): Promise<DocumentEnv> {
+  const env = await resolveModelCredentialEnv(documentId, agentModel, runnerUserId);
+  // GitHub auth for the run: the host token is no longer allowlisted into the
+  // agent env, so whatever the per-document resolution yields (possibly
+  // nothing) is exactly what the agent gets.
+  const githubAuth = await resolveGithubAuthForDocument(documentId, runnerUserId);
+  if (githubAuth) {
+    if (!env.GITHUB_TOKEN?.trim()) env.GITHUB_TOKEN = githubAuth.token;
+    if (!env.GH_TOKEN?.trim()) env.GH_TOKEN = githubAuth.token;
+  }
+  return env;
+}
+
+/**
+ * The credential-resolution core of loadAgentEnvForDocument (document env →
+ * runner credential → owner credential, requirement checks) WITHOUT the
+ * GitHub-auth resolution — also used to predict the free-fallback path cheaply.
+ */
+async function resolveModelCredentialEnv(
+  documentId: string,
+  agentModel: string | null | undefined,
+  runnerUserId: string | null
+): Promise<DocumentEnv> {
   const [docEnv, doc, runner] = await Promise.all([
     loadDocumentEnv(documentId),
     db.document.findUnique({
@@ -447,15 +469,27 @@ export async function loadAgentEnvForDocument(
   if (requirementError) {
     throw new Error(requirementError);
   }
-  // GitHub auth for the run: the host token is no longer allowlisted into the
-  // agent env, so whatever the per-document resolution yields (possibly
-  // nothing) is exactly what the agent gets.
-  const githubAuth = await resolveGithubAuthForDocument(documentId, runnerUserId);
-  if (githubAuth) {
-    if (!env.GITHUB_TOKEN?.trim()) env.GITHUB_TOKEN = githubAuth.token;
-    if (!env.GH_TOKEN?.trim()) env.GH_TOKEN = githubAuth.token;
-  }
   return env;
+}
+
+/**
+ * Would an Anthropic-model run on this document, triggered by this user, run
+ * on the free local model instead? True exactly when no Anthropic credential
+ * resolves anywhere (doc env → runner → owner → permitted host fallback) AND
+ * the deployment offers a free local model. Used to tell users up front that
+ * "Sonnet 5" would actually run as the local model.
+ */
+export async function anthropicRunUsesFreeFallback(
+  documentId: string,
+  runnerUserId: string | null = null
+): Promise<boolean> {
+  if (!freeLocalAgentModel()) return false;
+  try {
+    await resolveModelCredentialEnv(documentId, DEFAULT_AGENT_MODEL, runnerUserId);
+    return false;
+  } catch (error) {
+    return error instanceof Error && error.message === CONNECT_CREDENTIAL_MESSAGE;
+  }
 }
 
 /** The deployment's free local model ("local/<name>"), when configured. */
