@@ -33,7 +33,7 @@ export async function POST(request: Request, { params }: RouteContext) {
 
   const access = await resolveDocumentAccess(id, user?.id, parsed.data.shareToken ?? null);
   if (!access || !canManageDocumentAutomation(access, user?.id)) {
-    return NextResponse.json({ error: "Sign in with collaborator edit access to build widgets." }, { status: 403 });
+    return NextResponse.json({ error: "Sign in with edit access to build widgets." }, { status: 403 });
   }
 
   const linkedRepo = await ensureLinkedRepository(id, { requireClean: false, runnerUserId: user?.id ?? null });

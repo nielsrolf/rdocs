@@ -69,7 +69,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     !canManageDocumentAutomation(access, user?.id)
   ) {
     return NextResponse.json(
-      { error: "Sign in with collaborator edit access to change agent settings." },
+      { error: "Sign in with edit access to change agent settings." },
       { status: 403 }
     );
   }

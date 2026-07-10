@@ -64,6 +64,7 @@ npm run dev
 
 - Agent runs use the configured runner (`container` is the production target); repository work is isolated per run.
 - Comment-link agents are read-only; edit-link agents receive workspace command and repository access. View links cannot start agents.
+- Signed-in users with edit access — via membership or an edit link — manage agent settings, environment values, skills, and widgets alike; anonymous bearers cannot.
 - Share tokens are runtime capabilities and are never persisted in document nodes or asset URLs.
 - Agent-authored widgets run in an opaque-origin iframe sandbox.
 - Personal credentials and per-document environment values are encrypted at rest.

@@ -37,7 +37,7 @@ async function requireEditAccess(id: string, shareToken: string | null) {
     return { error: NextResponse.json({ error: "Document not found." }, { status: 404 }) };
   }
   if (!canManageDocumentAutomation(access, user?.id)) {
-    return { error: NextResponse.json({ error: "Sign in with collaborator edit access to manage secrets." }, { status: 403 }) };
+    return { error: NextResponse.json({ error: "Sign in with edit access to manage secrets." }, { status: 403 }) };
   }
   return { access };
 }

@@ -113,7 +113,7 @@ export async function POST(request: Request, { params }: RouteContext) {
 
   const access = await resolveDocumentAccess(id, user?.id, shareToken);
   if (!access || !canManageDocumentAutomation(access, user?.id)) {
-    return NextResponse.json({ error: "Sign in with collaborator edit access to manage agent skills." }, { status: 403 });
+    return NextResponse.json({ error: "Sign in with edit access to manage agent skills." }, { status: 403 });
   }
 
   let prepared;

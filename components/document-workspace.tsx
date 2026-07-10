@@ -425,7 +425,9 @@ export function DocumentWorkspace({
   // server resolves their access from the token, like collab pushes and AI edits.
   const canWriteComments = (isAuthenticated || Boolean(shareToken)) && initialPermission !== "VIEW";
   const canWriteDocument = initialPermission === "EDIT";
-  const canManageAutomation = canWriteDocument && isAuthenticated && !viaShareLink;
+  // Mirrors canManageDocumentAutomation server-side: signed-in edit access,
+  // including edit gained via a share link.
+  const canManageAutomation = canWriteDocument && isAuthenticated;
   // Comment-access users (can comment but not edit) are locked into suggesting
   // mode: the editor is interactive for them, but every change is forced into a
   // tracked-change suggestion. Editors default to direct editing and can toggle.

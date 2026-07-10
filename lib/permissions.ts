@@ -120,9 +120,13 @@ export function agentAccessModeForDocumentAccess(access: {
   return access.viaShareLink && !canEdit(access.permission) ? "read_only" : "workspace";
 }
 
+// Edit access is edit access: a signed-in user holding an edit link manages
+// agent settings, environment, skills, and widgets just like a collaborator
+// added by email. Only anonymous bearers are excluded — automation changes
+// need an account behind them.
 export function canManageDocumentAutomation(
   access: { permission: PermissionLevelValue; viaShareLink: boolean },
   userId: string | null | undefined
 ) {
-  return Boolean(userId) && !access.viaShareLink && canEdit(access.permission);
+  return Boolean(userId) && canEdit(access.permission);
 }

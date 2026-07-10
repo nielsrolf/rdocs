@@ -14,9 +14,11 @@ test("account memberships retain normal workspace agents", () => {
   assert.equal(agentAccessModeForDocumentAccess({ permission: "EDIT", viaShareLink: false }), "workspace");
 });
 
-test("bearer links can edit content but cannot manage secrets, skills, or executable widgets", () => {
-  assert.equal(canManageDocumentAutomation({ permission: "EDIT", viaShareLink: true }, null), false);
-  assert.equal(canManageDocumentAutomation({ permission: "EDIT", viaShareLink: true }, "signed-in"), false);
+test("signed-in edit access manages automation, whether via membership or edit link", () => {
+  assert.equal(canManageDocumentAutomation({ permission: "EDIT", viaShareLink: true }, "signed-in"), true);
   assert.equal(canManageDocumentAutomation({ permission: "EDIT", viaShareLink: false }, "member"), true);
+  // Anonymous bearers stay excluded: automation changes need an account.
+  assert.equal(canManageDocumentAutomation({ permission: "EDIT", viaShareLink: true }, null), false);
   assert.equal(canManageDocumentAutomation({ permission: "COMMENT", viaShareLink: false }, "member"), false);
+  assert.equal(canManageDocumentAutomation({ permission: "COMMENT", viaShareLink: true }, "signed-in"), false);
 });
