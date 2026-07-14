@@ -346,8 +346,8 @@ function TabBreakView({ node }: NodeViewProps) {
   const title = (node.attrs.title as string) || "Untitled tab";
   return (
     <NodeViewWrapper className="tab-break-node" contentEditable={false} data-tab-break>
-      <div className="tab-break-marker">
-        <span className="tab-break-label">Tab: {title}</span>
+      <div aria-label={`Tab: ${title}`} className="tab-break-header" role="heading" aria-level={1}>
+        <span className="tab-break-header-title">{title}</span>
       </div>
     </NodeViewWrapper>
   );

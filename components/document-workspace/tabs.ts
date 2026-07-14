@@ -110,8 +110,11 @@ export function createTabsVisibilityExtension(initialActiveTabId: string | null)
                 const blockFrom = offset;
                 const blockTo = offset + child.nodeSize;
                 const inActive = blockFrom >= activeTab.contentFrom && blockTo <= activeTab.contentTo;
-                const isOwnBreak = child.type.name === "tabBreak";
-                if (inActive && !isOwnBreak) return;
+                const isBreak = child.type.name === "tabBreak";
+                // The active tab's own break stays visible: it renders the tab
+                // title as the in-document header.
+                const isActiveBreak = isBreak && blockFrom === activeTab.breakPos;
+                if ((inActive && !isBreak) || isActiveBreak) return;
                 decorations.push(
                   Decoration.node(blockFrom, blockTo, {
                     class: "tab-hidden-block",

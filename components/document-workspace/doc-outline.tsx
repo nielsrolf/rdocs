@@ -475,6 +475,9 @@ function TabRow({
           title={tab.title}
           type="button"
         >
+          <span className="doc-tab-icon" aria-hidden="true">
+            <TabIcon />
+          </span>
           <span className="doc-tab-title">{tab.title}</span>
         </button>
       )}
@@ -521,6 +524,20 @@ function TabRow({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function TabIcon() {
+  return (
+    <svg aria-hidden="true" focusable="false" height="12" viewBox="0 0 16 16" width="12">
+      <path
+        d="M2 5.5A1.5 1.5 0 013.5 4H7l1.5 2h4A1.5 1.5 0 0114 7.5v3A1.5 1.5 0 0112.5 12h-9A1.5 1.5 0 012 10.5v-5z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinejoin="round"
+        strokeWidth="1.4"
+      />
+    </svg>
   );
 }
 

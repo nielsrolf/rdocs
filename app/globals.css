@@ -2785,11 +2785,19 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   min-width: 0;
 }
 
+/* Headings live indented under their tab, behind a left rule, so they read as
+   contents of the tab rather than siblings of it. */
 .doc-outline-tab-headings {
   list-style: none;
-  margin: 0.1rem 0 0;
-  padding: 0;
+  margin: 0.15rem 0 0 0.55rem;
+  padding: 0 0 0 0.35rem;
   min-width: 0;
+  border-left: 1px solid rgba(60, 64, 67, 0.16);
+}
+
+.doc-outline-tab-headings .doc-outline-item-level-1 {
+  font-weight: 500;
+  color: var(--muted);
 }
 
 .doc-tab-row {
@@ -2799,7 +2807,9 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   align-items: center;
   gap: 2px;
   padding: 0 0.2rem;
-  border-radius: 4px;
+  border: 1px solid rgba(60, 64, 67, 0.14);
+  border-radius: 6px;
+  background: rgba(60, 64, 67, 0.03);
   width: 100%;
   min-width: 0;
   box-sizing: border-box;
@@ -2808,19 +2818,33 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 }
 
 .doc-tab-row:hover {
-  background: rgba(0, 0, 0, 0.04);
+  background: rgba(0, 0, 0, 0.05);
   --tab-row-surface: #eceef0;
 }
 
 .doc-tab-row-active {
   background: rgba(26, 115, 232, 0.1);
+  border-color: rgba(26, 115, 232, 0.4);
   --tab-row-surface: #e7f0fd;
+}
+
+.doc-tab-icon {
+  flex: 0 0 auto;
+  color: var(--muted);
+  display: inline-flex;
+}
+
+.doc-tab-row-active .doc-tab-icon {
+  color: #1a73e8;
 }
 
 .doc-tab-button {
   flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
   text-align: left;
   background: transparent;
   border: none;
@@ -2937,22 +2961,21 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   user-select: none;
 }
 
-.tab-break-marker {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.35rem 0.6rem;
-  background: rgba(26, 115, 232, 0.08);
-  border-left: 3px solid #1a73e8;
-  border-radius: 3px;
-  font-size: 0.78rem;
-  color: #1a73e8;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+/* The active tab's break renders as the tab's in-document title header, so
+   users don't need to duplicate the tab name as an h1 inside the tab. */
+.tab-break-header {
+  padding-bottom: 0.45rem;
+  margin-bottom: 0.9rem;
+  border-bottom: 1px solid rgba(60, 64, 67, 0.18);
 }
 
-.tab-break-label {
-  font-weight: 600;
+.tab-break-header-title {
+  display: block;
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--text);
+  letter-spacing: -0.01em;
 }
 
 .tab-hidden-block {
