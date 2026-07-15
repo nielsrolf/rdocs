@@ -5,6 +5,7 @@ import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
 import {
+  computeCommittedContent,
   SUGGESTED_DELETION_MARK,
   SUGGESTED_INSERTION_MARK,
   SUGGESTION_DELETE_RECORDS_ATTR,
@@ -50,10 +51,19 @@ function isAtomNode(node: PMNode): boolean {
   return ATOM_NODE_TYPES.has(node.type.name);
 }
 
-type SuggestionPluginState = { enabled: boolean; author: SuggestionAuthor };
+// `strict` is set for comment-access ("suggest-only") users: they may ONLY add
+// suggestions, never change the committed view. Any local transaction that would
+// still alter the committed content after suggestion-wrapping (e.g. an untracked
+// structural edit — Enter/paragraph split, a block join, or a formatting-mark
+// toggle, none of which v1 tracks) is reverted before it becomes an un-pushable
+// collab step. Without this the server's committed-view guard rejects the step
+// with a 403 the client mis-escalated into an unusable "resolve sync conflict"
+// merge dialog on every subsequent keystroke (comment users can neither
+// force-push nor merge-commit), stranding them until a hard reload.
+type SuggestionPluginState = { enabled: boolean; strict: boolean; author: SuggestionAuthor };
 
 type SuggestionPluginMeta =
-  | { type: "configure"; enabled: boolean; author?: SuggestionAuthor }
+  | { type: "configure"; enabled: boolean; strict?: boolean; author?: SuggestionAuthor }
   // Marks a transaction the interceptor must ignore: our own appended rewrite,
   // or a remote collab apply (foreign steps already carry their author's marks).
   | { type: "skip" };
@@ -331,6 +341,16 @@ function buildInsertionMarkTransaction(
 
 // --- Plugin -----------------------------------------------------------------
 
+// True when two docs differ once every suggestion / annotation is stripped — the
+// same reject-all "committed view" the server's suggestion-only guard compares,
+// so the client's strict revert and the server's 403 agree exactly.
+function committedViewChanged(before: PMNode, after: PMNode): boolean {
+  return (
+    JSON.stringify(computeCommittedContent(before.toJSON())) !==
+    JSON.stringify(computeCommittedContent(after.toJSON()))
+  );
+}
+
 function atomDecorations(doc: PMNode): DecorationSet {
   const decorations: Decoration[] = [];
   doc.descendants((node, pos) => {
@@ -348,16 +368,20 @@ export function createSuggestionPlugin() {
   return new Plugin<SuggestionPluginState>({
     key: suggestionPluginKey,
     state: {
-      init: () => ({ enabled: false, author: { authorId: null, authorLabel: null } }),
+      init: () => ({ enabled: false, strict: false, author: { authorId: null, authorLabel: null } }),
       apply: (transaction, previous) => {
         const meta = transaction.getMeta(suggestionPluginKey) as SuggestionPluginMeta | undefined;
         if (meta?.type === "configure") {
-          return { enabled: meta.enabled, author: meta.author ?? previous.author };
+          return {
+            enabled: meta.enabled,
+            strict: meta.strict ?? previous.strict,
+            author: meta.author ?? previous.author
+          };
         }
         return previous;
       }
     },
-    appendTransaction(transactions, _oldState, newState) {
+    appendTransaction(transactions, oldState, newState) {
       const pluginState = suggestionPluginKey.getState(newState);
       if (!pluginState?.enabled) return null;
       if (!transactions.some((tr) => tr.docChanged)) return null;
@@ -366,7 +390,24 @@ export function createSuggestionPlugin() {
         const meta = tr.getMeta(suggestionPluginKey) as SuggestionPluginMeta | undefined;
         if (meta?.type === "skip") return null;
       }
-      return buildInsertionMarkTransaction(transactions, newState, pluginState.author);
+
+      const wrap = buildInsertionMarkTransaction(transactions, newState, pluginState.author);
+
+      if (pluginState.strict) {
+        // Compare the committed view AFTER suggestion-wrapping (a wrapped insertion
+        // leaves it unchanged) against the pre-edit doc. If it still differs, this
+        // edit isn't expressible as a suggestion — revert it wholesale so a
+        // comment-access user can never produce an un-pushable committed change.
+        const resultDoc = wrap ? wrap.doc : newState.doc;
+        if (committedViewChanged(oldState.doc, resultDoc)) {
+          const revert = newState.tr.replaceWith(0, newState.doc.content.size, oldState.doc.content);
+          revert.setMeta(suggestionPluginKey, { type: "skip" } satisfies SuggestionPluginMeta);
+          revert.setMeta("addToHistory", false);
+          return revert;
+        }
+      }
+
+      return wrap;
     },
     props: {
       decorations(state) {
@@ -378,10 +419,16 @@ export function createSuggestionPlugin() {
 
 // --- Mode toggle ------------------------------------------------------------
 
-export function setSuggestionMode(state: EditorState, enabled: boolean, author?: SuggestionAuthor): Transaction {
+export function setSuggestionMode(
+  state: EditorState,
+  enabled: boolean,
+  author?: SuggestionAuthor,
+  strict?: boolean
+): Transaction {
   return state.tr.setMeta(suggestionPluginKey, {
     type: "configure",
     enabled,
+    strict,
     author
   } satisfies SuggestionPluginMeta);
 }

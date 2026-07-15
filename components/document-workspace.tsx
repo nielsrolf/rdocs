@@ -1501,8 +1501,8 @@ export function DocumentWorkspace({
   // convert edits into tracked changes, and who is authoring them.
   useEffect(() => {
     if (!editor) return;
-    editor.view.dispatch(setSuggestionMode(editor.state, suggestingMode, suggestionAuthor));
-  }, [editor, suggestingMode, suggestionAuthor]);
+    editor.view.dispatch(setSuggestionMode(editor.state, suggestingMode, suggestionAuthor, suggestOnlyUser));
+  }, [editor, suggestingMode, suggestionAuthor, suggestOnlyUser]);
 
   // Recompute the pending-suggestion list whenever the document changes.
   useEffect(() => {

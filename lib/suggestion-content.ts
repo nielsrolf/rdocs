@@ -150,9 +150,11 @@ function transformNode(input: unknown, reject: boolean): unknown {
   if (!input || typeof input !== "object") return input;
   const node = input as JsonNode;
 
-  // Inline text marked as a suggestion. Comment-anchor marks are always stripped
-  // (annotation, not content) regardless of accept/reject.
-  if (node.type === "text") {
+  // Inline text — or any other inline node that carries marks, e.g. a hardBreak
+  // that fell inside a commented range (addMark marks all inline content, not
+  // just text). Comment-anchor marks are always stripped (annotation, not
+  // content) regardless of accept/reject; suggestion marks follow accept/reject.
+  if (node.type === "text" || (Array.isArray(node.marks) && node.marks.length > 0)) {
     const inserted = hasMark(node, SUGGESTED_INSERTION_MARK);
     const deleted = hasMark(node, SUGGESTED_DELETION_MARK);
     if (inserted) {
