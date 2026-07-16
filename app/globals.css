@@ -1752,11 +1752,16 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 }
 
 .dashboard-list {
+  width: 100%;
   max-width: 1200px;
   margin: 0 auto;
 }
 
+/* width:100% is load-bearing — the toolbar is a flex item of the .dashboard-tabs
+   column, where margin:auto with no explicit width would shrink it to its
+   content (~420px) and wrap the sort control onto a second row. */
 .dashboard-toolbar {
+  width: 100%;
   max-width: 1200px;
   margin: 0 auto 1rem;
   display: flex;
@@ -1767,35 +1772,65 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 }
 
 .dashboard-search-input {
-  flex: 1 1 280px;
-  max-width: 420px;
-  padding: 0.65rem 0.9rem;
+  flex: 1 1 320px;
+  max-width: 480px;
+  padding: 0.7rem 0.95rem 0.7rem 2.5rem;
   border-radius: 14px;
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.85);
+  background-color: rgba(255, 255, 255, 0.85);
+  /* Inline magnifier icon so the field reads as search without extra markup. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cline x1='21' y1='21' x2='16.65' y2='16.65'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: 0.85rem center;
   font-size: 0.95rem;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.dashboard-search-input::placeholder {
+  color: var(--muted);
 }
 
 .dashboard-search-input:focus {
-  outline: 2px solid rgba(26, 115, 232, 0.4);
-  outline-offset: 1px;
+  outline: none;
+  border-color: var(--accent-strong);
+  box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.18);
 }
 
 .dashboard-sort {
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.55rem;
   font-size: 0.9rem;
   color: var(--muted);
+  white-space: nowrap;
 }
 
 .dashboard-sort select {
-  padding: 0.5rem 0.7rem;
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 0.6rem 2rem 0.6rem 0.85rem;
   border-radius: 12px;
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.85);
+  background-color: rgba(255, 255, 255, 0.85);
+  /* Custom chevron replaces the native select arrow for a consistent look. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
   font-size: 0.9rem;
-  color: inherit;
+  font-weight: 500;
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.dashboard-sort select:hover {
+  border-color: var(--accent-strong);
+}
+
+.dashboard-sort select:focus {
+  outline: none;
+  border-color: var(--accent-strong);
+  box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.18);
 }
 
 .doc-row-unified {
