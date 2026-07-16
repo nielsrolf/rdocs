@@ -23,7 +23,7 @@ import { db } from "@/lib/db";
 import { loadAgentEnvWithFreeFallback, restrictAgentEnvForReadOnly } from "@/lib/user-credentials";
 import { agentAccessModeForDocumentAccess, canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
 import type { AgentAccessMode } from "@/agent-core";
-import { createAgentCommentThreads } from "@/lib/agent-comments";
+import { createLiveCommentRecorder } from "@/lib/agent-comments";
 import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
 import { getClientIp, rateLimit } from "@/lib/rate-limit";
 import {
@@ -206,6 +206,19 @@ async function runAiEditInBackground(input: {
       ? await buildConversationHistory(documentId, parsed.parentRunId)
       : { history: [] };
 
+    // Comments the agent leaves via add_comment are created (and broadcast)
+    // the moment they arrive, so collaborators see review feedback mid-run.
+    // Anonymous share-link runs never created agent comments before; keep that.
+    const commentRecorder = createdById
+      ? createLiveCommentRecorder({
+          documentId,
+          aiRunId,
+          createdById,
+          model: effectiveAgentConfig.model ?? null,
+          documentText
+        })
+      : null;
+
     const result = await getAgentRunner().run(
       {
         mode: "edit_selection",
@@ -235,6 +248,7 @@ async function runAiEditInBackground(input: {
         agentEnv: agentAccessMode === "read_only" ? restrictAgentEnvForReadOnly(agentEnv) : agentEnv,
         signal: abort.signal,
         containerName: `gdocs-run-${aiRunId}`,
+        onComment: commentRecorder?.onComment,
         onProgress: async (event) => {
           await Promise.all([
             db.aiRun.update({ where: { id: aiRunId }, data: { progress: event.message } }),
@@ -356,15 +370,11 @@ async function runAiEditInBackground(input: {
       replacementSources: JSON.stringify(sourceLinks),
       suggestions: JSON.stringify(Array.isArray(result.suggestions) ? result.suggestions : []),
       agentComments: JSON.stringify(
-        createdById
-          ? await createAgentCommentThreads({
-              documentId,
-              aiRunId,
-              createdById,
-              model: result.model,
-              comments: Array.isArray(result.comments) ? result.comments : [],
-              documentText
-            })
+        commentRecorder
+          ? await commentRecorder.finalize(
+              Array.isArray(result.comments) ? result.comments : [],
+              result.model
+            )
           : []
       )
     });

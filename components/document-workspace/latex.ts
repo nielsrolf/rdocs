@@ -1,4 +1,5 @@
 import { Extension } from "@tiptap/core";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import katex from "katex";
@@ -56,6 +57,31 @@ function findLatexMatches(text: string, basePosition: number) {
   return matches;
 }
 
+// One placeholder char per inline leaf (image, widget, …) keeps string offsets
+// aligned with doc positions; matches containing it are rejected below so an
+// equation never "spans" an atom.
+const INLINE_LEAF_PLACEHOLDER = "￼";
+
+export function findLatexMatchesInDoc(doc: ProseMirrorNode) {
+  const matches: LatexMatch[] = [];
+  doc.descendants((node, position) => {
+    if (!node.isTextblock) {
+      return true;
+    }
+    // Scan the whole textblock, not individual text nodes: marks added over a
+    // selection (commentAnchor, mention, …) split text nodes, which must not
+    // hide an equation whose $ delimiters end up in different nodes.
+    const text = node.textBetween(0, node.content.size, undefined, INLINE_LEAF_PLACEHOLDER);
+    for (const match of findLatexMatches(text, position + 1)) {
+      if (!match.latex.includes(INLINE_LEAF_PLACEHOLDER)) {
+        matches.push(match);
+      }
+    }
+    return false;
+  });
+  return matches;
+}
+
 export function createLatexRenderExtension() {
   return Extension.create({
     name: "latexRender",
@@ -96,12 +122,7 @@ export function createLatexRenderExtension() {
               const decorations: Decoration[] = [];
               const { from: selectionFrom, to: selectionTo } = state.selection;
 
-              state.doc.descendants((node, position) => {
-                if (!node.isText || !node.text) {
-                  return true;
-                }
-
-                findLatexMatches(node.text, position).forEach((match) => {
+              findLatexMatchesInDoc(state.doc).forEach((match) => {
                   const isActive = selectionFrom <= match.to && selectionTo >= match.from;
                   decorations.push(
                     Decoration.inline(match.from, match.to, {
@@ -135,9 +156,6 @@ export function createLatexRenderExtension() {
                       )
                     );
                   }
-                });
-
-                return true;
               });
 
               return DecorationSet.create(state.doc, decorations);

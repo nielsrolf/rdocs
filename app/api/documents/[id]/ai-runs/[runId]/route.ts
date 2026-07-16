@@ -73,9 +73,10 @@ export async function GET(request: Request, { params }: RouteContext) {
   const widgets = isSucceeded ? parseJsonArray<Record<string, unknown>>(run.replacementWidgets) : [];
   const sources = isSucceeded ? parseJsonArray<string>(run.replacementSources) : [];
   const suggestions = isSucceeded ? parseJsonArray<Record<string, unknown>>(run.suggestions) : [];
-  const agentComments = isSucceeded
-    ? parseJsonArray<{ threadId: string; findText: string }>(run.agentComments)
-    : [];
+  // Unlike the fields above, agentComments is NOT gated on success: comments
+  // the agent leaves mid-run via add_comment already exist as threads, and the
+  // client anchors each one as soon as it appears.
+  const agentComments = parseJsonArray<{ threadId: string; findText: string }>(run.agentComments);
 
   return NextResponse.json({
     aiRun: {

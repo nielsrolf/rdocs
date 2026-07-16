@@ -23,7 +23,7 @@ import { loadAgentEnvWithFreeFallback, restrictAgentEnvForReadOnly } from "@/lib
 import { agentAccessModeForDocumentAccess, canComment, resolveDocumentAccess } from "@/lib/permissions";
 import type { AgentAccessMode } from "@/agent-core";
 import { normalizeAgentImages } from "@/lib/ai-edit-submission";
-import { createAgentCommentThreads } from "@/lib/agent-comments";
+import { createLiveCommentRecorder } from "@/lib/agent-comments";
 import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
 import { getClientIp, rateLimit } from "@/lib/rate-limit";
 import { normalizeSourceLinks, serializeSourceLinks } from "@/lib/sources";
@@ -152,6 +152,16 @@ async function runAskAiInBackground(input: {
       });
     }
 
+    // Comments the agent leaves via add_comment are created (and broadcast)
+    // the moment they arrive, so collaborators see review feedback mid-run.
+    const commentRecorder = createLiveCommentRecorder({
+      documentId: thread.documentId,
+      aiRunId,
+      createdById,
+      model: effectiveAgentConfig.model ?? null,
+      documentText
+    });
+
     const aiReply = await getAgentRunner().run({
       mode: "comment_reply",
       accessMode: agentAccessMode,
@@ -182,6 +192,7 @@ async function runAskAiInBackground(input: {
       signal: abort.signal,
       containerName: `gdocs-run-${aiRunId}`,
       validation: { kind: "comment_reply", documentText: suggestionAnchorText },
+      onComment: commentRecorder.onComment,
       onProgress: async (event) => {
         await Promise.all([
           db.aiRun.update({
@@ -252,17 +263,13 @@ async function runAskAiInBackground(input: {
       }
     });
 
-    // Create any standalone review comments the agent anchored on the document.
-    // Threads are created here (correctly AI-authored); the client adds the
-    // commentAnchor mark when it processes this run.
-    const agentComments = await createAgentCommentThreads({
-      documentId: thread.documentId,
-      aiRunId,
-      createdById,
-      model: aiReply.model,
-      comments: Array.isArray(aiReply.comments) ? aiReply.comments : [],
-      documentText
-    });
+    // Create threads for any review comments that arrived only in
+    // submit_response's comments array (live add_comment ones already exist);
+    // the client adds the commentAnchor marks when it processes this run.
+    const agentComments = await commentRecorder.finalize(
+      Array.isArray(aiReply.comments) ? aiReply.comments : [],
+      aiReply.model
+    );
 
     await markAiRunSucceeded(aiRunId, {
       model: aiReply.model,

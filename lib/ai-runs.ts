@@ -201,6 +201,9 @@ export async function fetchDocumentAiRuns(documentId: string) {
       startedAt: true,
       finishedAt: true,
       appliedAt: true,
+      // Live comments left mid-run (add_comment). Carried in the polled list so
+      // clients can anchor them while the run is still working.
+      agentComments: true,
       events: {
         // Newest N, then flipped back to chronological below — asc+take would
         // pin the window to a long run's FIRST N events and freeze the timeline.
@@ -215,7 +218,21 @@ export async function fetchDocumentAiRuns(documentId: string) {
       }
     }
   });
-  return runs.map((run) => ({ ...run, events: [...run.events].reverse() }));
+  return runs.map((run) => ({
+    ...run,
+    agentComments: parseAgentComments(run.agentComments),
+    events: [...run.events].reverse()
+  }));
+}
+
+function parseAgentComments(raw: string | null): Array<{ threadId: string; findText: string }> {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 export function serializeAiRun(run: {
@@ -237,6 +254,9 @@ export function serializeAiRun(run: {
   startedAt: Date;
   finishedAt?: Date | null;
   appliedAt?: Date | null;
+  // Parsed by fetchDocumentAiRuns; raw JSON column when a route serializes a
+  // run it fetched itself.
+  agentComments?: string | Array<{ threadId: string; findText: string }> | null;
   events?: Array<{
     id: string;
     role: string;
@@ -252,6 +272,9 @@ export function serializeAiRun(run: {
     startedAt: run.startedAt,
     finishedAt: run.finishedAt ?? null,
     appliedAt: run.appliedAt ?? null,
+    agentComments: Array.isArray(run.agentComments)
+      ? run.agentComments
+      : parseAgentComments(run.agentComments ?? null),
     events: run.events ?? []
   };
 }

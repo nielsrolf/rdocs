@@ -191,6 +191,21 @@ export function normalizeAgentComments(value: unknown): AgentComment[] {
   return out;
 }
 
+// Comments the agent left mid-run via the add_comment tool that were NOT
+// delivered live (no onComment handler in scope) are buffered and merged into
+// the final output here, skipping any the agent also repeated in
+// submit_response's comments array.
+export function mergeBufferedComments(
+  submitted: AgentComment[],
+  buffered: AgentComment[]
+): AgentComment[] {
+  const fresh = buffered.filter(
+    (comment) =>
+      !submitted.some((other) => other.findText === comment.findText && other.body === comment.body)
+  );
+  return [...fresh, ...submitted];
+}
+
 export function validateAgentComments(
   comments: AgentComment[] | undefined,
   documentText: string

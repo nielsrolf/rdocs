@@ -15,7 +15,7 @@ import { getCollaborationVersion } from "@/lib/collaboration";
 import { hasDocumentEnvKey } from "@/lib/document-env";
 import { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
 import { db } from "@/lib/db";
-import { resolveDocumentAccess } from "@/lib/permissions";
+import { ensureShareLinkMembership, resolveDocumentAccess } from "@/lib/permissions";
 import {
   anthropicRunUsesFreeFallback,
   freeLocalAgentModel,
@@ -29,6 +29,7 @@ type PageProps = {
   }>;
   searchParams?: Promise<{
     share?: string;
+    comment?: string;
   }>;
 };
 
@@ -47,6 +48,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
   const resolvedSearchParams = searchParams ? await searchParams : undefined;
   const user = await getCurrentUser();
   const shareToken = resolvedSearchParams?.share ?? null;
+  const focusThreadId = resolvedSearchParams?.comment ?? null;
 
   if (!user && !shareToken) {
     redirect("/sign-in");
@@ -55,6 +57,13 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
   const access = await resolveDocumentAccess(id, user?.id, shareToken);
   if (!access) {
     notFound();
+  }
+
+  // Opening a share link while signed in makes the doc appear on the user's
+  // dashboard, as if they were added as a collaborator by email. Best-effort:
+  // never block the page render on it.
+  if (user && access.viaShareLink) {
+    await ensureShareLinkMembership(access, user.id).catch(() => undefined);
   }
 
   // The list of who can be @mentioned (owner + collaborators) is shown to every
@@ -184,6 +193,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         credentialHasOpenRouterKey={credentialHasOpenRouterKey}
         credentialHasLiteLlmKey={credentialHasLiteLlmKey}
         initialThreads={normalizedThreads}
+        initialFocusThreadId={focusThreadId}
         initialTitle={access.document.title}
         isAuthenticated={Boolean(user)}
         isOwner={user?.id === access.document.ownerId}

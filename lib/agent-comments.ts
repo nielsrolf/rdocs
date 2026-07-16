@@ -86,3 +86,57 @@ export async function createAgentCommentThreads(input: {
 
   return created;
 }
+
+// Live mid-run comment delivery. The agent's add_comment tool routes here via
+// the runner's onComment callback: each comment is persisted (and
+// SSE-broadcast) immediately so collaborators see review feedback while the
+// run is still working, and the growing {threadId, findText} list is
+// snapshotted onto AiRun.agentComments so polling clients can anchor the
+// comments incrementally. finalize() creates threads for any comments that
+// arrived only in submit_response's comments array — deduped against the live
+// ones, which also makes a retried attempt that re-leaves the same comments
+// idempotent — and returns the complete list for the run record.
+export function createLiveCommentRecorder(input: {
+  documentId: string;
+  aiRunId: string;
+  createdById: string | null;
+  model: string | null;
+  documentText: string;
+}) {
+  const live: Array<{ threadId: string; findText: string }> = [];
+  const seen = new Set<string>();
+  const keyOf = (comment: AgentComment) => `${comment.findText}\u0000${comment.body}`;
+
+  const persist = async (comment: AgentComment, model: string | null) => {
+    const created = await createAgentCommentThreads({
+      documentId: input.documentId,
+      aiRunId: input.aiRunId,
+      createdById: input.createdById,
+      model,
+      comments: [comment],
+      documentText: input.documentText
+    });
+    live.push(...created);
+  };
+
+  return {
+    onComment: async (comment: AgentComment) => {
+      const key = keyOf(comment);
+      if (seen.has(key)) return;
+      seen.add(key);
+      await persist(comment, input.model);
+      await db.aiRun
+        .update({ where: { id: input.aiRunId }, data: { agentComments: JSON.stringify(live) } })
+        .catch(() => null);
+    },
+    finalize: async (submitted: AgentComment[] | undefined, model?: string | null) => {
+      for (const comment of submitted ?? []) {
+        const key = keyOf(comment);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        await persist(comment, model ?? input.model);
+      }
+      return live;
+    }
+  };
+}

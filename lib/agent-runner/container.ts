@@ -10,7 +10,7 @@ import type {
   DocumentEnv
 } from "@/agent-core";
 
-import { agentModelProvider, isAuthFailure, isRetryableAgentError } from "@/agent-core";
+import { agentModelProvider, isAuthFailure, isRetryableAgentError, mergeBufferedComments } from "@/agent-core";
 
 import type { AgentRunner, AgentRunOptions, MergeResolveJob } from "./index";
 import { toAgentJob } from "./index";
@@ -91,6 +91,7 @@ export class ContainerRunner implements AgentRunner {
       agentEnv: job.agentEnv,
       agentModel: job.agentConfig?.model,
       onProgress: options?.onProgress,
+      onComment: options?.onComment,
       signal: options?.signal,
       containerName: options?.containerName
     });
@@ -119,6 +120,7 @@ export class ContainerRunner implements AgentRunner {
     agentEnv?: DocumentEnv;
     agentModel?: string | null;
     onProgress?: AgentRunOptions["onProgress"];
+    onComment?: AgentRunOptions["onComment"];
     signal?: AbortSignal;
     containerName?: string;
   }): Promise<Record<string, unknown>> {
@@ -171,7 +173,7 @@ export class ContainerRunner implements AgentRunner {
         }
         await prepareEnv();
         try {
-          return await this.spawnContainer(runtime, args, opts.job, opts.onProgress, {
+          return await this.spawnContainer(runtime, args, opts.job, opts.onProgress, opts.onComment, {
             signal: opts.signal,
             containerName: opts.containerName
           });
@@ -215,6 +217,7 @@ export class ContainerRunner implements AgentRunner {
     args: string[],
     job: unknown,
     onProgress?: AgentRunOptions["onProgress"],
+    onComment?: AgentRunOptions["onComment"],
     cancel?: { signal?: AbortSignal; containerName?: string }
   ): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
@@ -249,6 +252,9 @@ export class ContainerRunner implements AgentRunner {
       let stdoutBuffer = "";
       let stderrTail = "";
       const pending: Array<Promise<unknown>> = [];
+      // Comment frames arriving when the caller supplied no onComment handler
+      // are merged into the final output.comments instead of being dropped.
+      const bufferedComments: Array<{ findText: string; body: string }> = [];
 
       const handleFrame = (line: string) => {
         const trimmed = line.trim();
@@ -256,6 +262,7 @@ export class ContainerRunner implements AgentRunner {
         let frame: {
           type?: string;
           event?: ClaudeAgentProgressEvent;
+          comment?: { findText?: unknown; body?: unknown };
           output?: Record<string, unknown>;
           message?: string;
         };
@@ -267,6 +274,17 @@ export class ContainerRunner implements AgentRunner {
         }
         if (frame.type === "progress" && frame.event && onProgress) {
           pending.push(Promise.resolve(onProgress(frame.event)).catch(() => {}));
+        } else if (
+          frame.type === "comment" &&
+          typeof frame.comment?.findText === "string" &&
+          typeof frame.comment?.body === "string"
+        ) {
+          const comment = { findText: frame.comment.findText, body: frame.comment.body };
+          if (onComment) {
+            pending.push(Promise.resolve(onComment(comment)).catch(() => {}));
+          } else {
+            bufferedComments.push(comment);
+          }
         } else if (frame.type === "result" && frame.output) {
           result = frame.output;
         } else if (frame.type === "error") {
@@ -305,6 +323,12 @@ export class ContainerRunner implements AgentRunner {
           return;
         }
         if (result) {
+          if (bufferedComments.length > 0) {
+            const submitted = Array.isArray(result.comments)
+              ? (result.comments as Array<{ findText: string; body: string }>)
+              : [];
+            result.comments = mergeBufferedComments(submitted, bufferedComments);
+          }
           resolve(result);
           return;
         }

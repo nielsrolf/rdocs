@@ -93,6 +93,10 @@ async function main() {
       : undefined;
     const output = await runClaudeResearchAgent(job.input as never, {
       onProgress: (event: ClaudeAgentProgressEvent) => emit({ type: "progress", event }),
+      // Live mid-run comments cross the container boundary as their own frame;
+      // the host persists them (or buffers them into the result if it has no
+      // handler).
+      onComment: (comment) => emit({ type: "comment", comment }),
       agentConfig: job.agentConfig as never,
       agentEnv: job.agentEnv,
       validateSubmission,

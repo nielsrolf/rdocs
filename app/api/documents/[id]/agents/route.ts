@@ -23,7 +23,7 @@ import { agentAccessModeForDocumentAccess, canComment, resolveDocumentAccess } f
 import type { AgentAccessMode } from "@/agent-core";
 import { getClientIp, rateLimit } from "@/lib/rate-limit";
 import { normalizeAgentImages } from "@/lib/ai-edit-submission";
-import { createAgentCommentThreads } from "@/lib/agent-comments";
+import { createLiveCommentRecorder } from "@/lib/agent-comments";
 import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
 import {
   commitWorkspaceChanges,
@@ -141,6 +141,16 @@ async function runAgentConversationInBackground(input: {
         message: "Share-link agent is read-only: repository writes, commands, document secrets, commits, and pushes are disabled."
       });
     }
+    // Comments the agent leaves via add_comment are created (and broadcast)
+    // the moment they arrive, so collaborators see review feedback mid-run.
+    const commentRecorder = createLiveCommentRecorder({
+      documentId,
+      aiRunId,
+      createdById,
+      model: effectiveAgentConfig.model ?? null,
+      documentText
+    });
+
     const result = await getAgentRunner().run({
       mode: "conversation",
       accessMode: agentAccessMode,
@@ -166,6 +176,7 @@ async function runAgentConversationInBackground(input: {
       signal: abort.signal,
       containerName: `gdocs-run-${aiRunId}`,
       validation: { kind: "conversation", documentText: suggestionAnchorText },
+      onComment: commentRecorder.onComment,
       onProgress: async (event) => {
         await Promise.all([
           db.aiRun.update({
@@ -204,14 +215,10 @@ async function runAgentConversationInBackground(input: {
       message: result.reply ?? result.summary ?? "Finished agent conversation."
     });
 
-    const agentComments = await createAgentCommentThreads({
-      documentId,
-      aiRunId,
-      createdById,
-      model: result.model,
-      comments: Array.isArray(result.comments) ? result.comments : [],
-      documentText
-    });
+    const agentComments = await commentRecorder.finalize(
+      Array.isArray(result.comments) ? result.comments : [],
+      result.model
+    );
 
     await markAiRunSucceeded(aiRunId, {
       progress: result.summary ?? "Finished.",

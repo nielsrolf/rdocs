@@ -65,6 +65,7 @@ import {
   type SuggestionSummary
 } from "./document-workspace/suggestions";
 import { CommentRail } from "./document-workspace/comment-rail";
+import { layoutCommentRail } from "./document-workspace/comment-rail-layout";
 import { DocOutline, OUTLINE_MAX_WIDTH, OUTLINE_MIN_WIDTH } from "./document-workspace/doc-outline";
 import { MoveBlock, SlashTab, StrikeShortcut, TaskItem } from "./document-workspace/editor-extras";
 import { EnvironmentMenu } from "./document-workspace/environment-menu";
@@ -78,6 +79,7 @@ import { LinkPopover } from "./document-workspace/link-popover";
 import { HeadingCopyOverlay } from "./document-workspace/heading-copy-overlay";
 import {
   buildCommentAnchorTransaction,
+  collectCommentAnchorRanges,
   CommentAnchor,
   createCommentHighlightExtension,
   resolveCommentAnchorRange
@@ -223,6 +225,7 @@ export function DocumentWorkspace({
   mentionMembers,
   initialMentionedCommentIds,
   initialThreads,
+  initialFocusThreadId,
   initialShareLinks,
   initialRepoUrl,
   initialRepoBranch,
@@ -438,6 +441,7 @@ export function DocumentWorkspace({
   // flushed by the selectionchange listener below (or superseded by the next poll).
   const pendingAiRunsRef = useRef<ActiveAiRunView[] | null>(null);
   const syncAiRunsRef = useRef<(runs: ActiveAiRunView[]) => void>(() => {});
+  const updateThreadOffsetsRef = useRef<() => void>(() => {});
   const remotePresenceRef = useRef<RemotePresenceView[]>([]);
   const receivedMappingsRef = useRef<ReceivedMappingEntry[]>([]);
   const currentUserIdRef = useRef<string | null>(currentUserId);
@@ -732,30 +736,44 @@ export function DocumentWorkspace({
     }
 
     const pageRect = editorPageRef.current.getBoundingClientRect();
-    const nextOffsets = threads
-      .map((thread) => {
-        try {
-          const range = resolveCommentAnchorRange(editor.state.doc, thread);
-          const top = range ? editor.view.coordsAtPos(range.fromPos).top - pageRect.top : 0;
-          return { id: thread.id, top: Math.max(16, top) };
-        } catch {
-          return { id: thread.id, top: 16 };
-        }
-      })
-      .sort((left, right) => left.top - right.top);
-
-    let cursor = 16;
-    const normalized: Record<string, number> = {};
-
-    nextOffsets.forEach((item) => {
-      const top = Math.max(item.top, cursor);
-      normalized[item.id] = top;
-      cursor = top + (item.id === activeThreadId ? 264 : 152);
+    // Lay out exactly the threads the rail renders. `threads` also contains
+    // ones hidden by tag filters or anchored on another tab; including those
+    // used to reserve stacking space for cards that don't exist, pushing the
+    // visible cards far below their anchors.
+    const anchorTops = orderedThreads.map((thread) => {
+      try {
+        const range = resolveCommentAnchorRange(editor.state.doc, thread);
+        const top = range ? editor.view.coordsAtPos(range.fromPos).top - pageRect.top : 0;
+        return { id: thread.id, top };
+      } catch {
+        return { id: thread.id, top: 16 };
+      }
     });
 
-    setThreadOffsets(normalized);
-    setRailHeight(Math.max(editorPageRef.current.offsetHeight, cursor + 32));
+    // Real rendered card heights: a long comment or reply chain is much
+    // taller than any fixed estimate, and stacking with a wrong height puts
+    // every following card at the wrong position.
+    const heights: Record<string, number> = {};
+    document.querySelectorAll<HTMLElement>(".comment-thread-card[data-thread-id]").forEach((card) => {
+      const id = card.dataset.threadId;
+      if (id && card.offsetHeight > 0) {
+        heights[id] = card.offsetHeight;
+      }
+    });
+
+    const { offsets, bottom } = layoutCommentRail(anchorTops, activeThreadId, heights);
+
+    // Offsets are recomputed from ResizeObserver ticks; only re-render when
+    // something actually moved.
+    setThreadOffsets((previous) => {
+      const ids = Object.keys(offsets);
+      const unchanged =
+        ids.length === Object.keys(previous).length && ids.every((id) => previous[id] === offsets[id]);
+      return unchanged ? previous : offsets;
+    });
+    setRailHeight(Math.max(editorPageRef.current.offsetHeight, bottom + 32));
   }
+  updateThreadOffsetsRef.current = updateThreadOffsets;
 
   function markCollaborationSavedIfSettled() {
     if (!editor || sendableSteps(editor.state)) {
@@ -1695,12 +1713,6 @@ export function DocumentWorkspace({
     setRemotePresence,
     setRemoteNotice
   });
-
-  useEffect(() => {
-    window.requestAnimationFrame(() => {
-      updateThreadOffsets();
-    });
-  }, [editor, threads, activeThreadId]);
 
   // Initial word/character count once the editor is ready.
   useEffect(() => {
@@ -2861,11 +2873,15 @@ export function DocumentWorkspace({
   // adding the commentAnchor mark for each at its resolved range, through the
   // collab pipeline. The threads already exist + show in the rail; this places
   // their highlight in the text. Unresolved anchors leave the thread unanchored.
-  function applyAgentComments(aiRunId: string, comments: Array<{ threadId: string; findText: string }>) {
-    if (!editor || comments.length === 0) return;
+  function applyAgentComments(aiRunId: string, comments: Array<{ threadId: string; findText: string }>): number {
+    if (!editor || comments.length === 0) return 0;
+    // Idempotency: a thread already anchored in the doc (by this client's live
+    // mid-run pass, the end-of-run pass, or another collaborator) is skipped.
+    const anchored = collectCommentAnchorRanges(editor.state.doc);
     let applied = 0;
     const skipped: string[] = [];
     for (const comment of comments) {
+      if (anchored.has(comment.threadId)) continue;
       const range = resolveSuggestionRange(editor.state.doc, comment.findText);
       if (!range) {
         skipped.push(comment.threadId);
@@ -2887,6 +2903,7 @@ export function DocumentWorkspace({
         data: { documentId, aiRunId, applied, skipped: skipped.length, total: comments.length }
       });
     }
+    return applied;
   }
 
   function handleAcceptSuggestion(suggestionId: string) {
@@ -3426,6 +3443,20 @@ export function DocumentWorkspace({
     }
   }
 
+  // Arrived from the cross-document comment inbox (?comment=<threadId>): once
+  // the editor is ready, open that thread and scroll its anchor into view.
+  // Fires once — subsequent doc edits must not re-hijack the selection.
+  const focusThreadHandledRef = useRef(false);
+  useEffect(() => {
+    if (focusThreadHandledRef.current) return;
+    if (!initialFocusThreadId || !editor) return;
+    const target = threads.find((thread) => thread.id === initialFocusThreadId);
+    if (!target) return;
+    focusThreadHandledRef.current = true;
+    window.requestAnimationFrame(() => focusThread(target));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor, initialFocusThreadId, threads]);
+
   async function handleDeleteComment(commentId: string) {
     setDeleteBusyCommentId(commentId);
     setGlobalError(null);
@@ -3631,6 +3662,39 @@ export function DocumentWorkspace({
     const activeThread = visibleThreads.find((thread) => thread.id === activeThreadId);
     return activeThread ? [...inactiveThreads, activeThread] : inactiveThreads;
   }, [activeThreadId, visibleThreads]);
+
+  useEffect(() => {
+    window.requestAnimationFrame(() => {
+      updateThreadOffsets();
+    });
+  }, [editor, orderedThreads, activeThreadId]);
+
+  // Comment offsets are computed from coordsAtPos, which is only valid for the
+  // layout at that instant. Widget iframes report their height asynchronously
+  // (postMessage), images load late, KaTeX renders after mount — each shifts
+  // everything below it without any editor transaction. Observe the page (its
+  // height changes on any such shift) and the cards themselves (expanding a
+  // thread / long replies change stacking) and recompute.
+  useEffect(() => {
+    const page = editorPageRef.current;
+    if (!page) return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        updateThreadOffsetsRef.current();
+      });
+    });
+    observer.observe(page);
+    document
+      .querySelectorAll<HTMLElement>(".comment-thread-card[data-thread-id]")
+      .forEach((card) => observer.observe(card));
+    return () => {
+      observer.disconnect();
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [editor, orderedThreads, activeThreadId]);
   const selectedVersion =
     historyVersions.find((version) => version.id === selectedVersionId) ?? historyVersions[0] ?? null;
   const conversations = useMemo(() => buildConversations(aiRuns), [aiRuns]);
@@ -3928,6 +3992,25 @@ export function DocumentWorkspace({
       })();
     }
   }, [aiRuns, editor, documentId, shareToken, canPersistEdits]);
+
+  // Anchor comments the agent leaves MID-RUN (live add_comment delivery). The
+  // polled run list carries the growing agentComments list; each new threadId
+  // is attempted once here (failures are retried by the end-of-run apply
+  // paths, which re-run over the full list — applyAgentComments skips
+  // already-anchored threads, so the overlap is idempotent).
+  const liveCommentAttemptedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!editor || !canPersistEdits) return;
+    for (const run of aiRuns) {
+      if (run.status !== "RUNNING") continue;
+      const comments = Array.isArray(run.agentComments) ? run.agentComments : [];
+      const fresh = comments.filter((comment) => !liveCommentAttemptedRef.current.has(comment.threadId));
+      if (fresh.length === 0) continue;
+      fresh.forEach((comment) => liveCommentAttemptedRef.current.add(comment.threadId));
+      const applied = applyAgentComments(run.id, fresh);
+      if (applied > 0) void flushCollaborationSteps();
+    }
+  }, [aiRuns, editor, canPersistEdits]);
 
   // Clear async run busy-state once the run we kicked off reaches a terminal
   // state in the polled runs. (The comment reply itself arrives via the SSE

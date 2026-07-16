@@ -48,7 +48,9 @@ export const ANTHROPIC_AGENT_MODELS: readonly AgentModelOption[] = [
 // sensible defaults, not a whitelist.
 export const OPENROUTER_AGENT_MODELS: readonly AgentModelOption[] = [
   { value: "openrouter/z-ai/glm-5.2", label: "GLM 5.2", hint: "Zhipu flagship", provider: "openrouter" },
-  { value: "openrouter/openai/gpt-5.5", label: "GPT-5.5", hint: "OpenAI flagship", provider: "openrouter" },
+  { value: "openrouter/openai/gpt-5.6-sol", label: "GPT-5.6 Sol", hint: "OpenAI flagship", provider: "openrouter" },
+  { value: "openrouter/openai/gpt-5.6-terra", label: "GPT-5.6 Terra", hint: "OpenAI flagship, balanced", provider: "openrouter" },
+  { value: "openrouter/openai/gpt-5.6-luna", label: "GPT-5.6 Luna", hint: "OpenAI flagship, fast", provider: "openrouter" },
   { value: "openrouter/moonshotai/kimi-latest", label: "Kimi (latest)", hint: "Moonshot flagship", provider: "openrouter" },
   { value: "openrouter/minimax/minimax-m3", label: "MiniMax M3", hint: "MiniMax flagship", provider: "openrouter" },
   { value: "openrouter/google/gemini-3.5-flash", label: "Gemini 3.5 Flash", hint: "Fast Google model", provider: "openrouter" },
@@ -61,10 +63,15 @@ export const OPENROUTER_AGENT_MODELS: readonly AgentModelOption[] = [
 // the custom-model input — this list is just sensible defaults, not a whitelist.
 // We mirror the OpenRouter picks so a LiteLLM proxy that passes the same
 // "<author>/<model>" paths through offers the identical quick-select set; the
-// only differences are the "litellm/" prefix and the provider tag.
+// only differences are the "litellm/" prefix and the provider tag. Models the
+// LiteLLM deployment has no native provider key for (currently Google) keep
+// the "openrouter/" segment so LiteLLM routes them through OpenRouter.
+const LITELLM_KEEPS_OPENROUTER_ROUTE = new Set(["openrouter/google/gemini-3.5-flash"]);
 export const LITELLM_AGENT_MODELS: readonly AgentModelOption[] = OPENROUTER_AGENT_MODELS.map(
   (model) => ({
-    value: `${LITELLM_MODEL_PREFIX}${model.value.slice(OPENROUTER_MODEL_PREFIX.length)}`,
+    value: LITELLM_KEEPS_OPENROUTER_ROUTE.has(model.value)
+      ? `${LITELLM_MODEL_PREFIX}${model.value}`
+      : `${LITELLM_MODEL_PREFIX}${model.value.slice(OPENROUTER_MODEL_PREFIX.length)}`,
     label: model.label,
     hint: model.hint,
     provider: "litellm"

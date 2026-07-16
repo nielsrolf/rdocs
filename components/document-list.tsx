@@ -6,7 +6,7 @@ import { useMemo, useState } from "react";
 
 import { formatDateTime, permissionLabel, truncate } from "@/lib/utils";
 
-type DashboardDoc = {
+export type DashboardDoc = {
   id: string;
   title: string;
   updatedAt: string;

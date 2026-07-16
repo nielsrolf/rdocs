@@ -29,6 +29,9 @@ import { HttpRunner } from "./http";
 // over the wire by HttpRunner).
 export type AgentRunOptions = {
   onProgress?: ClaudeAgentRunOptions["onProgress"];
+  // Live mid-run comment delivery (see ClaudeAgentRunOptions.onComment).
+  // Runtime-only — never shipped as part of the serialized job.
+  onComment?: ClaudeAgentRunOptions["onComment"];
   validation?: SubmissionValidationSpec;
   agentConfig?: DocumentAgentConfig;
   agentEnv?: DocumentEnv;

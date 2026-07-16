@@ -76,6 +76,9 @@ export type DocumentWorkspaceProps = {
   // mentioning comment when arriving from a dashboard notification.
   initialMentionedCommentIds: string[];
   initialThreads: ThreadView[];
+  // Thread to open and scroll to on mount, e.g. arriving from the cross-document
+  // comment inbox via ?comment=<threadId>.
+  initialFocusThreadId?: string | null;
   initialShareLinks: ShareLinkView[];
   initialRepoUrl: string | null;
   initialRepoBranch: string | null;
@@ -153,6 +156,8 @@ export type ActiveAiRunView = {
   startedAt: string | Date;
   finishedAt?: string | Date | null;
   appliedAt?: string | Date | null;
+  /** Comments the agent has left so far ({threadId, findText}); grows mid-run. */
+  agentComments?: Array<{ threadId: string; findText: string }>;
   events?: AiRunEventView[];
 };
 

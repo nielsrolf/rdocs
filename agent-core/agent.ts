@@ -20,6 +20,7 @@ import {
 } from "./agent-config";
 import { applyProviderEnv, buildAgentEnv, type DocumentEnv } from "./agent-env";
 import {
+  mergeBufferedComments,
   normalizeAgentComments,
   normalizeSuggestions,
   type AgentComment,
@@ -112,6 +113,14 @@ export type ClaudeAgentSubmissionValidator = (
 
 export type ClaudeAgentRunOptions = {
   onProgress?: (event: ClaudeAgentProgressEvent) => void | Promise<void>;
+  /**
+   * Live delivery of comments the agent leaves mid-run via the add_comment
+   * tool (the host persists each one immediately so collaborators see it while
+   * the run continues). When absent, add_comment comments are buffered and
+   * merged into the returned output.comments — the end-of-run path still
+   * creates them.
+   */
+  onComment?: (comment: AgentComment) => void | Promise<void>;
   validateSubmission?: ClaudeAgentSubmissionValidator;
   /** Per-document model + thinking-effort selection (see lib/agent-config). */
   agentConfig?: DocumentAgentConfig;
@@ -131,6 +140,18 @@ export type ClaudeAgentRunOptions = {
 };
 
 const SUBMIT_TOOL_NAME = "mcp__gdocs__submit_response";
+const ADD_COMMENT_TOOL_NAME = "mcp__gdocs__add_comment";
+
+function countOccurrences(haystack: string, needle: string): number {
+  if (!needle) return 0;
+  let count = 0;
+  let index = haystack.indexOf(needle);
+  while (index !== -1 && count < 10) {
+    count += 1;
+    index = haystack.indexOf(needle, index + 1);
+  }
+  return count;
+}
 
 // A safety-classifier block is an HTTP 200 with stop_reason "refusal" (not an
 // HTTP error), which the Claude Code runtime turns into a fixed user-facing
@@ -407,7 +428,7 @@ App environment:
 - A document can be linked to one Git repository.
 ${workspaceAccess}
 - The editor renders replacementText as Markdown. Use Markdown structure deliberately: ##/### headings, short paragraphs, bullet or numbered lists, blockquotes, fenced code blocks, and Markdown tables when they improve scanability. Avoid returning one long paragraph.
-- The editor supports LaTeX math in Markdown text with $inline$ and $$display$$ delimiters.
+- The editor supports LaTeX math in Markdown text ONLY with $inline$ and $$display$$ delimiters, e.g. $e^{i\\pi}$ or $$\\int_0^1 x\\,dx$$. Do NOT use \\(...\\), \\[...\\], \`\`\`latex/math code fences, or HTML — those render as literal text, not math.
 - The editor converts repo-local Markdown images in replacementText into document figure nodes. Use ![Concise figure caption](assets/plot.png), and put a useful caption in the alt text. Do not use HTML image tags.
 - Existing document images and widgets are listed in the document context as bracketed records. Treat them as already-rendered document elements, not literal prose.
 - The document may be organized into tabs. In the document context, tabs are shown as <tab title="...">...</tab> sections. These wrappers describe document structure — never write them in your replacementText. The editor decides which tab the user is in; just produce Markdown for the content.
@@ -443,8 +464,10 @@ Suggesting edits (available in every mode):
 - Do not use suggestions to restate the selection you were asked to replace — use the top-level replacementText for that. Use suggestions for changes elsewhere in the document.
 
 Leaving comments (available in every mode):
-- You can leave standalone review comments anchored on sections of the document via the optional comments array on submit_response. Each is { findText, body }: findText is an exact, unique substring to anchor on (same rules as above), body is your comment. A new comment thread is created there, authored by you.
-- Use this when asked to review the document and leave feedback in place. You may leave as many as warranted. This is separate from any reply you post to the triggering comment thread — leave the in-document comments via this array, then summarize in your reply.
+- You can leave standalone review comments anchored on sections of the document. Each is { findText, body }: findText is an exact, unique substring to anchor on (same rules as above), body is your comment (concise Markdown). A new comment thread is created there, authored by you.
+- PREFER the add_comment tool: call it the moment you have formed a piece of feedback. The comment appears for collaborators immediately, so they can follow your review while you keep working — do not save comments up for the end.
+- The comments array on submit_response also works, but only use it for feedback you did not already leave via add_comment. Never repeat a comment you left with add_comment.
+- Use comments when asked to review the document and leave feedback in place. You may leave as many as warranted. This is separate from any reply you post to the triggering comment thread — leave in-document comments via add_comment, then summarize in your reply.
 
 Current document:
 Title: ${input.documentTitle || "Untitled"}
@@ -823,7 +846,7 @@ async function runClaudeResearchAgentOnce(
   input: ClaudeResearchAgentInput,
   options: ClaudeAgentRunOptions = {}
 ): Promise<ClaudeResearchAgentOutput> {
-  const { onProgress, validateSubmission } = options;
+  const { onProgress, onComment, validateSubmission } = options;
   const sdkConfig = resolveAgentSdkConfig(options.agentConfig, process.env.CLAUDE_AGENT_MODEL);
   if (!input.workspacePath) {
     throw new Error(
@@ -871,10 +894,82 @@ async function runClaudeResearchAgentOnce(
     }
   );
 
+  // Comments left mid-run via add_comment: delivered live through
+  // options.onComment when the host provides one (a comment thread is created
+  // immediately, visible to collaborators while the agent keeps working);
+  // otherwise buffered and merged into the final output.comments below.
+  const bufferedComments: AgentComment[] = [];
+  const addCommentTool = tool(
+    "add_comment",
+    "Leave ONE standalone review comment anchored on the document right now — it becomes visible to collaborators immediately, while you keep working. Prefer this over the comments array on submit_response, and never repeat a comment you already left here.",
+    {
+      findText: z
+        .string()
+        .min(1)
+        .describe(
+          "An EXACT, UNIQUE substring of the current document text to anchor this comment on. Verbatim, occurring exactly once — extend it until unique."
+        ),
+      body: z.string().min(1).describe("The comment text to leave on that anchor (concise Markdown).")
+    },
+    async (args) => {
+      const [comment] = normalizeAgentComments([args]);
+      if (!comment) {
+        return {
+          content: [{ type: "text" as const, text: "Invalid comment: findText and a non-empty body are required." }],
+          isError: true
+        };
+      }
+      const occurrences = countOccurrences(input.documentText, comment.findText);
+      if (occurrences !== 1) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                occurrences === 0
+                  ? "findText was not found in the current document text. Copy an exact substring verbatim (including punctuation and capitalization) and try again."
+                  : `findText occurs ${occurrences} times in the document. Extend it with surrounding words until it is unique, then try again.`
+            }
+          ],
+          isError: true
+        };
+      }
+      try {
+        if (onComment) {
+          await onComment(comment);
+        } else {
+          bufferedComments.push(comment);
+        }
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Failed to record the comment: ${error instanceof Error ? error.message : String(error)}`
+            }
+          ],
+          isError: true
+        };
+      }
+      emitProgress(onProgress, {
+        role: "tool",
+        message: `Left a comment on "${compactValue(comment.findText, 120)}"`
+      });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "Comment left. It is already visible — do not repeat it in submit_response's comments array."
+          }
+        ]
+      };
+    }
+  );
+
   const mcpServer = createSdkMcpServer({
     name: "gdocs",
     version: "1.0.0",
-    tools: [submitTool],
+    tools: [submitTool, addCommentTool],
     alwaysLoad: true
   });
 
@@ -934,7 +1029,7 @@ async function runClaudeResearchAgentOnce(
       systemPrompt: buildSystemPrompt(input),
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
-      allowedTools: [...toolsForAgentAccess(input.accessMode), SUBMIT_TOOL_NAME],
+      allowedTools: [...toolsForAgentAccess(input.accessMode), SUBMIT_TOOL_NAME, ADD_COMMENT_TOOL_NAME],
       disallowedTools: [
         "EnterWorktree",
         "ExitWorktree",
@@ -1040,7 +1135,7 @@ async function runClaudeResearchAgentOnce(
     images: fallback.images ?? [],
     widgets: fallback.widgets ?? [],
     suggestions: fallback.suggestions ?? [],
-    comments: fallback.comments ?? [],
+    comments: mergeBufferedComments(fallback.comments ?? [], bufferedComments),
     model: sdkConfig.label
   };
 }

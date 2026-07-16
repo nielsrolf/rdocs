@@ -1,85 +1,57 @@
 import { redirect } from "next/navigation";
 
-import { DocumentList } from "@/components/document-list";
+import type { InboxThreadView } from "@/components/comment-inbox";
+import { DashboardTabs } from "@/components/dashboard-tabs";
 import { NewDocumentButton } from "@/components/new-document-button";
 import { OnboardingTour, TourRestartButton } from "@/components/onboarding-tour";
 import { getCurrentUser } from "@/lib/auth";
-import { db } from "@/lib/db";
-import { getDocumentCommentStats } from "@/lib/document-data";
+import {
+  getDocumentCommentStats,
+  listAccessibleDocumentsForUser,
+  listTaggedThreadsForUser
+} from "@/lib/document-data";
 import { getDocumentMentionStats } from "@/lib/mention-data";
 
-export default async function DashboardPage() {
+type DashboardPageProps = {
+  searchParams?: Promise<{ tab?: string }>;
+};
+
+export default async function DashboardPage({ searchParams }: DashboardPageProps) {
   const user = await getCurrentUser();
 
   if (!user) {
     redirect("/sign-in");
   }
 
-  const [ownedDocuments, memberships] = await Promise.all([
-    db.document.findMany({
-      where: { ownerId: user.id },
-      orderBy: { updatedAt: "desc" },
-      select: {
-        id: true,
-        title: true,
-        updatedAt: true,
-        owner: { select: { id: true, name: true } }
-      }
-    }),
-    db.documentMembership.findMany({
-      where: { userId: user.id },
-      orderBy: { updatedAt: "desc" },
-      select: {
-        permission: true,
-        document: {
-          select: {
-            id: true,
-            title: true,
-            updatedAt: true,
-            owner: { select: { id: true, name: true } }
-          }
-        }
-      }
-    })
-  ]);
+  const resolvedSearchParams = searchParams ? await searchParams : undefined;
+  const initialTab = resolvedSearchParams?.tab === "comments" ? "comments" : "documents";
 
-  const docIds = [
-    ...ownedDocuments.map((d) => d.id),
-    ...memberships.map((m) => m.document.id)
-  ];
+  const accessibleDocuments = await listAccessibleDocumentsForUser(user.id);
+  const docIds = accessibleDocuments.map((d) => d.id);
 
   // Aggregated in SQL rather than loading every comment for every document.
-  const [{ unreadByDoc, lastCommentByDoc }, mentionByDoc] = await Promise.all([
+  const [{ unreadByDoc, lastCommentByDoc }, mentionByDoc, inbox] = await Promise.all([
     getDocumentCommentStats(user.id, docIds),
-    getDocumentMentionStats(user.id, docIds)
+    getDocumentMentionStats(user.id, docIds),
+    listTaggedThreadsForUser(user.id)
   ]);
 
-  const owned = ownedDocuments.map((d) => ({
+  const documents = accessibleDocuments.map((d) => ({
     id: d.id,
     title: d.title,
     updatedAt: d.updatedAt.toISOString(),
-    isOwner: true,
+    isOwner: d.isOwner,
     ownerId: d.owner.id,
     ownerName: d.owner.name,
-    permission: "EDIT",
+    permission: d.permission,
     unreadCount: unreadByDoc.get(d.id) ?? 0,
     mentionCount: mentionByDoc.get(d.id) ?? 0,
     lastCommentAt: lastCommentByDoc.get(d.id)?.toISOString() ?? null
   }));
-  const shared = memberships.map(({ document, permission }) => ({
-    id: document.id,
-    title: document.title,
-    updatedAt: document.updatedAt.toISOString(),
-    isOwner: false,
-    ownerId: document.owner.id,
-    ownerName: document.owner.name,
-    permission,
-    unreadCount: unreadByDoc.get(document.id) ?? 0,
-    mentionCount: mentionByDoc.get(document.id) ?? 0,
-    lastCommentAt: lastCommentByDoc.get(document.id)?.toISOString() ?? null
-  }));
 
-  const documents = [...owned, ...shared];
+  // serializeThread returns a loosely-typed `status: string`; the client view
+  // expects the ThreadStatusValue union — same cast the document page applies.
+  const inboxThreads = inbox.threads as unknown as InboxThreadView[];
 
   return (
     <main className="dashboard-shell">
@@ -95,7 +67,12 @@ export default async function DashboardPage() {
         </div>
       </section>
 
-      <DocumentList documents={documents} />
+      <DashboardTabs
+        documents={documents}
+        inboxThreads={inboxThreads}
+        inboxTags={inbox.tags}
+        initialTab={initialTab}
+      />
       <OnboardingTour surface="list" autoOffer={documents.length === 0} />
     </main>
   );

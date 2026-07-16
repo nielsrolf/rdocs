@@ -21,3 +21,6 @@ dev.db
 dev.db-journal
 .service.pid
 scripts/_*
+
+# Generated demo video artifacts (kept local)
+demo-video/

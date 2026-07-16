@@ -267,6 +267,145 @@ export async function getDocumentCommentStats(userId: string, documentIds: strin
   return { unreadByDoc, lastCommentByDoc };
 }
 
+export type AccessibleDocument = {
+  id: string;
+  title: string;
+  updatedAt: Date;
+  isOwner: boolean;
+  permission: string;
+  owner: { id: string; name: string };
+};
+
+// The union of documents a user can reach: everything they own plus every
+// document they were added to as a member. This is the same list the dashboard
+// renders; extracted here so the cross-document comment view scopes to exactly
+// the same set (no leakage of docs the user cannot see).
+export async function listAccessibleDocumentsForUser(userId: string): Promise<AccessibleDocument[]> {
+  const [ownedDocuments, memberships] = await Promise.all([
+    db.document.findMany({
+      where: { ownerId: userId },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        id: true,
+        title: true,
+        updatedAt: true,
+        owner: { select: { id: true, name: true } }
+      }
+    }),
+    db.documentMembership.findMany({
+      where: { userId },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        permission: true,
+        document: {
+          select: {
+            id: true,
+            title: true,
+            updatedAt: true,
+            owner: { select: { id: true, name: true } }
+          }
+        }
+      }
+    })
+  ]);
+
+  const owned: AccessibleDocument[] = ownedDocuments.map((d) => ({
+    id: d.id,
+    title: d.title,
+    updatedAt: d.updatedAt,
+    isOwner: true,
+    permission: "EDIT",
+    owner: d.owner
+  }));
+  const shared: AccessibleDocument[] = memberships.map(({ document, permission }) => ({
+    id: document.id,
+    title: document.title,
+    updatedAt: document.updatedAt,
+    isOwner: false,
+    permission,
+    owner: document.owner
+  }));
+
+  return [...owned, ...shared];
+}
+
+export type InboxThread = ReturnType<typeof serializeThread> & {
+  documentId: string;
+  documentTitle: string;
+};
+
+// Every comment thread across the documents a user can access, annotated with
+// its parent document, plus the distinct set of tags in play (for filter
+// chips). Filtering by tag is done client-side because tags live as a
+// JSON-string column, not a normalized table.
+export async function listTaggedThreadsForUser(
+  userId: string
+): Promise<{ threads: InboxThread[]; tags: string[] }> {
+  const documents = await listAccessibleDocumentsForUser(userId);
+  const titleByDoc = new Map(documents.map((d) => [d.id, d.title]));
+  const docIds = documents.map((d) => d.id);
+  if (docIds.length === 0) {
+    return { threads: [], tags: getDefaultThreadTags() };
+  }
+
+  const threads = await db.commentThread.findMany({
+    where: { documentId: { in: docIds } },
+    orderBy: { updatedAt: "desc" },
+    select: {
+      id: true,
+      documentId: true,
+      anchorText: true,
+      anchorContext: true,
+      status: true,
+      tags: true,
+      createdAt: true,
+      createdBy: { select: { id: true, name: true } },
+      comments: {
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true,
+          body: true,
+          aiModel: true,
+          guestName: true,
+          sourceLinks: true,
+          commitSha: true,
+          commitUrl: true,
+          aiRunId: true,
+          createdAt: true,
+          author: { select: { id: true, name: true } },
+          reactions: {
+            select: { emoji: true, userId: true, user: { select: { name: true } } }
+          }
+        }
+      }
+    }
+  });
+
+  const reads = await db.commentThreadRead.findMany({
+    where: { userId, threadId: { in: threads.map((t) => t.id) } },
+    select: { threadId: true, lastReadAt: true }
+  });
+  const lastReadByThread = new Map(reads.map((row) => [row.threadId, row.lastReadAt]));
+
+  const tagUniverse = new Set(getDefaultThreadTags());
+  const inboxThreads: InboxThread[] = threads.map((thread) => {
+    const serialized = serializeThread(thread, {
+      lastReadAt: lastReadByThread.get(thread.id) ?? null,
+      currentUserId: userId
+    });
+    for (const tag of serialized.tags) {
+      tagUniverse.add(tag);
+    }
+    return {
+      ...serialized,
+      documentId: thread.documentId,
+      documentTitle: titleByDoc.get(thread.documentId) ?? "Untitled"
+    };
+  });
+
+  return { threads: inboxThreads, tags: Array.from(tagUniverse) };
+}
+
 export async function listDocumentVersions(documentId: string) {
   const versions = await db.documentVersion.findMany({
     where: { documentId },

@@ -105,6 +105,36 @@ export async function resolveDocumentAccess(
   return null;
 }
 
+// A signed-in user who opens a doc through a valid share link becomes a
+// persistent collaborator — the doc shows up on their dashboard exactly as if
+// they had been invited by email. Idempotent; never downgrades an existing
+// membership (resolveDocumentAccess only reports viaShareLink when the user
+// has no membership, so the create path is the only one that normally runs).
+export async function ensureShareLinkMembership(
+  access: Pick<AccessResult, "viaShareLink" | "permission"> & {
+    document: { id: string; ownerId: string };
+  },
+  userId: string | null | undefined
+) {
+  if (!userId || !access.viaShareLink || access.document.ownerId === userId) {
+    return;
+  }
+  await db.documentMembership.upsert({
+    where: {
+      documentId_userId: {
+        documentId: access.document.id,
+        userId
+      }
+    },
+    create: {
+      documentId: access.document.id,
+      userId,
+      permission: access.permission
+    },
+    update: {}
+  });
+}
+
 export function canComment(permission: PermissionLevelValue) {
   return permission === "COMMENT" || permission === "EDIT";
 }

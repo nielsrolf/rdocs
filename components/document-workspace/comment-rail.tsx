@@ -187,6 +187,7 @@ export function CommentRail({
           return (
             <article
               className={`comment-thread-card${isActive ? " comment-thread-card-active" : ""}${unread ? " comment-thread-card-unread" : ""}`}
+              data-thread-id={thread.id}
               key={thread.id}
               onMouseDown={() => {
                 if (!isActive) onFocusThread(thread);
