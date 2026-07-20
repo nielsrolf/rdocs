@@ -14,6 +14,7 @@
 // ✅ / ❌ when the run finishes — and posts the agent's reply as a message.
 
 import { db } from "@/lib/db";
+import { saveAttachmentToStore } from "@/lib/attachments";
 import { defaultDocumentContent, serializeDocumentContent } from "@/lib/content";
 import { copyOwnerDefaultSkillsToDocument } from "@/lib/document-skills";
 import { recordAiRunEvent } from "@/lib/ai-runs";
@@ -36,6 +37,7 @@ export type SlackIncomingMessage = {
   text: string;
   ts: string;
   threadTs?: string;
+  files?: Array<{ downloadUrl?: string; name?: string; mimetype?: string }>;
 };
 
 // Back-compat alias (transport + tests use the mention name).
@@ -288,6 +290,10 @@ export async function startSlackConversationRun(args: StartSlackRunArgs): Promis
       url:
         process.env.SLACK_AGENT_TOOLS_URL?.trim() ||
         `${deps.appUrl.replace(/\/$/, "")}/api/slack/agent-tools`,
+      // rdocs document access, authenticated as the triggering user via the
+      // same run token (accepted by /api/mcp).
+      mcpUrl:
+        process.env.SLACK_AGENT_MCP_URL?.trim() || `${deps.appUrl.replace(/\/$/, "")}/api/mcp`,
       token: await createSlackToolsToken({
         slackTeamId: teamId,
         slackUserId: args.slackUserId,
@@ -402,13 +408,15 @@ async function handleIncomingSlackMessage(
   const triggerId = `${event.channel}:${conversationKey}`;
   const instructionBody = stripBotMention(event.text, deps.botUserId) || "(no message)";
 
-  // Active-run handling: in a channel, a run is "active here" when it belongs
-  // to this thread; in a DM (your own space) any running run on the DM counts.
+  // Active-run handling is strictly THREAD-scoped, in channels and DMs alike:
+  // one Slack thread = one agent session, and sessions in different threads
+  // run in parallel without interfering. Only a message inside a session's own
+  // thread can interrupt ("wait") or queue behind it.
   const activeRun = await db.aiRun.findFirst({
     where: {
       documentId: document.id,
       status: { in: ["RUNNING", "PENDING"] },
-      ...(surface === "dm" ? {} : { triggerId })
+      triggerId
     },
     orderBy: { startedAt: "desc" },
     select: { id: true }
@@ -463,8 +471,41 @@ async function handleIncomingSlackMessage(
     select: { id: true }
   });
 
+  // Files attached to the message: persisted as document attachments RIGHT
+  // AWAY (Slack file URLs expire) — the existing worktree sync makes them
+  // readable at attachments/<storedName> inside the agent's workspace.
+  const savedFiles: string[] = [];
+  for (const file of (event.files ?? []).slice(0, 5)) {
+    if (!file.downloadUrl || !file.name) continue;
+    const bytes = await deps.slack.downloadFile(file.downloadUrl);
+    if (!bytes || bytes.length === 0 || bytes.length > 50 * 1024 * 1024) continue;
+    try {
+      const { storedName } = await saveAttachmentToStore(document.id, file.name, bytes);
+      await db.attachment.create({
+        data: {
+          documentId: document.id,
+          fileName: file.name,
+          storedName,
+          mimeType: file.mimetype ?? "application/octet-stream",
+          size: bytes.length,
+          createdById: link.userId
+        }
+      });
+      savedFiles.push(`attachments/${storedName} (original name: ${file.name})`);
+    } catch (error) {
+      console.error("[slack] attachment save failed", {
+        documentId: document.id,
+        error: error instanceof Error ? error.message : error
+      });
+    }
+  }
+  const filesNote =
+    savedFiles.length > 0
+      ? `The user attached ${savedFiles.length === 1 ? "a file" : "files"}, available in your workspace:\n${savedFiles.map((f) => `- ${f}`).join("\n")}`
+      : null;
+
   const threadContext = await buildThreadContext(deps, event);
-  const instruction = [threadContext, instructionBody]
+  const instruction = [threadContext, filesNote, instructionBody]
     .filter(Boolean)
     .join("\n\n")
     .slice(0, MAX_INSTRUCTION_LENGTH);

@@ -10,6 +10,8 @@ process.env.SESSION_SECRET = process.env.SESSION_SECRET || "test-session-secret"
 const BOT = "UBOT";
 
 // C_BOTH: bot + alice + bob; C_ALICE: private, bot + alice only; C_NOBOT: alice only.
+const uploads: Array<{ channel: string; threadTs?: string; filename: string; size: number }> = [];
+
 function makeSlack(): SlackClient {
   const membership: Record<string, string[]> = {
     C_BOTH: [BOT, "UALICE", "UBOB"],
@@ -49,6 +51,12 @@ function makeSlack(): SlackClient {
       const members = membership[channelId];
       if (!members) throw new Error("channel_not_found");
       return members;
+    },
+    async downloadFile() {
+      return null;
+    },
+    async uploadFile(args) {
+      uploads.push({ channel: args.channel, threadTs: args.threadTs, filename: args.filename, size: args.content.length });
     }
   };
 }
@@ -200,4 +208,87 @@ test("recent_activity shows only runs on documents the requester can access", as
     { claims: { slackTeamId: teamId, slackUserId: "UNOBODY", aiRunId: "r3" }, slack, botUserId: BOT }
   );
   assert.equal(unlinked.ok, false);
+});
+
+test("run-scoped slack token authenticates the MCP bridge as the linked user", async () => {
+  const crypto = await import("node:crypto");
+  const { db } = await import("../lib/db");
+  const { createSlackToolsToken: mkToken } = await import("../lib/slack/link-token");
+  const { handleMcpMessage } = await import("../lib/mcp/server");
+  const teamId = `T-${crypto.randomUUID()}`;
+
+  const user = await db.user.create({
+    data: { email: `mcp-slack-${crypto.randomUUID()}@example.com`, name: "mcp-slack", passwordHash: "x" }
+  });
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UMCP", userId: user.id }
+  });
+  const doc = await db.document.create({
+    data: {
+      ownerId: user.id,
+      title: "My slack-reachable doc",
+      content: JSON.stringify({ type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "hello" }] }] })
+    }
+  });
+
+  // Exercise the exact resolution path the route uses.
+  const routeModule = await import("../app/api/mcp/route");
+  const token = await mkToken({ slackTeamId: teamId, slackUserId: "UMCP", aiRunId: "r-mcp" });
+  const request = new Request("http://localhost:14141/api/mcp", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "list_documents", arguments: {} } })
+  });
+  const response = await routeModule.POST(request);
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as { result?: { content: Array<{ text: string }> } };
+  assert.ok(payload.result, "tools/call must succeed with the slack run token");
+  assert.match(payload.result!.content[0].text, /My slack-reachable doc/);
+
+  // A garbage token is still rejected.
+  const bad = await routeModule.POST(
+    new Request("http://localhost:14141/api/mcp", {
+      method: "POST",
+      headers: { Authorization: "Bearer not-a-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })
+    })
+  );
+  assert.equal(bad.status, 401);
+  void handleMcpMessage;
+  void doc;
+});
+
+test("send_file uploads into the run's own thread after a membership check", async () => {
+  const crypto = await import("node:crypto");
+  const { db } = await import("../lib/db");
+  const teamId = `T-${crypto.randomUUID()}`;
+  const user = await db.user.create({
+    data: { email: `sf-${crypto.randomUUID()}@example.com`, name: "sf", passwordHash: "x" }
+  });
+  const doc = await db.document.create({ data: { ownerId: user.id, title: "x", content: "{}" } });
+  const run = await db.aiRun.create({
+    data: { documentId: doc.id, triggerType: "SLACK_MENTION", triggerId: "C_BOTH:1.0", instruction: "x" }
+  });
+  const slack = makeSlack();
+  const before = uploads.length;
+  const ok = await handleSlackAgentToolCall(
+    {
+      tool: "send_file",
+      args: { filename: "plot.png", content_base64: Buffer.from("png-bytes").toString("base64") }
+    },
+    { claims: { slackTeamId: teamId, slackUserId: "UALICE", aiRunId: run.id }, slack, botUserId: BOT }
+  );
+  assert.ok(ok.ok, ok.text);
+  assert.equal(uploads.length, before + 1);
+  assert.deepEqual(uploads.at(-1), { channel: "C_BOTH", threadTs: "1.0", filename: "plot.png", size: 9 });
+
+  // A run anchored in a channel the requester is not a member of is refused.
+  const runPrivate = await db.aiRun.create({
+    data: { documentId: doc.id, triggerType: "SLACK_MENTION", triggerId: "C_ALICE:2.0", instruction: "x" }
+  });
+  const denied = await handleSlackAgentToolCall(
+    { tool: "send_file", args: { filename: "p.png", content_base64: "eA==" } },
+    { claims: { slackTeamId: teamId, slackUserId: "UBOB", aiRunId: runPrivate.id }, slack, botUserId: BOT }
+  );
+  assert.equal(denied.ok, false);
 });

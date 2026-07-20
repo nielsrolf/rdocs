@@ -40,7 +40,11 @@ function makeDeps(runs: ConversationRunInput[]) {
     },
     async channelMembers() {
       return [BOT, "UALICE"];
-    }
+    },
+    async downloadFile() {
+      return null;
+    },
+    async uploadFile() {}
   };
   const deps: SlackEventDeps = {
     slack,

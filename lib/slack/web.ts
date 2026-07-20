@@ -24,6 +24,16 @@ export type SlackClient = {
   botChannels(): Promise<Array<{ id: string; name: string | null; isPrivate: boolean }>>;
   /** User ids that are members of a channel (paginated up to ~600). */
   channelMembers(channelId: string): Promise<string[]>;
+  /** Download a Slack-hosted file (url_private_download) with the bot token. */
+  downloadFile(url: string): Promise<Buffer | null>;
+  /** Upload a file into a channel/thread (files.getUploadURLExternal flow). */
+  uploadFile(args: {
+    channel: string;
+    threadTs?: string;
+    filename: string;
+    title?: string;
+    content: Buffer;
+  }): Promise<void>;
 };
 
 type SlackApiResponse = { ok: boolean; error?: string } & Record<string, unknown>;
@@ -147,6 +157,34 @@ export function createSlackWebClient(botToken: string): SlackClient {
         name: typeof channel.name === "string" ? channel.name : null,
         isPrivate: channel.is_private === true || channel.is_im === true
       }));
+    },
+    async downloadFile(url) {
+      try {
+        const response = await fetch(url, { headers: { Authorization: `Bearer ${botToken}` } });
+        if (!response.ok) return null;
+        const bytes = Buffer.from(await response.arrayBuffer());
+        // Slack serves an HTML login page instead of 403 for bad auth — reject it.
+        if (bytes.subarray(0, 15).toString().toLowerCase().includes("<!doctype")) return null;
+        return bytes;
+      } catch {
+        return null;
+      }
+    },
+    async uploadFile({ channel, threadTs, filename, title, content }) {
+      const ticket = await slackApi(botToken, "files.getUploadURLExternal", {
+        filename,
+        length: content.length
+      });
+      const uploadUrl = typeof ticket.upload_url === "string" ? ticket.upload_url : null;
+      const fileId = typeof ticket.file_id === "string" ? ticket.file_id : null;
+      if (!uploadUrl || !fileId) throw new Error("Slack did not return an upload URL.");
+      const put = await fetch(uploadUrl, { method: "POST", body: new Uint8Array(content) });
+      if (!put.ok) throw new Error(`Slack upload failed: http ${put.status}`);
+      await slackApi(botToken, "files.completeUploadExternal", {
+        files: JSON.stringify([{ id: fileId, title: title || filename }]),
+        channel_id: channel,
+        ...(threadTs ? { thread_ts: threadTs } : {})
+      });
     },
     async channelMembers(channelId) {
       const members: string[] = [];

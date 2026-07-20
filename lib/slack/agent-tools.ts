@@ -21,7 +21,8 @@ export type SlackAgentToolRequest = {
     | "recent_activity"
     | "schedule_task"
     | "list_scheduled_tasks"
-    | "cancel_scheduled_task";
+    | "cancel_scheduled_task"
+    | "send_file";
   args: Record<string, unknown>;
 };
 
@@ -142,6 +143,40 @@ export async function handleSlackAgentToolCall(
       return `${run.startedAt.toISOString()} • ${project} • ${who} • ${run.status}\n  prompt: ${prompt}${selection}${summary}`;
     });
     return { ok: true, text: `Recent agent activity across your projects (newest first):\n${lines.join("\n")}` };
+  }
+
+  if (request.tool === "send_file") {
+    // Upload a workspace file into the run's own conversation. The agent ships
+    // the bytes base64 over the run-scoped callback; they land in the thread
+    // the run was triggered from — never another channel.
+    const run = await db.aiRun.findUnique({
+      where: { id: claims.aiRunId },
+      select: { triggerId: true }
+    });
+    if (!run?.triggerId) return { ok: false, text: "This run has no Slack conversation to send into." };
+    const [channel, threadTs] = run.triggerId.split(":", 2);
+    const denied = await assertReadable(slack, botUserId, claims, channel);
+    if (denied) return { ok: false, text: denied };
+    const filename = typeof request.args.filename === "string" ? request.args.filename.trim() : "";
+    const contentBase64 = typeof request.args.content_base64 === "string" ? request.args.content_base64 : "";
+    const title = typeof request.args.title === "string" ? request.args.title.trim() : undefined;
+    if (!filename || !contentBase64) return { ok: false, text: "filename and content_base64 are required." };
+    let content: Buffer;
+    try {
+      content = Buffer.from(contentBase64, "base64");
+    } catch {
+      return { ok: false, text: "content_base64 is not valid base64." };
+    }
+    if (content.length === 0) return { ok: false, text: "The file is empty." };
+    if (content.length > 25 * 1024 * 1024) return { ok: false, text: "File too large (max 25 MB)." };
+    await slack.uploadFile({
+      channel,
+      threadTs: threadTs || undefined,
+      filename,
+      title,
+      content
+    });
+    return { ok: true, text: `Uploaded ${filename} (${content.length} bytes) to the thread.` };
   }
 
   if (

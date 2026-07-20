@@ -43,7 +43,14 @@ export async function startSlackSocketService() {
     subtype: event.subtype,
     text: event.text ?? "",
     ts: event.ts,
-    threadTs: event.thread_ts
+    threadTs: event.thread_ts,
+    files: Array.isArray(event.files)
+      ? event.files.map((file: Record<string, unknown>) => ({
+          downloadUrl: typeof file.url_private_download === "string" ? file.url_private_download : undefined,
+          name: typeof file.name === "string" ? file.name : undefined,
+          mimetype: typeof file.mimetype === "string" ? file.mimetype : undefined
+        }))
+      : undefined
   });
 
   socket.on("app_mention", async ({ event, body, ack }) => {

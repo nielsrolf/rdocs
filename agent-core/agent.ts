@@ -1,6 +1,6 @@
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import fs from "node:fs/promises";
-import { join as joinPath, resolve as resolvePath } from "node:path";
+import { basename, join as joinPath, resolve as resolvePath, sep as pathSep } from "node:path";
 
 import {
   createSdkMcpServer,
@@ -98,6 +98,12 @@ export type ClaudeResearchAgentInput = {
   slackTools?: {
     url: string;
     token: string;
+    /**
+     * The rdocs MCP bridge (/api/mcp). Attached as an HTTP MCP server so the
+     * agent can read/edit rdocs documents as the triggering user (the bridge
+     * accepts the same run-scoped token and resolves their linked account).
+     */
+    mcpUrl?: string;
   };
 };
 
@@ -173,7 +179,8 @@ const POST_SLACK_MESSAGE_TOOL_NAME = "mcp__gdocs__post_slack_message";
 const SLACK_READ_TOOL_NAMES = [
   "mcp__gdocs__list_slack_channels",
   "mcp__gdocs__read_slack_channel",
-  "mcp__gdocs__read_slack_thread"
+  "mcp__gdocs__read_slack_thread",
+  "mcp__gdocs__send_slack_file"
 ];
 const RECENT_ACTIVITY_TOOL_NAME = "mcp__gdocs__recent_activity";
 const SCHEDULE_TOOL_NAMES = [
@@ -562,7 +569,7 @@ function buildUserPromptRaw(input: ClaudeResearchAgentInput) {
         }). Your submit_response reply is posted to the Slack thread — write it as a chat message: concise Markdown, no long report unless asked (it is converted to Slack formatting for you).
 While you work you may post short interim updates to the thread with the post_slack_message tool (e.g. what you found so far, or that a step will take a while). Default to ONE message per round of conversation: every unnecessary interim message fragments the thread. Never use post_slack_message for the final answer, which always goes through submit_response. Everything you post goes to the CURRENT thread only — never attempt to reach other channels or threads via shell/curl; use only the provided tools.${
           input.slackTools
-            ? "\nYou can also inspect other Slack content with list_slack_channels / read_slack_channel / read_slack_thread. Access is enforced server-side: only channels that both you (the bot) and the requesting user are members of are readable.\nYou can schedule (recurring) work with schedule_task / list_scheduled_tasks / cancel_scheduled_task — each firing runs as a fresh agent run in this conversation with the scheduling user's credentials. Only schedule when explicitly asked; always confirm the schedule you set in your reply."
+            ? "\nYou can also inspect other Slack content with list_slack_channels / read_slack_channel / read_slack_thread. Access is enforced server-side: only channels that both you (the bot) and the requesting user are members of are readable.\nYou can schedule (recurring) work with schedule_task / list_scheduled_tasks / cancel_scheduled_task — each firing runs as a fresh agent run in this conversation with the scheduling user's credentials. Only schedule when explicitly asked; always confirm the schedule you set in your reply.\nThe rdocs MCP server (tools starting with mcp__rdocs__) gives you the requesting user's rdocs documents: list, read, edit, comment — you act with exactly their document access.\nFiles the user attaches in Slack appear in your workspace under attachments/; share files back into the thread with send_slack_file."
             : ""
         }
 ${
@@ -1156,6 +1163,60 @@ async function runClaudeResearchAgentOnce(
     async (args) => callSlackTool("cancel_scheduled_task", args)
   );
 
+  const sendSlackFileTool = tool(
+    "send_slack_file",
+    "Share ONE file from your workspace into the Slack thread you are working in (plot, PDF, dataset…). Max 25 MB. The file goes to THIS thread only.",
+    {
+      path: z.string().min(1).describe("Path of the file, relative to your workspace root."),
+      title: z.string().optional().describe("Optional display title in Slack.")
+    },
+    async (args) => {
+      const workspaceRoot = (() => {
+        try {
+          return realpathSync(cwd);
+        } catch {
+          return resolvePath(cwd);
+        }
+      })();
+      const resolved = resolvePath(workspaceRoot, args.path);
+      let canonicalFile: string;
+      try {
+        canonicalFile = realpathSync(resolved);
+      } catch {
+        return { content: [{ type: "text" as const, text: `File not found: ${args.path}` }], isError: true };
+      }
+      if (canonicalFile !== workspaceRoot && !canonicalFile.startsWith(workspaceRoot + pathSep)) {
+        return {
+          content: [{ type: "text" as const, text: "Only files inside your workspace can be shared." }],
+          isError: true
+        };
+      }
+      let bytes: Buffer;
+      try {
+        bytes = readFileSync(canonicalFile);
+      } catch (error) {
+        return {
+          content: [
+            { type: "text" as const, text: `Could not read file: ${error instanceof Error ? error.message : String(error)}` }
+          ],
+          isError: true
+        };
+      }
+      if (bytes.length > 25 * 1024 * 1024) {
+        return { content: [{ type: "text" as const, text: "File too large (max 25 MB)." }], isError: true };
+      }
+      const result = await callSlackTool("send_file", {
+        filename: basename(canonicalFile),
+        title: args.title,
+        content_base64: bytes.toString("base64")
+      });
+      if (!("isError" in result) || !result.isError) {
+        emitProgress(onProgress, { role: "tool", message: `Shared ${basename(canonicalFile)} to Slack` });
+      }
+      return result;
+    }
+  );
+
   const isDmOverview = input.slackContext?.surface === "dm";
   const mcpServer = createSdkMcpServer({
     name: "gdocs",
@@ -1165,7 +1226,15 @@ async function runClaudeResearchAgentOnce(
       addCommentTool,
       ...(input.slackContext ? [postSlackMessageTool] : []),
       ...(input.slackTools
-        ? [listSlackChannelsTool, readSlackChannelTool, readSlackThreadTool, scheduleTaskTool, listScheduledTasksTool, cancelScheduledTaskTool]
+        ? [
+            listSlackChannelsTool,
+            readSlackChannelTool,
+            readSlackThreadTool,
+            sendSlackFileTool,
+            scheduleTaskTool,
+            listScheduledTasksTool,
+            cancelScheduledTaskTool
+          ]
         : []),
       ...(input.slackTools && isDmOverview ? [recentActivityTool] : [])
     ],
@@ -1234,6 +1303,8 @@ async function runClaudeResearchAgentOnce(
         ADD_COMMENT_TOOL_NAME,
         ...(input.slackContext ? [POST_SLACK_MESSAGE_TOOL_NAME] : []),
         ...(input.slackTools ? [...SLACK_READ_TOOL_NAMES, ...SCHEDULE_TOOL_NAMES] : []),
+        // Whole-server allow: every tool of the rdocs MCP bridge.
+        ...(input.slackTools?.mcpUrl ? ["mcp__rdocs"] : []),
         ...(input.slackTools && input.slackContext?.surface === "dm" ? [RECENT_ACTIVITY_TOOL_NAME] : [])
       ],
       disallowedTools: [
@@ -1243,7 +1314,20 @@ async function runClaudeResearchAgentOnce(
         "ExitPlanMode",
         "ToolSearch"
       ],
-      mcpServers: { gdocs: mcpServer },
+      mcpServers: {
+        gdocs: mcpServer,
+        // rdocs document access for Slack runs, authenticated as the
+        // triggering user (see input.slackTools.mcpUrl).
+        ...(input.slackTools?.mcpUrl
+          ? {
+              rdocs: {
+                type: "http" as const,
+                url: input.slackTools.mcpUrl,
+                headers: { Authorization: `Bearer ${input.slackTools.token}` }
+              }
+            }
+          : {})
+      },
       maxTurns: parseMaxTurns(process.env.CLAUDE_AGENT_MAX_TURNS),
       model: sdkConfig.model,
       thinking: sdkConfig.thinking,

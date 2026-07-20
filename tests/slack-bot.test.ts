@@ -58,7 +58,11 @@ function makeFakeSlack(threadMessages: SlackMessage[] = [], channelMessages: Sla
     },
     async channelMembers() {
       return [];
-    }
+    },
+    async downloadFile() {
+      return Buffer.from("fake-bytes");
+    },
+    async uploadFile() {}
   };
   return { client, posted, ephemeral, reactions };
 }
@@ -525,4 +529,91 @@ test("cancelled runs post 'Stopped.' instead of a failure message", async () => 
   await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
   await runs[0].onFinished?.({ status: "FAILED", reply: null, error: "Cancelled by user." });
   assert.equal(posted.at(-1)!.text, "Stopped.");
+});
+
+test("DM threads are independent sessions: a running thread never captures other threads' messages", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-par-alice");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const { client, reactions } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+
+  // Thread A starts a run and stays RUNNING.
+  const a = await handleSlackDirectMessage(
+    mention({ teamId, channel: "D777", text: "long task please", ts: "7000.000" }),
+    depsWith(client, runs)
+  );
+  assert.equal(a.handled, true);
+  assert.ok(!("action" in a));
+
+  // A NEW top-level DM message must start a parallel run in its own thread —
+  // not queue behind thread A, not reply into thread A.
+  const b = await handleSlackDirectMessage(
+    mention({ teamId, channel: "D777", text: "do you have access to rdocs?", ts: "7001.000" }),
+    depsWith(client, runs)
+  );
+  assert.equal(b.handled, true);
+  assert.ok(!("action" in b), "new top-level DM message must not be queued behind another thread's run");
+  assert.equal(runs.length, 2, "two parallel sessions");
+  assert.ok(
+    !reactions.some((r) => r.ts === "7001.000" && r.name === "hourglass_flowing_sand"),
+    "no queue reaction on an unrelated message"
+  );
+
+  // Its reply lands in ITS OWN thread.
+  const { posted } = { posted: [] as Array<{ channel: string; text: string; threadTs?: string }> };
+  void posted;
+  await runs[1].onFinished?.({ status: "SUCCEEDED", reply: "Yes I do.", error: null });
+  // The fake client records into the shared `posted` from makeFakeSlack via closure:
+  // fetch it through the client by re-checking reactions/posts is not possible here,
+  // so assert via the run rows instead.
+  const runB = await db.aiRun.findUnique({ where: { id: (b as { aiRunId: string }).aiRunId } });
+  assert.equal(runB!.triggerId, "D777:7001.000", "session B anchors to its own thread");
+
+  // "wait" inside thread A still interrupts run A.
+  const abortA = registerRunAbortController((a as { aiRunId: string }).aiRunId);
+  const interrupt = await handleSlackDirectMessage(
+    mention({ teamId, channel: "D777", text: "wait", ts: "7002.000", threadTs: "7000.000" }),
+    depsWith(client, runs)
+  );
+  assert.equal("action" in interrupt && interrupt.action, "interrupted");
+  assert.ok(abortA.signal.aborted);
+
+  // And a bare top-level "wait" with no run in ITS thread is just a prompt.
+  const idle = await handleSlackDirectMessage(
+    mention({ teamId, channel: "D777", text: "wait", ts: "7003.000" }),
+    depsWith(client, runs)
+  );
+  assert.equal(idle.handled, true);
+  assert.ok(!("action" in idle) || idle.action === undefined);
+});
+
+test("files attached to a slack message are saved as document attachments and announced to the agent", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-file-alice");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const { client } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+  const result = await handleSlackAppMention(
+    {
+      ...mention({ teamId, text: `<@${BOT_USER_ID}> analyze this dataset` }),
+      files: [{ downloadUrl: "https://files.slack.com/x", name: "results.csv", mimetype: "text/csv" }]
+    },
+    depsWith(client, runs)
+  );
+  assert.equal(result.handled, true);
+
+  const attachment = await db.attachment.findFirst({
+    where: { documentId: (result as { documentId: string }).documentId },
+    orderBy: { createdAt: "desc" }
+  });
+  assert.ok(attachment, "attachment row must exist");
+  assert.equal(attachment!.fileName, "results.csv");
+  assert.equal(attachment!.createdById, alice.id);
+  assert.match(runs[0].message, /attachments\/results\.csv/);
+  assert.match(runs[0].message, /analyze this dataset/);
 });

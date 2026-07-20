@@ -1,8 +1,28 @@
 import { NextResponse } from "next/server";
 
 import { resolveApiTokenUser } from "@/lib/api-tokens";
+import { db } from "@/lib/db";
 import { handleMcpBody } from "@/lib/mcp/server";
 import { getPublicOrigin } from "@/lib/request-origin";
+import { verifySlackToolsToken } from "@/lib/slack/link-token";
+
+// Slack-triggered agent runs reach this bridge with their run-scoped JWT
+// (input.slackTools.token) instead of a gdai_ personal token; it resolves to
+// the rdocs account LINKED to the Slack user who triggered the run, so the
+// agent reads/edits documents with exactly that user's access.
+async function resolveSlackRunUser(authorizationHeader: string | null) {
+  const match = authorizationHeader?.match(/^Bearer\s+(\S+)$/i);
+  if (!match || match[1].startsWith("gdai_")) return null;
+  const claims = await verifySlackToolsToken(match[1]);
+  if (!claims) return null;
+  const link = await db.slackAccountLink.findUnique({
+    where: {
+      slackTeamId_slackUserId: { slackTeamId: claims.slackTeamId, slackUserId: claims.slackUserId }
+    },
+    select: { user: { select: { id: true, email: true, name: true } } }
+  });
+  return link?.user ?? null;
+}
 
 export const runtime = "nodejs";
 // Long agent-driven tool calls (widget builds, git pushes) can take a while.
@@ -23,7 +43,9 @@ function unauthorized() {
 }
 
 export async function POST(request: Request) {
-  const user = await resolveApiTokenUser(request.headers.get("authorization"));
+  const authorization = request.headers.get("authorization");
+  const user =
+    (await resolveApiTokenUser(authorization)) ?? (await resolveSlackRunUser(authorization));
   if (!user) {
     return unauthorized();
   }

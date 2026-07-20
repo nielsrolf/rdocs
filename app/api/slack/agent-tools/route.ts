@@ -15,7 +15,8 @@ const toolRequestSchema = z.object({
     "recent_activity",
     "schedule_task",
     "list_scheduled_tasks",
-    "cancel_scheduled_task"
+    "cancel_scheduled_task",
+    "send_file"
   ]),
   args: z.record(z.string(), z.unknown()).default({})
 });
