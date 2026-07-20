@@ -6,6 +6,8 @@ import { createApiToken } from "../lib/api-tokens";
 import { db } from "../lib/db";
 import { claimNextSelfHostedJob, completeSelfHostedJob, enqueueSelfHostedJob, getSelfHostedJob } from "../lib/self-hosted-jobs";
 import { loadAgentEnvForDocument, normalizeCredentialInput, upsertUserCredential } from "../lib/user-credentials";
+import { runAskAiInBackground } from "../lib/ask-ai";
+import { runAgentConversationInBackground } from "../lib/agent-conversation";
 
 // Same-process key: credentials created below are decrypted with this key.
 process.env.CREDENTIAL_ENCRYPTION_KEY = crypto.randomBytes(32).toString("base64");
@@ -163,4 +165,139 @@ test("self-hosted job queue: failure path records the error", async () => {
   const finished = await getSelfHostedJob(enqueued.id);
   assert.equal(finished?.status, "failed");
   assert.equal(finished?.error, "worker exploded");
+});
+
+// --- (c) the ask-ai and agent-conversation background runners must take the
+// same isSelfHosted branch as ai-edit: no worktree, enqueue a SelfHostedJob,
+// and never fall through to the managed in-process/container runner.
+
+test("ask-ai on a selfHosted document: no worktree, enqueues a SelfHostedJob, posts the worker's reply", async () => {
+  const owner = await makeUser("sh-ask-owner");
+  await connectAnthropicKey(owner.id, "sk-ant-ask-owner-key");
+  const doc = await makeDoc(owner.id, "selfHosted");
+
+  const thread = await db.commentThread.create({
+    data: {
+      documentId: doc.id,
+      createdById: owner.id,
+      anchorText: "the anchored sentence",
+      anchorContext: "context around the anchored sentence"
+    }
+  });
+  await db.comment.create({
+    data: { threadId: thread.id, authorId: owner.id, body: "what do you think?" }
+  });
+
+  const threadForReply = {
+    id: thread.id,
+    anchorText: thread.anchorText,
+    anchorContext: thread.anchorContext,
+    documentId: doc.id,
+    document: {
+      id: doc.id,
+      title: doc.title,
+      content: doc.content,
+      repoUrl: doc.repoUrl,
+      agentModel: doc.agentModel,
+      agentEffort: doc.agentEffort,
+      runnerMode: doc.runnerMode
+    },
+    comments: [{ body: "what do you think?", author: { name: "owner" }, aiModel: null }]
+  };
+
+  const aiRun = await db.aiRun.create({
+    data: {
+      documentId: doc.id,
+      triggerType: "COMMENT_THREAD",
+      createdById: owner.id,
+      triggerId: thread.id,
+      instruction: "Write the next assistant reply for this comment thread.",
+      suggestOnly: true
+    }
+  });
+
+  const runPromise = runAskAiInBackground({
+    aiRunId: aiRun.id,
+    thread: threadForReply,
+    createdById: owner.id,
+    agentAccessMode: "workspace"
+  });
+
+  // Wait for the job to appear rather than sleeping a fixed amount — the
+  // background runner does credential resolution before enqueuing.
+  let job: Awaited<ReturnType<typeof db.selfHostedJob.findFirst>> = null;
+  for (let i = 0; i < 50 && !job; i++) {
+    job = await db.selfHostedJob.findFirst({ where: { aiRunId: aiRun.id } });
+    if (!job) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.ok(job, "runAskAiInBackground must enqueue a SelfHostedJob instead of managing a worktree");
+  assert.equal(job!.documentId, doc.id);
+
+  const ok = await completeSelfHostedJob(job!.id, owner.id, {
+    status: "succeeded",
+    resultPayload: { reply: "Here is the worker's reply.", model: "claude-sonnet-5" }
+  });
+  assert.ok(ok);
+
+  await runPromise;
+
+  const finishedRun = await db.aiRun.findUnique({ where: { id: aiRun.id } });
+  assert.equal(finishedRun?.status, "SUCCEEDED");
+  // selfHosted: this app never created/tracked a worktree for the run.
+  assert.equal(finishedRun?.workspacePath, null);
+
+  const posted = await db.comment.findFirst({
+    where: { threadId: thread.id, aiRunId: aiRun.id }
+  });
+  assert.equal(posted?.body, "Here is the worker's reply.");
+});
+
+test("agent-conversation on a selfHosted document: no worktree, enqueues a SelfHostedJob, resolves via the worker's result", async () => {
+  const owner = await makeUser("sh-conv-owner");
+  await connectAnthropicKey(owner.id, "sk-ant-conv-owner-key");
+  const doc = await makeDoc(owner.id, "selfHosted");
+
+  const aiRun = await db.aiRun.create({
+    data: {
+      documentId: doc.id,
+      triggerType: "CONVERSATION",
+      createdById: owner.id,
+      instruction: "summarize the doc",
+      suggestOnly: true
+    }
+  });
+
+  const runPromise = runAgentConversationInBackground({
+    documentId: doc.id,
+    aiRunId: aiRun.id,
+    message: "summarize the doc",
+    previousRunId: null,
+    documentTitle: doc.title,
+    documentContent: doc.content,
+    createdById: owner.id,
+    agentConfig: { model: doc.agentModel, effort: doc.agentEffort },
+    agentAccessMode: "workspace",
+    runnerMode: doc.runnerMode
+  });
+
+  let job: Awaited<ReturnType<typeof db.selfHostedJob.findFirst>> = null;
+  for (let i = 0; i < 50 && !job; i++) {
+    job = await db.selfHostedJob.findFirst({ where: { aiRunId: aiRun.id } });
+    if (!job) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.ok(job, "runAgentConversationInBackground must enqueue a SelfHostedJob instead of managing a worktree");
+  assert.equal(job!.documentId, doc.id);
+
+  const ok = await completeSelfHostedJob(job!.id, owner.id, {
+    status: "succeeded",
+    resultPayload: { reply: "Summary from the worker.", model: "claude-sonnet-5" }
+  });
+  assert.ok(ok);
+
+  await runPromise;
+
+  const finishedRun = await db.aiRun.findUnique({ where: { id: aiRun.id } });
+  assert.equal(finishedRun?.status, "SUCCEEDED");
+  // selfHosted: this app never created/tracked a worktree for the run.
+  assert.equal(finishedRun?.workspacePath, null);
 });

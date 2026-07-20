@@ -6,6 +6,7 @@
 import {
   handleSlackAppMention,
   handleSlackDirectMessage,
+  handleSlackThreadReply,
   type SlackIncomingMessage
 } from "@/lib/slack/events";
 import { createSlackWebClient, slackAuthTest } from "@/lib/slack/web";
@@ -74,15 +75,23 @@ export async function startSlackSocketService() {
     }
   });
 
-  // DMs: every user message is a prompt, no mention required.
+  // DMs: every user message is a prompt, no mention required. Channel thread
+  // replies to existing claudex conversations also come through here (that is
+  // how "wait" works without re-mentioning the bot) — requires the message.channels
+  // + message.groups event subscriptions in the Slack app config.
   socket.on("message", async ({ event, body, ack }) => {
     await ack();
-    if (event.channel_type !== "im") return;
+    const isDm = event.channel_type === "im";
+    const isChannel = event.channel_type === "channel" || event.channel_type === "group";
+    if (!isDm && !(isChannel && event.thread_ts)) return;
     try {
       const message = toIncoming(event, body);
-      const result = await handleSlackDirectMessage(message, { slack, appUrl, botUserId });
-      // Our own replies echo back as message.im events — don't log that noise.
-      if (result.handled || result.reason !== "bot-message") {
+      const result = isDm
+        ? await handleSlackDirectMessage(message, { slack, appUrl, botUserId })
+        : await handleSlackThreadReply(message, { slack, appUrl, botUserId });
+      // Our own replies echo back as message events, and most channel thread
+      // replies have no claudex session — don't log that noise.
+      if (result.handled || (result.reason !== "bot-message" && result.reason !== "no-session")) {
         console.log("[slack] dm", {
           channel: message.channel,
           user: message.user,

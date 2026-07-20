@@ -41,6 +41,9 @@ export class InProcessRunner implements AgentRunner {
       agentConfig: options?.agentConfig,
       agentEnv: options?.agentEnv,
       validateSubmission,
+      // Real cancellation: the signal reaches the SDK loop, which tears down
+      // its subprocess — without this, "cancelled" runs kept executing.
+      signal: options?.signal,
       // Trusted host runs (Slack dev channel) opt out of the workspace guard
       // and kernel sandbox: the whole point is operating on the deployment.
       isolatedRuntime: options?.trustedHostRun === true

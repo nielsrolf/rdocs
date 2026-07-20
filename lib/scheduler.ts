@@ -74,7 +74,7 @@ export async function fireScheduledTask(task: ScheduledTaskRow, deps?: SlackEven
   }
   const document = await db.document.findUnique({
     where: { id: task.documentId },
-    select: { id: true, title: true, content: true, agentModel: true, agentEffort: true }
+    select: { id: true, title: true, content: true, agentModel: true, agentEffort: true, runnerMode: true }
   });
   if (!document || !task.createdById) {
     await db.scheduledTask.update({

@@ -166,6 +166,12 @@ export type ClaudeAgentRunOptions = {
    * Runtime-only; the container runner bridges it as a "slack_message" frame.
    */
   onSlackMessage?: (text: string) => void | Promise<void>;
+  /**
+   * External cancellation. Aborting tears down the SDK loop itself (the run's
+   * subprocess exits), not just the caller's bookkeeping — required for
+   * in-process runs, where there is no container to kill.
+   */
+  signal?: AbortSignal;
   validateSubmission?: ClaudeAgentSubmissionValidator;
   /** Per-document model + thinking-effort selection (see lib/agent-config). */
   agentConfig?: DocumentAgentConfig;
@@ -941,6 +947,13 @@ async function runClaudeResearchAgentOnce(
   const cwd = input.workspacePath;
   const isolatedRuntime = options.isolatedRuntime ?? false;
   const abortController = new AbortController();
+  // Bridge external cancellation into the SDK loop's own controller so an
+  // aborted run actually terminates (subprocess included).
+  if (options.signal?.aborted) {
+    throw new Error("Claude research agent run was aborted.");
+  }
+  const onExternalAbort = () => abortController.abort();
+  options.signal?.addEventListener("abort", onExternalAbort, { once: true });
 
   let captured: Partial<ClaudeResearchAgentOutput> | null = null;
   const submitTool = tool(
@@ -1416,6 +1429,7 @@ async function runClaudeResearchAgentOnce(
     }
     throw error;
   } finally {
+    options.signal?.removeEventListener("abort", onExternalAbort);
     agentQuery.close();
   }
 

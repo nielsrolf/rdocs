@@ -82,7 +82,8 @@ export async function POST(request: Request, { params }: RouteContext) {
     documentContent: access.document.content,
     createdById: user?.id ?? null,
     agentConfig: { model: access.document.agentModel, effort: access.document.agentEffort },
-    agentAccessMode: agentAccessModeForDocumentAccess(access)
+    agentAccessMode: agentAccessModeForDocumentAccess(access),
+    runnerMode: access.document.runnerMode
   }).catch((error) => {
     console.error("[agents] background run threw", {
       documentId: id,

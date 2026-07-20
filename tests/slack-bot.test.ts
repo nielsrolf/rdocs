@@ -682,3 +682,75 @@ test("dev-channel messages from the allowlisted user run on the host; others san
     else process.env.SLACK_DEV_ALLOWED_EMAILS = prevEmails;
   }
 });
+
+test("plain thread replies reach active claudex sessions: 'wait' interrupts without a mention", async () => {
+  const { handleSlackThreadReply } = await import("../lib/slack/events");
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-tr-alice");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const { client, reactions } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+
+  // A reply in a random thread with no claudex session is ignored entirely.
+  const ignored = await handleSlackThreadReply(
+    mention({ teamId, text: "just chatting", ts: "8001.000", threadTs: "8000.000" }),
+    depsWith(client, runs)
+  );
+  assert.equal(ignored.handled, false);
+  assert.equal("reason" in ignored && ignored.reason, "no-session");
+  assert.equal(runs.length, 0);
+
+  // Start a session via mention, leave it RUNNING.
+  const start = await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
+  const runId = (start as { aiRunId: string }).aiRunId;
+  const abort = registerRunAbortController(runId);
+
+  // A bare "wait" reply in the session's thread — NO mention — interrupts it.
+  const interrupt = await handleSlackThreadReply(
+    mention({ teamId, text: "wait", ts: "1003.000", threadTs: "1000.000" }),
+    depsWith(client, runs)
+  );
+  assert.equal(interrupt.handled, true);
+  assert.equal("action" in interrupt && interrupt.action, "interrupted");
+  assert.ok(abort.signal.aborted, "the run's signal must abort");
+  assert.deepEqual(reactions.at(-1), { op: "add", ts: "1003.000", name: "octagonal_sign" });
+
+  // And after the session finishes, a plain reply continues the conversation.
+  await db.aiRun.update({ where: { id: runId }, data: { status: "FAILED" } });
+  const followUp = await handleSlackThreadReply(
+    mention({ teamId, text: "now use fable to do it", ts: "1004.000", threadTs: "1000.000" }),
+    depsWith(client, runs)
+  );
+  assert.equal(followUp.handled, true);
+  const run2 = await db.aiRun.findUnique({ where: { id: (followUp as { aiRunId: string }).aiRunId } });
+  assert.equal(run2!.parentRunId, runId, "plain reply chains the conversation");
+});
+
+test("the same message arriving as app_mention and message event is processed once", async () => {
+  const { handleSlackThreadReply } = await import("../lib/slack/events");
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-dd-alice");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const { client } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+  const start = await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
+  const runId = (start as { aiRunId: string }).aiRunId;
+  await db.aiRun.update({ where: { id: runId }, data: { status: "SUCCEEDED" } });
+
+  // Same ts, different event ids — mention first, then the message event echo.
+  const viaMention = await handleSlackAppMention(
+    mention({ teamId, text: `<@${BOT_USER_ID}> continue`, ts: "1005.000", threadTs: "1000.000" }),
+    depsWith(client, runs)
+  );
+  assert.equal(viaMention.handled, true);
+  const viaMessage = await handleSlackThreadReply(
+    mention({ teamId, text: `<@${BOT_USER_ID}> continue`, ts: "1005.000", threadTs: "1000.000" }),
+    depsWith(client, runs)
+  );
+  assert.equal(viaMessage.handled, false);
+  assert.equal("reason" in viaMessage && viaMessage.reason, "duplicate");
+});

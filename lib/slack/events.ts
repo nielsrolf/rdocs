@@ -279,7 +279,14 @@ export function queuedFollowUpCount(aiRunId: string) {
 type StartSlackRunArgs = {
   deps: SlackEventDeps;
   surface: "mention" | "dm";
-  document: { id: string; title: string; content: string; agentModel: string | null; agentEffort: string | null };
+  document: {
+    id: string;
+    title: string;
+    content: string;
+    agentModel: string | null;
+    agentEffort: string | null;
+    runnerMode: string;
+  };
   channel: string;
   channelName: string | null;
   teamId: string;
@@ -337,6 +344,7 @@ export async function startSlackConversationRun(args: StartSlackRunArgs): Promis
     createdById: args.userId,
     agentConfig: { model: document.agentModel, effort: document.agentEffort },
     agentAccessMode: "workspace",
+    runnerMode: document.runnerMode,
     hostDevRun: args.hostDevRun,
     slackContext: {
       surface: surface === "dm" ? "dm" : "channel",
@@ -441,7 +449,12 @@ async function handleIncomingSlackMessage(
   if (!event.user || event.botId || (event.subtype && event.subtype !== "file_share")) {
     return { handled: false as const, reason: "bot-message" as const };
   }
-  if (hasSeenSlackEvent(event.eventId)) return { handled: false as const, reason: "duplicate" as const };
+  // Dedupe on the MESSAGE identity (team:channel:ts), not the event id: the
+  // same message can arrive twice (app_mention + message.channels), and Slack
+  // also redelivers unacked envelopes.
+  if (hasSeenSlackEvent(`${event.teamId}:${event.channel}:${event.ts}`)) {
+    return { handled: false as const, reason: "duplicate" as const };
+  }
 
   const link = await db.slackAccountLink.findUnique({
     where: { slackTeamId_slackUserId: { slackTeamId: event.teamId, slackUserId: event.user } },
@@ -649,6 +662,32 @@ async function handleIncomingSlackMessage(
 }
 
 export async function handleSlackAppMention(event: SlackIncomingMessage, deps: SlackEventDeps) {
+  return handleIncomingSlackMessage(event, deps, "mention");
+}
+
+// Channel thread replies WITHOUT a mention: once a thread is a claudex
+// conversation, plain replies in it reach the bot too — that's what makes
+// "wait" (and follow-ups) work without re-mentioning. Random threads that
+// never involved claudex are ignored.
+export async function handleSlackThreadReply(event: SlackIncomingMessage, deps: SlackEventDeps) {
+  if (!event.threadTs || event.threadTs === event.ts) {
+    return { handled: false as const, reason: "not-a-thread-reply" as const };
+  }
+  if (!event.user || event.botId || (event.subtype && event.subtype !== "file_share")) {
+    return { handled: false as const, reason: "bot-message" as const };
+  }
+  const document = await db.document.findUnique({
+    where: {
+      slackTeamId_slackChannelId: { slackTeamId: event.teamId, slackChannelId: event.channel }
+    },
+    select: { id: true }
+  });
+  if (!document) return { handled: false as const, reason: "no-session" as const };
+  const session = await db.aiRun.findFirst({
+    where: { documentId: document.id, triggerId: `${event.channel}:${event.threadTs}` },
+    select: { id: true }
+  });
+  if (!session) return { handled: false as const, reason: "no-session" as const };
   return handleIncomingSlackMessage(event, deps, "mention");
 }
 

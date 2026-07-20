@@ -18,7 +18,7 @@ import {
   isRunCancellation,
   registerRunAbortController
 } from "@/lib/agent-runner/run-registry";
-import { createAgentRunner, getAgentRunner } from "@/lib/agent-runner";
+import { createAgentRunner, getAgentRunner, getSelfHostedRunner } from "@/lib/agent-runner";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
 import { loadAgentEnvWithFreeFallback, restrictAgentEnvForReadOnly } from "@/lib/user-credentials";
@@ -50,6 +50,10 @@ export type ConversationRunInput = {
   createdById: string | null;
   agentConfig: { model: string | null; effort: string | null };
   agentAccessMode: AgentAccessMode;
+  // Document.runnerMode ("managed" | "selfHosted"). selfHosted documents never
+  // get a worktree managed by this app — see the isSelfHosted branch below,
+  // mirroring app/api/documents/[id]/ai-edit/route.ts.
+  runnerMode: string;
   // Host dev mode: run unsandboxed in the live deployment directory
   // (allowlisted Slack dev channel only — see lib/slack/dev-mode.ts).
   hostDevRun?: boolean;
@@ -75,12 +79,17 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
     createdById,
     agentConfig,
     agentAccessMode,
+    runnerMode,
     hostDevRun,
     slackContext,
     slackTools,
     onSlackMessage,
     onFinished
   } = input;
+  // Host dev mode and selfHosted are mutually exclusive in practice (host dev
+  // runs are an allowlisted internal debugging path); host dev wins if both
+  // are somehow set, since it explicitly wants the deployment's own checkout.
+  const isSelfHosted = !hostDevRun && runnerMode === "selfHosted";
   let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
   const stopHeartbeat = startAiRunHeartbeat(aiRunId);
   const abort = registerRunAbortController(aiRunId);
@@ -90,8 +99,12 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
     const { history: conversationHistory } = await buildConversationHistory(documentId, previousRunId);
 
     // Host dev runs operate directly on the deployment checkout — no worktree,
-    // no end-of-run commit/cleanup.
-    linkedRepo = hostDevRun ? null : await ensureLinkedRepositoryWorktree(documentId, aiRunId, createdById);
+    // no end-of-run commit/cleanup. selfHosted runs never get a worktree from
+    // this app either — the owner's external worker clones and works in its
+    // own checkout.
+    linkedRepo = hostDevRun || isSelfHosted
+      ? null
+      : await ensureLinkedRepositoryWorktree(documentId, aiRunId, createdById);
     if (hostDevRun) {
       await db.aiRun.update({
         where: { id: aiRunId },
@@ -174,7 +187,11 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       documentText
     });
 
-    const runner = hostDevRun ? createAgentRunner("inprocess") : getAgentRunner();
+    const runner = hostDevRun
+      ? createAgentRunner("inprocess")
+      : isSelfHosted
+        ? getSelfHostedRunner()
+        : getAgentRunner();
     const result = await runner.run({
       mode: "conversation",
       hostDevRun,
@@ -203,6 +220,8 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       agentEnv: agentAccessMode === "read_only" ? restrictAgentEnvForReadOnly(agentEnv) : agentEnv,
       signal: abort.signal,
       containerName: `gdocs-run-${aiRunId}`,
+      documentId,
+      aiRunId,
       validation: { kind: "conversation", documentText: suggestionAnchorText },
       onComment: commentRecorder.onComment,
       onSlackMessage,
