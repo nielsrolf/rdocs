@@ -1546,12 +1546,21 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .eyebrow,
 .permission-pill,
-.subtle-pill {
+.subtle-pill,
+.slack-pill {
   display: inline-flex;
   align-items: center;
   border-radius: 999px;
   padding: 0.28rem 0.7rem;
   font-size: 0.8rem;
+}
+
+/* Slack-channel documents (claudex bot workspaces) — Slack aubergine tint. */
+.slack-pill {
+  background: rgba(74, 21, 75, 0.1);
+  color: #4a154b;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .eyebrow {

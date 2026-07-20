@@ -270,6 +270,7 @@ export async function getDocumentCommentStats(userId: string, documentIds: strin
 export type AccessibleDocument = {
   id: string;
   title: string;
+  kind: string;
   updatedAt: Date;
   isOwner: boolean;
   permission: string;
@@ -288,6 +289,7 @@ export async function listAccessibleDocumentsForUser(userId: string): Promise<Ac
       select: {
         id: true,
         title: true,
+        kind: true,
         updatedAt: true,
         owner: { select: { id: true, name: true } }
       }
@@ -301,6 +303,7 @@ export async function listAccessibleDocumentsForUser(userId: string): Promise<Ac
           select: {
             id: true,
             title: true,
+            kind: true,
             updatedAt: true,
             owner: { select: { id: true, name: true } }
           }
@@ -312,6 +315,7 @@ export async function listAccessibleDocumentsForUser(userId: string): Promise<Ac
   const owned: AccessibleDocument[] = ownedDocuments.map((d) => ({
     id: d.id,
     title: d.title,
+    kind: d.kind,
     updatedAt: d.updatedAt,
     isOwner: true,
     permission: "EDIT",
@@ -320,6 +324,7 @@ export async function listAccessibleDocumentsForUser(userId: string): Promise<Ac
   const shared: AccessibleDocument[] = memberships.map(({ document, permission }) => ({
     id: document.id,
     title: document.title,
+    kind: document.kind,
     updatedAt: document.updatedAt,
     isOwner: false,
     permission,

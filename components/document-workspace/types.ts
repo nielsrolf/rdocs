@@ -63,6 +63,7 @@ export type DocumentWorkspaceProps = {
   currentUserName: string;
   documentId: string;
   initialTitle: string;
+  documentKind?: string;
   initialContent: unknown;
   initialCollaborationVersion: number;
   initialDocumentUpdatedAt: string;

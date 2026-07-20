@@ -9,6 +9,7 @@ import { formatDateTime, permissionLabel, truncate } from "@/lib/utils";
 export type DashboardDoc = {
   id: string;
   title: string;
+  kind: string;
   updatedAt: string;
   isOwner: boolean;
   ownerId: string;
@@ -140,6 +141,11 @@ export function DocumentList({
                       </span>
                     </div>
                     <div className="doc-row-aside">
+                      {document.kind === "slack_channel" ? (
+                        <span className="slack-pill" title="Backed by a Slack channel — the claudex bot's per-channel workspace and config">
+                          Slack
+                        </span>
+                      ) : null}
                       {document.mentionCount > 0 ? (
                         <span
                           className="mention-badge"

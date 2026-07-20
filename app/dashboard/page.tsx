@@ -24,7 +24,12 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
   }
 
   const resolvedSearchParams = searchParams ? await searchParams : undefined;
-  const initialTab = resolvedSearchParams?.tab === "comments" ? "comments" : "documents";
+  const initialTab =
+    resolvedSearchParams?.tab === "comments"
+      ? ("comments" as const)
+      : resolvedSearchParams?.tab === "channels"
+        ? ("channels" as const)
+        : ("documents" as const);
 
   const accessibleDocuments = await listAccessibleDocumentsForUser(user.id);
   const docIds = accessibleDocuments.map((d) => d.id);
@@ -39,6 +44,7 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
   const documents = accessibleDocuments.map((d) => ({
     id: d.id,
     title: d.title,
+    kind: d.kind,
     updatedAt: d.updatedAt.toISOString(),
     isOwner: d.isOwner,
     ownerId: d.owner.id,

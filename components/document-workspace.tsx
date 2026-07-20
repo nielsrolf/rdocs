@@ -217,6 +217,7 @@ export function DocumentWorkspace({
   currentUserName,
   documentId,
   initialTitle,
+  documentKind,
   initialContent,
   initialCollaborationVersion,
   initialDocumentUpdatedAt,
@@ -4132,6 +4133,14 @@ export function DocumentWorkspace({
               onChange={(event) => setTitle(event.target.value)}
               value={title}
             />
+            {documentKind === "slack_channel" ? (
+              <span
+                className="slack-pill"
+                title="This document is the claudex bot's workspace for a Slack channel: its text is the channel notebook, and the agent settings here (model, skills, environment) configure the bot in that channel."
+              >
+                Slack channel
+              </span>
+            ) : null}
           </div>
 
           <div className="document-compact-status">

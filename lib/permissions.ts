@@ -6,6 +6,7 @@ type AccessResult = {
   document: {
     id: string;
     title: string;
+    kind: string;
     content: string;
     ownerId: string;
     repoUrl: string | null;
@@ -31,6 +32,7 @@ export async function resolveDocumentAccess(
     select: {
       id: true,
       title: true,
+      kind: true,
       content: true,
       ownerId: true,
       repoUrl: true,

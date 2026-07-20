@@ -195,6 +195,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         initialThreads={normalizedThreads}
         initialFocusThreadId={focusThreadId}
         initialTitle={access.document.title}
+        documentKind={access.document.kind}
         isAuthenticated={Boolean(user)}
         isOwner={user?.id === access.document.ownerId}
         shareToken={access.shareToken}

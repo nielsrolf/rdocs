@@ -5,11 +5,13 @@ import { useState } from "react";
 import { CommentInbox, type InboxThreadView } from "@/components/comment-inbox";
 import { DocumentList, type DashboardDoc } from "@/components/document-list";
 
+type DashboardTab = "documents" | "channels" | "comments";
+
 type DashboardTabsProps = {
   documents: DashboardDoc[];
   inboxThreads: InboxThreadView[];
   inboxTags: string[];
-  initialTab?: "documents" | "comments";
+  initialTab?: DashboardTab;
 };
 
 export function DashboardTabs({
@@ -18,7 +20,9 @@ export function DashboardTabs({
   inboxTags,
   initialTab = "documents"
 }: DashboardTabsProps) {
-  const [tab, setTab] = useState<"documents" | "comments">(initialTab);
+  const [tab, setTab] = useState<DashboardTab>(initialTab);
+  const channelDocs = documents.filter((d) => d.kind === "slack_channel");
+  const regularDocs = documents.filter((d) => d.kind !== "slack_channel");
 
   return (
     <div className="dashboard-tabs">
@@ -32,6 +36,17 @@ export function DashboardTabs({
         >
           Documents
         </button>
+        {channelDocs.length > 0 ? (
+          <button
+            aria-selected={tab === "channels"}
+            className={tab === "channels" ? "dashboard-tab dashboard-tab-active" : "dashboard-tab"}
+            onClick={() => setTab("channels")}
+            role="tab"
+            type="button"
+          >
+            Slack channels
+          </button>
+        ) : null}
         <button
           aria-selected={tab === "comments"}
           className={tab === "comments" ? "dashboard-tab dashboard-tab-active" : "dashboard-tab"}
@@ -44,7 +59,9 @@ export function DashboardTabs({
       </div>
 
       {tab === "documents" ? (
-        <DocumentList documents={documents} />
+        <DocumentList documents={regularDocs} />
+      ) : tab === "channels" ? (
+        <DocumentList documents={channelDocs} />
       ) : (
         <CommentInbox initialThreads={inboxThreads} allTags={inboxTags} />
       )}
