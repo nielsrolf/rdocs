@@ -10,6 +10,8 @@
 // untrusted widget build) is reconstructed from the serializable spec and runs
 // HERE, in the sandbox — never on the app host.
 
+import { execFileSync } from "node:child_process";
+
 import {
   buildSubmissionValidator,
   runClaudeResearchAgent,
@@ -84,6 +86,25 @@ async function main() {
       });
       emit({ type: "result", output: { kind: "merge_resolve", ok: true } });
       return;
+    }
+
+    // Per-user GitHub auth: make plain `git clone/push https://github.com/…`
+    // work with the run's resolved token (gh reads GH_TOKEN by itself). The
+    // token lands in $HOME/.gitconfig — a tmpfs private to THIS container, and
+    // the same env already carries it; no new exposure. Container-only: the
+    // in-process runner must never rewrite the host's git config.
+    const githubToken = job.agentEnv?.GITHUB_TOKEN?.trim();
+    if (githubToken) {
+      try {
+        execFileSync("git", [
+          "config",
+          "--global",
+          `url.https://x-access-token:${githubToken}@github.com/.insteadOf`,
+          "https://github.com/"
+        ]);
+      } catch (error) {
+        process.stderr.write(`[agent-entrypoint] git auth config failed: ${(error as Error).message}\n`);
+      }
     }
 
     // The agent runs against the in-container mount, not the host path.

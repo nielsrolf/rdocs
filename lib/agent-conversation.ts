@@ -159,6 +159,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
 
     const result = await getAgentRunner().run({
       mode: "conversation",
+      githubAuthAvailable: Boolean(agentEnv.GITHUB_TOKEN?.trim() || agentEnv.GH_TOKEN?.trim()),
       accessMode: agentAccessMode,
       documentTitle,
       documentText,

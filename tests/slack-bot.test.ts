@@ -415,6 +415,18 @@ test("agent prompt includes slack context and post_slack_message guidance", () =
     }
   });
   assert.match(prompt, /happening in Slack \(the #research channel\)/);
+
+  const withGithub = buildUserPrompt({
+    mode: "conversation",
+    documentTitle: "Doc",
+    documentText: "",
+    unresolvedThreads: [],
+    workspacePath: "/tmp/w",
+    workspaceOverview: "",
+    instruction: "clone the repo",
+    githubAuthAvailable: true
+  });
+  assert.match(withGithub, /GITHUB_TOKEN and GH_TOKEN are set/);
   assert.match(prompt, /post_slack_message/);
   assert.match(prompt, /\[carol\]: the eval numbers look off/);
 

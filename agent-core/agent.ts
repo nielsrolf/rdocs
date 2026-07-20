@@ -89,6 +89,12 @@ export type ClaudeResearchAgentInput = {
     recentMessages: string | null;
   };
   /**
+   * True when the run env carries a resolved GitHub token (GITHUB_TOKEN /
+   * GH_TOKEN) — set by the host after credential resolution so the prompt can
+   * tell the agent its GitHub access actually works.
+   */
+  githubAuthAvailable?: boolean;
+  /**
    * HTTP callback for the Slack read tools (list/read channels & threads),
    * with a run-scoped bearer token pinned to the triggering user's Slack
    * identity. Access is enforced server-side per call — see
@@ -581,9 +587,13 @@ ${
         }\n\n`
       : "";
 
+    const githubBlock = input.githubAuthAvailable
+      ? `GitHub access: GITHUB_TOKEN and GH_TOKEN are set in your environment with the requesting user's credentials — the gh CLI works directly, and plain https git operations against github.com are pre-authenticated. You can clone private repos the user can access.\n\n`
+      : "";
+
     return `Trigger: document-level agent conversation.
 
-${slackBlock}${historyBlock}New user message:
+${slackBlock}${githubBlock}${historyBlock}New user message:
 ${instruction}
 
 You may inspect or modify workspace files if that helps. Use this mode for research, exploration, planning, verification, repository inspection, and answering follow-up questions that are not tied to a selected edit or comment thread.
