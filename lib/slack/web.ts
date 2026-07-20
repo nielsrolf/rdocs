@@ -20,6 +20,10 @@ export type SlackClient = {
   threadReplies(args: { channel: string; ts: string; limit?: number }): Promise<SlackMessage[]>;
   /** Recent top-level channel messages, oldest first. */
   channelHistory(args: { channel: string; limit?: number }): Promise<SlackMessage[]>;
+  /** Channels the BOT is a member of (public + private + im). */
+  botChannels(): Promise<Array<{ id: string; name: string | null; isPrivate: boolean }>>;
+  /** User ids that are members of a channel (paginated up to ~600). */
+  channelMembers(channelId: string): Promise<string[]>;
 };
 
 type SlackApiResponse = { ok: boolean; error?: string } & Record<string, unknown>;
@@ -120,6 +124,36 @@ export function createSlackWebClient(botToken: string): SlackClient {
       // transcripts read naturally.
       const result = await slackApi(botToken, "conversations.history", { channel, limit });
       return normalizeMessages(result.messages).reverse();
+    },
+    async botChannels() {
+      const result = await slackApi(botToken, "users.conversations", {
+        types: "public_channel,private_channel,im",
+        exclude_archived: true,
+        limit: 200
+      });
+      const channels = Array.isArray(result.channels) ? (result.channels as Array<Record<string, unknown>>) : [];
+      return channels.map((channel) => ({
+        id: typeof channel.id === "string" ? channel.id : "",
+        name: typeof channel.name === "string" ? channel.name : null,
+        isPrivate: channel.is_private === true || channel.is_im === true
+      }));
+    },
+    async channelMembers(channelId) {
+      const members: string[] = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < 3; page++) {
+        const result = await slackApi(botToken, "conversations.members", {
+          channel: channelId,
+          limit: 200,
+          ...(cursor ? { cursor } : {})
+        });
+        if (Array.isArray(result.members)) {
+          members.push(...(result.members as string[]));
+        }
+        cursor = (result.response_metadata as { next_cursor?: string } | undefined)?.next_cursor || undefined;
+        if (!cursor) break;
+      }
+      return members;
     }
   };
 }

@@ -88,6 +88,17 @@ export type ClaudeResearchAgentInput = {
     /** Preformatted transcript of recent channel messages, oldest first. */
     recentMessages: string | null;
   };
+  /**
+   * HTTP callback for the Slack read tools (list/read channels & threads),
+   * with a run-scoped bearer token pinned to the triggering user's Slack
+   * identity. Access is enforced server-side per call — see
+   * lib/slack/agent-tools.ts. Travels over stdin into the container; never
+   * persisted.
+   */
+  slackTools?: {
+    url: string;
+    token: string;
+  };
 };
 
 export type ClaudeResearchAgentOutput = {
@@ -159,6 +170,11 @@ export type ClaudeAgentRunOptions = {
 const SUBMIT_TOOL_NAME = "mcp__gdocs__submit_response";
 const ADD_COMMENT_TOOL_NAME = "mcp__gdocs__add_comment";
 const POST_SLACK_MESSAGE_TOOL_NAME = "mcp__gdocs__post_slack_message";
+const SLACK_READ_TOOL_NAMES = [
+  "mcp__gdocs__list_slack_channels",
+  "mcp__gdocs__read_slack_channel",
+  "mcp__gdocs__read_slack_thread"
+];
 
 function countOccurrences(haystack: string, needle: string): number {
   if (!needle) return 0;
@@ -538,7 +554,12 @@ function buildUserPromptRaw(input: ClaudeResearchAgentInput) {
       ? `This conversation is happening in Slack (${
           slack.surface === "dm" ? "a direct message" : slack.channelName ? `the #${slack.channelName.replace(/^#/, "")} channel` : "a channel"
         }). Your submit_response reply is posted to the Slack thread — write it as a chat message: concise Markdown, no long report unless asked (it is converted to Slack formatting for you).
-While you work you may post short interim updates to the thread with the post_slack_message tool (e.g. what you found so far, or that a step will take a while). Use it sparingly — the user already sees a working indicator; never use it for the final answer, which always goes through submit_response.${
+While you work you may post short interim updates to the thread with the post_slack_message tool (e.g. what you found so far, or that a step will take a while). Default to ONE message per round of conversation: every unnecessary interim message fragments the thread. Never use post_slack_message for the final answer, which always goes through submit_response. Everything you post goes to the CURRENT thread only — never attempt to reach other channels or threads via shell/curl; use only the provided tools.${
+          input.slackTools
+            ? "\nYou can also inspect other Slack content with list_slack_channels / read_slack_channel / read_slack_thread. Access is enforced server-side: only channels that both you (the bot) and the requesting user are members of are readable."
+            : ""
+        }
+Your workspace directory persists for this ${slack.surface === "dm" ? "conversation" : "channel"} across runs. Treat CLAUDE.md at the workspace root as your notebook: read it when starting non-trivial work, and update it when you learn something durable (user preferences, mistakes to avoid, project knowledge, key paths/commands). Keep it concise; prune outdated notes.${
           slack.recentMessages ? `\n\nRecent messages in this Slack ${slack.surface === "dm" ? "conversation" : "channel"} (oldest first, for context — the thread you are replying in may reference them):\n${slack.recentMessages}` : ""
         }\n\n`
       : "";
@@ -1029,10 +1050,74 @@ async function runClaudeResearchAgentOnce(
     }
   );
 
+  // Slack read tools: thin HTTP shims — the server executes the actual Slack
+  // calls and enforces membership access per call (lib/slack/agent-tools.ts).
+  const callSlackTool = async (toolName: string, args: Record<string, unknown>) => {
+    const slackTools = input.slackTools!;
+    try {
+      const response = await fetch(slackTools.url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${slackTools.token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ tool: toolName, args }),
+        signal: AbortSignal.timeout(30_000)
+      });
+      const payload = (await response.json().catch(() => null)) as { ok?: boolean; text?: string } | null;
+      const text = payload?.text ?? `Slack tool call failed (http ${response.status}).`;
+      return {
+        content: [{ type: "text" as const, text }],
+        ...(payload?.ok === true ? {} : { isError: true })
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Slack tool call failed: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ],
+        isError: true
+      };
+    }
+  };
+
+  const listSlackChannelsTool = tool(
+    "list_slack_channels",
+    "List the Slack channels you can read in this run. Access is limited server-side to channels that BOTH the bot and the user who triggered this run are members of.",
+    {},
+    async () => callSlackTool("list_slack_channels", {})
+  );
+  const readSlackChannelTool = tool(
+    "read_slack_channel",
+    "Read recent top-level messages from a Slack channel (oldest first, with [ts] prefixes usable as thread_ts). Same access rule as list_slack_channels.",
+    {
+      channel_id: z.string().min(1).describe("Slack channel id (e.g. C0123ABC) from list_slack_channels."),
+      limit: z.number().int().min(1).max(100).optional().describe("Messages to fetch (default 30).")
+    },
+    async (args) => callSlackTool("read_slack_channel", args)
+  );
+  const readSlackThreadTool = tool(
+    "read_slack_thread",
+    "Read the replies of one Slack thread. Same access rule as list_slack_channels.",
+    {
+      channel_id: z.string().min(1).describe("Slack channel id the thread lives in."),
+      thread_ts: z.string().min(1).describe("The thread's root timestamp (the [ts] prefix of its first message)."),
+      limit: z.number().int().min(1).max(100).optional().describe("Replies to fetch (default 50).")
+    },
+    async (args) => callSlackTool("read_slack_thread", args)
+  );
+
   const mcpServer = createSdkMcpServer({
     name: "gdocs",
     version: "1.0.0",
-    tools: input.slackContext ? [submitTool, addCommentTool, postSlackMessageTool] : [submitTool, addCommentTool],
+    tools: [
+      submitTool,
+      addCommentTool,
+      ...(input.slackContext ? [postSlackMessageTool] : []),
+      ...(input.slackTools ? [listSlackChannelsTool, readSlackChannelTool, readSlackThreadTool] : [])
+    ],
     alwaysLoad: true
   });
 
@@ -1096,7 +1181,8 @@ async function runClaudeResearchAgentOnce(
         ...toolsForAgentAccess(input.accessMode),
         SUBMIT_TOOL_NAME,
         ADD_COMMENT_TOOL_NAME,
-        ...(input.slackContext ? [POST_SLACK_MESSAGE_TOOL_NAME] : [])
+        ...(input.slackContext ? [POST_SLACK_MESSAGE_TOOL_NAME] : []),
+        ...(input.slackTools ? SLACK_READ_TOOL_NAMES : [])
       ],
       disallowedTools: [
         "EnterWorktree",

@@ -21,7 +21,7 @@ import {
   runAgentConversationInBackground,
   type ConversationRunInput
 } from "@/lib/agent-conversation";
-import { createSlackLinkToken } from "@/lib/slack/link-token";
+import { createSlackLinkToken, createSlackToolsToken } from "@/lib/slack/link-token";
 import { markdownToMrkdwn } from "@/lib/slack/mrkdwn";
 import type { SlackClient, SlackMessage } from "@/lib/slack/web";
 
@@ -276,6 +276,20 @@ async function handleIncomingSlackMessage(
       surface: surface === "dm" ? "dm" : "channel",
       channelName,
       recentMessages: await buildChannelContext(deps, event)
+    },
+    // Read tools call back over HTTP with a token pinned to the SENDER's Slack
+    // identity — the route re-checks channel membership on every call.
+    slackTools: {
+      // SLACK_AGENT_TOOLS_URL overrides for deployments where containers can't
+      // reach APP_URL (e.g. use http://host.docker.internal:14141/api/slack/agent-tools).
+      url:
+        process.env.SLACK_AGENT_TOOLS_URL?.trim() ||
+        `${deps.appUrl.replace(/\/$/, "")}/api/slack/agent-tools`,
+      token: await createSlackToolsToken({
+        slackTeamId: event.teamId,
+        slackUserId: event.user,
+        aiRunId: aiRun.id
+      })
     },
     // Interim updates the agent posts mid-run via post_slack_message.
     onSlackMessage: async (text) => {

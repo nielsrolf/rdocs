@@ -52,6 +52,8 @@ export type ConversationRunInput = {
   agentAccessMode: AgentAccessMode;
   // Set for Slack-triggered runs: prompt context + the post_slack_message tool.
   slackContext?: ClaudeResearchAgentInput["slackContext"];
+  // Run-scoped HTTP callback enabling the Slack read tools.
+  slackTools?: ClaudeResearchAgentInput["slackTools"];
   // Live delivery of interim Slack updates the agent posts mid-run.
   onSlackMessage?: (text: string) => Promise<void> | void;
   // Called once after the run reaches a terminal state (bookkeeping already
@@ -71,6 +73,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
     agentConfig,
     agentAccessMode,
     slackContext,
+    slackTools,
     onSlackMessage,
     onFinished
   } = input;
@@ -173,7 +176,8 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       workspaceOverview,
       instruction: message,
       conversationHistory,
-      slackContext
+      slackContext,
+      slackTools
     }, {
       agentConfig: effectiveAgentConfig,
       agentEnv: agentAccessMode === "read_only" ? restrictAgentEnvForReadOnly(agentEnv) : agentEnv,

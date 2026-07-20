@@ -31,6 +31,48 @@ export async function createSlackLinkToken(claims: SlackLinkClaims) {
     .sign(getSecret());
 }
 
+// Run-scoped token authorizing the agent's Slack read tools for the duration
+// of one run. Carries the TRIGGERING user's Slack identity — the agent-tools
+// route enforces that every channel it touches contains both the bot and this
+// user, so the bot can never be used as a confused deputy to read channels the
+// requester is not in.
+const TOOLS_PURPOSE = "slack-agent-tools";
+
+export type SlackToolsClaims = {
+  slackTeamId: string;
+  slackUserId: string;
+  aiRunId: string;
+};
+
+export async function createSlackToolsToken(claims: SlackToolsClaims) {
+  return new SignJWT({ purpose: TOOLS_PURPOSE, ...claims })
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuedAt()
+    .setExpirationTime("12h")
+    .sign(getSecret());
+}
+
+export async function verifySlackToolsToken(token: string): Promise<SlackToolsClaims | null> {
+  try {
+    const { payload } = await jwtVerify(token, getSecret());
+    if (
+      payload.purpose !== TOOLS_PURPOSE ||
+      typeof payload.slackTeamId !== "string" ||
+      typeof payload.slackUserId !== "string" ||
+      typeof payload.aiRunId !== "string"
+    ) {
+      return null;
+    }
+    return {
+      slackTeamId: payload.slackTeamId,
+      slackUserId: payload.slackUserId,
+      aiRunId: payload.aiRunId
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function verifySlackLinkToken(token: string): Promise<SlackLinkClaims | null> {
   try {
     const { payload } = await jwtVerify(token, getSecret());

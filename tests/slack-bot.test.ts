@@ -50,6 +50,12 @@ function makeFakeSlack(threadMessages: SlackMessage[] = [], channelMessages: Sla
     },
     async channelHistory() {
       return channelMessages;
+    },
+    async botChannels() {
+      return [];
+    },
+    async channelMembers() {
+      return [];
     }
   };
   return { client, posted, ephemeral, reactions };
