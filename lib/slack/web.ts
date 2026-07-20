@@ -29,13 +29,23 @@ export type SlackClient = {
 type SlackApiResponse = { ok: boolean; error?: string } & Record<string, unknown>;
 
 async function slackApi(botToken: string, method: string, body: Record<string, unknown>) {
+  // ALWAYS form-encode. Slack accepts x-www-form-urlencoded on every Web API
+  // method, but honors application/json only on a subset — GET-style methods
+  // (conversations.history/replies/members, users.conversations, users.info)
+  // silently IGNORE a JSON body and run with defaults, which broke membership
+  // checks and hid private channels.
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(body)) {
+    if (value === undefined || value === null) continue;
+    params.set(key, String(value));
+  }
   const response = await fetch(`https://slack.com/api/${method}`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${botToken}`,
-      "Content-Type": "application/json; charset=utf-8"
+      "Content-Type": "application/x-www-form-urlencoded; charset=utf-8"
     },
-    body: JSON.stringify(body)
+    body: params
   });
   const payload = (await response.json().catch(() => null)) as SlackApiResponse | null;
   if (!payload || !payload.ok) {
