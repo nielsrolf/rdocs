@@ -236,7 +236,7 @@ type StartSlackRunArgs = {
   clearPendingReaction?: boolean;
 };
 
-async function startSlackConversationRun(args: StartSlackRunArgs): Promise<string> {
+export async function startSlackConversationRun(args: StartSlackRunArgs): Promise<string> {
   const { deps, surface, document, channel, channelName, teamId, triggerId, replyThreadTs } = args;
 
   const aiRun = await db.aiRun.create({

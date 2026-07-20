@@ -14,7 +14,14 @@ import type { SlackToolsClaims } from "@/lib/slack/link-token";
 import type { SlackClient, SlackMessage } from "@/lib/slack/web";
 
 export type SlackAgentToolRequest = {
-  tool: "list_slack_channels" | "read_slack_channel" | "read_slack_thread" | "recent_activity";
+  tool:
+    | "list_slack_channels"
+    | "read_slack_channel"
+    | "read_slack_thread"
+    | "recent_activity"
+    | "schedule_task"
+    | "list_scheduled_tasks"
+    | "cancel_scheduled_task";
   args: Record<string, unknown>;
 };
 
@@ -135,6 +142,124 @@ export async function handleSlackAgentToolCall(
       return `${run.startedAt.toISOString()} • ${project} • ${who} • ${run.status}\n  prompt: ${prompt}${selection}${summary}`;
     });
     return { ok: true, text: `Recent agent activity across your projects (newest first):\n${lines.join("\n")}` };
+  }
+
+  if (
+    request.tool === "schedule_task" ||
+    request.tool === "list_scheduled_tasks" ||
+    request.tool === "cancel_scheduled_task"
+  ) {
+    // Scheduling is anchored to the run's own conversation: the run row tells
+    // us the document and Slack thread the tool call came from.
+    const { computeNextRunAt, MAX_ACTIVE_TASKS_PER_DOCUMENT } = await import("@/lib/scheduler");
+    const run = await db.aiRun.findUnique({
+      where: { id: claims.aiRunId },
+      select: { documentId: true, triggerId: true }
+    });
+    if (!run?.triggerId) {
+      return { ok: false, text: "This run has no Slack conversation to schedule into." };
+    }
+    const link = await db.slackAccountLink.findUnique({
+      where: {
+        slackTeamId_slackUserId: { slackTeamId: claims.slackTeamId, slackUserId: claims.slackUserId }
+      }
+    });
+    if (!link) {
+      return { ok: false, text: "This Slack account is not linked to an rdocs account." };
+    }
+    const [runChannel, runThreadTs] = run.triggerId.split(":", 2);
+
+    if (request.tool === "schedule_task") {
+      const instruction = typeof request.args.instruction === "string" ? request.args.instruction.trim() : "";
+      if (!instruction) return { ok: false, text: "instruction is required." };
+      const cron = typeof request.args.cron === "string" ? request.args.cron.trim() : null;
+      const at = typeof request.args.at === "string" ? request.args.at.trim() : null;
+      const timezone = typeof request.args.timezone === "string" ? request.args.timezone.trim() : null;
+      const context = request.args.context === "channel" ? "slack_channel" : "slack_thread";
+      let nextRunAt: Date;
+      try {
+        nextRunAt = computeNextRunAt({ cron, at, timezone });
+      } catch (error) {
+        return { ok: false, text: error instanceof Error ? error.message : "Invalid schedule." };
+      }
+      const active = await db.scheduledTask.count({
+        where: { documentId: run.documentId, disabledAt: null }
+      });
+      if (active >= MAX_ACTIVE_TASKS_PER_DOCUMENT) {
+        return { ok: false, text: `This channel already has ${active} active scheduled tasks — cancel some first.` };
+      }
+      const task = await db.scheduledTask.create({
+        data: {
+          documentId: run.documentId,
+          createdById: link.userId,
+          createdByRunId: claims.aiRunId,
+          instruction,
+          contextType: context,
+          slackTeamId: claims.slackTeamId,
+          slackChannelId: runChannel,
+          slackThreadTs: context === "slack_thread" ? runThreadTs ?? null : null,
+          cron,
+          timezone,
+          nextRunAt
+        }
+      });
+      // Visible consent: the channel learns a recurring task now exists, who
+      // it runs as, and how to stop it — regardless of what the agent says.
+      await slack
+        .postMessage({
+          channel: runChannel,
+          ...(context === "slack_thread" && runThreadTs ? { threadTs: runThreadTs } : {}),
+          text:
+            `⏰ Scheduled task created (id ${task.id}): "${instruction.slice(0, 150)}"\n` +
+            `${cron ? `Recurs: \`${cron}\`${timezone ? ` (${timezone})` : ""}` : `Runs once`} — next firing ${nextRunAt.toISOString()}. ` +
+            `It runs with the scheduler's credentials. Anyone in this channel can cancel it (ask the bot to cancel scheduled task ${task.id}).`
+        })
+        .catch(() => null);
+      return {
+        ok: true,
+        text: `Scheduled (id ${task.id}). Next firing: ${nextRunAt.toISOString()}${cron ? `, recurring ${cron}` : ", one-shot"}.`
+      };
+    }
+
+    if (request.tool === "list_scheduled_tasks") {
+      const tasks = await db.scheduledTask.findMany({
+        where: { documentId: run.documentId, disabledAt: null },
+        orderBy: { nextRunAt: "asc" },
+        select: {
+          id: true,
+          instruction: true,
+          cron: true,
+          timezone: true,
+          nextRunAt: true,
+          contextType: true,
+          createdBy: { select: { name: true } }
+        }
+      });
+      if (tasks.length === 0) return { ok: true, text: "No active scheduled tasks in this channel." };
+      const lines = tasks.map(
+        (t) =>
+          `${t.id} • ${t.cron ? `cron ${t.cron}${t.timezone ? ` (${t.timezone})` : ""}` : "one-shot"} • next ${t.nextRunAt.toISOString()} • by ${t.createdBy?.name ?? "unknown"} • ${t.contextType === "slack_channel" ? "channel" : "thread"}\n  ${t.instruction.slice(0, 160)}`
+      );
+      return { ok: true, text: `Active scheduled tasks:\n${lines.join("\n")}` };
+    }
+
+    // cancel_scheduled_task: anyone who can talk to the bot in the task's
+    // channel may cancel — membership is re-verified against Slack.
+    const taskId = typeof request.args.task_id === "string" ? request.args.task_id.trim() : "";
+    if (!taskId) return { ok: false, text: "task_id is required." };
+    const task = await db.scheduledTask.findUnique({ where: { id: taskId } });
+    if (!task || task.disabledAt) return { ok: false, text: "No active task with that id." };
+    const denied = await assertReadable(slack, botUserId, claims, task.slackChannelId);
+    if (denied) return { ok: false, text: denied };
+    await db.scheduledTask.update({ where: { id: taskId }, data: { disabledAt: new Date() } });
+    await slack
+      .postMessage({
+        channel: task.slackChannelId,
+        ...(task.slackThreadTs ? { threadTs: task.slackThreadTs } : {}),
+        text: `⏰ Scheduled task ${task.id} cancelled.`
+      })
+      .catch(() => null);
+    return { ok: true, text: `Cancelled scheduled task ${task.id}.` };
   }
 
   if (request.tool === "list_slack_channels") {

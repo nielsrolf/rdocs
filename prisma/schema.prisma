@@ -28,6 +28,7 @@ model User {
   skills            UserSkill[]
   slackLinks        SlackAccountLink[]
   aiRuns            AiRun[]              @relation("AiRunCreator")
+  scheduledTasks    ScheduledTask[]
 }
 
 // A reusable agent skill in a user's personal library (a directory with a
@@ -134,6 +135,7 @@ model Document {
   documentMentions DocumentMention[]
   attachments     Attachment[]
   skills          DocumentSkill[]
+  scheduledTasks  ScheduledTask[]
 
   @@unique([slackTeamId, slackChannelId])
 }
@@ -378,6 +380,40 @@ model AiRunEvent {
   aiRun     AiRun    @relation(fields: [aiRunId], references: [id], onDelete: Cascade)
 
   @@index([aiRunId, createdAt])
+}
+
+// A recurring or one-shot agent task scheduled from Slack (schedule_task
+// tool). Fired by the poll loop in lib/scheduler.ts: each firing starts a
+// normal conversation AiRun in the stored context (a Slack thread by default,
+// or the channel top-level) with the CREATOR's identity/credentials. Creation
+// is announced in the channel and any channel member can cancel — a recurring
+// task silently burning someone's API key is the failure mode this guards.
+model ScheduledTask {
+  id             String    @id @default(cuid())
+  documentId     String
+  createdById    String?
+  createdByRunId String?
+  instruction    String
+  // "slack_thread" (reply into the stored thread) or "slack_channel" (post
+  // top-level, starting a fresh thread per firing).
+  contextType    String
+  slackTeamId    String
+  slackChannelId String
+  slackThreadTs  String?
+  // Recurring: a 5-field cron expression. One-shot: null cron, nextRunAt only.
+  cron           String?
+  timezone       String?
+  nextRunAt      DateTime
+  lastFiredAt    DateTime?
+  lastRunId      String?
+  disabledAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  document       Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  createdBy      User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([nextRunAt, disabledAt])
+  @@index([documentId])
 }
 
 model EmbeddedWidget {

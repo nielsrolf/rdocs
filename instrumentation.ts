@@ -68,6 +68,17 @@ export async function register() {
       });
     });
 
+  // Scheduled agent tasks (Slack schedule_task tool) — 30s DB poll, no-op
+  // when nothing is due.
+  try {
+    const { startSchedulerLoop } = await import("@/lib/scheduler");
+    startSchedulerLoop();
+  } catch (error) {
+    console.error("[startup] scheduler failed to start", {
+      error: error instanceof Error ? error.message : error
+    });
+  }
+
   const { reapIdleCollaborationRooms } = await import("@/lib/collaboration");
   const reaper = setInterval(() => {
     try {

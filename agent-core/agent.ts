@@ -176,6 +176,11 @@ const SLACK_READ_TOOL_NAMES = [
   "mcp__gdocs__read_slack_thread"
 ];
 const RECENT_ACTIVITY_TOOL_NAME = "mcp__gdocs__recent_activity";
+const SCHEDULE_TOOL_NAMES = [
+  "mcp__gdocs__schedule_task",
+  "mcp__gdocs__list_scheduled_tasks",
+  "mcp__gdocs__cancel_scheduled_task"
+];
 
 function countOccurrences(haystack: string, needle: string): number {
   if (!needle) return 0;
@@ -557,7 +562,7 @@ function buildUserPromptRaw(input: ClaudeResearchAgentInput) {
         }). Your submit_response reply is posted to the Slack thread — write it as a chat message: concise Markdown, no long report unless asked (it is converted to Slack formatting for you).
 While you work you may post short interim updates to the thread with the post_slack_message tool (e.g. what you found so far, or that a step will take a while). Default to ONE message per round of conversation: every unnecessary interim message fragments the thread. Never use post_slack_message for the final answer, which always goes through submit_response. Everything you post goes to the CURRENT thread only — never attempt to reach other channels or threads via shell/curl; use only the provided tools.${
           input.slackTools
-            ? "\nYou can also inspect other Slack content with list_slack_channels / read_slack_channel / read_slack_thread. Access is enforced server-side: only channels that both you (the bot) and the requesting user are members of are readable."
+            ? "\nYou can also inspect other Slack content with list_slack_channels / read_slack_channel / read_slack_thread. Access is enforced server-side: only channels that both you (the bot) and the requesting user are members of are readable.\nYou can schedule (recurring) work with schedule_task / list_scheduled_tasks / cancel_scheduled_task — each firing runs as a fresh agent run in this conversation with the scheduling user's credentials. Only schedule when explicitly asked; always confirm the schedule you set in your reply."
             : ""
         }
 ${
@@ -1124,6 +1129,33 @@ async function runClaudeResearchAgentOnce(
     async (args) => callSlackTool("recent_activity", args)
   );
 
+  const scheduleTaskTool = tool(
+    "schedule_task",
+    "Schedule a (recurring) agent task in THIS Slack conversation. Each firing runs the instruction as a fresh agent run with the scheduling user's credentials, replying in this thread (default) or as a new top-level channel message. The channel is notified and any member can cancel.",
+    {
+      instruction: z.string().min(1).max(4000).describe("What the agent should do each time the task fires."),
+      cron: z.string().optional().describe("5-field cron expression for recurring tasks (e.g. '0 9 * * 1-5'). Provide cron OR at."),
+      at: z.string().optional().describe("ISO-8601 timestamp for a one-shot task. Provide cron OR at."),
+      timezone: z.string().optional().describe("IANA timezone for the cron expression (e.g. 'Europe/Berlin'). Server default if omitted."),
+      context: z.enum(["thread", "channel"]).optional().describe("Where firings run: this thread (default) or a fresh top-level channel message per firing.")
+    },
+    async (args) => callSlackTool("schedule_task", args)
+  );
+  const listScheduledTasksTool = tool(
+    "list_scheduled_tasks",
+    "List the active scheduled tasks of this Slack channel/conversation.",
+    {},
+    async () => callSlackTool("list_scheduled_tasks", {})
+  );
+  const cancelScheduledTaskTool = tool(
+    "cancel_scheduled_task",
+    "Cancel an active scheduled task by id (from list_scheduled_tasks). Any member of the task's channel may cancel.",
+    {
+      task_id: z.string().min(1).describe("The scheduled task id.")
+    },
+    async (args) => callSlackTool("cancel_scheduled_task", args)
+  );
+
   const isDmOverview = input.slackContext?.surface === "dm";
   const mcpServer = createSdkMcpServer({
     name: "gdocs",
@@ -1132,7 +1164,9 @@ async function runClaudeResearchAgentOnce(
       submitTool,
       addCommentTool,
       ...(input.slackContext ? [postSlackMessageTool] : []),
-      ...(input.slackTools ? [listSlackChannelsTool, readSlackChannelTool, readSlackThreadTool] : []),
+      ...(input.slackTools
+        ? [listSlackChannelsTool, readSlackChannelTool, readSlackThreadTool, scheduleTaskTool, listScheduledTasksTool, cancelScheduledTaskTool]
+        : []),
       ...(input.slackTools && isDmOverview ? [recentActivityTool] : [])
     ],
     alwaysLoad: true
@@ -1199,7 +1233,7 @@ async function runClaudeResearchAgentOnce(
         SUBMIT_TOOL_NAME,
         ADD_COMMENT_TOOL_NAME,
         ...(input.slackContext ? [POST_SLACK_MESSAGE_TOOL_NAME] : []),
-        ...(input.slackTools ? SLACK_READ_TOOL_NAMES : []),
+        ...(input.slackTools ? [...SLACK_READ_TOOL_NAMES, ...SCHEDULE_TOOL_NAMES] : []),
         ...(input.slackTools && input.slackContext?.surface === "dm" ? [RECENT_ACTIVITY_TOOL_NAME] : [])
       ],
       disallowedTools: [
