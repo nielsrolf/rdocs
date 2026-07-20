@@ -27,6 +27,7 @@ model User {
   apiTokens         ApiToken[]
   skills            UserSkill[]
   slackLinks        SlackAccountLink[]
+  aiRuns            AiRun[]              @relation("AiRunCreator")
 }
 
 // A reusable agent skill in a user's personal library (a directory with a
@@ -322,6 +323,10 @@ model AiRun {
   documentId    String
   triggerType   String
   triggerId     String?
+  // The user whose request started this run (and whose credentials it ran
+  // with). Null for legacy rows and share-link visitors. Powers the activity
+  // overview ("who did what where").
+  createdById   String?
   parentRunId   String?
   instruction   String
   status        String            @default("RUNNING")
@@ -352,6 +357,7 @@ model AiRun {
   suggestOnly        Boolean           @default(false)
   appliedAt          DateTime?
   document      Document          @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  createdBy     User?             @relation("AiRunCreator", fields: [createdById], references: [id], onDelete: SetNull)
   parentRun     AiRun?            @relation("AiRunFollowUps", fields: [parentRunId], references: [id], onDelete: SetNull)
   followUps     AiRun[]           @relation("AiRunFollowUps")
   comments      Comment[]

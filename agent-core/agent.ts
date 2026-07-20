@@ -175,6 +175,7 @@ const SLACK_READ_TOOL_NAMES = [
   "mcp__gdocs__read_slack_channel",
   "mcp__gdocs__read_slack_thread"
 ];
+const RECENT_ACTIVITY_TOOL_NAME = "mcp__gdocs__recent_activity";
 
 function countOccurrences(haystack: string, needle: string): number {
   if (!needle) return 0;
@@ -559,7 +560,11 @@ While you work you may post short interim updates to the thread with the post_sl
             ? "\nYou can also inspect other Slack content with list_slack_channels / read_slack_channel / read_slack_thread. Access is enforced server-side: only channels that both you (the bot) and the requesting user are members of are readable."
             : ""
         }
-Your workspace directory persists for this ${slack.surface === "dm" ? "conversation" : "channel"} across runs. Treat CLAUDE.md at the workspace root as your notebook: read it when starting non-trivial work, and update it when you learn something durable (user preferences, mistakes to avoid, project knowledge, key paths/commands). Keep it concise; prune outdated notes.${
+${
+          slack.surface === "dm" && input.slackTools
+            ? "In a DM you are the user's PERSONAL OVERVIEW assistant: you can see recent agent activity across every document and Slack channel they have access to via the recent_activity tool (prompt, who triggered it, status, outcome per run). Use it when they ask what's going on, what happened in a project, or what their collaborators did — then drill into specifics with the Slack read tools or workspace files.\n"
+            : ""
+        }Your workspace directory persists for this ${slack.surface === "dm" ? "conversation" : "channel"} across runs. Treat CLAUDE.md at the workspace root as your notebook: read it when starting non-trivial work, and update it when you learn something durable (user preferences, mistakes to avoid, project knowledge, key paths/commands). Keep it concise; prune outdated notes.${
           slack.recentMessages ? `\n\nRecent messages in this Slack ${slack.surface === "dm" ? "conversation" : "channel"} (oldest first, for context — the thread you are replying in may reference them):\n${slack.recentMessages}` : ""
         }\n\n`
       : "";
@@ -1109,6 +1114,17 @@ async function runClaudeResearchAgentOnce(
     async (args) => callSlackTool("read_slack_thread", args)
   );
 
+  const recentActivityTool = tool(
+    "recent_activity",
+    "Cross-project overview: recent agent runs (prompt, who, status, outcome) across ALL documents and Slack channels the requesting user has access to. Use this to answer 'what's going on' questions in a DM.",
+    {
+      project: z.string().optional().describe("Filter to projects whose title contains this substring."),
+      limit: z.number().int().min(1).max(100).optional().describe("Runs to return (default 20).")
+    },
+    async (args) => callSlackTool("recent_activity", args)
+  );
+
+  const isDmOverview = input.slackContext?.surface === "dm";
   const mcpServer = createSdkMcpServer({
     name: "gdocs",
     version: "1.0.0",
@@ -1116,7 +1132,8 @@ async function runClaudeResearchAgentOnce(
       submitTool,
       addCommentTool,
       ...(input.slackContext ? [postSlackMessageTool] : []),
-      ...(input.slackTools ? [listSlackChannelsTool, readSlackChannelTool, readSlackThreadTool] : [])
+      ...(input.slackTools ? [listSlackChannelsTool, readSlackChannelTool, readSlackThreadTool] : []),
+      ...(input.slackTools && isDmOverview ? [recentActivityTool] : [])
     ],
     alwaysLoad: true
   });
@@ -1182,7 +1199,8 @@ async function runClaudeResearchAgentOnce(
         SUBMIT_TOOL_NAME,
         ADD_COMMENT_TOOL_NAME,
         ...(input.slackContext ? [POST_SLACK_MESSAGE_TOOL_NAME] : []),
-        ...(input.slackTools ? SLACK_READ_TOOL_NAMES : [])
+        ...(input.slackTools ? SLACK_READ_TOOL_NAMES : []),
+        ...(input.slackTools && input.slackContext?.surface === "dm" ? [RECENT_ACTIVITY_TOOL_NAME] : [])
       ],
       disallowedTools: [
         "EnterWorktree",

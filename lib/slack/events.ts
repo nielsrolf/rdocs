@@ -246,6 +246,7 @@ async function handleIncomingSlackMessage(
     data: {
       documentId: document.id,
       triggerType: previousRun ? "SLACK_FOLLOWUP" : "SLACK_MENTION",
+      createdById: link.userId,
       triggerId,
       parentRunId: previousRun?.id ?? null,
       instruction,

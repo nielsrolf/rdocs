@@ -126,3 +126,78 @@ test("read_slack_thread enforces the same rule and requires thread_ts", async ()
   assert.ok(allowed.ok);
   assert.match(allowed.text, /public plan/);
 });
+
+test("recent_activity shows only runs on documents the requester can access", async (t) => {
+  const crypto = await import("node:crypto");
+  const { db } = await import("../lib/db");
+  const teamId = `T-${crypto.randomUUID()}`;
+
+  async function makeUser(name: string, slackId: string) {
+    const user = await db.user.create({
+      data: { email: `${name}-${crypto.randomUUID()}@example.com`, name, passwordHash: "x" }
+    });
+    await db.slackAccountLink.create({
+      data: { slackTeamId: teamId, slackUserId: slackId, userId: user.id }
+    });
+    return user;
+  }
+  const alice = await makeUser("ra-alice", "UALICE");
+  const bob = await makeUser("ra-bob", "UBOB");
+
+  const aliceDoc = await db.document.create({
+    data: { ownerId: alice.id, title: "Alice secret project", content: "{}" }
+  });
+  const sharedDoc = await db.document.create({
+    data: { ownerId: alice.id, title: "Shared roadmap", content: "{}" }
+  });
+  await db.documentMembership.create({
+    data: { documentId: sharedDoc.id, userId: bob.id, permission: "EDIT" }
+  });
+  await db.aiRun.create({
+    data: {
+      documentId: aliceDoc.id,
+      triggerType: "CONVERSATION",
+      createdById: alice.id,
+      instruction: "analyze the secret data",
+      status: "SUCCEEDED",
+      progress: "Found the secret answer."
+    }
+  });
+  await db.aiRun.create({
+    data: {
+      documentId: sharedDoc.id,
+      triggerType: "CONVERSATION",
+      createdById: alice.id,
+      instruction: "update the roadmap",
+      status: "SUCCEEDED",
+      progress: "Roadmap updated."
+    }
+  });
+
+  const slack = makeSlack();
+  const asBobHere = { slackTeamId: teamId, slackUserId: "UBOB", aiRunId: "r1" };
+  const bobView = await handleSlackAgentToolCall(
+    { tool: "recent_activity", args: {} },
+    { claims: asBobHere, slack, botUserId: BOT }
+  );
+  assert.ok(bobView.ok);
+  assert.match(bobView.text, /Shared roadmap/);
+  assert.match(bobView.text, /update the roadmap/);
+  assert.match(bobView.text, /ra-alice/, "attribution shows who triggered the run");
+  assert.doesNotMatch(bobView.text, /secret/, "Bob must not see Alice-only runs");
+
+  const asAliceHere = { slackTeamId: teamId, slackUserId: "UALICE", aiRunId: "r2" };
+  const aliceView = await handleSlackAgentToolCall(
+    { tool: "recent_activity", args: { project: "secret" } },
+    { claims: asAliceHere, slack, botUserId: BOT }
+  );
+  assert.match(aliceView.text, /analyze the secret data/);
+  assert.match(aliceView.text, /outcome: Found the secret answer/);
+  assert.doesNotMatch(aliceView.text, /Shared roadmap/, "project filter scopes the feed");
+
+  const unlinked = await handleSlackAgentToolCall(
+    { tool: "recent_activity", args: {} },
+    { claims: { slackTeamId: teamId, slackUserId: "UNOBODY", aiRunId: "r3" }, slack, botUserId: BOT }
+  );
+  assert.equal(unlinked.ok, false);
+});

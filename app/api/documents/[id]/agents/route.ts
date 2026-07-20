@@ -57,6 +57,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     data: {
       documentId: id,
       triggerType: parsed.data.previousRunId ? "CONVERSATION_FOLLOWUP" : "CONVERSATION",
+      createdById: user?.id ?? null,
       parentRunId: parsed.data.previousRunId ?? null,
       instruction: parsed.data.message.trim(),
       progress: "Starting Claude research agent.",

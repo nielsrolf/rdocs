@@ -480,6 +480,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     data: {
       documentId: id,
       triggerType: "SELECTION_EDIT",
+      createdById: user?.id ?? null,
       triggerId: parsed.data.selectionId ? `selection:${parsed.data.selectionId}` : null,
       selectionId: parsed.data.selectionId ?? null,
       // Kept (truncated) so the agent view can show what the run was triggered

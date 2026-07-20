@@ -8,7 +8,7 @@ import { createSlackWebClient, slackAuthTest } from "@/lib/slack/web";
 export const runtime = "nodejs";
 
 const toolRequestSchema = z.object({
-  tool: z.enum(["list_slack_channels", "read_slack_channel", "read_slack_thread"]),
+  tool: z.enum(["list_slack_channels", "read_slack_channel", "read_slack_thread", "recent_activity"]),
   args: z.record(z.string(), z.unknown()).default({})
 });
 

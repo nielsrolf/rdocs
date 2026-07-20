@@ -424,6 +424,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     data: {
       documentId: thread.documentId,
       triggerType: "COMMENT_THREAD",
+      createdById: user?.id ?? null,
       triggerId: thread.id,
       instruction: "Write the next assistant reply for this comment thread.",
       progress: "Starting Claude research agent.",
