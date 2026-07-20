@@ -20,6 +20,7 @@ type MaskedCredential = {
 
 function credentialLabel(credential: MaskedCredential): string {
   if (credential.provider === "openrouter") return "OpenRouter API key";
+  if (credential.provider === "openai") return "OpenAI API key";
   if (credential.provider === "litellm") return "LiteLLM API key";
   if (credential.provider === "github") return "GitHub access token";
   return credential.kind === "oauth" ? "Claude subscription" : "Anthropic API key";
@@ -29,12 +30,19 @@ function credentialLabel(credential: MaskedCredential): string {
 // provider is detected from its prefix.
 const FALLBACK_PROVIDER_OPTIONS: Array<{ value: CredentialProvider; label: string }> = [
   { value: "litellm", label: "LiteLLM API key" },
+  { value: "openai", label: "OpenAI API key" },
   { value: "openrouter", label: "OpenRouter API key" },
   { value: "github", label: "GitHub access token" }
 ];
 
 // Shown under the add-row for the detected/selected provider.
 const PROVIDER_HINTS: Record<CredentialProvider, ReactNode> = {
+  openai: (
+    <>
+      Used for voice-message transcription in the Slack bot (Whisper) — not for
+      agent runs. Keys start with <code>sk-</code> / <code>sk-proj-</code>.
+    </>
+  ),
   anthropic: (
     <>
       Paste an API key (<code>sk-ant-…</code>) or a subscription token from{" "}

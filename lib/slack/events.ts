@@ -43,13 +43,41 @@ export type SlackIncomingMessage = {
 // Back-compat alias (transport + tests use the mention name).
 export type SlackMentionEvent = SlackIncomingMessage & { type?: "app_mention" };
 
+export type TranscribeResult = { text: string } | { unavailable: true } | { error: string };
+
 export type SlackEventDeps = {
   slack: SlackClient;
   appUrl: string;
   botUserId: string;
   // Injectable so tests can observe run inputs without running an agent.
   startRun?: (input: ConversationRunInput) => Promise<void>;
+  // Injectable voice transcription; default resolves the triggering user's
+  // OpenAI/LiteLLM credential (lib/slack/transcribe.ts).
+  transcribe?: (args: {
+    documentId: string;
+    userId: string | null;
+    bytes: Buffer;
+    filename: string;
+    mimetype: string;
+  }) => Promise<TranscribeResult>;
 };
+
+async function defaultTranscribe(args: {
+  documentId: string;
+  userId: string | null;
+  bytes: Buffer;
+  filename: string;
+  mimetype: string;
+}): Promise<TranscribeResult> {
+  const { resolveTranscriptionConfig, transcribeAudio } = await import("@/lib/slack/transcribe");
+  const config = await resolveTranscriptionConfig(args.documentId, args.userId);
+  if (!config) return { unavailable: true };
+  try {
+    return { text: await transcribeAudio(config, args) };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : "transcription failed" };
+  }
+}
 
 const MAX_INSTRUCTION_LENGTH = 8000;
 
@@ -374,8 +402,10 @@ async function handleIncomingSlackMessage(
   surface: "mention" | "dm"
 ) {
   // Never respond to bot messages (including our own) — loop guard. Message
-  // subtypes (edits, joins, deletions…) are not user prompts either.
-  if (!event.user || event.botId || event.subtype) {
+  // subtypes (edits, joins, deletions…) are not user prompts either — EXCEPT
+  // "file_share": that's how a normal user message with an attached file or
+  // voice note arrives.
+  if (!event.user || event.botId || (event.subtype && event.subtype !== "file_share")) {
     return { handled: false as const, reason: "bot-message" as const };
   }
   if (hasSeenSlackEvent(event.eventId)) return { handled: false as const, reason: "duplicate" as const };
@@ -473,12 +503,36 @@ async function handleIncomingSlackMessage(
 
   // Files attached to the message: persisted as document attachments RIGHT
   // AWAY (Slack file URLs expire) — the existing worktree sync makes them
-  // readable at attachments/<storedName> inside the agent's workspace.
+  // readable at attachments/<storedName> inside the agent's workspace. Voice
+  // notes are additionally transcribed (with the triggering user's OpenAI or
+  // LiteLLM credential) so they act like typed messages.
   const savedFiles: string[] = [];
+  const transcripts: string[] = [];
+  const voiceNotes: string[] = [];
+  let voiceUnavailable = false;
+  const transcribe = deps.transcribe ?? defaultTranscribe;
   for (const file of (event.files ?? []).slice(0, 5)) {
     if (!file.downloadUrl || !file.name) continue;
     const bytes = await deps.slack.downloadFile(file.downloadUrl);
     if (!bytes || bytes.length === 0 || bytes.length > 50 * 1024 * 1024) continue;
+    const isAudio = (file.mimetype ?? "").startsWith("audio/");
+    if (isAudio) {
+      const result = await transcribe({
+        documentId: document.id,
+        userId: link.userId,
+        bytes,
+        filename: file.name,
+        mimetype: file.mimetype ?? "audio/mp4"
+      });
+      if ("text" in result && result.text) {
+        transcripts.push(result.text);
+      } else if ("unavailable" in result) {
+        voiceUnavailable = true;
+      } else if ("error" in result) {
+        voiceNotes.push(`(A voice message could not be transcribed: ${result.error})`);
+      }
+      continue;
+    }
     try {
       const { storedName } = await saveAttachmentToStore(document.id, file.name, bytes);
       await db.attachment.create({
@@ -499,13 +553,38 @@ async function handleIncomingSlackMessage(
       });
     }
   }
+  const hasTypedText = instructionBody !== "(no message)";
+
+  // A pure voice message with no way to transcribe it: don't burn an agent
+  // run on guessing — tell the user how to enable voice support.
+  if (voiceUnavailable && !hasTypedText && transcripts.length === 0 && savedFiles.length === 0) {
+    const { VOICE_SUPPORT_HINT } = await import("@/lib/slack/transcribe");
+    await deps.slack
+      .postMessage({ channel: event.channel, threadTs: event.threadTs ?? event.ts, text: VOICE_SUPPORT_HINT })
+      .catch(() => null);
+    return { handled: false as const, reason: "voice-unavailable" as const };
+  }
+  if (voiceUnavailable) {
+    voiceNotes.push(
+      "(The user also sent a voice message, but no transcription credential is connected — mention that adding an OpenAI API key in rdocs enables voice support.)"
+    );
+  }
+
   const filesNote =
     savedFiles.length > 0
       ? `The user attached ${savedFiles.length === 1 ? "a file" : "files"}, available in your workspace:\n${savedFiles.map((f) => `- ${f}`).join("\n")}`
       : null;
+  const transcriptNote =
+    transcripts.length > 0
+      ? hasTypedText
+        ? `Voice message transcript${transcripts.length > 1 ? "s" : ""}:\n${transcripts.map((t) => `"${t}"`).join("\n")}`
+        : null
+      : null;
+  // A voice-only message: the transcript IS the user's message.
+  const effectiveBody = !hasTypedText && transcripts.length > 0 ? transcripts.join("\n") : instructionBody;
 
   const threadContext = await buildThreadContext(deps, event);
-  const instruction = [threadContext, filesNote, instructionBody]
+  const instruction = [threadContext, filesNote, transcriptNote, ...voiceNotes, effectiveBody]
     .filter(Boolean)
     .join("\n\n")
     .slice(0, MAX_INSTRUCTION_LENGTH);

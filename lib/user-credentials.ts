@@ -35,6 +35,7 @@ export type NormalizedCredentialInput = OwnerCredential & { provider: Credential
 
 export const CREDENTIAL_PROVIDERS: readonly CredentialProvider[] = [
   "anthropic",
+  "openai",
   "openrouter",
   "litellm",
   "github"

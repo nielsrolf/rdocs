@@ -2,7 +2,7 @@
 // and the client credentials menu (single input field, no provider dropdown).
 // No imports — this must stay safe to bundle client-side.
 
-export type CredentialProvider = "anthropic" | "openrouter" | "litellm" | "github";
+export type CredentialProvider = "anthropic" | "openai" | "openrouter" | "litellm" | "github";
 
 export type CredentialKind = "api_key" | "oauth";
 
@@ -31,6 +31,12 @@ const PREFIX_RULES: Array<{ prefixes: string[]; detected: DetectedCredential }> 
     // Classic + fine-grained PATs and app/OAuth tokens.
     prefixes: ["github_pat_", "ghp_", "gho_", "ghu_", "ghs_"],
     detected: { provider: "github", kind: "api_key", label: "GitHub access token" }
+  },
+  {
+    // Only the unambiguous modern prefix: bare "sk-…" could equally be a
+    // LiteLLM proxy key, so legacy OpenAI keys need an explicit provider pick.
+    prefixes: ["sk-proj-"],
+    detected: { provider: "openai", kind: "api_key", label: "OpenAI API key" }
   }
 ];
 
