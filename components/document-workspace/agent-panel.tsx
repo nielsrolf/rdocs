@@ -1,3 +1,5 @@
+import { EnvironmentMenu } from "./environment-menu";
+import { SkillsMenu } from "./skills-menu";
 import { useEffect, useState } from "react";
 
 import {
@@ -184,6 +186,8 @@ type AgentConversationOptions = {
 };
 
 export function AgentPanel({
+  canManageAutomation,
+  onEnvKeysChanged,
   title,
   documentId,
   shareToken,
@@ -227,6 +231,8 @@ export function AgentPanel({
   agentBusy: boolean;
   canWriteComments: boolean;
   canWriteDocument: boolean;
+  canManageAutomation: boolean;
+  onEnvKeysChanged: (keys: string[]) => void;
   agentModel: string;
   agentEffort: string;
   hasOpenRouterKey: boolean;
@@ -320,6 +326,12 @@ export function AgentPanel({
           <span className="agent-screen-title-doc">{title}</span>
         </div>
         <div className="agent-config" role="group" aria-label="Agent configuration">
+          {canManageAutomation ? (
+            <>
+              <EnvironmentMenu documentId={documentId} shareToken={shareToken ?? null} onKeysChanged={onEnvKeysChanged} />
+              <SkillsMenu documentId={documentId} shareToken={shareToken ?? null} />
+            </>
+          ) : null}
           <label className="agent-config-field">
             <span className="agent-config-label">Model</span>
             <select

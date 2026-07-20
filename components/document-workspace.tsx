@@ -4755,6 +4755,11 @@ export function DocumentWorkspace({
 
       {agentPanelOpen ? (
         <AgentPanel
+          canManageAutomation={canManageAutomation}
+          onEnvKeysChanged={(keys) => {
+            setHasOpenRouterKey(keys.includes("OPENROUTER_API_KEY") || credentialHasOpenRouterKey);
+            setHasLiteLlmKey(keys.includes("LITELLM_API_KEY") || credentialHasLiteLlmKey);
+          }}
           title={title}
           documentId={documentId}
           shareToken={shareToken}

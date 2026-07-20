@@ -1596,6 +1596,39 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   max-width: 46rem;
 }
 
+/* Onboarding card shown on the Slack channels tab before any channel exists. */
+.slack-onboarding {
+  padding: 1.5rem 1.75rem;
+  max-width: 46rem;
+  line-height: 1.55;
+}
+
+.slack-onboarding h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.15rem;
+}
+
+.slack-onboarding h3 {
+  margin: 1.25rem 0 0.35rem;
+  font-size: 0.95rem;
+}
+
+.slack-onboarding ol,
+.slack-onboarding ul {
+  margin: 0.4rem 0 0.75rem;
+  padding-left: 1.3rem;
+}
+
+.slack-onboarding li {
+  margin-bottom: 0.45rem;
+  font-size: 0.92rem;
+}
+
+.slack-onboarding p {
+  font-size: 0.92rem;
+  margin: 0.35rem 0;
+}
+
 .eyebrow {
   background: var(--accent-soft);
   color: var(--accent-strong);
