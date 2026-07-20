@@ -13,6 +13,7 @@ import {
   type SlackMentionEvent
 } from "../lib/slack/events";
 import type { ConversationRunInput } from "../lib/agent-conversation";
+import { buildUserPrompt } from "../agent-core/agent";
 import type { SlackClient, SlackMessage } from "../lib/slack/web";
 
 process.env.SESSION_SECRET = process.env.SESSION_SECRET || "test-session-secret";
@@ -20,7 +21,7 @@ process.env.SESSION_SECRET = process.env.SESSION_SECRET || "test-session-secret"
 const BOT_USER_ID = "UBOT";
 const APP_URL = "http://localhost:14141";
 
-function makeFakeSlack(threadMessages: SlackMessage[] = []) {
+function makeFakeSlack(threadMessages: SlackMessage[] = [], channelMessages: SlackMessage[] = []) {
   const posted: Array<{ channel: string; text: string; threadTs?: string }> = [];
   const ephemeral: Array<{ channel: string; user: string; text: string; threadTs?: string }> = [];
   const reactions: Array<{ op: "add" | "remove"; ts: string; name: string }> = [];
@@ -46,6 +47,9 @@ function makeFakeSlack(threadMessages: SlackMessage[] = []) {
     },
     async threadReplies() {
       return threadMessages;
+    },
+    async channelHistory() {
+      return channelMessages;
     }
   };
   return { client, posted, ephemeral, reactions };
@@ -345,6 +349,72 @@ test("thread context from other participants is prepended to the instruction", a
   assert.match(runs[0].message, /\[claudex \(you\)\]: I checked run 42 earlier/);
   assert.match(runs[0].message, /can you investigate\?$/);
   assert.doesNotMatch(runs[0].message, /1001\.000.*can you investigate.*\n/, "triggering message not duplicated in context");
+});
+
+test("run input carries slack context and interim messages post as mrkdwn", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-alice7");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const { client, posted } = makeFakeSlack(
+    [],
+    [
+      { ts: "900.000", user: "UCAROL", text: "yesterday's run crashed" },
+      { ts: "1000.000", user: "UALICE", text: `<@${BOT_USER_ID}> summarize the latest results` }
+    ]
+  );
+  const runs: ConversationRunInput[] = [];
+  const result = await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
+  assert.equal(result.handled, true);
+
+  assert.equal(runs[0].slackContext?.surface, "channel");
+  assert.equal(runs[0].slackContext?.channelName, "research");
+  assert.match(runs[0].slackContext?.recentMessages ?? "", /\[name-of-UCAROL\]: yesterday's run crashed/);
+  assert.doesNotMatch(
+    runs[0].slackContext?.recentMessages ?? "",
+    /summarize the latest results/,
+    "the triggering message is not duplicated into channel context"
+  );
+
+  await runs[0].onSlackMessage?.("**Update**: still digging");
+  assert.equal(posted.at(-1)!.text, "*Update*: still digging");
+  assert.equal(posted.at(-1)!.threadTs, "1000.000");
+
+  // Final replies are converted too.
+  await runs[0].onFinished?.({ status: "SUCCEEDED", reply: "It **worked**, see [run](https://x.io)", error: null });
+  assert.equal(posted.at(-1)!.text, "It *worked*, see <https://x.io|run>");
+});
+
+test("agent prompt includes slack context and post_slack_message guidance", () => {
+  const prompt = buildUserPrompt({
+    mode: "conversation",
+    documentTitle: "#research",
+    documentText: "",
+    unresolvedThreads: [],
+    workspacePath: "/tmp/w",
+    workspaceOverview: "",
+    instruction: "summarize",
+    slackContext: {
+      surface: "channel",
+      channelName: "research",
+      recentMessages: "[carol]: the eval numbers look off"
+    }
+  });
+  assert.match(prompt, /happening in Slack \(the #research channel\)/);
+  assert.match(prompt, /post_slack_message/);
+  assert.match(prompt, /\[carol\]: the eval numbers look off/);
+
+  const plain = buildUserPrompt({
+    mode: "conversation",
+    documentTitle: "Doc",
+    documentText: "",
+    unresolvedThreads: [],
+    workspacePath: "/tmp/w",
+    workspaceOverview: "",
+    instruction: "summarize"
+  });
+  assert.doesNotMatch(plain, /Slack/);
 });
 
 test("ensureSlackChannelDocument is idempotent per (team, channel)", async () => {

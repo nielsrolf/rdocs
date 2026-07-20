@@ -32,6 +32,9 @@ export type AgentRunOptions = {
   // Live mid-run comment delivery (see ClaudeAgentRunOptions.onComment).
   // Runtime-only — never shipped as part of the serialized job.
   onComment?: ClaudeAgentRunOptions["onComment"];
+  // Live mid-run Slack updates (see ClaudeAgentRunOptions.onSlackMessage).
+  // Runtime-only — never shipped as part of the serialized job.
+  onSlackMessage?: ClaudeAgentRunOptions["onSlackMessage"];
   validation?: SubmissionValidationSpec;
   agentConfig?: DocumentAgentConfig;
   agentEnv?: DocumentEnv;

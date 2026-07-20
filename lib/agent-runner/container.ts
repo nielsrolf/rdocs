@@ -92,6 +92,7 @@ export class ContainerRunner implements AgentRunner {
       agentModel: job.agentConfig?.model,
       onProgress: options?.onProgress,
       onComment: options?.onComment,
+      onSlackMessage: options?.onSlackMessage,
       signal: options?.signal,
       containerName: options?.containerName
     });
@@ -121,6 +122,7 @@ export class ContainerRunner implements AgentRunner {
     agentModel?: string | null;
     onProgress?: AgentRunOptions["onProgress"];
     onComment?: AgentRunOptions["onComment"];
+    onSlackMessage?: AgentRunOptions["onSlackMessage"];
     signal?: AbortSignal;
     containerName?: string;
   }): Promise<Record<string, unknown>> {
@@ -173,7 +175,7 @@ export class ContainerRunner implements AgentRunner {
         }
         await prepareEnv();
         try {
-          return await this.spawnContainer(runtime, args, opts.job, opts.onProgress, opts.onComment, {
+          return await this.spawnContainer(runtime, args, opts.job, opts.onProgress, opts.onComment, opts.onSlackMessage, {
             signal: opts.signal,
             containerName: opts.containerName
           });
@@ -218,6 +220,7 @@ export class ContainerRunner implements AgentRunner {
     job: unknown,
     onProgress?: AgentRunOptions["onProgress"],
     onComment?: AgentRunOptions["onComment"],
+    onSlackMessage?: AgentRunOptions["onSlackMessage"],
     cancel?: { signal?: AbortSignal; containerName?: string }
   ): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
@@ -263,6 +266,7 @@ export class ContainerRunner implements AgentRunner {
           type?: string;
           event?: ClaudeAgentProgressEvent;
           comment?: { findText?: unknown; body?: unknown };
+          text?: unknown;
           output?: Record<string, unknown>;
           message?: string;
         };
@@ -284,6 +288,14 @@ export class ContainerRunner implements AgentRunner {
             pending.push(Promise.resolve(onComment(comment)).catch(() => {}));
           } else {
             bufferedComments.push(comment);
+          }
+        } else if (frame.type === "slack_message" && typeof frame.text === "string") {
+          // Interim Slack updates are only meaningful mid-run — dropped (with a
+          // note) when the caller has no handler, never buffered.
+          if (onSlackMessage) {
+            pending.push(Promise.resolve(onSlackMessage(frame.text)).catch(() => {}));
+          } else {
+            process.stderr.write("[agent-container] dropped slack_message frame (no handler)\n");
           }
         } else if (frame.type === "result" && frame.output) {
           result = frame.output;

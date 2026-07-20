@@ -97,6 +97,9 @@ async function main() {
       // the host persists them (or buffers them into the result if it has no
       // handler).
       onComment: (comment) => emit({ type: "comment", comment }),
+      // Interim Slack updates cross the boundary the same way; the host posts
+      // them to the thread.
+      onSlackMessage: (text) => emit({ type: "slack_message", text }),
       agentConfig: job.agentConfig as never,
       agentEnv: job.agentEnv,
       validateSubmission,

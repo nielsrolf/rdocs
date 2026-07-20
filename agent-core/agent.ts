@@ -77,6 +77,17 @@ export type ClaudeResearchAgentInput = {
     role: string;
     message: string;
   }>;
+  /**
+   * Present when the conversation happens in Slack (the claudex bot). Enables
+   * the post_slack_message tool and adds channel context to the prompt.
+   * Serializable — travels with the job into the container runner.
+   */
+  slackContext?: {
+    surface: "channel" | "dm";
+    channelName: string | null;
+    /** Preformatted transcript of recent channel messages, oldest first. */
+    recentMessages: string | null;
+  };
 };
 
 export type ClaudeResearchAgentOutput = {
@@ -121,6 +132,12 @@ export type ClaudeAgentRunOptions = {
    * creates them.
    */
   onComment?: (comment: AgentComment) => void | Promise<void>;
+  /**
+   * Live delivery of interim Slack messages posted mid-run via the
+   * post_slack_message tool (only offered when input.slackContext is set).
+   * Runtime-only; the container runner bridges it as a "slack_message" frame.
+   */
+  onSlackMessage?: (text: string) => void | Promise<void>;
   validateSubmission?: ClaudeAgentSubmissionValidator;
   /** Per-document model + thinking-effort selection (see lib/agent-config). */
   agentConfig?: DocumentAgentConfig;
@@ -141,6 +158,7 @@ export type ClaudeAgentRunOptions = {
 
 const SUBMIT_TOOL_NAME = "mcp__gdocs__submit_response";
 const ADD_COMMENT_TOOL_NAME = "mcp__gdocs__add_comment";
+const POST_SLACK_MESSAGE_TOOL_NAME = "mcp__gdocs__post_slack_message";
 
 function countOccurrences(haystack: string, needle: string): number {
   if (!needle) return 0;
@@ -515,10 +533,19 @@ function buildUserPromptRaw(input: ClaudeResearchAgentInput) {
   if (input.mode === "conversation") {
     const historyText = formatConversationHistory(input.conversationHistory);
     const historyBlock = historyText ? `Earlier in this conversation:\n${historyText}\n\n` : "";
+    const slack = input.slackContext;
+    const slackBlock = slack
+      ? `This conversation is happening in Slack (${
+          slack.surface === "dm" ? "a direct message" : slack.channelName ? `the #${slack.channelName.replace(/^#/, "")} channel` : "a channel"
+        }). Your submit_response reply is posted to the Slack thread — write it as a chat message: concise Markdown, no long report unless asked (it is converted to Slack formatting for you).
+While you work you may post short interim updates to the thread with the post_slack_message tool (e.g. what you found so far, or that a step will take a while). Use it sparingly — the user already sees a working indicator; never use it for the final answer, which always goes through submit_response.${
+          slack.recentMessages ? `\n\nRecent messages in this Slack ${slack.surface === "dm" ? "conversation" : "channel"} (oldest first, for context — the thread you are replying in may reference them):\n${slack.recentMessages}` : ""
+        }\n\n`
+      : "";
 
     return `Trigger: document-level agent conversation.
 
-${historyBlock}New user message:
+${slackBlock}${historyBlock}New user message:
 ${instruction}
 
 You may inspect or modify workspace files if that helps. Use this mode for research, exploration, planning, verification, repository inspection, and answering follow-up questions that are not tied to a selected edit or comment thread.
@@ -846,7 +873,7 @@ async function runClaudeResearchAgentOnce(
   input: ClaudeResearchAgentInput,
   options: ClaudeAgentRunOptions = {}
 ): Promise<ClaudeResearchAgentOutput> {
-  const { onProgress, onComment, validateSubmission } = options;
+  const { onProgress, onComment, onSlackMessage, validateSubmission } = options;
   const sdkConfig = resolveAgentSdkConfig(options.agentConfig, process.env.CLAUDE_AGENT_MODEL);
   if (!input.workspacePath) {
     throw new Error(
@@ -966,10 +993,46 @@ async function runClaudeResearchAgentOnce(
     }
   );
 
+  // Interim Slack updates (claudex): only offered when the run originates in
+  // Slack. Fire-and-forget through options.onSlackMessage — the host posts to
+  // the thread (or, in the container runner, relays a "slack_message" frame).
+  const postSlackMessageTool = tool(
+    "post_slack_message",
+    "Post ONE short interim status update to the Slack thread you are working in, visible immediately. Use sparingly for meaningful progress (a finding, a long step starting) — never for the final answer, which must go through submit_response.",
+    {
+      text: z.string().min(1).max(2000).describe("The message to post (concise Markdown; converted to Slack formatting).")
+    },
+    async (args) => {
+      if (!onSlackMessage) {
+        return {
+          content: [{ type: "text" as const, text: "Slack delivery is not available in this run." }],
+          isError: true
+        };
+      }
+      try {
+        await onSlackMessage(args.text);
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Failed to post to Slack: ${error instanceof Error ? error.message : String(error)}`
+            }
+          ],
+          isError: true
+        };
+      }
+      emitProgress(onProgress, { role: "tool", message: `Posted to Slack: ${compactValue(args.text, 120)}` });
+      return {
+        content: [{ type: "text" as const, text: "Posted. Do not repeat this update in your final reply." }]
+      };
+    }
+  );
+
   const mcpServer = createSdkMcpServer({
     name: "gdocs",
     version: "1.0.0",
-    tools: [submitTool, addCommentTool],
+    tools: input.slackContext ? [submitTool, addCommentTool, postSlackMessageTool] : [submitTool, addCommentTool],
     alwaysLoad: true
   });
 
@@ -1029,7 +1092,12 @@ async function runClaudeResearchAgentOnce(
       systemPrompt: buildSystemPrompt(input),
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
-      allowedTools: [...toolsForAgentAccess(input.accessMode), SUBMIT_TOOL_NAME, ADD_COMMENT_TOOL_NAME],
+      allowedTools: [
+        ...toolsForAgentAccess(input.accessMode),
+        SUBMIT_TOOL_NAME,
+        ADD_COMMENT_TOOL_NAME,
+        ...(input.slackContext ? [POST_SLACK_MESSAGE_TOOL_NAME] : [])
+      ],
       disallowedTools: [
         "EnterWorktree",
         "ExitWorktree",

@@ -18,6 +18,8 @@ export type SlackClient = {
   channelInfo(channelId: string): Promise<{ name: string | null } | null>;
   userInfo(userId: string): Promise<{ displayName: string | null } | null>;
   threadReplies(args: { channel: string; ts: string; limit?: number }): Promise<SlackMessage[]>;
+  /** Recent top-level channel messages, oldest first. */
+  channelHistory(args: { channel: string; limit?: number }): Promise<SlackMessage[]>;
 };
 
 type SlackApiResponse = { ok: boolean; error?: string } & Record<string, unknown>;
@@ -45,6 +47,16 @@ export async function slackAuthTest(botToken: string) {
     userId: typeof result.user_id === "string" ? result.user_id : null,
     teamId: typeof result.team_id === "string" ? result.team_id : null
   };
+}
+
+function normalizeMessages(messages: unknown): SlackMessage[] {
+  if (!Array.isArray(messages)) return [];
+  return (messages as Array<Record<string, unknown>>).map((message) => ({
+    ts: typeof message.ts === "string" ? message.ts : "",
+    user: typeof message.user === "string" ? message.user : undefined,
+    botId: typeof message.bot_id === "string" ? message.bot_id : undefined,
+    text: typeof message.text === "string" ? message.text : ""
+  }));
 }
 
 export function createSlackWebClient(botToken: string): SlackClient {
@@ -101,13 +113,13 @@ export function createSlackWebClient(botToken: string): SlackClient {
     },
     async threadReplies({ channel, ts, limit = 20 }) {
       const result = await slackApi(botToken, "conversations.replies", { channel, ts, limit });
-      const messages = Array.isArray(result.messages) ? (result.messages as Array<Record<string, unknown>>) : [];
-      return messages.map((message) => ({
-        ts: typeof message.ts === "string" ? message.ts : "",
-        user: typeof message.user === "string" ? message.user : undefined,
-        botId: typeof message.bot_id === "string" ? message.bot_id : undefined,
-        text: typeof message.text === "string" ? message.text : ""
-      }));
+      return normalizeMessages(result.messages);
+    },
+    async channelHistory({ channel, limit = 30 }) {
+      // conversations.history returns newest first — flip to oldest-first so
+      // transcripts read naturally.
+      const result = await slackApi(botToken, "conversations.history", { channel, limit });
+      return normalizeMessages(result.messages).reverse();
     }
   };
 }

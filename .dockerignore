@@ -12,6 +12,9 @@ logs
 *.db
 *.db-journal
 prisma/*.db
+**/*.db
+**/*.db-journal
+backups
 playwright-report
 test-results
 e2e

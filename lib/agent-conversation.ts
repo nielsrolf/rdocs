@@ -22,7 +22,7 @@ import { getAgentRunner } from "@/lib/agent-runner";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
 import { loadAgentEnvWithFreeFallback, restrictAgentEnvForReadOnly } from "@/lib/user-credentials";
-import type { AgentAccessMode } from "@/agent-core";
+import type { AgentAccessMode, ClaudeResearchAgentInput } from "@/agent-core";
 import { normalizeAgentImages } from "@/lib/ai-edit-submission";
 import { createLiveCommentRecorder } from "@/lib/agent-comments";
 import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
@@ -50,6 +50,10 @@ export type ConversationRunInput = {
   createdById: string | null;
   agentConfig: { model: string | null; effort: string | null };
   agentAccessMode: AgentAccessMode;
+  // Set for Slack-triggered runs: prompt context + the post_slack_message tool.
+  slackContext?: ClaudeResearchAgentInput["slackContext"];
+  // Live delivery of interim Slack updates the agent posts mid-run.
+  onSlackMessage?: (text: string) => Promise<void> | void;
   // Called once after the run reaches a terminal state (bookkeeping already
   // persisted). Used by the Slack bot to deliver the reply to the thread.
   onFinished?: (outcome: ConversationRunOutcome) => Promise<void> | void;
@@ -66,6 +70,8 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
     createdById,
     agentConfig,
     agentAccessMode,
+    slackContext,
+    onSlackMessage,
     onFinished
   } = input;
   let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
@@ -166,7 +172,8 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       workspacePath: linkedRepo?.workspace ?? null,
       workspaceOverview,
       instruction: message,
-      conversationHistory
+      conversationHistory,
+      slackContext
     }, {
       agentConfig: effectiveAgentConfig,
       agentEnv: agentAccessMode === "read_only" ? restrictAgentEnvForReadOnly(agentEnv) : agentEnv,
@@ -174,6 +181,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       containerName: `gdocs-run-${aiRunId}`,
       validation: { kind: "conversation", documentText: suggestionAnchorText },
       onComment: commentRecorder.onComment,
+      onSlackMessage,
       onProgress: async (event) => {
         await Promise.all([
           db.aiRun.update({

@@ -22,7 +22,8 @@ import {
   type ConversationRunInput
 } from "@/lib/agent-conversation";
 import { createSlackLinkToken } from "@/lib/slack/link-token";
-import type { SlackClient } from "@/lib/slack/web";
+import { markdownToMrkdwn } from "@/lib/slack/mrkdwn";
+import type { SlackClient, SlackMessage } from "@/lib/slack/web";
 
 export type SlackIncomingMessage = {
   eventId: string;
@@ -114,6 +115,46 @@ export async function ensureSlackChannelDocument(input: {
   return document;
 }
 
+async function formatTranscript(
+  deps: SlackEventDeps,
+  messages: SlackMessage[],
+  excludeTs: string
+): Promise<string | null> {
+  const others = messages.filter((message) => message.ts !== excludeTs && message.text);
+  if (others.length === 0) return null;
+  const nameCache = new Map<string, string>();
+  const lines = await Promise.all(
+    others.slice(-15).map(async (message) => {
+      let name = "unknown";
+      if (message.botId) {
+        name = "claudex (you)";
+      } else if (message.user) {
+        if (!nameCache.has(message.user)) {
+          nameCache.set(
+            message.user,
+            (await deps.slack.userInfo(message.user))?.displayName ?? message.user
+          );
+        }
+        name = nameCache.get(message.user)!;
+      }
+      return `[${name}]: ${message.text}`;
+    })
+  );
+  return lines.join("\n");
+}
+
+async function buildChannelContext(
+  deps: SlackEventDeps,
+  event: SlackIncomingMessage
+): Promise<string | null> {
+  try {
+    const history = await deps.slack.channelHistory({ channel: event.channel, limit: 30 });
+    return await formatTranscript(deps, history, event.ts);
+  } catch {
+    return null;
+  }
+}
+
 async function buildThreadContext(
   deps: SlackEventDeps,
   event: SlackIncomingMessage
@@ -121,19 +162,8 @@ async function buildThreadContext(
   if (!event.threadTs || event.threadTs === event.ts) return null;
   try {
     const replies = await deps.slack.threadReplies({ channel: event.channel, ts: event.threadTs, limit: 20 });
-    const others = replies.filter((message) => message.ts !== event.ts && message.text);
-    if (others.length === 0) return null;
-    const lines = await Promise.all(
-      others.slice(-15).map(async (message) => {
-        const name = message.botId
-          ? "claudex (you)"
-          : message.user
-            ? (await deps.slack.userInfo(message.user))?.displayName ?? message.user
-            : "unknown";
-        return `[${name}]: ${message.text}`;
-      })
-    );
-    return `Recent messages in this Slack thread (for context):\n${lines.join("\n")}`;
+    const transcript = await formatTranscript(deps, replies, event.ts);
+    return transcript ? `Recent messages in this Slack thread (for context):\n${transcript}` : null;
   } catch {
     return null;
   }
@@ -242,6 +272,19 @@ async function handleIncomingSlackMessage(
     createdById: link.userId,
     agentConfig: { model: document.agentModel, effort: document.agentEffort },
     agentAccessMode: "workspace",
+    slackContext: {
+      surface: surface === "dm" ? "dm" : "channel",
+      channelName,
+      recentMessages: await buildChannelContext(deps, event)
+    },
+    // Interim updates the agent posts mid-run via post_slack_message.
+    onSlackMessage: async (text) => {
+      await deps.slack.postMessage({
+        channel: event.channel,
+        threadTs: replyThreadTs,
+        text: markdownToMrkdwn(text)
+      });
+    },
     onFinished: async (outcome) => {
       const succeeded = outcome.status === "SUCCEEDED";
       await deps.slack
@@ -251,7 +294,7 @@ async function handleIncomingSlackMessage(
         .addReaction({ channel: event.channel, ts: event.ts, name: succeeded ? "white_check_mark" : "x" })
         .catch(() => null);
       const text = succeeded
-        ? outcome.reply ?? "Done."
+        ? markdownToMrkdwn(outcome.reply ?? "Done.")
         : `The run failed: ${outcome.error ?? "unknown error"}`;
       await deps.slack
         .postMessage({ channel: event.channel, threadTs: replyThreadTs, text })

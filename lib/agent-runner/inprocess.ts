@@ -37,6 +37,7 @@ export class InProcessRunner implements AgentRunner {
     const runPromise = runClaudeResearchAgent(input, {
       onProgress: options?.onProgress,
       onComment: options?.onComment,
+      onSlackMessage: options?.onSlackMessage,
       agentConfig: options?.agentConfig,
       agentEnv: options?.agentEnv,
       validateSubmission
