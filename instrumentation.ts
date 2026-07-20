@@ -58,6 +58,16 @@ export async function register() {
   // the in-memory rooms map doesn't grow unbounded for the process lifetime.
   // Also catches rooms created transiently by poll-only clients. unref() so it
   // never keeps the process alive on its own.
+  // Slack bot (Socket Mode) — no-op unless SLACK_BOT_TOKEN + SLACK_APP_TOKEN
+  // are configured. Don't block startup on the websocket handshake.
+  void import("@/lib/slack/service")
+    .then(({ startSlackSocketService }) => startSlackSocketService())
+    .catch((error) => {
+      console.error("[startup] slack service failed to start", {
+        error: error instanceof Error ? error.message : error
+      });
+    });
+
   const { reapIdleCollaborationRooms } = await import("@/lib/collaboration");
   const reaper = setInterval(() => {
     try {

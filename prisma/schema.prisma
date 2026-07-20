@@ -26,6 +26,7 @@ model User {
   credentials       UserCredential[]
   apiTokens         ApiToken[]
   skills            UserSkill[]
+  slackLinks        SlackAccountLink[]
 }
 
 // A reusable agent skill in a user's personal library (a directory with a
@@ -105,6 +106,13 @@ model Document {
   id              String               @id @default(cuid())
   title           String
   content         String
+  // "document" (default) or "slack_channel". A slack_channel document is the
+  // per-channel agent workspace behind the Slack bot: same model/skills/env
+  // config surface, rendered differently in the dashboard. Slack ids identify
+  // the backing channel; one document per (team, channel).
+  kind            String               @default("document")
+  slackTeamId     String?
+  slackChannelId  String?
   ownerId         String
   repoUrl         String?
   repoBranch      String?
@@ -125,6 +133,24 @@ model Document {
   documentMentions DocumentMention[]
   attachments     Attachment[]
   skills          DocumentSkill[]
+
+  @@unique([slackTeamId, slackChannelId])
+}
+
+// Links a Slack identity to a gdocs-ai account so bot runs triggered by a
+// Slack mention execute with the mentioning user's credentials (runnerUserId
+// in lib/user-credentials.ts). One link per Slack identity per team.
+model SlackAccountLink {
+  id            String   @id @default(cuid())
+  slackTeamId   String
+  slackUserId   String
+  userId        String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([slackTeamId, slackUserId])
+  @@index([userId])
 }
 
 // User-uploaded files attached to a document. The bytes live on disk under the

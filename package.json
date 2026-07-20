@@ -19,6 +19,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.144",
     "@prisma/client": "^5.22.0",
+    "@slack/socket-mode": "^3.0.0",
     "@tiptap/extension-image": "^2.10.4",
     "@tiptap/extension-link": "^2.10.4",
     "@tiptap/extension-placeholder": "^2.10.4",

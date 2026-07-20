@@ -1,0 +1,366 @@
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import test from "node:test";
+
+import { db } from "../lib/db";
+import { createSlackLinkToken, verifySlackLinkToken } from "../lib/slack/link-token";
+import {
+  ensureSlackChannelDocument,
+  handleSlackAppMention,
+  handleSlackDirectMessage,
+  hasSeenSlackEvent,
+  stripBotMention,
+  type SlackMentionEvent
+} from "../lib/slack/events";
+import type { ConversationRunInput } from "../lib/agent-conversation";
+import type { SlackClient, SlackMessage } from "../lib/slack/web";
+
+process.env.SESSION_SECRET = process.env.SESSION_SECRET || "test-session-secret";
+
+const BOT_USER_ID = "UBOT";
+const APP_URL = "http://localhost:14141";
+
+function makeFakeSlack(threadMessages: SlackMessage[] = []) {
+  const posted: Array<{ channel: string; text: string; threadTs?: string }> = [];
+  const ephemeral: Array<{ channel: string; user: string; text: string; threadTs?: string }> = [];
+  const reactions: Array<{ op: "add" | "remove"; ts: string; name: string }> = [];
+  const client: SlackClient = {
+    async postMessage(args) {
+      posted.push(args);
+      return { ts: `${posted.length}.000` };
+    },
+    async postEphemeral(args) {
+      ephemeral.push(args);
+    },
+    async addReaction({ ts, name }) {
+      reactions.push({ op: "add", ts, name });
+    },
+    async removeReaction({ ts, name }) {
+      reactions.push({ op: "remove", ts, name });
+    },
+    async channelInfo() {
+      return { name: "research" };
+    },
+    async userInfo(userId) {
+      return { displayName: `name-of-${userId}` };
+    },
+    async threadReplies() {
+      return threadMessages;
+    }
+  };
+  return { client, posted, ephemeral, reactions };
+}
+
+async function makeUser(prefix: string) {
+  return db.user.create({
+    data: { email: `${prefix}-${crypto.randomUUID()}@example.com`, name: prefix, passwordHash: "x" }
+  });
+}
+
+function mention(overrides: Partial<SlackMentionEvent> & { teamId: string }): SlackMentionEvent {
+  return {
+    type: "app_mention",
+    eventId: `ev-${crypto.randomUUID()}`,
+    channel: "C123",
+    user: "UALICE",
+    text: `<@${BOT_USER_ID}> summarize the latest results`,
+    ts: "1000.000",
+    ...overrides
+  };
+}
+
+function depsWith(client: SlackClient, runs: ConversationRunInput[]) {
+  return {
+    slack: client,
+    appUrl: APP_URL,
+    botUserId: BOT_USER_ID,
+    startRun: async (input: ConversationRunInput) => {
+      runs.push(input);
+    }
+  };
+}
+
+test("slack link token: round trip, tamper, wrong purpose", async () => {
+  const token = await createSlackLinkToken({ slackTeamId: "T1", slackUserId: "U1" });
+  const claims = await verifySlackLinkToken(token);
+  assert.deepEqual(claims, { slackTeamId: "T1", slackUserId: "U1" });
+
+  assert.equal(await verifySlackLinkToken(token.slice(0, -2) + "xx"), null);
+  assert.equal(await verifySlackLinkToken("not-a-token"), null);
+});
+
+test("mention text stripping and event dedupe", () => {
+  assert.equal(stripBotMention(`<@${BOT_USER_ID}> do the thing <@${BOT_USER_ID}>`, BOT_USER_ID), "do the thing");
+  const id = `dedupe-${crypto.randomUUID()}`;
+  assert.equal(hasSeenSlackEvent(id), false);
+  assert.equal(hasSeenSlackEvent(id), true);
+});
+
+test("unlinked slack user gets a connect prompt and no run", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const { client, ephemeral } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+
+  const result = await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
+
+  assert.equal(result.handled, false);
+  assert.equal("reason" in result && result.reason, "unlinked-user");
+  assert.equal(runs.length, 0);
+  assert.equal(ephemeral.length, 1);
+  assert.match(ephemeral[0].text, /\/api\/slack\/connect\?token=/);
+
+  const url = ephemeral[0].text.match(/http\S+token=(\S+)/);
+  assert.ok(url, "prompt must contain a connect URL with a token");
+  const claims = await verifySlackLinkToken(decodeURIComponent(url![1]));
+  assert.equal(claims?.slackTeamId, teamId);
+  assert.equal(claims?.slackUserId, "UALICE");
+});
+
+test("linked user mention creates channel document + run with the mentioner's identity", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-alice");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+
+  const { client, posted, reactions } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+  const result = await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
+
+  assert.equal(result.handled, true);
+  const document = await db.document.findUnique({
+    where: { slackTeamId_slackChannelId: { slackTeamId: teamId, slackChannelId: "C123" } }
+  });
+  assert.ok(document, "channel document must exist");
+  assert.equal(document!.kind, "slack_channel");
+  assert.equal(document!.title, "#research");
+  assert.equal(document!.ownerId, alice.id);
+
+  const run = await db.aiRun.findUnique({ where: { id: (result as { aiRunId: string }).aiRunId } });
+  assert.ok(run);
+  assert.equal(run!.triggerType, "SLACK_MENTION");
+  assert.equal(run!.triggerId, "C123:1000.000");
+  assert.equal(run!.instruction, "summarize the latest results");
+
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].createdById, alice.id, "run must execute with the mentioner's identity");
+  assert.equal(runs[0].agentAccessMode, "workspace");
+
+  // No ack message — a 👀 reaction on the triggering message instead.
+  assert.equal(posted.length, 0);
+  assert.deepEqual(reactions, [{ op: "add", ts: "1000.000", name: "eyes" }]);
+
+  // Reply delivery through the onFinished hook: swap 👀 for ✅ and post reply.
+  await runs[0].onFinished?.({ status: "SUCCEEDED", reply: "All done!", error: null });
+  assert.deepEqual(reactions.slice(1), [
+    { op: "remove", ts: "1000.000", name: "eyes" },
+    { op: "add", ts: "1000.000", name: "white_check_mark" }
+  ]);
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].text, "All done!");
+  assert.equal(posted[0].threadTs, "1000.000");
+
+  // A failed run gets ❌.
+  await runs[0].onFinished?.({ status: "FAILED", reply: null, error: "boom" });
+  assert.deepEqual(reactions.at(-1), { op: "add", ts: "1000.000", name: "x" });
+  assert.match(posted.at(-1)!.text, /boom/);
+});
+
+test("DM: responds without a mention, replies in a thread, threads chain", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-dm-alice");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+
+  const { client, posted, reactions } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+  const first = await handleSlackDirectMessage(
+    mention({ teamId, channel: "D555", text: "hello, what are you?", ts: "5000.000" }),
+    depsWith(client, runs)
+  );
+  assert.equal(first.handled, true);
+
+  const document = await db.document.findUnique({
+    where: { slackTeamId_slackChannelId: { slackTeamId: teamId, slackChannelId: "D555" } }
+  });
+  assert.ok(document);
+  assert.equal(document!.kind, "slack_channel");
+  assert.match(document!.title, /^Slack DM \(name-of-UALICE\)$/);
+
+  const firstRun = await db.aiRun.findUnique({ where: { id: (first as { aiRunId: string }).aiRunId } });
+  assert.equal(firstRun!.triggerId, "D555:5000.000");
+  assert.equal(firstRun!.instruction, "hello, what are you?");
+  await db.aiRun.update({ where: { id: firstRun!.id }, data: { status: "SUCCEEDED" } });
+
+  // Replies are threaded off the triggering message so the thread IS the
+  // visible conversation context.
+  await runs[0].onFinished?.({ status: "SUCCEEDED", reply: "Hi!", error: null });
+  assert.equal(posted.at(-1)!.threadTs, "5000.000");
+  assert.deepEqual(reactions.at(-1), { op: "add", ts: "5000.000", name: "white_check_mark" });
+
+  // A reply inside that thread chains to the first run…
+  const threaded = await handleSlackDirectMessage(
+    mention({ teamId, channel: "D555", text: "and now do a thing", ts: "5001.000", threadTs: "5000.000" }),
+    depsWith(client, runs)
+  );
+  const threadedRun = await db.aiRun.findUnique({ where: { id: (threaded as { aiRunId: string }).aiRunId } });
+  assert.equal(threadedRun!.triggerType, "SLACK_FOLLOWUP");
+  assert.equal(threadedRun!.parentRunId, firstRun!.id);
+
+  // …while a new top-level DM message starts a fresh conversation.
+  const fresh = await handleSlackDirectMessage(
+    mention({ teamId, channel: "D555", text: "unrelated question", ts: "5002.000" }),
+    depsWith(client, runs)
+  );
+  const freshRun = await db.aiRun.findUnique({ where: { id: (fresh as { aiRunId: string }).aiRunId } });
+  assert.equal(freshRun!.triggerType, "SLACK_MENTION");
+  assert.equal(freshRun!.parentRunId, null);
+  assert.equal(freshRun!.triggerId, "D555:5002.000");
+});
+
+test("DM: unlinked user gets the connect prompt as a normal message; subtypes ignored", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const { client, posted, ephemeral } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+
+  const result = await handleSlackDirectMessage(
+    mention({ teamId, channel: "D556", text: "hi", ts: "6000.000" }),
+    depsWith(client, runs)
+  );
+  assert.equal(result.handled, false);
+  assert.equal("reason" in result && result.reason, "unlinked-user");
+  assert.equal(ephemeral.length, 0, "DM prompts are regular messages, not ephemeral");
+  assert.equal(posted.length, 1);
+  assert.match(posted[0].text, /\/api\/slack\/connect\?token=/);
+
+  const edited = await handleSlackDirectMessage(
+    mention({ teamId, channel: "D556", text: "hi", ts: "6001.000", subtype: "message_changed" }),
+    depsWith(client, runs)
+  );
+  assert.equal(edited.handled, false);
+  assert.equal("reason" in edited && edited.reason, "bot-message");
+});
+
+test("follow-up mention in the same thread chains to the previous run", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-alice2");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+
+  const { client } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+  const first = await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
+  assert.equal(first.handled, true);
+  const firstRunId = (first as { aiRunId: string }).aiRunId;
+  await db.aiRun.update({ where: { id: firstRunId }, data: { status: "SUCCEEDED" } });
+
+  const second = await handleSlackAppMention(
+    mention({ teamId, ts: "1001.000", threadTs: "1000.000", text: `<@${BOT_USER_ID}> and now expand it` }),
+    depsWith(client, runs)
+  );
+  assert.equal(second.handled, true);
+  const secondRun = await db.aiRun.findUnique({ where: { id: (second as { aiRunId: string }).aiRunId } });
+  assert.equal(secondRun!.triggerType, "SLACK_FOLLOWUP");
+  assert.equal(secondRun!.parentRunId, firstRunId);
+  assert.equal(secondRun!.triggerId, "C123:1000.000");
+  assert.equal(runs[1].previousRunId, firstRunId);
+});
+
+test("a second linked user in the channel becomes a member, not an owner", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-alice3");
+  const bob = await makeUser("slack-bob");
+  await db.slackAccountLink.createMany({
+    data: [
+      { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id },
+      { slackTeamId: teamId, slackUserId: "UBOB", userId: bob.id }
+    ]
+  });
+
+  const { client } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+  await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
+  const result = await handleSlackAppMention(
+    mention({ teamId, user: "UBOB", ts: "2000.000" }),
+    depsWith(client, runs)
+  );
+  assert.equal(result.handled, true);
+
+  const document = await db.document.findUnique({
+    where: { slackTeamId_slackChannelId: { slackTeamId: teamId, slackChannelId: "C123" } },
+    include: { memberships: true }
+  });
+  assert.equal(document!.ownerId, alice.id);
+  assert.deepEqual(
+    document!.memberships.map((m) => [m.userId, m.permission]),
+    [[bob.id, "EDIT"]]
+  );
+  assert.equal(runs[1].createdById, bob.id, "Bob's mention runs with Bob's identity");
+});
+
+test("duplicate event ids and bot messages are ignored", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-alice4");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const { client } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+
+  const event = mention({ teamId });
+  const first = await handleSlackAppMention(event, depsWith(client, runs));
+  assert.equal(first.handled, true);
+  const replay = await handleSlackAppMention(event, depsWith(client, runs));
+  assert.equal(replay.handled, false);
+  assert.equal("reason" in replay && replay.reason, "duplicate");
+  assert.equal(runs.length, 1);
+
+  const botEvent = mention({ teamId, botId: "B999", ts: "3000.000" });
+  const botResult = await handleSlackAppMention(botEvent, depsWith(client, runs));
+  assert.equal(botResult.handled, false);
+  assert.equal("reason" in botResult && botResult.reason, "bot-message");
+});
+
+test("thread context from other participants is prepended to the instruction", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-alice5");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const { client } = makeFakeSlack([
+    { ts: "1000.000", user: "UCAROL", text: "the eval numbers look off" },
+    { ts: "1000.500", botId: "B1", text: "I checked run 42 earlier" },
+    { ts: "1001.000", user: "UALICE", text: `<@${BOT_USER_ID}> can you investigate?` }
+  ]);
+  const runs: ConversationRunInput[] = [];
+  const result = await handleSlackAppMention(
+    mention({ teamId, ts: "1001.000", threadTs: "1000.000", text: `<@${BOT_USER_ID}> can you investigate?` }),
+    depsWith(client, runs)
+  );
+  assert.equal(result.handled, true);
+  assert.match(runs[0].message, /Recent messages in this Slack thread/);
+  assert.match(runs[0].message, /\[name-of-UCAROL\]: the eval numbers look off/);
+  assert.match(runs[0].message, /\[claudex \(you\)\]: I checked run 42 earlier/);
+  assert.match(runs[0].message, /can you investigate\?$/);
+  assert.doesNotMatch(runs[0].message, /1001\.000.*can you investigate.*\n/, "triggering message not duplicated in context");
+});
+
+test("ensureSlackChannelDocument is idempotent per (team, channel)", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-alice6");
+  const a = await ensureSlackChannelDocument({
+    slackTeamId: teamId,
+    slackChannelId: "C777",
+    channelName: "general",
+    userId: alice.id
+  });
+  const b = await ensureSlackChannelDocument({
+    slackTeamId: teamId,
+    slackChannelId: "C777",
+    channelName: "general",
+    userId: alice.id
+  });
+  assert.equal(a.id, b.id);
+});
