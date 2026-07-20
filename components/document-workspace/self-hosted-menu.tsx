@@ -9,10 +9,9 @@ type ApiTokenRecord = { id: string; label: string | null; createdAt: string; las
 // toggle (enforced again server-side in PATCH /api/documents/:id) because it
 // decides whose AI credentials every collaborator's run authenticates with.
 //
-// NOTE: there is no prebuilt worker/docker image yet — see
-// runner/self-hosted/README.md. This panel mints a real, usable bearer token
-// and shows the real HTTP contract; the run-command shown is illustrative
-// until that image exists.
+// The panel mints a real bearer token and shows the real build+run commands
+// for the worker image (runner/self-hosted/Dockerfile). Not published to a
+// registry yet — the shown command builds it from the repo.
 export function SelfHostedMenu({
   documentId,
   runnerMode,

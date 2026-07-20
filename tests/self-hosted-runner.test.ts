@@ -301,3 +301,138 @@ test("agent-conversation on a selfHosted document: no worktree, enqueues a SelfH
   // selfHosted: this app never created/tracked a worktree for the run.
   assert.equal(finishedRun?.workspacePath, null);
 });
+
+// --- (d) hardening added after the first slice: payload encryption at rest,
+// live progress streaming, and cancellation propagation.
+
+test("job payloads are encrypted at rest and decrypted on claim", async () => {
+  const { recordSelfHostedProgress } = await import("../lib/self-hosted-jobs");
+  void recordSelfHostedProgress;
+  const owner = await makeUser("sh-enc-owner");
+  const doc = await makeDoc(owner.id, "selfHosted");
+  const run = await db.aiRun.create({
+    data: { documentId: doc.id, triggerType: "CONVERSATION", instruction: "x" }
+  });
+
+  const secretValue = `sk-ant-super-secret-${crypto.randomUUID()}`;
+  await enqueueSelfHostedJob({
+    documentId: doc.id,
+    aiRunId: run.id,
+    jobPayload: { agentEnv: { ANTHROPIC_API_KEY: secretValue }, input: {} }
+  });
+
+  const raw = await db.selfHostedJob.findFirst({
+    where: { aiRunId: run.id },
+    select: { jobPayload: true }
+  });
+  assert.ok(raw);
+  assert.doesNotMatch(raw!.jobPayload, new RegExp(secretValue), "credential must not be stored in plaintext");
+  assert.doesNotMatch(raw!.jobPayload, /ANTHROPIC_API_KEY/, "payload structure must not be readable at rest");
+
+  const claimed = await claimNextSelfHostedJob(owner.id);
+  assert.ok(claimed);
+  const payload = JSON.parse(claimed!.jobPayload) as { agentEnv: Record<string, string> };
+  assert.equal(payload.agentEnv.ANTHROPIC_API_KEY, secretValue, "worker receives the decrypted payload");
+});
+
+test("worker progress frames land in the run timeline; cancellation flows back via the progress response", async () => {
+  const { cancelSelfHostedJob, recordSelfHostedProgress } = await import("../lib/self-hosted-jobs");
+  const owner = await makeUser("sh-prog-owner");
+  const other = await makeUser("sh-prog-other");
+  const doc = await makeDoc(owner.id, "selfHosted");
+  const run = await db.aiRun.create({
+    data: { documentId: doc.id, triggerType: "CONVERSATION", instruction: "x" }
+  });
+  await enqueueSelfHostedJob({ documentId: doc.id, aiRunId: run.id, jobPayload: { input: {} } });
+  const claimed = await claimNextSelfHostedJob(owner.id);
+  assert.ok(claimed);
+
+  // Not the owner → rejected.
+  const foreign = await recordSelfHostedProgress(claimed!.id, other.id, [{ message: "nope" }]);
+  assert.deepEqual(foreign, { ok: false, cancelled: false });
+
+  const posted = await recordSelfHostedProgress(claimed!.id, owner.id, [
+    { role: "tool", message: "Cloning repo" },
+    { role: "agent", message: "Working on the fix" }
+  ]);
+  assert.deepEqual(posted, { ok: true, cancelled: false });
+  const events = await db.aiRunEvent.findMany({
+    where: { aiRunId: run.id },
+    orderBy: { createdAt: "asc" },
+    select: { role: true, message: true }
+  });
+  assert.deepEqual(events, [
+    { role: "tool", message: "Cloning repo" },
+    { role: "agent", message: "Working on the fix" }
+  ]);
+  const runRow = await db.aiRun.findUnique({ where: { id: run.id }, select: { progress: true } });
+  assert.equal(runRow!.progress, "Working on the fix");
+
+  // App-side cancellation → the next progress post tells the worker to stop…
+  assert.equal(await cancelSelfHostedJob(claimed!.id), true);
+  const afterCancel = await recordSelfHostedProgress(claimed!.id, owner.id, [{ message: "still going" }]);
+  assert.deepEqual(afterCancel, { ok: true, cancelled: true });
+  // …and a late result is dropped.
+  const lateResult = await completeSelfHostedJob(claimed!.id, owner.id, {
+    status: "succeeded",
+    resultPayload: { reply: "too late" }
+  });
+  assert.equal(lateResult, false);
+  const finalRow = await getSelfHostedJob(claimed!.id);
+  assert.equal(finalRow!.status, "cancelled");
+});
+
+test("enqueued jobs carry repo coordinates so the worker can clone with its own credentials", async () => {
+  const { SelfHostedPullRunner } = await import("../lib/agent-runner/self-hosted");
+  const { decodeJobPayload } = await import("../lib/self-hosted-jobs");
+  const owner = await makeUser("sh-repo-owner");
+  const doc = await db.document.create({
+    data: {
+      ownerId: owner.id,
+      title: "repo doc",
+      content: "{}",
+      runnerMode: "selfHosted",
+      repoUrl: "https://github.com/example/project",
+      repoBranch: "main"
+    }
+  });
+  const run = await db.aiRun.create({
+    data: { documentId: doc.id, triggerType: "CONVERSATION", instruction: "x" }
+  });
+
+  const runner = new SelfHostedPullRunner();
+  const runPromise = runner.run(
+    {
+      mode: "conversation",
+      documentTitle: "repo doc",
+      documentText: "",
+      unresolvedThreads: [],
+      workspacePath: null,
+      workspaceOverview: "",
+      instruction: "do the thing"
+    },
+    { documentId: doc.id, aiRunId: run.id }
+  );
+
+  // Wait for the job row, inspect its payload, then complete it.
+  let jobRow: { id: string; jobPayload: string } | null = null;
+  for (let i = 0; i < 50 && !jobRow; i++) {
+    jobRow = await db.selfHostedJob.findFirst({
+      where: { aiRunId: run.id },
+      select: { id: true, jobPayload: true }
+    });
+    if (!jobRow) await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(jobRow, "job must be enqueued");
+  const payload = JSON.parse(decodeJobPayload(jobRow!.jobPayload)) as {
+    repo?: { url: string; branch: string | null } | null;
+  };
+  assert.deepEqual(payload.repo, { url: "https://github.com/example/project", branch: "main" });
+
+  await completeSelfHostedJob(jobRow!.id, owner.id, {
+    status: "succeeded",
+    resultPayload: { reply: "done", model: "test" }
+  });
+  const output = await runPromise;
+  assert.equal(output.reply, "done");
+});

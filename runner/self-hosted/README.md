@@ -7,10 +7,9 @@ the app's own container runner — so the actual Claude Agent SDK loop is
 identical to a managed run; only the transport (HTTP claim/result instead of
 stdin/NDJSON) and the workspace provisioning differ.
 
-Read "What's built" and especially "Explicitly NOT implemented yet" before
-relying on this for anything beyond doc-only edits: **automatic repo cloning
-is not implemented**, because the job payload the app sends never contains a
-repo URL (see below for why).
+Read "What's built" and "Explicitly NOT implemented yet" below. Repo-backed
+documents work: the job payload carries the repo URL/branch (never
+credentials) and the worker clones with its own git auth.
 
 ## What the app does today for a `selfHosted` document
 
@@ -88,30 +87,25 @@ Env vars the worker reads:
   the workspace for every job this worker processes (copied into a fresh
   per-job scratch dir, so a crashed run never dirties your real checkout).
 
-## Explicitly NOT implemented yet
+## Now implemented (since the first slice)
 
-- **No automatic repo cloning.** This is the real gap, not a corner someone
-  cut in this worker: `AgentJob.input` (`ClaudeResearchAgentInput` in
-  `agent-core/agent.ts`) has no repo URL/branch field at all, and
-  `SelfHostedPullRunner` never populates one — for `runnerMode: "managed"`
-  documents the repo URL/branch lives in `Document`/`Repository` rows and gets
-  turned into a live worktree by `lib/research-workspace.ts` on the app side;
-  for `selfHosted` documents that whole step is skipped, by design, so the
-  app never touches the user's git credentials. Until a follow-up threads a
-  repo URL (and nothing more — never credentials) into the job payload, this
-  worker only supports (a) doc-only jobs, or (b) jobs against a single
-  operator-supplied `WORKSPACE_REPO_PATH` checkout shared by every job. A
-  worker that needs a *different* repo per document/job must be extended
-  (e.g. keep a local map of `documentId → repo path` and look it up before
-  each `runJob`) — not built here.
-- **No progress streaming.** The app has no live view into a self-hosted run
-  until it finishes — no equivalent of the container runner's NDJSON
-  progress frames yet. The agent panel will just show "waiting" until the
-  worker posts a final result. (The worker does log `onProgress` events to
-  its own stderr for local debugging.)
-- **No cancellation propagation.** Stopping a run in the UI stops the app's
-  poll loop and marks the run cancelled, but does not tell the worker to stop
-  executing.
+- **Automatic repo cloning.** The job payload carries the document's repo
+  coordinates (`repo: { url, branch }` — URL and branch only, never
+  credentials); the worker clones per job with THIS box's own git
+  credentials (`GITHUB_TOKEN` env, or whatever ambient git auth exists).
+  `WORKSPACE_REPO_PATH` still overrides cloning when set.
+- **Progress streaming.** The worker batches `onProgress` frames and POSTs
+  them to `/api/self-hosted/jobs/:id/progress` every ~2.5s; they land in the
+  run's timeline, so the agent panel (and Slack) show live progress.
+- **Cancellation propagation.** Stopping a run marks the job `cancelled`;
+  the worker learns this from the `cancelled: true` flag on its next
+  progress post, aborts the SDK loop (subprocess included), and discards the
+  result. Late results for cancelled jobs are rejected by the app.
+- **Job payloads are encrypted at rest** in the app's database (they carry
+  the owner's credentials); they are decrypted only when a worker claims the
+  job, over TLS.
+
+## Explicitly NOT implemented yet
 - **No merge-conflict auto-resolution** for self-hosted documents
   (`SelfHostedPullRunner.resolveMergeConflicts` throws). The owner's worker
   would need to handle merges itself, or this needs a dedicated job type.

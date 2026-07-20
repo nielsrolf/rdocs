@@ -67,6 +67,8 @@ type ClaimedJob = {
     agentConfig?: Record<string, unknown>;
     agentEnv?: Record<string, string>;
     validation?: Parameters<typeof buildSubmissionValidator>[0];
+    /** Repo coordinates; cloned with THIS box's own git credentials. */
+    repo?: { url: string; branch: string | null } | null;
   };
 };
 
@@ -87,6 +89,24 @@ async function claimJob(): Promise<ClaimedJob | null> {
   }
   const body = (await response.json()) as { job: ClaimedJob | null };
   return body.job ?? null;
+}
+
+type ProgressEvent = { role?: string; message: string };
+
+// Progress frames are batched (the SDK can emit many per second) and posted
+// every few seconds. The response doubles as the cancellation channel.
+async function postProgress(jobId: string, events: ProgressEvent[]): Promise<{ cancelled: boolean }> {
+  const response = await fetch(`${APP_URL}/api/self-hosted/jobs/${jobId}/progress`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${SELF_HOSTED_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ events: events.slice(0, 50) })
+  });
+  if (!response.ok) return { cancelled: false };
+  const body = (await response.json().catch(() => null)) as { cancelled?: boolean } | null;
+  return { cancelled: body?.cancelled === true };
 }
 
 async function postResult(jobId: string, payload: { result: unknown } | { error: string }): Promise<void> {
@@ -111,13 +131,30 @@ async function postResult(jobId: string, payload: { result: unknown } | { error:
  * run never leaves the user's real working tree dirty, and so concurrent jobs
  * (were this worker ever run with concurrency > 1) don't collide.
  */
-async function resolveWorkspaceDir(jobId: string): Promise<string> {
+async function resolveWorkspaceDir(
+  jobId: string,
+  repo: { url: string; branch: string | null } | null | undefined
+): Promise<string> {
   const dir = await mkdtemp(path.join(SCRATCH_ROOT, `self-hosted-job-${jobId}-`));
   if (WORKSPACE_REPO_PATH) {
     // `cp -a` preserves a .git dir well enough for the agent's own git
     // commands to operate against a real history. rsync/git-worktree would be
     // more efficient for large repos, but cp keeps this dependency-free.
     await execFileAsync("cp", ["-a", `${WORKSPACE_REPO_PATH}/.`, dir]);
+    return dir;
+  }
+  if (repo?.url) {
+    // Clone with whatever git credentials THIS box has (configureGithubAuth
+    // ran first when the job carries a token; otherwise ambient credentials).
+    const args = ["clone", ...(repo.branch ? ["--branch", repo.branch] : []), repo.url, dir];
+    try {
+      await execFileAsync("git", args, { timeout: 10 * 60 * 1000 });
+      console.error(`[self-hosted-worker] cloned ${repo.url}${repo.branch ? `#${repo.branch}` : ""}`);
+    } catch (error) {
+      console.error(
+        `[self-hosted-worker] clone of ${repo.url} failed (${(error as Error).message}); running with an empty scratch dir`
+      );
+    }
   }
   return dir;
 }
@@ -144,37 +181,80 @@ function configureGithubAuth(githubToken: string | undefined) {
   }
 }
 
+const PROGRESS_FLUSH_MS = 2_500;
+
 async function runJob(job: ClaimedJob): Promise<void> {
   console.error(`[self-hosted-worker] running job ${job.id} (aiRunId=${job.aiRunId}, documentId=${job.documentId})`);
-  const workspaceDir = await resolveWorkspaceDir(job.id);
-  try {
-    configureGithubAuth(job.jobPayload.agentEnv?.GITHUB_TOKEN);
+  configureGithubAuth(job.jobPayload.agentEnv?.GITHUB_TOKEN);
+  const workspaceDir = await resolveWorkspaceDir(job.id, job.jobPayload.repo);
 
+  // Live progress: batch frames and flush on an interval. The flush response
+  // is also how the app tells us the run was cancelled — abort the SDK loop
+  // (kills its subprocess) and drop the job without posting a result.
+  const abort = new AbortController();
+  let cancelled = false;
+  const pendingEvents: ProgressEvent[] = [];
+  let flushing = false;
+  const flush = async () => {
+    if (flushing || pendingEvents.length === 0) return;
+    flushing = true;
+    const batch = pendingEvents.splice(0, 50);
+    try {
+      const outcome = await postProgress(job.id, batch);
+      if (outcome.cancelled && !cancelled) {
+        cancelled = true;
+        console.error(`[self-hosted-worker] job ${job.id} was cancelled by the app; aborting`);
+        abort.abort();
+      }
+    } catch (error) {
+      console.error(`[self-hosted-worker] progress post failed: ${(error as Error).message}`);
+    } finally {
+      flushing = false;
+    }
+  };
+  const flushTimer = setInterval(() => {
+    void flush();
+  }, PROGRESS_FLUSH_MS);
+
+  try {
     const input: ClaudeResearchAgentInput = { ...job.jobPayload.input, workspacePath: workspaceDir };
     const validateSubmission = job.jobPayload.validation
       ? buildSubmissionValidator(job.jobPayload.validation, { workspacePath: workspaceDir })
       : undefined;
 
     const output: ClaudeResearchAgentOutput = await runClaudeResearchAgent(input, {
-      onProgress: (event) => console.error(`[self-hosted-worker] progress: ${JSON.stringify(event)}`),
+      onProgress: (event) => {
+        pendingEvents.push({ role: event.role, message: event.message });
+      },
       agentConfig: job.jobPayload.agentConfig as never,
       agentEnv: job.jobPayload.agentEnv,
       validateSubmission,
+      signal: abort.signal,
       // Not a container: no kernel mount-namespace boundary exists here, so
       // keep the in-process workspace guard enabled (same choice InProcessRunner
       // makes for its own no-sandbox fallback).
       isolatedRuntime: false
     });
 
+    if (cancelled) {
+      console.error(`[self-hosted-worker] job ${job.id} finished after cancellation; result discarded`);
+      return;
+    }
+    await flush();
     await postResult(job.id, { result: output });
     console.error(`[self-hosted-worker] job ${job.id} succeeded`);
   } catch (error) {
+    if (cancelled) {
+      console.error(`[self-hosted-worker] job ${job.id} aborted (cancelled by the app)`);
+      return;
+    }
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[self-hosted-worker] job ${job.id} failed: ${message}`);
     await postResult(job.id, { error: message }).catch((postError) => {
       console.error(`[self-hosted-worker] failed to report failure for job ${job.id}: ${(postError as Error).message}`);
     });
   } finally {
+    clearInterval(flushTimer);
     await rm(workspaceDir, { recursive: true, force: true }).catch(() => {});
   }
 }

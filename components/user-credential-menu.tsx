@@ -410,6 +410,12 @@ export function UserCredentialMenu() {
         <UserSkillsSection onSkillsChanged={setSkills} skills={skills} />
 
         {error ? <p className="env-note env-note-error">{error}</p> : null}
+
+        <p className="env-note">
+          Prefer not to store credentials here at all? Documents can run their agents on{" "}
+          <strong>your own infrastructure</strong> instead: flip a document to self-hosted in its
+          agent panel and run the worker container with your keys — they never leave your machine.
+        </p>
       </div>
     </details>
   );

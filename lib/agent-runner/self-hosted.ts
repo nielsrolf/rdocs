@@ -1,6 +1,7 @@
 import type { ClaudeResearchAgentInput, ClaudeResearchAgentOutput } from "@/agent-core";
 
-import { enqueueSelfHostedJob, getSelfHostedJob } from "@/lib/self-hosted-jobs";
+import { db } from "@/lib/db";
+import { cancelSelfHostedJob, enqueueSelfHostedJob, getSelfHostedJob } from "@/lib/self-hosted-jobs";
 
 import type { AgentRunner, AgentRunOptions, MergeResolveJob } from "./index";
 import { toAgentJob } from "./index";
@@ -73,11 +74,27 @@ export class SelfHostedPullRunner implements AgentRunner {
     }
 
     const job = toAgentJob(input, options);
-    const created = await enqueueSelfHostedJob({ documentId, aiRunId, jobPayload: job });
+    // Repo coordinates (never app-side tokens): the worker clones with ITS OWN
+    // git credentials — the whole point of self-hosting.
+    const document = await db.document.findUnique({
+      where: { id: documentId },
+      select: { repoUrl: true, repoBranch: true }
+    });
+    const created = await enqueueSelfHostedJob({
+      documentId,
+      aiRunId,
+      jobPayload: {
+        ...job,
+        repo: document?.repoUrl ? { url: document.repoUrl, branch: document.repoBranch ?? null } : null
+      }
+    });
 
     const deadline = Date.now() + MAX_WAIT_MS;
     while (Date.now() < deadline) {
       if (options?.signal?.aborted) {
+        // Tell the worker (via the job row) before rejecting; it sees the
+        // cancelled flag on its next progress post and stops.
+        await cancelSelfHostedJob(created.id).catch(() => null);
         throw new RunCancelledError();
       }
       const row = await getSelfHostedJob(created.id);
@@ -90,7 +107,15 @@ export class SelfHostedPullRunner implements AgentRunner {
       if (row.status === "failed") {
         throw new Error(row.error ?? "Self-hosted worker reported a failure with no message.");
       }
-      await sleep(POLL_INTERVAL_MS, options?.signal);
+      if (row.status === "cancelled") {
+        throw new RunCancelledError();
+      }
+      try {
+        await sleep(POLL_INTERVAL_MS, options?.signal);
+      } catch (error) {
+        await cancelSelfHostedJob(created.id).catch(() => null);
+        throw error;
+      }
     }
 
     throw new Error(

@@ -49,9 +49,9 @@ COPY agent-core /agent/agent-core
 COPY runner/self-hosted/worker.ts /agent/worker.ts
 
 # Required at runtime: APP_URL, SELF_HOSTED_TOKEN, and whatever credential env
-# vars the agent needs (ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN; GITHUB_TOKEN
-# for gh/git if you want repo tools without WORKSPACE_REPO_PATH already
-# containing a usable git remote). Optional: WORKSPACE_REPO_PATH (a repo
-# checkout bind-mounted into the container — see runner/self-hosted/README.md
-# for why this is required today for repo-backed runs).
+# vars the agent needs (ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN;
+# GITHUB_TOKEN for gh/git). Repo-backed documents are cloned per job from the
+# repo coordinates in the job payload using THIS container's git credentials.
+# Optional: WORKSPACE_REPO_PATH (a bind-mounted checkout used instead of
+# cloning — e.g. for private remotes this box can't reach).
 ENTRYPOINT ["/agent/node_modules/.bin/tsx", "/agent/worker.ts"]

@@ -20,10 +20,16 @@ export const runtime = "nodejs";
 // interface for when it exists.
 
 function buildRunCommand(origin: string, token: string) {
-  return (
-    `docker run --rm -e GDOCS_AI_URL=${origin} -e GDOCS_AI_TOKEN=${token} ` +
-    `gdocs-ai/self-hosted-runner   # image not published yet — see runner/self-hosted/README.md`
-  );
+  // Env names must match runner/self-hosted/worker.ts. The image is built
+  // from the repo (not published to a registry yet); the clone+build step is
+  // one-time, the run command is the durable part.
+  return [
+    `git clone https://github.com/nielsrolf/rdocs && cd rdocs   # one-time`,
+    `docker build -f runner/self-hosted/Dockerfile -t rdocs-worker .   # one-time`,
+    `docker run --rm -e APP_URL=${origin} -e SELF_HOSTED_TOKEN=${token} \\`,
+    `  -e ANTHROPIC_API_KEY=sk-ant-...   # your own key — never sent to ${origin}`,
+    `  rdocs-worker`
+  ].join("\n");
 }
 
 export async function GET() {
