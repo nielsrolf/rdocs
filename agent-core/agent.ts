@@ -95,6 +95,11 @@ export type ClaudeResearchAgentInput = {
    */
   githubAuthAvailable?: boolean;
   /**
+   * Host dev run (allowlisted Slack dev channel): the workspace IS the live
+   * deployment directory, unsandboxed. Adds operational warnings to the prompt.
+   */
+  hostDevRun?: boolean;
+  /**
    * HTTP callback for the Slack read tools (list/read channels & threads),
    * with a run-scoped bearer token pinned to the triggering user's Slack
    * identity. Access is enforced server-side per call — see
@@ -587,13 +592,18 @@ ${
         }\n\n`
       : "";
 
+    const hostDevBlock = input.hostDevRun
+      ? `HOST DEV MODE: your workspace is the LIVE deployment directory of this very service (the rdocs/gdocs-ai repo, its real database, .env, logs, and running processes) — not an isolated copy. Read CLAUDE.md at the workspace root FIRST and follow its rules (tests-first bug fixes, restart recipe, log conventions).
+Critical: you run INSIDE the service you are working on. Restarting or rebuilding the service KILLS YOUR OWN RUN — if you must restart, first deliver your findings with post_slack_message (your final reply may be lost), and only then trigger the restart as the very last action, detached (nohup). Prefer leaving the restart to the user. Be conservative with the database; it is production data (snapshots exist under backups/).\n\n`
+      : "";
+
     const githubBlock = input.githubAuthAvailable
       ? `GitHub access: GITHUB_TOKEN and GH_TOKEN are set in your environment with the requesting user's credentials — the gh CLI works directly, and plain https git operations against github.com are pre-authenticated. You can clone private repos the user can access.\n\n`
       : "";
 
     return `Trigger: document-level agent conversation.
 
-${slackBlock}${githubBlock}${historyBlock}New user message:
+${slackBlock}${hostDevBlock}${githubBlock}${historyBlock}New user message:
 ${instruction}
 
 You may inspect or modify workspace files if that helps. Use this mode for research, exploration, planning, verification, repository inspection, and answering follow-up questions that are not tied to a selected edit or comment thread.

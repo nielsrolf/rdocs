@@ -22,6 +22,7 @@ import {
   type ConversationRunInput
 } from "@/lib/agent-conversation";
 import { createSlackLinkToken, createSlackToolsToken } from "@/lib/slack/link-token";
+import { isHostDevRun } from "@/lib/slack/dev-mode";
 import { markdownToMrkdwn } from "@/lib/slack/mrkdwn";
 import { RUN_CANCELLED_MESSAGE, cancelAiRun } from "@/lib/agent-runner/run-registry";
 import type { SlackClient, SlackMessage } from "@/lib/slack/web";
@@ -293,6 +294,8 @@ type StartSlackRunArgs = {
   channelContext: string | null;
   /** True for drained-queue follow-ups: their anchors carry an ⏳ to clear. */
   clearPendingReaction?: boolean;
+  /** Allowlisted dev channel: run on the host in the deployment directory. */
+  hostDevRun?: boolean;
 };
 
 export async function startSlackConversationRun(args: StartSlackRunArgs): Promise<string> {
@@ -334,6 +337,7 @@ export async function startSlackConversationRun(args: StartSlackRunArgs): Promis
     createdById: args.userId,
     agentConfig: { model: document.agentModel, effort: document.agentEffort },
     agentAccessMode: "workspace",
+    hostDevRun: args.hostDevRun,
     slackContext: {
       surface: surface === "dm" ? "dm" : "channel",
       channelName,
@@ -440,12 +444,16 @@ async function handleIncomingSlackMessage(
   if (hasSeenSlackEvent(event.eventId)) return { handled: false as const, reason: "duplicate" as const };
 
   const link = await db.slackAccountLink.findUnique({
-    where: { slackTeamId_slackUserId: { slackTeamId: event.teamId, slackUserId: event.user } }
+    where: { slackTeamId_slackUserId: { slackTeamId: event.teamId, slackUserId: event.user } },
+    include: { user: { select: { email: true } } }
   });
   if (!link) {
     await sendConnectPrompt(event, deps, surface);
     return { handled: false as const, reason: "unlinked-user" as const };
   }
+  // Host dev mode: allowlisted channel + allowlisted user → the run executes
+  // unsandboxed in the live deployment directory (lib/slack/dev-mode.ts).
+  const hostDevRun = isHostDevRun(event.channel, link.user.email);
 
   const channelName = surface === "dm" ? null : (await deps.slack.channelInfo(event.channel))?.name ?? null;
   const dmTitle =
@@ -633,7 +641,8 @@ async function handleIncomingSlackMessage(
     userId: link.userId,
     slackUserId: event.user,
     parentRunId: previousRun?.id ?? null,
-    channelContext: await buildChannelContext(deps, event)
+    channelContext: await buildChannelContext(deps, event),
+    hostDevRun
   });
 
   return { handled: true as const, aiRunId, documentId: document.id };

@@ -40,7 +40,10 @@ export class InProcessRunner implements AgentRunner {
       onSlackMessage: options?.onSlackMessage,
       agentConfig: options?.agentConfig,
       agentEnv: options?.agentEnv,
-      validateSubmission
+      validateSubmission,
+      // Trusted host runs (Slack dev channel) opt out of the workspace guard
+      // and kernel sandbox: the whole point is operating on the deployment.
+      isolatedRuntime: options?.trustedHostRun === true
     });
     const signal = options?.signal;
     if (!signal) {

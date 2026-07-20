@@ -629,3 +629,56 @@ test("files attached to a slack message are saved as document attachments and an
   assert.match(runs[0].message, /attachments\/results\.csv/);
   assert.match(runs[0].message, /analyze this dataset/);
 });
+
+test("host dev mode requires BOTH channel and user allowlists", async () => {
+  const { isHostDevRun } = await import("../lib/slack/dev-mode");
+  const env = { SLACK_DEV_CHANNEL_IDS: "C_DEV, c_other", SLACK_DEV_ALLOWED_EMAILS: "Niels@Example.com" };
+  assert.equal(isHostDevRun("C_DEV", "niels@example.com", env), true);
+  assert.equal(isHostDevRun("c_dev", "NIELS@example.com", env), true, "case-insensitive");
+  assert.equal(isHostDevRun("C_DEV", "bob@example.com", env), false, "unlisted user in dev channel");
+  assert.equal(isHostDevRun("C_PROD", "niels@example.com", env), false, "unlisted channel");
+  assert.equal(isHostDevRun("C_DEV", null, env), false);
+  assert.equal(isHostDevRun("C_DEV", "niels@example.com", {}), false, "inactive without config");
+  assert.equal(
+    isHostDevRun("C_DEV", "niels@example.com", { SLACK_DEV_CHANNEL_IDS: "C_DEV" }),
+    false,
+    "channel list alone never activates"
+  );
+});
+
+test("dev-channel messages from the allowlisted user run on the host; others sandboxed", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-dev-alice");
+  const bob = await makeUser("slack-dev-bob");
+  await db.slackAccountLink.createMany({
+    data: [
+      { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id },
+      { slackTeamId: teamId, slackUserId: "UBOB", userId: bob.id }
+    ]
+  });
+  const aliceRow = await db.user.findUnique({ where: { id: alice.id }, select: { email: true } });
+
+  const prevChannels = process.env.SLACK_DEV_CHANNEL_IDS;
+  const prevEmails = process.env.SLACK_DEV_ALLOWED_EMAILS;
+  process.env.SLACK_DEV_CHANNEL_IDS = "C123";
+  process.env.SLACK_DEV_ALLOWED_EMAILS = aliceRow!.email;
+  try {
+    const { client } = makeFakeSlack();
+    const runs: ConversationRunInput[] = [];
+    const aliceResult = await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
+    assert.equal(aliceResult.handled, true);
+    assert.equal(runs[0].hostDevRun, true, "allowlisted user in dev channel runs on host");
+
+    const bobResult = await handleSlackAppMention(
+      mention({ teamId, user: "UBOB", ts: "2000.000" }),
+      depsWith(client, runs)
+    );
+    assert.equal(bobResult.handled, true);
+    assert.equal(runs[1].hostDevRun ?? false, false, "other users stay sandboxed");
+  } finally {
+    if (prevChannels === undefined) delete process.env.SLACK_DEV_CHANNEL_IDS;
+    else process.env.SLACK_DEV_CHANNEL_IDS = prevChannels;
+    if (prevEmails === undefined) delete process.env.SLACK_DEV_ALLOWED_EMAILS;
+    else process.env.SLACK_DEV_ALLOWED_EMAILS = prevEmails;
+  }
+});

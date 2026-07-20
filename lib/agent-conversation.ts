@@ -18,7 +18,7 @@ import {
   isRunCancellation,
   registerRunAbortController
 } from "@/lib/agent-runner/run-registry";
-import { getAgentRunner } from "@/lib/agent-runner";
+import { createAgentRunner, getAgentRunner } from "@/lib/agent-runner";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
 import { loadAgentEnvWithFreeFallback, restrictAgentEnvForReadOnly } from "@/lib/user-credentials";
@@ -50,6 +50,9 @@ export type ConversationRunInput = {
   createdById: string | null;
   agentConfig: { model: string | null; effort: string | null };
   agentAccessMode: AgentAccessMode;
+  // Host dev mode: run unsandboxed in the live deployment directory
+  // (allowlisted Slack dev channel only — see lib/slack/dev-mode.ts).
+  hostDevRun?: boolean;
   // Set for Slack-triggered runs: prompt context + the post_slack_message tool.
   slackContext?: ClaudeResearchAgentInput["slackContext"];
   // Run-scoped HTTP callback enabling the Slack read tools.
@@ -72,6 +75,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
     createdById,
     agentConfig,
     agentAccessMode,
+    hostDevRun,
     slackContext,
     slackTools,
     onSlackMessage,
@@ -85,7 +89,20 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
   try {
     const { history: conversationHistory } = await buildConversationHistory(documentId, previousRunId);
 
-    linkedRepo = await ensureLinkedRepositoryWorktree(documentId, aiRunId, createdById);
+    // Host dev runs operate directly on the deployment checkout — no worktree,
+    // no end-of-run commit/cleanup.
+    linkedRepo = hostDevRun ? null : await ensureLinkedRepositoryWorktree(documentId, aiRunId, createdById);
+    if (hostDevRun) {
+      await db.aiRun.update({
+        where: { id: aiRunId },
+        data: { workspacePath: process.cwd() }
+      });
+      await recordAiRunEvent({
+        aiRunId,
+        role: "system",
+        message: `⚠ HOST DEV RUN: executing unsandboxed in the live deployment directory (${process.cwd()}).`
+      });
+    }
     if (linkedRepo) {
       await db.aiRun.update({
         where: { id: aiRunId },
@@ -157,8 +174,10 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       documentText
     });
 
-    const result = await getAgentRunner().run({
+    const runner = hostDevRun ? createAgentRunner("inprocess") : getAgentRunner();
+    const result = await runner.run({
       mode: "conversation",
+      hostDevRun,
       githubAuthAvailable: Boolean(agentEnv.GITHUB_TOKEN?.trim() || agentEnv.GH_TOKEN?.trim()),
       accessMode: agentAccessMode,
       documentTitle,
@@ -173,7 +192,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
           body: comment.body
         }))
       })),
-      workspacePath: linkedRepo?.workspace ?? null,
+      workspacePath: hostDevRun ? process.cwd() : linkedRepo?.workspace ?? null,
       workspaceOverview,
       instruction: message,
       conversationHistory,
@@ -187,6 +206,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       validation: { kind: "conversation", documentText: suggestionAnchorText },
       onComment: commentRecorder.onComment,
       onSlackMessage,
+      trustedHostRun: hostDevRun,
       onProgress: async (event) => {
         await Promise.all([
           db.aiRun.update({

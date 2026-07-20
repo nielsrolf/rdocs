@@ -46,6 +46,11 @@ export type AgentRunOptions = {
   // so cancellation can kill it deterministically. Ignored by non-container
   // backends.
   containerName?: string;
+  // Host dev mode (Slack dev channel): the run executes in the live deployment
+  // directory with the workspace guard and kernel sandbox DISABLED. Only ever
+  // set together with an explicit env allowlist (lib/slack/dev-mode.ts) and
+  // only honored by the in-process runner.
+  trustedHostRun?: boolean;
 };
 
 /** The serializable half of an agent run — safe to JSON-encode and ship. */
