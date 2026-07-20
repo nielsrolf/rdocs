@@ -232,6 +232,7 @@ export function DocumentWorkspace({
   initialRepoBranch,
   initialAgentModel,
   initialAgentEffort,
+  initialRunnerMode,
   initialHasOpenRouterKey,
   initialHasLiteLlmKey,
   localAgentModel,
@@ -252,6 +253,7 @@ export function DocumentWorkspace({
   const [repoBranch, setRepoBranch] = useState(initialRepoBranch ?? "");
   const [agentModel, setAgentModel] = useState(initialAgentModel ?? DEFAULT_AGENT_MODEL);
   const [agentEffort, setAgentEffort] = useState(initialAgentEffort ?? DEFAULT_AGENT_EFFORT);
+  const [runnerMode, setRunnerMode] = useState(initialRunnerMode ?? "managed");
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(initialHasOpenRouterKey);
   const [hasLiteLlmKey, setHasLiteLlmKey] = useState(initialHasLiteLlmKey);
   const [repoBusy, setRepoBusy] = useState(false);
@@ -1884,6 +1886,33 @@ export function DocumentWorkspace({
     setAgentEffort(previous.effort);
     setSaveState("error");
     reportClientError("Failed to save agent settings.", "agent-config", {
+      status: response.status
+    });
+  }
+
+  // Only the actual owner may flip this (enforced again server-side) — it
+  // decides whose AI credentials every collaborator's run uses.
+  async function handleSaveRunnerMode(next: "managed" | "selfHosted") {
+    if (!isOwner) {
+      return;
+    }
+    const previous = runnerMode;
+    setRunnerMode(next);
+    setSaveState("saving");
+    const response = await fetch(`/api/documents/${documentId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, shareToken, runnerMode: next })
+    });
+    const data = await response.json().catch(() => null);
+    if (response.ok && typeof data?.updatedAt === "string") {
+      setDocumentUpdatedAt(data.updatedAt);
+      setSaveState("saved");
+      return;
+    }
+    setRunnerMode(previous);
+    setSaveState("error");
+    reportClientError("Failed to save the self-hosted runner setting.", "runner-mode-config", {
       status: response.status
     });
   }
@@ -4782,8 +4811,11 @@ export function DocumentWorkspace({
           hasLiteLlmKey={hasLiteLlmKey}
           localModel={localAgentModel}
           anthropicFreeFallback={anthropicFreeFallback}
+          runnerMode={runnerMode}
+          isOwner={isOwner}
           onAgentModelChange={(model) => void handleSaveAgentConfig({ model })}
           onAgentEffortChange={(effort) => void handleSaveAgentConfig({ effort })}
+          onRunnerModeChange={(mode) => void handleSaveRunnerMode(mode)}
           onClose={() => setAgentPanelOpen(false)}
           onSelectConversation={(rootId) => {
             setComposeMode("selected");

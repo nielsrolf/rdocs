@@ -1,4 +1,5 @@
 import { EnvironmentMenu } from "./environment-menu";
+import { SelfHostedMenu } from "./self-hosted-menu";
 import { SkillsMenu } from "./skills-menu";
 import { useEffect, useState } from "react";
 
@@ -207,8 +208,11 @@ export function AgentPanel({
   hasLiteLlmKey,
   localModel,
   anthropicFreeFallback,
+  runnerMode,
+  isOwner,
   onAgentModelChange,
   onAgentEffortChange,
+  onRunnerModeChange,
   onClose,
   onSelectConversation,
   onStartNewConversation,
@@ -243,8 +247,12 @@ export function AgentPanel({
    * execute on the free local model. Never display an Anthropic name as if it
    * will run. */
   anthropicFreeFallback: boolean;
+  /** "managed" (default) or "selfHosted" — see Document.runnerMode. */
+  runnerMode: string;
+  isOwner: boolean;
   onAgentModelChange: (model: string) => void;
   onAgentEffortChange: (effort: string) => void;
+  onRunnerModeChange: (mode: "managed" | "selfHosted") => void;
   onClose: () => void;
   onSelectConversation: (rootId: string) => void;
   onStartNewConversation: () => void;
@@ -332,6 +340,12 @@ export function AgentPanel({
               <SkillsMenu documentId={documentId} shareToken={shareToken ?? null} />
             </>
           ) : null}
+          <SelfHostedMenu
+            documentId={documentId}
+            runnerMode={runnerMode}
+            isOwner={isOwner}
+            onRunnerModeChange={onRunnerModeChange}
+          />
           <label className="agent-config-field">
             <span className="agent-config-label">Model</span>
             <select

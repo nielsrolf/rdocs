@@ -11,7 +11,7 @@ import {
   registerRunAbortController
 } from "@/lib/agent-runner/run-registry";
 import { buildAndVerifyWidget } from "@/agent-core";
-import { getAgentRunner } from "@/lib/agent-runner";
+import { getAgentRunner, getSelfHostedRunner } from "@/lib/agent-runner";
 import { detectEditAssetIntent } from "@/lib/ai-asset-intent";
 import {
   embedSourceExists,
@@ -141,8 +141,15 @@ async function runAiEditInBackground(input: {
   createdById: string | null;
   agentConfig: { model: string | null; effort: string | null };
   agentAccessMode: AgentAccessMode;
+  runnerMode: string;
 }) {
-  const { documentId, aiRunId, parsed, documentTitle, documentContentRaw, createdById, agentConfig, agentAccessMode } = input;
+  const { documentId, aiRunId, parsed, documentTitle, documentContentRaw, createdById, agentConfig, agentAccessMode, runnerMode } = input;
+  // selfHosted documents: the app never manages a repo/worktree for these —
+  // the owner's external worker clones and works in its own checkout. Leaving
+  // linkedRepo null skips ensureLinkedRepositoryWorktree AND every
+  // commit/cleanup step below that is already gated on `linkedRepo` being set.
+  const isSelfHosted = runnerMode === "selfHosted";
+  const runner = isSelfHosted ? getSelfHostedRunner() : getAgentRunner();
   let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
   const stopHeartbeat = startAiRunHeartbeat(aiRunId);
   const abort = registerRunAbortController(aiRunId);
@@ -165,7 +172,9 @@ async function runAiEditInBackground(input: {
       }
     });
 
-    linkedRepo = await ensureLinkedRepositoryWorktree(documentId, aiRunId, createdById);
+    linkedRepo = isSelfHosted
+      ? null
+      : await ensureLinkedRepositoryWorktree(documentId, aiRunId, createdById);
     if (linkedRepo) {
       await db.aiRun.update({
         where: { id: aiRunId },
@@ -219,7 +228,7 @@ async function runAiEditInBackground(input: {
         })
       : null;
 
-    const result = await getAgentRunner().run(
+    const result = await runner.run(
       {
         mode: "edit_selection",
         accessMode: agentAccessMode,
@@ -248,6 +257,8 @@ async function runAiEditInBackground(input: {
         agentEnv: agentAccessMode === "read_only" ? restrictAgentEnvForReadOnly(agentEnv) : agentEnv,
         signal: abort.signal,
         containerName: `gdocs-run-${aiRunId}`,
+        documentId,
+        aiRunId,
         onComment: commentRecorder?.onComment,
         onProgress: async (event) => {
           await Promise.all([
@@ -281,7 +292,9 @@ async function runAiEditInBackground(input: {
       documentId,
       workspace: linkedRepo?.workspace ?? null,
       aiRunId,
-      verifyOnly: getAgentRunner().mode !== "inprocess"
+      // selfHostedPull's mode is also "http" (see self-hosted.ts) — never build
+      // untrusted widget code on the host for it either.
+      verifyOnly: runner.mode !== "inprocess"
     });
     const widgets = widgetResult.created;
     for (const buildError of widgetResult.buildErrors) {
@@ -507,7 +520,8 @@ export async function POST(request: Request, { params }: RouteContext) {
     documentContentRaw: access.document.content,
     createdById: user?.id ?? null,
     agentConfig: { model: access.document.agentModel, effort: access.document.agentEffort },
-    agentAccessMode: agentAccessModeForDocumentAccess(access)
+    agentAccessMode: agentAccessModeForDocumentAccess(access),
+    runnerMode: access.document.runnerMode
   }).catch((error) => {
     console.error("[ai-edit] background run threw", {
       aiRunId: aiRun.id,

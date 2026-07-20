@@ -22,6 +22,7 @@ import type {
 import { InProcessRunner } from "./inprocess";
 import { ContainerRunner } from "./container";
 import { HttpRunner } from "./http";
+import { SelfHostedPullRunner } from "./self-hosted";
 
 // run() options. Unlike ClaudeAgentRunOptions, validation is expressed as a
 // SERIALIZABLE spec rather than a closure, so it can be shipped to a remote
@@ -51,6 +52,12 @@ export type AgentRunOptions = {
   // set together with an explicit env allowlist (lib/slack/dev-mode.ts) and
   // only honored by the in-process runner.
   trustedHostRun?: boolean;
+  // Identifiers the selfHostedPull runner needs to key its SelfHostedJob row
+  // (see ./self-hosted.ts). Not needed — and unused — by inprocess/container/
+  // http, so existing call sites are unaffected unless they opt a document
+  // into runnerMode "selfHosted".
+  documentId?: string;
+  aiRunId?: string;
 };
 
 /** The serializable half of an agent run — safe to JSON-encode and ship. */
@@ -129,4 +136,25 @@ export function getAgentRunner(): AgentRunner {
     cached = createAgentRunner(resolveAgentRunnerMode());
   }
   return cached;
+}
+
+let cachedSelfHosted: AgentRunner | null = null;
+
+/**
+ * The selfHostedPull runner — NOT selected by AGENT_RUNNER_MODE (that is a
+ * deployment-wide env var), but per-document by `Document.runnerMode`. Call
+ * sites should do:
+ *
+ *   const runner = document.runnerMode === "selfHosted"
+ *     ? getSelfHostedRunner()
+ *     : getAgentRunner();
+ *
+ * and pass `documentId`/`aiRunId` in AgentRunOptions so the runner can key its
+ * SelfHostedJob row.
+ */
+export function getSelfHostedRunner(): AgentRunner {
+  if (!cachedSelfHosted) {
+    cachedSelfHosted = new SelfHostedPullRunner();
+  }
+  return cachedSelfHosted;
 }

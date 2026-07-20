@@ -122,6 +122,17 @@ model Document {
   activeAiRunId   String?
   agentModel      String?
   agentEffort     String?
+  // "managed" (default): the app owns the repo/worktree and runs the agent on
+  // its own container/in-process runner (see lib/agent-runner). "selfHosted":
+  // the app never clones or mounts a worktree for this document — it only
+  // enqueues a SelfHostedJob describing the work; the OWNER's external worker
+  // (their own infra, polling POST /api/self-hosted/jobs/claim with their own
+  // ApiToken) clones the repo, does the work, and posts the result back.
+  // Collaborators on a selfHosted document run under the OWNER's AI
+  // credentials (see lib/user-credentials.ts) — an explicit, UI-disclosed
+  // trust decision the owner made by flipping this flag, analogous to the
+  // existing GitHub-auth owner-credential fallback.
+  runnerMode      String               @default("managed")
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt
   owner           User                 @relation("DocumentOwner", fields: [ownerId], references: [id], onDelete: Cascade)
@@ -136,8 +147,36 @@ model Document {
   attachments     Attachment[]
   skills          DocumentSkill[]
   scheduledTasks  ScheduledTask[]
+  selfHostedJobs  SelfHostedJob[]
 
   @@unique([slackTeamId, slackChannelId])
+}
+
+// A queued unit of work for a "selfHosted" runnerMode document. Created
+// instead of a worktree bind-mount when the runner picks the selfHostedPull
+// strategy (lib/agent-runner/self-hosted.ts); the owner's external worker
+// polls POST /api/self-hosted/jobs/claim, does the work in its OWN clone of
+// the repo, and posts the result to POST /api/self-hosted/jobs/:id/result.
+// `jobPayload` is the serialized AgentJob (input + agentConfig + agentEnv +
+// validation spec) — the same shape HttpRunner/ContainerRunner would ship.
+// `resultPayload` is the serialized ClaudeResearchAgentOutput (success) or an
+// error string (failure). No NDJSON progress stream yet — see
+// lib/agent-runner/self-hosted.ts for the "not done" list.
+model SelfHostedJob {
+  id             String    @id @default(cuid())
+  documentId     String
+  aiRunId        String
+  status         String    @default("pending") // pending | claimed | succeeded | failed
+  jobPayload     String
+  resultPayload  String?
+  error          String?
+  createdAt      DateTime  @default(now())
+  claimedAt      DateTime?
+  finishedAt     DateTime?
+  document       Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId, status])
+  @@index([aiRunId])
 }
 
 // Links a Slack identity to a gdocs-ai account so bot runs triggered by a

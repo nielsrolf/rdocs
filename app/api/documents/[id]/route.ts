@@ -29,7 +29,10 @@ const updateDocumentSchema = z.object({
     .max(160)
     .refine(isStorableAgentModel, { message: "Unknown agent model." })
     .optional(),
-  agentEffort: z.enum(agentEffortValues).optional()
+  agentEffort: z.enum(agentEffortValues).optional(),
+  // "managed" (default) or "selfHosted" — see Document.runnerMode in
+  // schema.prisma. Gated the same as agentModel/agentEffort below.
+  runnerMode: z.enum(["managed", "selfHosted"]).optional()
 });
 
 type RouteContext = {
@@ -70,6 +73,15 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   ) {
     return NextResponse.json(
       { error: "Sign in with edit access to change agent settings." },
+      { status: 403 }
+    );
+  }
+  // runnerMode decides whose AI credentials every collaborator's run uses —
+  // a bigger trust decision than picking a model, so only the actual OWNER
+  // (not merely an edit-access/edit-link holder) may flip it.
+  if (parsed.data.runnerMode !== undefined && access.document.ownerId !== user?.id) {
+    return NextResponse.json(
+      { error: "Only the document owner can change the self-hosted runner setting." },
       { status: 403 }
     );
   }
@@ -117,7 +129,8 @@ export async function PATCH(request: Request, { params }: RouteContext) {
         title: nextTitle,
         ...(hasContentUpdate ? { content: nextContent } : {}),
         ...(parsed.data.agentModel !== undefined ? { agentModel: parsed.data.agentModel } : {}),
-        ...(parsed.data.agentEffort !== undefined ? { agentEffort: parsed.data.agentEffort } : {})
+        ...(parsed.data.agentEffort !== undefined ? { agentEffort: parsed.data.agentEffort } : {}),
+        ...(parsed.data.runnerMode !== undefined ? { runnerMode: parsed.data.runnerMode } : {})
       },
       select: {
         updatedAt: true
@@ -224,6 +237,8 @@ export async function GET(request: Request, { params }: RouteContext) {
       repoBranch: access.document.repoBranch,
       agentModel: access.document.agentModel,
       agentEffort: access.document.agentEffort,
+      runnerMode: access.document.runnerMode,
+      isOwner: access.document.ownerId === user?.id,
       // Key presence only (never the value) — the selector uses it to decide
       // whether to offer OpenRouter/LiteLLM models. A doc env key OR a per-user
       // key connected by the document owner counts.

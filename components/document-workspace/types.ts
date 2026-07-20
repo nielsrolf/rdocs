@@ -85,6 +85,8 @@ export type DocumentWorkspaceProps = {
   initialRepoBranch: string | null;
   initialAgentModel: string | null;
   initialAgentEffort: string | null;
+  /** "managed" (default) or "selfHosted" — see Document.runnerMode. */
+  initialRunnerMode: string;
   initialHasOpenRouterKey: boolean;
   initialHasLiteLlmKey: boolean;
   /** The deployment's free local model ("local/<name>") when configured. */

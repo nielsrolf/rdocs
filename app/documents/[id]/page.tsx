@@ -186,6 +186,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         initialRepoUrl={access.document.repoUrl}
         initialAgentModel={access.document.agentModel}
         initialAgentEffort={access.document.agentEffort}
+        initialRunnerMode={access.document.runnerMode}
         initialHasOpenRouterKey={initialHasOpenRouterKey}
         initialHasLiteLlmKey={initialHasLiteLlmKey}
         localAgentModel={freeLocalAgentModel()}

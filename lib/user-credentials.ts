@@ -359,14 +359,19 @@ export async function resolveGithubAuthForDocument(
   runnerUserId: string | null = null,
   env: Record<string, string | undefined> = process.env
 ): Promise<GithubAuth | null> {
-  const [docEnv, doc, runner] = await Promise.all([
+  const doc = await db.document.findUnique({
+    where: { id: documentId },
+    select: { ownerId: true, runnerMode: true, owner: { select: { email: true } } }
+  });
+  // selfHosted documents: any collaborator's run authenticates as the OWNER,
+  // never the triggering user — the owner opted into this trust boundary by
+  // flipping runnerMode (see the Document.runnerMode doc comment in
+  // schema.prisma). Force the "runner" identity used below to the owner.
+  const effectiveRunnerUserId = doc?.runnerMode === "selfHosted" ? doc.ownerId : runnerUserId;
+  const [docEnv, runner] = await Promise.all([
     loadDocumentEnv(documentId),
-    db.document.findUnique({
-      where: { id: documentId },
-      select: { ownerId: true, owner: { select: { email: true } } }
-    }),
-    runnerUserId
-      ? db.user.findUnique({ where: { id: runnerUserId }, select: { id: true, email: true } })
+    effectiveRunnerUserId
+      ? db.user.findUnique({ where: { id: effectiveRunnerUserId }, select: { id: true, email: true } })
       : null
   ]);
 
@@ -446,14 +451,19 @@ async function resolveModelCredentialEnv(
   agentModel: string | null | undefined,
   runnerUserId: string | null
 ): Promise<DocumentEnv> {
-  const [docEnv, doc, runner] = await Promise.all([
+  const doc = await db.document.findUnique({
+    where: { id: documentId },
+    select: { ownerId: true, runnerMode: true, owner: { select: { email: true } } }
+  });
+  // Same selfHosted override as resolveGithubAuthForDocument: the owner
+  // explicitly opted every collaborator's run into using their AI
+  // credentials by flipping runnerMode, so pretend the triggering user IS the
+  // owner for credential-resolution purposes only (never for anything else).
+  const effectiveRunnerUserId = doc?.runnerMode === "selfHosted" ? doc.ownerId : runnerUserId;
+  const [docEnv, runner] = await Promise.all([
     loadDocumentEnv(documentId),
-    db.document.findUnique({
-      where: { id: documentId },
-      select: { ownerId: true, owner: { select: { email: true } } }
-    }),
-    runnerUserId
-      ? db.user.findUnique({ where: { id: runnerUserId }, select: { id: true, email: true } })
+    effectiveRunnerUserId
+      ? db.user.findUnique({ where: { id: effectiveRunnerUserId }, select: { id: true, email: true } })
       : null
   ]);
   const provider = agentModelProvider(agentModel);

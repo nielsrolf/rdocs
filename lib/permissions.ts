@@ -15,6 +15,7 @@ type AccessResult = {
     activeAiRunId: string | null;
     agentModel: string | null;
     agentEffort: string | null;
+    runnerMode: string;
     updatedAt: Date;
   };
   permission: PermissionLevelValue;
@@ -41,6 +42,7 @@ export async function resolveDocumentAccess(
       activeAiRunId: true,
       agentModel: true,
       agentEffort: true,
+      runnerMode: true,
       updatedAt: true
     }
   });
