@@ -1563,6 +1563,39 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   white-space: nowrap;
 }
 
+/* Explainer strip shown at the top of a Slack-channel document. */
+.slack-doc-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.55rem 1rem;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: #4a154b;
+  background: rgba(74, 21, 75, 0.06);
+  border-bottom: 1px solid rgba(74, 21, 75, 0.15);
+}
+
+.slack-doc-banner-link {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #4a154b;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.channels-tab-note {
+  margin: 0.75rem 0 1rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: var(--muted);
+  max-width: 46rem;
+}
+
 .eyebrow {
   background: var(--accent-soft);
   color: var(--accent-strong);

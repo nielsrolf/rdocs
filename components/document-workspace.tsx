@@ -358,7 +358,9 @@ export function DocumentWorkspace({
   const agentRunIdRef = useRef<string | null>(null);
   const mountedAtRef = useRef<number>(Date.now());
   const [, setActiveAiTarget] = useState<ActiveAiTarget | null>(null);
-  const [agentPanelOpen, setAgentPanelOpen] = useState(false);
+  // Slack-channel documents exist FOR the agent: land on the agent panel
+  // (config + run history) instead of the mostly-empty notebook body.
+  const [agentPanelOpen, setAgentPanelOpen] = useState(documentKind === "slack_channel");
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [composeMode, setComposeMode] = useState<"selected" | "new">("selected");
   const [agentMessage, setAgentMessage] = useState("");
@@ -4122,6 +4124,16 @@ export function DocumentWorkspace({
       <>
       {isPublicView ? null : (
       <div className="document-chrome">
+        {documentKind === "slack_channel" ? (
+          <div className="slack-doc-banner">
+            <strong>Slack workspace.</strong> This document backs a Slack conversation: the agent
+            settings here configure claudex for that channel, Slack-triggered runs appear in the
+            agent panel, and this body is a shared notebook the agent reads on every run.
+            <button className="slack-doc-banner-link" onClick={() => setAgentPanelOpen(true)} type="button">
+              Open agent panel
+            </button>
+          </div>
+        ) : null}
         <div className="document-topbar">
           <div className="document-topbar-left">
             <input

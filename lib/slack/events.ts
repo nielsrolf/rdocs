@@ -15,7 +15,6 @@
 
 import { db } from "@/lib/db";
 import { saveAttachmentToStore } from "@/lib/attachments";
-import { defaultDocumentContent, serializeDocumentContent } from "@/lib/content";
 import { copyOwnerDefaultSkillsToDocument } from "@/lib/document-skills";
 import { recordAiRunEvent } from "@/lib/ai-runs";
 import {
@@ -102,12 +101,41 @@ export function stripBotMention(text: string, botUserId: string) {
     .trim();
 }
 
+// Starter content for a fresh channel document — lands as the doc body so the
+// web view is self-explanatory instead of an empty page.
+export function slackChannelSeedContent(title: string, surface: "channel" | "dm") {
+  const paragraph = (text: string) => ({ type: "paragraph", content: [{ type: "text", text }] });
+  const where = surface === "dm" ? "your claudex DM" : `the Slack ${title} channel`;
+  return JSON.stringify({
+    type: "doc",
+    content: [
+      { type: "heading", attrs: { level: 1 }, content: [{ type: "text", text: `${title} — claudex workspace` }] },
+      paragraph(
+        `This document backs ${where}. It is not a normal document — it is the bot's configuration and memory surface:`
+      ),
+      paragraph(
+        "• Agent settings here (model, effort, skills, environment variables — see the agent button in the top bar) configure how claudex runs in this conversation."
+      ),
+      paragraph(
+        "• Every Slack message that triggers claudex shows up as a run in the agent panel, with its full timeline."
+      ),
+      paragraph(
+        "• Files shared in Slack are stored as attachments; the agent keeps its own notes in the workspace CLAUDE.md."
+      ),
+      paragraph(
+        "You can also use this body as a shared notebook — the agent reads it on every run, so pinned context (goals, conventions, links) written here reaches it."
+      )
+    ]
+  });
+}
+
 export async function ensureSlackChannelDocument(input: {
   slackTeamId: string;
   slackChannelId: string;
   channelName: string | null;
   titleFallback?: string;
   userId: string;
+  surface?: "channel" | "dm";
 }) {
   const existing = await db.document.findUnique({
     where: {
@@ -130,16 +158,17 @@ export async function ensureSlackChannelDocument(input: {
     return existing;
   }
 
+  const title = input.channelName
+    ? `#${input.channelName}`
+    : input.titleFallback ?? `Slack channel ${input.slackChannelId}`;
   const document = await db.document.create({
     data: {
       ownerId: input.userId,
       kind: "slack_channel",
       slackTeamId: input.slackTeamId,
       slackChannelId: input.slackChannelId,
-      title: input.channelName
-        ? `#${input.channelName}`
-        : input.titleFallback ?? `Slack channel ${input.slackChannelId}`,
-      content: serializeDocumentContent(defaultDocumentContent)
+      title,
+      content: slackChannelSeedContent(title, input.surface ?? "channel")
     }
   });
   await copyOwnerDefaultSkillsToDocument(input.userId, document.id);
@@ -428,7 +457,8 @@ async function handleIncomingSlackMessage(
     slackChannelId: event.channel,
     channelName,
     titleFallback: dmTitle,
-    userId: link.userId
+    userId: link.userId,
+    surface: surface === "dm" ? "dm" : "channel"
   });
 
   // One Slack thread = one conversation, in channels and DMs alike: replies

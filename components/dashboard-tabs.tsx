@@ -61,7 +61,14 @@ export function DashboardTabs({
       {tab === "documents" ? (
         <DocumentList documents={regularDocs} />
       ) : tab === "channels" ? (
-        <DocumentList documents={channelDocs} />
+        <>
+          <p className="channels-tab-note">
+            Each Slack conversation where claudex runs gets a workspace here. Open one to configure
+            the bot for that channel (model, skills, environment), review its run history, or pin
+            shared context in the notebook body — the agent reads it on every run.
+          </p>
+          <DocumentList documents={channelDocs} />
+        </>
       ) : (
         <CommentInbox initialThreads={inboxThreads} allTags={inboxTags} />
       )}
