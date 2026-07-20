@@ -1304,7 +1304,13 @@ async function runClaudeResearchAgentOnce(
       // omit the option, preserving pre-skills behavior). Passing the list
       // also enables the Skill tool without touching allowedTools.
       ...(workspaceSkills.length > 0 ? { skills: workspaceSkills } : {}),
-      systemPrompt: buildSystemPrompt(input),
+      // Non-Anthropic providers run inside the Claude Code harness, whose
+      // built-in prompt frames the assistant as Claude — models then claim to
+      // BE Claude when asked. State the actual identity explicitly.
+      systemPrompt:
+        sdkConfig.provider === "anthropic"
+          ? buildSystemPrompt(input)
+          : `${buildSystemPrompt(input)}\n\nModel identity: you are ${sdkConfig.model} served via ${sdkConfig.provider}, running inside the Claude Code agent harness. If asked what model you are, say so — do not claim to be a Claude model.`,
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       allowedTools: [
