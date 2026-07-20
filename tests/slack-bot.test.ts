@@ -9,9 +9,11 @@ import {
   handleSlackAppMention,
   handleSlackDirectMessage,
   hasSeenSlackEvent,
+  isInterruptMessage,
   stripBotMention,
   type SlackMentionEvent
 } from "../lib/slack/events";
+import { isCancellableAiRun, registerRunAbortController } from "../lib/agent-runner/run-registry";
 import type { ConversationRunInput } from "../lib/agent-conversation";
 import { buildUserPrompt } from "../agent-core/agent";
 import type { SlackClient, SlackMessage } from "../lib/slack/web";
@@ -217,6 +219,7 @@ test("DM: responds without a mention, replies in a thread, threads chain", async
   const threadedRun = await db.aiRun.findUnique({ where: { id: (threaded as { aiRunId: string }).aiRunId } });
   assert.equal(threadedRun!.triggerType, "SLACK_FOLLOWUP");
   assert.equal(threadedRun!.parentRunId, firstRun!.id);
+  await db.aiRun.update({ where: { id: threadedRun!.id }, data: { status: "SUCCEEDED" } });
 
   // …while a new top-level DM message starts a fresh conversation.
   const fresh = await handleSlackDirectMessage(
@@ -439,4 +442,87 @@ test("ensureSlackChannelDocument is idempotent per (team, channel)", async () =>
     userId: alice.id
   });
   assert.equal(a.id, b.id);
+});
+
+test("'wait' while a run is active aborts it instead of prompting", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-int-alice");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const { client, reactions } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+
+  const first = await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
+  assert.equal(first.handled, true);
+  const runId = (first as { aiRunId: string }).aiRunId;
+  const abort = registerRunAbortController(runId);
+
+  assert.ok(isInterruptMessage("wait"));
+  assert.ok(isInterruptMessage("Stop!"));
+  assert.ok(!isInterruptMessage("wait, actually change the title"));
+
+  const interrupt = await handleSlackAppMention(
+    mention({ teamId, ts: "1001.000", threadTs: "1000.000", text: `<@${BOT_USER_ID}> wait` }),
+    depsWith(client, runs)
+  );
+  assert.equal(interrupt.handled, true);
+  assert.equal("action" in interrupt && interrupt.action, "interrupted");
+  assert.ok(abort.signal.aborted, "active run must be aborted");
+  assert.ok(!isCancellableAiRun(runId) || abort.signal.aborted);
+  assert.deepEqual(reactions.at(-1), { op: "add", ts: "1001.000", name: "octagonal_sign" });
+  assert.equal(runs.length, 1, "no new run for an interrupt message");
+
+  // Cancelled runs report "Stopped." rather than a failure.
+  const { posted } = makeFakeSlack();
+  void posted;
+});
+
+test("messages during an active run queue into one chained follow-up", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-q-alice");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const { client, posted, reactions } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+
+  const first = await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
+  const firstRunId = (first as { aiRunId: string }).aiRunId;
+
+  const queued = await handleSlackAppMention(
+    mention({ teamId, ts: "1002.000", threadTs: "1000.000", text: `<@${BOT_USER_ID}> also add a plot` }),
+    depsWith(client, runs)
+  );
+  assert.equal("action" in queued && queued.action, "queued");
+  assert.ok(reactions.some((r) => r.ts === "1002.000" && r.name === "hourglass_flowing_sand"));
+  assert.equal(runs.length, 1, "queued message must not start a concurrent run");
+
+  // Finish the active run — the queued message becomes a chained follow-up.
+  await db.aiRun.update({ where: { id: firstRunId }, data: { status: "SUCCEEDED" } });
+  await runs[0].onFinished?.({ status: "SUCCEEDED", reply: "First done.", error: null });
+
+  assert.equal(runs.length, 2, "queued follow-up run must start after the first finishes");
+  assert.equal(runs[1].previousRunId, firstRunId);
+  assert.match(runs[1].message, /also add a plot/);
+  const followUp = await db.aiRun.findUnique({ where: { id: runs[1].aiRunId } });
+  assert.equal(followUp!.parentRunId, firstRunId);
+  assert.equal(followUp!.createdById, alice.id);
+  assert.ok(posted.some((p) => p.text === "First done."));
+  // The queued message's hourglass flips to eyes when its run starts.
+  assert.ok(reactions.some((r) => r.op === "remove" && r.ts === "1002.000" && r.name === "hourglass_flowing_sand"));
+  assert.ok(reactions.some((r) => r.op === "add" && r.ts === "1002.000" && r.name === "eyes"));
+});
+
+test("cancelled runs post 'Stopped.' instead of a failure message", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-c-alice");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const { client, posted } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+  await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
+  await runs[0].onFinished?.({ status: "FAILED", reply: null, error: "Cancelled by user." });
+  assert.equal(posted.at(-1)!.text, "Stopped.");
 });

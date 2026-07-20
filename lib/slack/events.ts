@@ -23,6 +23,7 @@ import {
 } from "@/lib/agent-conversation";
 import { createSlackLinkToken, createSlackToolsToken } from "@/lib/slack/link-token";
 import { markdownToMrkdwn } from "@/lib/slack/mrkdwn";
+import { RUN_CANCELLED_MESSAGE, cancelAiRun } from "@/lib/agent-runner/run-registry";
 import type { SlackClient, SlackMessage } from "@/lib/slack/web";
 
 export type SlackIncomingMessage = {
@@ -191,6 +192,176 @@ async function sendConnectPrompt(
   });
 }
 
+// Bare "wait"/"stop"-style messages sent while a run is active in the same
+// conversation abort that run instead of becoming a prompt.
+const INTERRUPT_PATTERN = /^(wait|stop|cancel|halt|abort)[\s.!]*$/i;
+
+export function isInterruptMessage(text: string) {
+  return INTERRUPT_PATTERN.test(text.trim());
+}
+
+// Messages that arrive while a run is still working are queued (per active
+// run) and become ONE follow-up run the moment it finishes — nothing is
+// dropped, nothing races the active run. In-memory, single-process deploy.
+type QueuedFollowUp = {
+  userId: string;
+  slackUserId: string;
+  senderName: string;
+  text: string;
+  ts: string;
+};
+const queuedFollowUps = new Map<string, QueuedFollowUp[]>();
+
+export function queuedFollowUpCount(aiRunId: string) {
+  return queuedFollowUps.get(aiRunId)?.length ?? 0;
+}
+
+type StartSlackRunArgs = {
+  deps: SlackEventDeps;
+  surface: "mention" | "dm";
+  document: { id: string; title: string; content: string; agentModel: string | null; agentEffort: string | null };
+  channel: string;
+  channelName: string | null;
+  teamId: string;
+  triggerId: string;
+  replyThreadTs: string | undefined;
+  /** Trigger messages to mark with 👀 now and ✅/❌ at the end. */
+  reactionAnchors: Array<{ ts: string }>;
+  instruction: string;
+  userId: string;
+  slackUserId: string;
+  parentRunId: string | null;
+  channelContext: string | null;
+  /** True for drained-queue follow-ups: their anchors carry an ⏳ to clear. */
+  clearPendingReaction?: boolean;
+};
+
+async function startSlackConversationRun(args: StartSlackRunArgs): Promise<string> {
+  const { deps, surface, document, channel, channelName, teamId, triggerId, replyThreadTs } = args;
+
+  const aiRun = await db.aiRun.create({
+    data: {
+      documentId: document.id,
+      triggerType: args.parentRunId ? "SLACK_FOLLOWUP" : "SLACK_MENTION",
+      createdById: args.userId,
+      triggerId,
+      parentRunId: args.parentRunId,
+      instruction: args.instruction,
+      progress: "Starting Claude research agent from Slack.",
+      suggestOnly: true
+    }
+  });
+  await recordAiRunEvent({ aiRunId: aiRun.id, role: "user", message: args.instruction });
+
+  // Working indicator on the triggering message(s); runs can take minutes and
+  // silence reads as a broken bot.
+  for (const anchor of args.reactionAnchors) {
+    if (args.clearPendingReaction) {
+      await deps.slack
+        .removeReaction({ channel, ts: anchor.ts, name: "hourglass_flowing_sand" })
+        .catch(() => null);
+    }
+    await deps.slack.addReaction({ channel, ts: anchor.ts, name: "eyes" }).catch(() => null);
+  }
+
+  const startRun = deps.startRun ?? runAgentConversationInBackground;
+  const runInput: ConversationRunInput = {
+    documentId: document.id,
+    aiRunId: aiRun.id,
+    message: args.instruction,
+    previousRunId: args.parentRunId,
+    documentTitle: document.title,
+    documentContent: document.content,
+    createdById: args.userId,
+    agentConfig: { model: document.agentModel, effort: document.agentEffort },
+    agentAccessMode: "workspace",
+    slackContext: {
+      surface: surface === "dm" ? "dm" : "channel",
+      channelName,
+      recentMessages: args.channelContext
+    },
+    // Read tools call back over HTTP with a token pinned to the SENDER's Slack
+    // identity — the route re-checks channel membership on every call.
+    slackTools: {
+      // SLACK_AGENT_TOOLS_URL overrides for deployments where containers can't
+      // reach APP_URL (e.g. use http://host.docker.internal:14141/api/slack/agent-tools).
+      url:
+        process.env.SLACK_AGENT_TOOLS_URL?.trim() ||
+        `${deps.appUrl.replace(/\/$/, "")}/api/slack/agent-tools`,
+      token: await createSlackToolsToken({
+        slackTeamId: teamId,
+        slackUserId: args.slackUserId,
+        aiRunId: aiRun.id
+      })
+    },
+    // Interim updates the agent posts mid-run via post_slack_message.
+    onSlackMessage: async (text) => {
+      await deps.slack.postMessage({
+        channel,
+        threadTs: replyThreadTs,
+        text: markdownToMrkdwn(text)
+      });
+    },
+    onFinished: async (outcome) => {
+      const succeeded = outcome.status === "SUCCEEDED";
+      const cancelled = !succeeded && outcome.error === RUN_CANCELLED_MESSAGE;
+      for (const anchor of args.reactionAnchors) {
+        await deps.slack.removeReaction({ channel, ts: anchor.ts, name: "eyes" }).catch(() => null);
+        await deps.slack
+          .addReaction({ channel, ts: anchor.ts, name: succeeded ? "white_check_mark" : "x" })
+          .catch(() => null);
+      }
+      const text = succeeded
+        ? markdownToMrkdwn(outcome.reply ?? "Done.")
+        : cancelled
+          ? "Stopped."
+          : `The run failed: ${outcome.error ?? "unknown error"}`;
+      await deps.slack.postMessage({ channel, threadTs: replyThreadTs, text }).catch((error) => {
+        console.error("[slack] reply delivery failed", {
+          aiRunId: aiRun.id,
+          error: error instanceof Error ? error.message : error
+        });
+      });
+
+      // Messages that arrived during the run become one chained follow-up run
+      // (skipped after a cancellation — "wait" means the user wants the floor).
+      const queued = queuedFollowUps.get(aiRun.id) ?? [];
+      queuedFollowUps.delete(aiRun.id);
+      if (queued.length === 0 || cancelled) return;
+      const multipleSenders = new Set(queued.map((q) => q.userId)).size > 1;
+      const instruction = queued
+        .map((q) => (queued.length > 1 || multipleSenders ? `[${q.senderName}]: ${q.text}` : q.text))
+        .join("\n")
+        .slice(0, MAX_INSTRUCTION_LENGTH);
+      const last = queued[queued.length - 1];
+      await startSlackConversationRun({
+        ...args,
+        instruction,
+        userId: last.userId,
+        slackUserId: last.slackUserId,
+        parentRunId: aiRun.id,
+        reactionAnchors: queued.map((q) => ({ ts: q.ts })),
+        clearPendingReaction: true
+      }).catch((error) => {
+        console.error("[slack] queued follow-up failed to start", {
+          afterRunId: aiRun.id,
+          error: error instanceof Error ? error.message : error
+        });
+      });
+    }
+  };
+
+  void startRun(runInput).catch((error) => {
+    console.error("[slack] background run threw", {
+      documentId: document.id,
+      aiRunId: aiRun.id,
+      error: error instanceof Error ? error.message : error
+    });
+  });
+
+  return aiRun.id;
+}
+
 async function handleIncomingSlackMessage(
   event: SlackIncomingMessage,
   deps: SlackEventDeps,
@@ -229,108 +400,93 @@ async function handleIncomingSlackMessage(
   // context the agent has. A new top-level message starts a fresh conversation.
   const conversationKey = event.threadTs ?? event.ts;
   const triggerId = `${event.channel}:${conversationKey}`;
+  const instructionBody = stripBotMention(event.text, deps.botUserId) || "(no message)";
+
+  // Active-run handling: in a channel, a run is "active here" when it belongs
+  // to this thread; in a DM (your own space) any running run on the DM counts.
+  const activeRun = await db.aiRun.findFirst({
+    where: {
+      documentId: document.id,
+      status: { in: ["RUNNING", "PENDING"] },
+      ...(surface === "dm" ? {} : { triggerId })
+    },
+    orderBy: { startedAt: "desc" },
+    select: { id: true }
+  });
+  if (activeRun) {
+    if (isInterruptMessage(instructionBody)) {
+      const cancelled = cancelAiRun(activeRun.id);
+      await deps.slack
+        .addReaction({ channel: event.channel, ts: event.ts, name: cancelled ? "octagonal_sign" : "shrug" })
+        .catch(() => null);
+      if (!cancelled) {
+        await deps.slack
+          .postMessage({
+            channel: event.channel,
+            threadTs: event.threadTs ?? event.ts,
+            text: "That run is no longer cancellable from here (it may have just finished)."
+          })
+          .catch(() => null);
+      }
+      return { handled: true as const, action: "interrupted" as const, aiRunId: activeRun.id };
+    }
+    // Not an interrupt: queue for a follow-up run when the active one ends.
+    const senderName = (await deps.slack.userInfo(event.user))?.displayName ?? event.user;
+    const queue = queuedFollowUps.get(activeRun.id) ?? [];
+    queue.push({
+      userId: link.userId,
+      slackUserId: event.user,
+      senderName,
+      text: instructionBody,
+      ts: event.ts
+    });
+    queuedFollowUps.set(activeRun.id, queue);
+    await deps.slack
+      .addReaction({ channel: event.channel, ts: event.ts, name: "hourglass_flowing_sand" })
+      .catch(() => null);
+    // Race guard: if the run finished while we were queueing, its onFinished
+    // may have already drained — re-check and drain-start ourselves if the run
+    // is terminal and our message is still queued.
+    const nowTerminal = await db.aiRun.findFirst({
+      where: { id: activeRun.id, status: { in: ["SUCCEEDED", "FAILED"] } },
+      select: { id: true }
+    });
+    if (!nowTerminal || queuedFollowUps.get(activeRun.id) !== queue) {
+      return { handled: true as const, action: "queued" as const, aiRunId: activeRun.id };
+    }
+    queuedFollowUps.delete(activeRun.id);
+  }
+
   const previousRun = await db.aiRun.findFirst({
     where: { documentId: document.id, triggerId, status: { in: ["SUCCEEDED", "FAILED"] } },
     orderBy: { startedAt: "desc" },
     select: { id: true }
   });
 
-  const instructionBody = stripBotMention(event.text, deps.botUserId) || "(no message)";
   const threadContext = await buildThreadContext(deps, event);
   const instruction = [threadContext, instructionBody]
     .filter(Boolean)
     .join("\n\n")
     .slice(0, MAX_INSTRUCTION_LENGTH);
 
-  const aiRun = await db.aiRun.create({
-    data: {
-      documentId: document.id,
-      triggerType: previousRun ? "SLACK_FOLLOWUP" : "SLACK_MENTION",
-      createdById: link.userId,
-      triggerId,
-      parentRunId: previousRun?.id ?? null,
-      instruction,
-      progress: "Starting Claude research agent from Slack.",
-      suggestOnly: true
-    }
-  });
-  await recordAiRunEvent({ aiRunId: aiRun.id, role: "user", message: instruction });
-
-  // Working indicator on the triggering message; runs can take minutes and
-  // silence reads as a broken bot.
-  await deps.slack.addReaction({ channel: event.channel, ts: event.ts, name: "eyes" }).catch(() => null);
-
-  const replyThreadTs = event.threadTs ?? event.ts;
-
-  const startRun = deps.startRun ?? runAgentConversationInBackground;
-  const runInput: ConversationRunInput = {
-    documentId: document.id,
-    aiRunId: aiRun.id,
-    message: instruction,
-    previousRunId: previousRun?.id ?? null,
-    documentTitle: document.title,
-    documentContent: document.content,
-    createdById: link.userId,
-    agentConfig: { model: document.agentModel, effort: document.agentEffort },
-    agentAccessMode: "workspace",
-    slackContext: {
-      surface: surface === "dm" ? "dm" : "channel",
-      channelName,
-      recentMessages: await buildChannelContext(deps, event)
-    },
-    // Read tools call back over HTTP with a token pinned to the SENDER's Slack
-    // identity — the route re-checks channel membership on every call.
-    slackTools: {
-      // SLACK_AGENT_TOOLS_URL overrides for deployments where containers can't
-      // reach APP_URL (e.g. use http://host.docker.internal:14141/api/slack/agent-tools).
-      url:
-        process.env.SLACK_AGENT_TOOLS_URL?.trim() ||
-        `${deps.appUrl.replace(/\/$/, "")}/api/slack/agent-tools`,
-      token: await createSlackToolsToken({
-        slackTeamId: event.teamId,
-        slackUserId: event.user,
-        aiRunId: aiRun.id
-      })
-    },
-    // Interim updates the agent posts mid-run via post_slack_message.
-    onSlackMessage: async (text) => {
-      await deps.slack.postMessage({
-        channel: event.channel,
-        threadTs: replyThreadTs,
-        text: markdownToMrkdwn(text)
-      });
-    },
-    onFinished: async (outcome) => {
-      const succeeded = outcome.status === "SUCCEEDED";
-      await deps.slack
-        .removeReaction({ channel: event.channel, ts: event.ts, name: "eyes" })
-        .catch(() => null);
-      await deps.slack
-        .addReaction({ channel: event.channel, ts: event.ts, name: succeeded ? "white_check_mark" : "x" })
-        .catch(() => null);
-      const text = succeeded
-        ? markdownToMrkdwn(outcome.reply ?? "Done.")
-        : `The run failed: ${outcome.error ?? "unknown error"}`;
-      await deps.slack
-        .postMessage({ channel: event.channel, threadTs: replyThreadTs, text })
-        .catch((error) => {
-          console.error("[slack] reply delivery failed", {
-            aiRunId: aiRun.id,
-            error: error instanceof Error ? error.message : error
-          });
-        });
-    }
-  };
-
-  void startRun(runInput).catch((error) => {
-    console.error("[slack] background run threw", {
-      documentId: document.id,
-      aiRunId: aiRun.id,
-      error: error instanceof Error ? error.message : error
-    });
+  const aiRunId = await startSlackConversationRun({
+    deps,
+    surface,
+    document,
+    channel: event.channel,
+    channelName,
+    teamId: event.teamId,
+    triggerId,
+    replyThreadTs: event.threadTs ?? event.ts,
+    reactionAnchors: [{ ts: event.ts }],
+    instruction,
+    userId: link.userId,
+    slackUserId: event.user,
+    parentRunId: previousRun?.id ?? null,
+    channelContext: await buildChannelContext(deps, event)
   });
 
-  return { handled: true as const, aiRunId: aiRun.id, documentId: document.id };
+  return { handled: true as const, aiRunId, documentId: document.id };
 }
 
 export async function handleSlackAppMention(event: SlackIncomingMessage, deps: SlackEventDeps) {
