@@ -42,6 +42,9 @@ export default async function RootLayout({
               {user ? (
                 <>
                   <span className="user-chip">{user.name}</span>
+                  <Link href="/settings/agent" className="ghost-button">
+                    Agent settings
+                  </Link>
                   <UserCredentialMenu />
                   <form action="/api/auth/sign-out" method="post">
                     <button className="ghost-button" type="submit">
