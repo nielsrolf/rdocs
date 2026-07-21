@@ -20,15 +20,15 @@ export const runtime = "nodejs";
 // interface for when it exists.
 
 function buildRunCommand(origin: string, token: string) {
-  // Env names must match runner/self-hosted/worker.ts. The image is built
-  // from the repo (not published to a registry yet); the clone+build step is
-  // one-time, the run command is the durable part.
+  // Env names must match runner/self-hosted/worker.ts. The published image is
+  // overridable for forks/staging via SELF_HOSTED_WORKER_IMAGE.
+  const image = process.env.SELF_HOSTED_WORKER_IMAGE?.trim() || "nielsrolf/rdocs-worker:latest";
   return [
-    `git clone https://github.com/nielsrolf/rdocs && cd rdocs   # one-time`,
-    `docker build -f runner/self-hosted/Dockerfile -t rdocs-worker .   # one-time`,
-    `docker run --rm -e APP_URL=${origin} -e SELF_HOSTED_TOKEN=${token} \\`,
-    `  -e ANTHROPIC_API_KEY=sk-ant-...   # your own key — never sent to ${origin}`,
-    `  rdocs-worker`
+    `docker run -d --restart unless-stopped --name rdocs-worker \\`,
+    `  -e APP_URL=${origin} \\`,
+    `  -e SELF_HOSTED_TOKEN=${token} \\`,
+    `  -e ANTHROPIC_API_KEY=sk-ant-your-key \\`,
+    `  ${image}`
   ].join("\n");
 }
 

@@ -11,7 +11,9 @@
 # THEIR credentials. Its job is convenience packaging (agent-core + a git
 # client + the poll loop), not sandboxing.
 #
-# Build context is the gdocs-ai repo ROOT (so agent-core/ can be COPYed):
+# Published as docker.io/nielsrolf/rdocs-worker (multi-arch: amd64 + arm64;
+# per-arch tags + `docker manifest` — this host has no buildx). To build from
+# the repo instead (context is the repo ROOT so agent-core/ can be COPYed):
 #   docker build -f runner/self-hosted/Dockerfile -t gdocs-self-hosted-worker:local .
 #
 # Run:

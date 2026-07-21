@@ -96,6 +96,33 @@ export function UserCredentialMenu() {
   // Provider picked manually when the pasted value's format is unrecognizable.
   const [fallbackProvider, setFallbackProvider] = useState<CredentialProvider | "">("");
   const [busy, setBusy] = useState(false);
+  const [workerCommand, setWorkerCommand] = useState<string | null>(null);
+  const [workerBusy, setWorkerBusy] = useState(false);
+  const [workerError, setWorkerError] = useState<string | null>(null);
+  const [workerCopied, setWorkerCopied] = useState(false);
+
+  async function handleGenerateWorkerCommand() {
+    if (workerBusy) return;
+    setWorkerBusy(true);
+    setWorkerError(null);
+    try {
+      const response = await fetch("/api/user/self-hosted-tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: "self-hosted worker" })
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.command) {
+        setWorkerError(data?.error ?? "Failed to generate the command.");
+        return;
+      }
+      setWorkerCommand(data.command);
+    } catch {
+      setWorkerError("Failed to generate the command.");
+    } finally {
+      setWorkerBusy(false);
+    }
+  }
   const [mcpTokens, setMcpTokens] = useState<McpToken[]>([]);
   const [skills, setSkills] = useState<UserSkillEntry[]>([]);
   // The plaintext command is only available right after creating a token.
@@ -411,11 +438,41 @@ export function UserCredentialMenu() {
 
         {error ? <p className="env-note env-note-error">{error}</p> : null}
 
-        <p className="env-note">
-          Prefer not to store credentials here at all? Documents can run their agents on{" "}
-          <strong>your own infrastructure</strong> instead: flip a document to self-hosted in its
-          agent panel and run the worker container with your keys — they never leave your machine.
-        </p>
+        <div className="env-note">
+          <p>
+            Prefer not to store credentials here at all? Documents can run their agents on{" "}
+            <strong>your own infrastructure</strong> instead: run the worker container on any
+            machine with your keys — they never leave it — and flip a document to self-hosted in
+            its agent panel.
+          </p>
+          {workerCommand ? (
+            <>
+              <code className="env-note-command">{workerCommand}</code>
+              <button
+                className="ghost-button"
+                onClick={() => {
+                  void navigator.clipboard.writeText(workerCommand).then(() => {
+                    setWorkerCopied(true);
+                    setTimeout(() => setWorkerCopied(false), 1500);
+                  });
+                }}
+                type="button"
+              >
+                {workerCopied ? "Copied" : "Copy command"}
+              </button>
+            </>
+          ) : (
+            <button
+              className="ghost-button"
+              disabled={workerBusy}
+              onClick={() => void handleGenerateWorkerCommand()}
+              type="button"
+            >
+              {workerBusy ? "Generating…" : "Generate worker command"}
+            </button>
+          )}
+          {workerError ? <p className="env-note-error">{workerError}</p> : null}
+        </div>
       </div>
     </details>
   );

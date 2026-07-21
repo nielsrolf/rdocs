@@ -9,9 +9,9 @@ type ApiTokenRecord = { id: string; label: string | null; createdAt: string; las
 // toggle (enforced again server-side in PATCH /api/documents/:id) because it
 // decides whose AI credentials every collaborator's run authenticates with.
 //
-// The panel mints a real bearer token and shows the real build+run commands
-// for the worker image (runner/self-hosted/Dockerfile). Not published to a
-// registry yet — the shown command builds it from the repo.
+// The panel mints a real bearer token and shows the real run command for the
+// published worker image (docker.io/nielsrolf/rdocs-worker, multi-arch;
+// override via SELF_HOSTED_WORKER_IMAGE).
 export function SelfHostedMenu({
   documentId,
   runnerMode,

@@ -11,6 +11,20 @@ Read "What's built" and "Explicitly NOT implemented yet" below. Repo-backed
 documents work: the job payload carries the repo URL/branch (never
 credentials) and the worker clones with its own git auth.
 
+## Quick start
+
+```
+docker run -d --restart unless-stopped --name rdocs-worker \
+  -e APP_URL=https://docs.nielsrolf.com \
+  -e SELF_HOSTED_TOKEN=gdai_... \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  nielsrolf/rdocs-worker:latest
+```
+
+The image is published multi-arch (amd64 + arm64). Mint the token (and get
+this command pre-filled) from **AI credentials** in the topbar or the
+document's self-hosted panel. Add `GITHUB_TOKEN` for private-repo documents.
+
 ## What the app does today for a `selfHosted` document
 
 - It does **not** clone or maintain a git worktree for the document at all
