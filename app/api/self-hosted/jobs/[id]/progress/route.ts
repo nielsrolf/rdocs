@@ -14,11 +14,13 @@ const progressSchema = z.object({
         message: z.string().min(1).max(16000)
       })
     )
-    .min(1)
     .max(50)
 });
 
 // Worker → app progress stream for a claimed SelfHostedJob: frames land in
+// (an EMPTY events array is a pure cancellation/liveness check — long silent
+// tool calls emit no frames, but the worker still needs to hear about aborts)
+//
 // the run's AiRunEvent timeline (so the agent panel shows live progress) and
 // the latest one becomes AiRun.progress. The response's `cancelled` flag is
 // ALSO the cancellation channel: when the app-side run was aborted, the

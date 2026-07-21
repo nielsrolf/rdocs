@@ -37,8 +37,6 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
  && apt-get install -y --no-install-recommends gh \
  && rm -rf /var/lib/apt/lists/*
 
-ENV HOME=/root
-
 WORKDIR /agent
 COPY runner/self-hosted/package.json /agent/package.json
 RUN npm install --omit=dev --no-audit --no-fund
@@ -47,6 +45,12 @@ RUN npm install --omit=dev --no-audit --no-fund
 # container runner (runner/agent-entrypoint.ts) — this image reuses it as-is.
 COPY agent-core /agent/agent-core
 COPY runner/self-hosted/worker.ts /agent/worker.ts
+
+# The Claude CLI refuses --dangerously-skip-permissions as root — run as a
+# regular user (the app's own agent container achieves the same via --user).
+RUN useradd -m -u 1001 worker && chown -R worker /agent
+USER worker
+ENV HOME=/home/worker
 
 # Required at runtime: APP_URL, SELF_HOSTED_TOKEN, and whatever credential env
 # vars the agent needs (ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN;

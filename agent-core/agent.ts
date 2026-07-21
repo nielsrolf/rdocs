@@ -1319,6 +1319,14 @@ async function runClaudeResearchAgentOnce(
   const workspaceSkills =
     input.accessMode === "read_only" ? [] : await discoverWorkspaceSkills(cwd);
 
+  // Keep a tail of the CLI's stderr: "Claude Code process exited with code N"
+  // is undiagnosable without it (startup crashes never reach the message
+  // stream). Attached to the thrown error below.
+  let stderrTail = "";
+  const captureStderr = (data: string) => {
+    stderrTail = (stderrTail + data).slice(-4000);
+  };
+
   const agentQuery = query({
     prompt: buildUserMessageStream(input),
     options: {
@@ -1336,6 +1344,7 @@ async function runClaudeResearchAgentOnce(
           : `${buildSystemPrompt(input)}\n\nModel identity: you are ${sdkConfig.model} served via ${sdkConfig.provider}, running inside the Claude Code agent harness. If asked what model you are, say so — do not claim to be a Claude model.`,
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
+      stderr: captureStderr,
       allowedTools: [
         ...toolsForAgentAccess(input.accessMode),
         SUBMIT_TOOL_NAME,
@@ -1426,6 +1435,11 @@ async function runClaudeResearchAgentOnce(
   } catch (error) {
     if (abortController.signal.aborted) {
       throw new Error("Claude research agent run was aborted.");
+    }
+    // Startup/process crashes carry no detail in the SDK error — append the
+    // captured stderr tail so the failure is actually diagnosable.
+    if (error instanceof Error && /exited with code/i.test(error.message) && stderrTail.trim()) {
+      throw new Error(`${error.message}\n--- claude stderr (tail) ---\n${stderrTail.trim().slice(-2000)}`);
     }
     throw error;
   } finally {

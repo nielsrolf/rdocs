@@ -195,9 +195,16 @@ async function runJob(job: ClaimedJob): Promise<void> {
   let cancelled = false;
   const pendingEvents: ProgressEvent[] = [];
   let flushing = false;
+  let lastPostAt = Date.now();
+  const CANCEL_CHECK_MS = 10_000;
   const flush = async () => {
-    if (flushing || pendingEvents.length === 0) return;
+    // Even with nothing to report, post an empty check periodically — it is
+    // the only way to learn about an app-side cancellation during long,
+    // silent tool calls.
+    if (flushing) return;
+    if (pendingEvents.length === 0 && Date.now() - lastPostAt < CANCEL_CHECK_MS) return;
     flushing = true;
+    lastPostAt = Date.now();
     const batch = pendingEvents.splice(0, 50);
     try {
       const outcome = await postProgress(job.id, batch);

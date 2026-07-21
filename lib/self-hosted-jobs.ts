@@ -104,6 +104,7 @@ export async function recordSelfHostedProgress(
   if (!job || job.document.ownerId !== userId) return { ok: false, cancelled: false };
   if (job.status === "cancelled") return { ok: true, cancelled: true };
   if (job.status !== "claimed") return { ok: false, cancelled: false };
+  if (events.length === 0) return { ok: true, cancelled: false };
 
   const trimmed = events.slice(0, 50);
   for (const event of trimmed) {
