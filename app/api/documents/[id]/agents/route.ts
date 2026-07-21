@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { recordAiRunEvent, serializeAiRun } from "@/lib/ai-runs";
 import { runAgentConversationInBackground } from "@/lib/agent-conversation";
+import { resolveAgentConfigForUser } from "@/lib/agent-defaults";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { agentAccessModeForDocumentAccess, canComment, resolveDocumentAccess } from "@/lib/permissions";
@@ -81,7 +82,8 @@ export async function POST(request: Request, { params }: RouteContext) {
     documentTitle: access.document.title,
     documentContent: access.document.content,
     createdById: user?.id ?? null,
-    agentConfig: { model: access.document.agentModel, effort: access.document.agentEffort },
+    // Doc agent-panel config -> triggering user's default -> app default.
+    agentConfig: await resolveAgentConfigForUser(access.document, user?.id ?? null),
     agentAccessMode: agentAccessModeForDocumentAccess(access),
     runnerMode: access.document.runnerMode
   }).catch((error) => {

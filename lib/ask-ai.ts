@@ -22,6 +22,7 @@ import {
   parseDocumentContent
 } from "@/lib/content";
 import { db } from "@/lib/db";
+import { resolveAgentConfigForUser } from "@/lib/agent-defaults";
 import { loadAgentEnvWithFreeFallback, restrictAgentEnvForReadOnly } from "@/lib/user-credentials";
 import type { AgentAccessMode } from "@/agent-core";
 import { normalizeAgentImages } from "@/lib/ai-edit-submission";
@@ -131,7 +132,8 @@ export async function runAskAiInBackground(input: {
       usedFreeFallback
     } = await loadAgentEnvWithFreeFallback(
       thread.documentId,
-      { model: thread.document.agentModel, effort: thread.document.agentEffort },
+      // Doc agent-panel config -> triggering user's default -> app default.
+      await resolveAgentConfigForUser(thread.document, createdById),
       createdById
     );
     if (usedFreeFallback) {

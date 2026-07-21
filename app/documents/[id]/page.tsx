@@ -158,6 +158,18 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
   // on the free local model (no credential anywhere) — surfaced in the UI so
   // "Sonnet 5" is never displayed while qwen does the work.
   const anthropicFreeFallback = await anthropicRunUsesFreeFallback(id, user?.id ?? null);
+  // The agent panel shows the config a run started by THIS viewer would use:
+  // doc agent-panel config -> viewer's personal default -> app default. Runs
+  // resolve the same chain server-side (lib/agent-defaults.ts), so the panel
+  // never claims "Sonnet 5" while the user's personal default does the work.
+  const viewerDefaults = user
+    ? await db.user.findUnique({
+        where: { id: user.id },
+        select: { defaultAgentModel: true, defaultAgentEffort: true }
+      })
+    : null;
+  const effectiveAgentModel = access.document.agentModel ?? viewerDefaults?.defaultAgentModel ?? null;
+  const effectiveAgentEffort = access.document.agentEffort ?? viewerDefaults?.defaultAgentEffort ?? null;
   const credentialHasOpenRouterKey = ownerHasOpenRouterKeyOnly || viewerHasOpenRouterKey;
   const credentialHasLiteLlmKey = ownerHasLiteLlmKeyOnly || viewerHasLiteLlmKey;
   const initialHasOpenRouterKey = envHasOpenRouterKey || credentialHasOpenRouterKey;
@@ -184,8 +196,8 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         initialMentionedCommentIds={initialMentionedCommentIds}
         initialRepoBranch={access.document.repoBranch}
         initialRepoUrl={access.document.repoUrl}
-        initialAgentModel={access.document.agentModel}
-        initialAgentEffort={access.document.agentEffort}
+        initialAgentModel={effectiveAgentModel}
+        initialAgentEffort={effectiveAgentEffort}
         initialRunnerMode={access.document.runnerMode}
         initialHasOpenRouterKey={initialHasOpenRouterKey}
         initialHasLiteLlmKey={initialHasLiteLlmKey}

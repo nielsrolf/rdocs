@@ -11,8 +11,9 @@ import { db } from "@/lib/db";
 export const runtime = "nodejs";
 
 // Per-user default agent config (User.defaultAgentModel/-Effort). Used as the
-// fallback for runs whose document has no explicit agent config — today that
-// is Slack channel/DM runs (see resolveSlackAgentConfig in lib/slack/events.ts).
+// fallback for ALL runs whose document has no explicit agent config — Slack,
+// doc conversation, selection edits, and comment replies (see
+// resolveAgentConfigForUser in lib/agent-defaults.ts).
 // Null clears a field back to the app default (sonnet-5, thinking off).
 
 function serialize(user: { defaultAgentModel: string | null; defaultAgentEffort: string | null }) {

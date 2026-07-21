@@ -20,6 +20,7 @@ import {
   normalizeSubmittedWidget
 } from "@/lib/ai-edit-submission";
 import { db } from "@/lib/db";
+import { resolveAgentConfigForUser } from "@/lib/agent-defaults";
 import { loadAgentEnvWithFreeFallback, restrictAgentEnvForReadOnly } from "@/lib/user-credentials";
 import { agentAccessModeForDocumentAccess, canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
 import type { AgentAccessMode } from "@/agent-core";
@@ -519,7 +520,8 @@ export async function POST(request: Request, { params }: RouteContext) {
     documentTitle: access.document.title,
     documentContentRaw: access.document.content,
     createdById: user?.id ?? null,
-    agentConfig: { model: access.document.agentModel, effort: access.document.agentEffort },
+    // Doc agent-panel config -> triggering user's default -> app default.
+    agentConfig: await resolveAgentConfigForUser(access.document, user?.id ?? null),
     agentAccessMode: agentAccessModeForDocumentAccess(access),
     runnerMode: access.document.runnerMode
   }).catch((error) => {
