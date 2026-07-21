@@ -42,6 +42,16 @@ export function isCancellableAiRun(aiRunId: string): boolean {
   return controllers.has(aiRunId);
 }
 
+/**
+ * How many agent runs THIS process currently owns. Every background runner
+ * registers here for its full lifetime (register in the route, deregister in
+ * the runner's finally), so this is the drain criterion for graceful
+ * shutdown: zero means no in-flight work would die with the process.
+ */
+export function activeRunCount(): number {
+  return controllers.size;
+}
+
 // A run's failure is a user cancellation when its signal was aborted —
 // regardless of what error actually surfaced (the killed container manifests
 // as "exited without a result", the SDK as an AbortError, etc.).

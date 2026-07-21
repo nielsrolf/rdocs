@@ -1,4 +1,6 @@
 .next
+.next-blue
+.next-green
 node_modules
 .env
 .env.local
@@ -20,6 +22,12 @@ backups/
 dev.db
 dev.db-journal
 .service.pid
+.service_blue.pid
+.service_green.pid
+.lb.pid
+.deploy-active
+.deploy-lockhash
+deploy/caddy.json
 scripts/_*
 
 # Generated demo video artifacts (kept local)

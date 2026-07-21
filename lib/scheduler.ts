@@ -212,3 +212,14 @@ export function startSchedulerLoop(intervalMs = 30_000) {
   loop.unref?.();
   console.log("[scheduler] poll loop started", { intervalMs });
 }
+
+// Graceful drain (blue/green deploy): the outgoing process must stop claiming
+// scheduled tasks so every future firing happens on the new process. The
+// atomic nextRunAt claim already prevents double-fires during overlap; this
+// just stops the old process from stealing claims after the LB switch.
+export function stopSchedulerLoop() {
+  if (!loop) return;
+  clearInterval(loop);
+  loop = null;
+  console.log("[scheduler] poll loop stopped (drain)");
+}

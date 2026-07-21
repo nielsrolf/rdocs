@@ -29,6 +29,10 @@ lsof -nP -iTCP:14141 -sTCP:LISTEN; ps aux | grep next-server | grep -v grep
 
 The `npm ci` + `npm run build` step typically takes 30–90 seconds, so run the restart in the background (or via Bash `run_in_background`) and poll/monitor the log for `Ready in`. Do not start the dev server (`npm run dev`); production `npm run start` is what the deploy uses.
 
+### Zero-downtime deploys (preferred once bootstrapped)
+
+`./deploy/deploy.sh` is the blue/green deploy path — see `deploy/README.md`. Caddy on `:14141` proxies to app instances on `:14142`/`:14143`; each release builds into its own dist dir (`NEXT_DIST_DIR=.next-blue|green`), and after the upstream switch the old process **drains gracefully**: Slack socket + scheduler stop, in-flight agent runs finish where they started (shared DB + Slack Web API), then it exits. `GET /api/health` reports `{ok, draining, activeRuns, pid, distDir}` (503 while draining); `POST /api/admin/drain` (Bearer `DEPLOY_SECRET` from `.env`) starts a drain. The boot sweep in `instrumentation.ts` is **silence-based** (`sweepAbandonedAiRuns`) — never revert it to "fail every RUNNING run at boot", or a new process kills the draining sibling's runs. Migrations must be expand/contract (old code serves the new schema during overlap). `gdocs-ai.sh` stays as the legacy/emergency single-process path; never run both at once — stop Caddy (`kill $(cat .lb.pid)`) and both colors before falling back.
+
 - Public URL: `https://docs.nielsrolf.com`
 - Local: `http://localhost:14141`
 - The app sits **behind Cloudflare**, which terminates origin connections at ~100s (HTTP 524). Anything synchronous that takes longer than that will fail client-side even if the origin completes.

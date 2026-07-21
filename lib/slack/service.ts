@@ -12,6 +12,26 @@ import {
 import { createSlackWebClient, slackAuthTest } from "@/lib/slack/web";
 
 let started = false;
+let activeSocket: { disconnect: () => Promise<void> } | null = null;
+let draining = false;
+
+// Graceful drain (blue/green deploy): disconnect the websocket so Slack stops
+// round-robining events to the outgoing process. In-flight runs keep posting
+// replies via the Web API (plain HTTPS), which needs no socket. Idempotent.
+export async function stopSlackSocketService() {
+  draining = true;
+  const socket = activeSocket;
+  activeSocket = null;
+  if (!socket) return;
+  try {
+    await socket.disconnect();
+    console.log("[slack] Socket Mode disconnected (drain)");
+  } catch (error) {
+    console.warn("[slack] socket disconnect failed (drain)", {
+      error: error instanceof Error ? error.message : error
+    });
+  }
+}
 
 export async function startSlackSocketService() {
   if (started) return;
@@ -106,9 +126,16 @@ export async function startSlackSocketService() {
   });
 
   socket.on("disconnected", () => {
+    if (draining) return;
     console.warn("[slack] socket disconnected; client will reconnect automatically.");
   });
 
+  if (draining) {
+    // Drain began while we were still handshaking — don't connect at all.
+    started = false;
+    return;
+  }
   await socket.start();
+  activeSocket = socket;
   console.log("[slack] Socket Mode connected", { botUserId, teamId: auth.teamId });
 }

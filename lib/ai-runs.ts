@@ -39,8 +39,20 @@ export type AbandonedRunResult = {
   finishedAt: Date;
 };
 
-// Marks abandoned RUNNING runs as FAILED. Returns the affected ids so callers
-// can patch already-fetched copies, or null when nothing was reaped.
+// Non-terminal statuses judged by the silence rule. PENDING is included: a
+// PENDING row whose owning process died would otherwise linger forever (no
+// heartbeat is ever written for it, and the old boot sweep was the only thing
+// that cleaned those up).
+const REAPABLE_STATUSES = new Set(["RUNNING", "PENDING"]);
+
+// Marks abandoned RUNNING/PENDING runs as FAILED. Returns the affected ids so
+// callers can patch already-fetched copies, or null when nothing was reaped.
+//
+// This is the ONLY orphan-detection mechanism — the boot sweep uses it too
+// (sweepAbandonedAiRuns below) instead of failing every non-terminal run.
+// With blue/green deploys two server processes overlap: a freshly booted
+// process must not kill runs the draining old process is still working on.
+// Their heartbeats are fresh, so the silence rule spares them.
 export async function failAbandonedAiRuns(
   runs: Array<{ id: string; status: string; startedAt: Date }>,
   now = Date.now()
@@ -48,7 +60,7 @@ export async function failAbandonedAiRuns(
   // Runs younger than the threshold cannot have been silent longer than it, so
   // this pre-filter also avoids the event lookup on every poll of a fresh run.
   const candidates = runs.filter(
-    (run) => run.status === "RUNNING" && now - run.startedAt.getTime() > STALE_AI_RUN_MS
+    (run) => REAPABLE_STATUSES.has(run.status) && now - run.startedAt.getTime() > STALE_AI_RUN_MS
   );
   if (candidates.length === 0) {
     return null;
@@ -84,10 +96,40 @@ export async function failAbandonedAiRuns(
   const finishedAt = new Date();
   const error = "Run abandoned (server restart or crash).";
   await db.aiRun.updateMany({
-    where: { id: { in: abandonedIds }, status: "RUNNING" },
+    where: { id: { in: abandonedIds }, status: { in: [...REAPABLE_STATUSES] } },
     data: { status: "FAILED", error, finishedAt }
   });
   return { failedIds: new Set(abandonedIds), error, finishedAt };
+}
+
+// Global orphan sweep: fetch every non-terminal run and apply the silence
+// rule. Used at boot and by the periodic reaper interval (instrumentation.ts)
+// so runs whose document nobody has open still get reaped after a crash.
+// Returns the runs that were actually failed, with workspace info so callers
+// can salvage their uncommitted work (lib/run-salvage.ts).
+// `scope.documentId` exists for tests, which share the real database with the
+// running service — a global sweep in a test must not touch unrelated rows.
+export async function sweepAbandonedAiRuns(now = Date.now(), scope?: { documentId?: string }) {
+  const runs = await db.aiRun.findMany({
+    where: {
+      status: { in: [...REAPABLE_STATUSES] },
+      ...(scope?.documentId ? { documentId: scope.documentId } : {})
+    },
+    select: {
+      id: true,
+      documentId: true,
+      workspacePath: true,
+      branchName: true,
+      status: true,
+      startedAt: true
+    }
+  });
+  if (runs.length === 0) {
+    return { failed: [], scanned: 0 };
+  }
+  const result = await failAbandonedAiRuns(runs, now);
+  const failed = result ? runs.filter((run) => result.failedIds.has(run.id)) : [];
+  return { failed, scanned: runs.length };
 }
 
 // The single terminal-success write for agent runs. All three agent routes
