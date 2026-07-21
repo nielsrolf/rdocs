@@ -4,6 +4,7 @@ import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { canManageDocumentAutomation, resolveDocumentAccess } from "@/lib/permissions";
+import { loadCatalogSkill } from "@/lib/skill-catalog";
 import {
   copySkillDir,
   getDocumentSkillDir,
@@ -40,10 +41,17 @@ function serializeDocumentSkill(skill: {
   };
 }
 
-const copySchema = z.object({
-  userSkillId: z.string().min(1),
-  share: z.string().optional().nullable()
-});
+// JSON attach payload: copy from the caller's library (userSkillId) OR
+// one-click install from the curated catalog (catalogName).
+const copySchema = z
+  .object({
+    userSkillId: z.string().min(1).optional(),
+    catalogName: z.string().min(1).optional(),
+    share: z.string().optional().nullable()
+  })
+  .refine((value) => Boolean(value.userSkillId) !== Boolean(value.catalogName), {
+    message: "Provide exactly one of userSkillId or catalogName."
+  });
 
 export async function GET(request: Request, { params }: RouteContext) {
   const { id } = await params;
@@ -82,6 +90,34 @@ export async function POST(request: Request, { params }: RouteContext) {
     }
     if (!user) {
       return NextResponse.json({ error: "Not signed in." }, { status: 401 });
+    }
+
+    // One-click install straight from the curated catalog onto the document.
+    if (parsed.data.catalogName) {
+      let prepared;
+      try {
+        prepared = await loadCatalogSkill(parsed.data.catalogName);
+      } catch (error) {
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Failed to load the skill catalog." },
+          { status: 502 }
+        );
+      }
+      if (!prepared) {
+        return NextResponse.json({ error: "Skill not found in the catalog." }, { status: 404 });
+      }
+      await writeSkillToStore(getDocumentSkillDir(id, prepared.name), prepared);
+      const skill = await db.documentSkill.upsert({
+        where: { documentId_name: { documentId: id, name: prepared.name } },
+        create: {
+          documentId: id,
+          name: prepared.name,
+          description: prepared.description,
+          createdById: user.id
+        },
+        update: { description: prepared.description }
+      });
+      return NextResponse.json({ skill: serializeDocumentSkill(skill) });
     }
 
     const userSkill = await db.userSkill.findUnique({ where: { id: parsed.data.userSkillId } });

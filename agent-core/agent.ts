@@ -18,7 +18,7 @@ import {
   resolveRefusalFallbackModel,
   type DocumentAgentConfig
 } from "./agent-config";
-import { applyProviderEnv, buildAgentEnv, type DocumentEnv } from "./agent-env";
+import { agentEnvKeysForPrompt, applyProviderEnv, buildAgentEnv, type DocumentEnv } from "./agent-env";
 import {
   mergeBufferedComments,
   normalizeAgentComments,
@@ -1327,6 +1327,20 @@ async function runClaudeResearchAgentOnce(
     stderrTail = (stderrTail + data).slice(-4000);
   };
 
+  // Environment handed to the SDK (and therefore every Bash/tool subprocess).
+  // Built once, up front, so the system prompt can disclose which env var
+  // NAMES are available — agents need that to decide which services they can
+  // call (e.g. OpenAI directly vs. a LiteLLM proxy). Values are never shown.
+  const agentProcessEnv = applyProviderEnv(
+    buildAgentEnv(process.env, options.agentEnv),
+    sdkConfig.provider
+  );
+  const promptEnvKeys = agentEnvKeysForPrompt(options.agentEnv ?? {}, agentProcessEnv);
+  const envDisclosure =
+    promptEnvKeys.length > 0
+      ? `\n\nRun environment: these environment variables are set for this run and available in Bash and any subprocess (values hidden): ${promptEnvKeys.join(", ")}. Use them to decide which services/providers you can call — e.g. use a provider's API directly only when its key is present (OPENAI_API_KEY → OpenAI directly; LITELLM_API_KEY + LITELLM_BASE_URL → an OpenAI-compatible LiteLLM proxy serving many models; GITHUB_TOKEN → authenticated gh/git). Never print or commit their values.`
+      : `\n\nRun environment: no API keys or custom environment variables are configured for this run. Do not assume provider keys (e.g. OPENAI_API_KEY) exist; scripts that need one will fail until the user adds it via the document's Env menu.`;
+
   const agentQuery = query({
     prompt: buildUserMessageStream(input),
     options: {
@@ -1340,8 +1354,8 @@ async function runClaudeResearchAgentOnce(
       // BE Claude when asked. State the actual identity explicitly.
       systemPrompt:
         sdkConfig.provider === "anthropic"
-          ? buildSystemPrompt(input)
-          : `${buildSystemPrompt(input)}\n\nModel identity: you are ${sdkConfig.model} served via ${sdkConfig.provider}, running inside the Claude Code agent harness. If asked what model you are, say so — do not claim to be a Claude model.`,
+          ? `${buildSystemPrompt(input)}${envDisclosure}`
+          : `${buildSystemPrompt(input)}${envDisclosure}\n\nModel identity: you are ${sdkConfig.model} served via ${sdkConfig.provider}, running inside the Claude Code agent harness. If asked what model you are, say so — do not claim to be a Claude model.`,
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       stderr: captureStderr,
@@ -1384,7 +1398,7 @@ async function runClaudeResearchAgentOnce(
       // the agent must not inherit unrelated host vars. For OpenRouter models
       // the env is then rewritten to point the SDK at OpenRouter's
       // Anthropic-compatible endpoint using the document's OPENROUTER_API_KEY.
-      env: applyProviderEnv(buildAgentEnv(process.env, options.agentEnv), sdkConfig.provider),
+      env: agentProcessEnv,
       // Kernel sandbox (macOS Seatbelt / Linux bubblewrap) as the authoritative
       // workspace boundary for the in-process runner. Degrade gracefully where
       // unavailable rather than refusing to run; the PreToolUse guard still

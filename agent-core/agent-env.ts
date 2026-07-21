@@ -174,6 +174,31 @@ export function buildAgentEnv(
   return result;
 }
 
+// Host-provided configuration (not credentials) worth disclosing to the agent
+// alongside the document env keys, because it changes which services are
+// reachable (e.g. a LiteLLM proxy endpoint).
+const PROMPT_ENV_HOST_KEYS = ["LITELLM_BASE_URL", "LOCAL_MODEL_BASE_URL", "LOCAL_MODEL_NAME"];
+
+/**
+ * Env var NAMES (never values) to disclose in the agent's system prompt so it
+ * knows which API keys/services are available in its run environment — e.g.
+ * whether to call OpenAI directly (OPENAI_API_KEY) or go through a LiteLLM
+ * proxy (LITELLM_API_KEY + LITELLM_BASE_URL). Discloses only the
+ * document-configured env (incl. per-run injected credentials like
+ * GITHUB_TOKEN) plus a few host config keys — never the host allowlist noise
+ * or harness-internal vars. Keys that ended up empty in the final env (e.g.
+ * ANTHROPIC_API_KEY cleared by applyProviderEnv) are dropped.
+ */
+export function agentEnvKeysForPrompt(
+  documentEnv: DocumentEnv,
+  finalEnv: Record<string, string>
+): string[] {
+  const keys = new Set<string>();
+  for (const key of Object.keys(documentEnv)) keys.add(key);
+  for (const key of PROMPT_ENV_HOST_KEYS) keys.add(key);
+  return [...keys].filter((key) => Boolean(finalEnv[key]?.trim())).sort();
+}
+
 /**
  * Mask a secret for display: keep a few leading/trailing characters and replace
  * the middle with a fixed run of asterisks. Short secrets are fully masked so we

@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   OPENROUTER_BASE_URL,
+  agentEnvKeysForPrompt,
   applyProviderEnv,
   buildAgentEnv,
   isValidEnvKey,
@@ -199,4 +200,33 @@ test("host LITELLM_BASE_URL passes the allowlist but a host LITELLM_API_KEY does
   });
   assert.equal(env.LITELLM_BASE_URL, "http://host.docker.internal:9274");
   assert.equal(env.LITELLM_API_KEY, undefined);
+});
+
+test("agentEnvKeysForPrompt discloses document env + host config key NAMES only", () => {
+  const documentEnv = { OPENAI_API_KEY: "sk-openai", GITHUB_TOKEN: "ghp_doc", EMPTY_ONE: "  " };
+  const finalEnv = buildAgentEnv(
+    { PATH: "/bin", HOME: "/home/x", ANTHROPIC_API_KEY: "sk-ant", LITELLM_BASE_URL: "http://litellm" },
+    documentEnv
+  );
+  const keys = agentEnvKeysForPrompt(documentEnv, finalEnv);
+  // Document-configured keys and the LiteLLM host default are disclosed…
+  assert.deepEqual(keys, ["GITHUB_TOKEN", "LITELLM_BASE_URL", "OPENAI_API_KEY"]);
+  // …but never toolchain noise or harness credentials, and never any value.
+  assert.equal(keys.includes("PATH"), false);
+  assert.equal(keys.includes("ANTHROPIC_API_KEY"), false);
+  assert.equal(keys.includes("EMPTY_ONE"), false, "empty values are not disclosed");
+});
+
+test("agentEnvKeysForPrompt drops keys applyProviderEnv cleared in the final env", () => {
+  // A user-credential ANTHROPIC_API_KEY in the document env gets cleared by
+  // applyProviderEnv for litellm runs — the prompt must not claim it exists.
+  const documentEnv = {
+    ANTHROPIC_API_KEY: "sk-ant-doc",
+    LITELLM_API_KEY: "sk-litellm",
+    LITELLM_BASE_URL: "https://litellm.example.com"
+  };
+  const finalEnv = applyProviderEnv(buildAgentEnv({ PATH: "/bin" }, documentEnv), "litellm");
+  const keys = agentEnvKeysForPrompt(documentEnv, finalEnv);
+  assert.equal(keys.includes("ANTHROPIC_API_KEY"), false);
+  assert.deepEqual(keys, ["LITELLM_API_KEY", "LITELLM_BASE_URL"]);
 });

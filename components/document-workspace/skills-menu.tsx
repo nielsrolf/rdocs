@@ -18,6 +18,11 @@ type LibrarySkillEntry = {
   isDefault: boolean;
 };
 
+type CatalogSkillEntry = {
+  name: string;
+  description: string | null;
+};
+
 // Document-level agent skills menu (topbar). Anyone with edit access can
 // attach skills — uploaded directly (a skill folder or single SKILL.md) or
 // copied from their personal library (managed under AI credentials). Attached
@@ -34,6 +39,7 @@ export function SkillsMenu({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [skills, setSkills] = useState<DocumentSkillEntry[] | null>(null);
   const [library, setLibrary] = useState<LibrarySkillEntry[]>([]);
+  const [catalog, setCatalog] = useState<CatalogSkillEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -54,6 +60,10 @@ export function SkillsMenu({
       const libraryResponse = await fetch("/api/user/skills", { cache: "no-store" });
       const libraryData = await libraryResponse.json().catch(() => null);
       setLibrary(libraryResponse.ok ? libraryData?.skills ?? [] : []);
+      // Curated catalog — also signed-in only; failures just hide the section.
+      const catalogResponse = await fetch("/api/skill-catalog", { cache: "no-store" });
+      const catalogData = await catalogResponse.json().catch(() => null);
+      setCatalog(catalogResponse.ok ? catalogData?.skills ?? [] : []);
     } catch {
       setError("Failed to load skills.");
     } finally {
@@ -115,6 +125,27 @@ export function SkillsMenu({
     }
   }
 
+  async function handleInstallFromCatalog(catalogName: string) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/documents/${documentId}/skills`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ catalogName, ...(shareToken ? { share: shareToken } : {}) })
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        setError(data?.error ?? "Failed to install skill.");
+        return;
+      }
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleDelete(skillId: string) {
     if (busy) return;
     setBusy(true);
@@ -137,6 +168,10 @@ export function SkillsMenu({
 
   const attachedNames = new Set((skills ?? []).map((skill) => skill.name));
   const addableLibrary = library.filter((skill) => !attachedNames.has(skill.name));
+  const libraryNames = new Set(library.map((skill) => skill.name));
+  const addableCatalog = catalog.filter(
+    (skill) => !attachedNames.has(skill.name) && !libraryNames.has(skill.name)
+  );
 
   return (
     <details className="header-menu header-menu-env" ref={detailsRef}>
@@ -196,6 +231,30 @@ export function SkillsMenu({
             Upload SKILL.md
           </button>
         </div>
+
+        {addableCatalog.length > 0 ? (
+          <div className="env-var-list">
+            <div>
+              <strong>Skill catalog</strong>
+            </div>
+            {addableCatalog.map((skill) => (
+              <div className="env-var-row" key={`catalog-${skill.name}`}>
+                <span className="env-var-key">{skill.name}</span>
+                <span className="env-var-value" title={skill.description ?? undefined}>
+                  {skill.description ?? "No description"}
+                </span>
+                <button
+                  className="ghost-button"
+                  disabled={busy}
+                  onClick={() => handleInstallFromCatalog(skill.name)}
+                  type="button"
+                >
+                  Install
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
 
         {addableLibrary.length > 0 ? (
           <div className="env-var-list">

@@ -16,6 +16,7 @@ __pycache__
 tsconfig.tsbuildinfo
 .research-workspaces/
 .user-skills/
+.skill-catalog/
 logs/
 # Runtime state / local scratch
 backups/

@@ -1,8 +1,13 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { buildSkillFormData } from "@/components/skill-upload";
+
+type CatalogSkillEntry = {
+  name: string;
+  description: string | null;
+};
 
 export type UserSkillEntry = {
   id: string;
@@ -28,6 +33,45 @@ export function UserSkillsSection({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [catalog, setCatalog] = useState<CatalogSkillEntry[]>([]);
+
+  // Curated one-click catalog; a fetch failure simply hides the section.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch("/api/skill-catalog", { cache: "no-store" });
+        const data = await response.json().catch(() => null);
+        if (!cancelled && response.ok) setCatalog(data?.skills ?? []);
+      } catch {
+        // ignore — catalog is optional
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleInstallFromCatalog(catalogName: string) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/user/skills", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ catalogName })
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        setError(data?.error ?? "Failed to install skill.");
+        return;
+      }
+      await reload();
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function reload() {
     const response = await fetch("/api/user/skills", { cache: "no-store" });
@@ -137,6 +181,30 @@ export function UserSkillsSection({
       ) : (
         <div className="env-empty">No skills uploaded.</div>
       )}
+
+      {catalog.filter((entry) => !skills.some((skill) => skill.name === entry.name)).length > 0 ? (
+        <div className="env-var-list">
+          <strong className="credentials-section-title">Skill catalog</strong>
+          {catalog
+            .filter((entry) => !skills.some((skill) => skill.name === entry.name))
+            .map((entry) => (
+              <div className="env-var-row" key={`catalog-${entry.name}`}>
+                <span className="env-var-key">{entry.name}</span>
+                <span className="env-var-value" title={entry.description ?? undefined}>
+                  {entry.description ?? "No description"}
+                </span>
+                <button
+                  className="ghost-button"
+                  disabled={busy}
+                  onClick={() => handleInstallFromCatalog(entry.name)}
+                  type="button"
+                >
+                  Install
+                </button>
+              </div>
+            ))}
+        </div>
+      ) : null}
 
       <div className="credentials-actions">
         <button
