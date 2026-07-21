@@ -303,7 +303,7 @@ export function DocumentWorkspace({
     freeFallbackNoticeShownRef.current = true;
     const localName = localAgentModel ? localAgentModel.slice(LOCAL_MODEL_PREFIX.length) : "the local model";
     setFreeFallbackNotice(
-      `No AI credential connected — this run uses the free local model ${localName}, which is very slow. To use Claude, add a credential in the AI credentials menu (topbar).`
+      `No AI credential connected — this run uses the free local model ${localName}, which is very slow. To use Claude, add a credential under AI settings (topbar).`
     );
   }, [anthropicFreeFallback, agentModel, localAgentModel]);
   // Optimistic progress line for a just-started run — must not claim "Claude"
@@ -4500,7 +4500,7 @@ export function DocumentWorkspace({
                     <p>
                       No GitHub credential is connected for this document. If the repository is
                       private (or you want the AI to push to it), connect a GitHub personal access
-                      token with access to it under <em>AI credentials</em> in the topbar, then
+                      token with access to it under <em>AI settings</em> in the topbar, then
                       press Save again. Public repositories work read-only without a token — so
                       also check the URL for typos.
                     </p>

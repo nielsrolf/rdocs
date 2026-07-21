@@ -135,7 +135,7 @@ Every step is now logged. If you change any of them, keep the `scope` strings st
 
 ## MCP bridge (external agents editing documents)
 
-`POST /api/mcp` is a stateless streamable-HTTP MCP server (hand-rolled JSON-RPC in `lib/mcp/server.ts` — initialize / tools/list / tools/call only). Users connect a local Claude Code with the one-liner from the topbar **AI credentials → Connect via MCP** button, which mints an `ApiToken` (SHA-256-hashed, `lib/api-tokens.ts`) and copies:
+`POST /api/mcp` is a stateless streamable-HTTP MCP server (hand-rolled JSON-RPC in `lib/mcp/server.ts` — initialize / tools/list / tools/call only). Users connect a local Claude Code with the one-liner from the **AI settings page (topbar) → Connect via MCP** button, which mints an `ApiToken` (SHA-256-hashed, `lib/api-tokens.ts`) and copies:
 
 ```
 claude mcp add --transport http r-docs <APP_URL>/api/mcp --header "Authorization: Bearer gdai_…"

@@ -96,5 +96,5 @@ export async function transcribeAudio(
 
 export const VOICE_SUPPORT_HINT =
   "🎙️ I received a voice message but can't transcribe it yet. To enable voice support, add an OpenAI API key " +
-  "(AI credentials in the rdocs topbar — used only for Whisper transcription) or a LiteLLM key with a whisper model, " +
+  "(AI settings in the rdocs topbar — used only for Whisper transcription) or a LiteLLM key with a whisper model, " +
   "then send the voice note again.";

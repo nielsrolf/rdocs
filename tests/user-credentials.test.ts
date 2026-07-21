@@ -210,7 +210,7 @@ test("no owner provider key leaves the env untouched", () => {
 test("providerKeyRequirementError: third-party model with no key anywhere → actionable error", () => {
   assert.match(
     providerKeyRequirementError({}, "openrouter/openai/gpt-5.2") ?? "",
-    /OPENROUTER_API_KEY.*Env menu.*AI credentials/i
+    /OPENROUTER_API_KEY.*Env menu.*AI settings/i
   );
   assert.match(
     providerKeyRequirementError({ LITELLM_API_KEY: "  " }, "litellm/openai/gpt-5") ?? "",

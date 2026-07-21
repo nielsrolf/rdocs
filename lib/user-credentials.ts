@@ -269,7 +269,7 @@ export function providerKeyRequirementError(
   const keyVar = PROVIDER_ENV_KEY[provider];
   if (agentEnv[keyVar]?.trim()) return null;
   const label = provider === "openrouter" ? "OpenRouter" : "LiteLLM";
-  return `${label} model selected but no ${keyVar} is available. Add it in the document's Env menu, or connect a ${label} key in the AI credentials menu.`;
+  return `${label} model selected but no ${keyVar} is available. Add it in the document's Env menu, or connect a ${label} key under AI settings (topbar).`;
 }
 
 function isFlagEnabled(value: string | undefined): boolean {

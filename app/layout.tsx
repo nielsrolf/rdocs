@@ -5,7 +5,6 @@ import "@/app/globals.css";
 import "katex/dist/katex.min.css";
 import { BrandMark } from "@/components/brand-mark";
 import { ChunkReloadRecovery } from "@/components/chunk-reload-recovery";
-import { UserCredentialMenu } from "@/components/user-credential-menu";
 import { getCurrentUser } from "@/lib/auth";
 
 export const metadata: Metadata = {
@@ -42,10 +41,12 @@ export default async function RootLayout({
               {user ? (
                 <>
                   <span className="user-chip">{user.name}</span>
-                  <Link href="/settings/agent" className="ghost-button">
-                    Agent settings
+                  {/* Full-page AI settings (credentials, default model, MCP,
+                      skills, self-hosted worker) — replaced the old "AI
+                      credentials" popup. Keeps the ai-credentials tour anchor. */}
+                  <Link href="/settings/agent" className="ghost-button" data-tour="ai-credentials">
+                    AI settings
                   </Link>
-                  <UserCredentialMenu />
                   <form action="/api/auth/sign-out" method="post">
                     <button className="ghost-button" type="submit">
                       Sign out

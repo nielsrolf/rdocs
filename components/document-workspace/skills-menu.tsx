@@ -182,7 +182,7 @@ export function SkillsMenu({
           <p>
             Skills (folders with a <code>SKILL.md</code>) that agents can use on this document.
             Upload a skill folder or a single <code>SKILL.md</code>, or add one from your library
-            under <em>AI credentials</em>.
+            under <em>AI settings</em>.
           </p>
         </div>
 

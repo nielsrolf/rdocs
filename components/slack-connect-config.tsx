@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import {
   AGENT_EFFORTS,
@@ -13,9 +13,83 @@ import {
   agentModelProvider,
   normalizeAgentModel
 } from "@/agent-core/agent-config";
-import { detectCredential, type CredentialProvider } from "@/lib/credential-detect";
+import {
+  detectCredential,
+  looksLikeMcpToken,
+  type CredentialProvider
+} from "@/lib/credential-detect";
+import { emitTourEvent } from "@/components/onboarding-tour";
+import { UserSkillsSection, type UserSkillEntry } from "@/components/user-skills-section";
 
-type MaskedCredential = { provider: CredentialProvider; masked: string };
+type MaskedCredential = {
+  provider: CredentialProvider;
+  kind: "api_key" | "oauth";
+  masked: string;
+  label: string | null;
+  updatedAt: string;
+};
+
+type McpToken = {
+  id: string;
+  label: string | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+};
+
+function credentialLabel(credential: MaskedCredential): string {
+  if (credential.provider === "openrouter") return "OpenRouter API key";
+  if (credential.provider === "openai") return "OpenAI API key";
+  if (credential.provider === "litellm") return "LiteLLM API key";
+  if (credential.provider === "github") return "GitHub access token";
+  return credential.kind === "oauth" ? "Claude subscription" : "Anthropic API key";
+}
+
+// Only offered when the pasted value's format is unrecognizable — every other
+// provider is detected from its prefix.
+const FALLBACK_PROVIDER_OPTIONS: Array<{ value: CredentialProvider; label: string }> = [
+  { value: "litellm", label: "LiteLLM API key" },
+  { value: "openai", label: "OpenAI API key" },
+  { value: "openrouter", label: "OpenRouter API key" },
+  { value: "github", label: "GitHub access token" }
+];
+
+// Shown under the add-row for the detected/selected provider.
+const PROVIDER_HINTS: Record<CredentialProvider, ReactNode> = {
+  openai: (
+    <>
+      Used for voice-message transcription in the Slack bot (Whisper) — not for
+      agent runs. Keys start with <code>sk-</code> / <code>sk-proj-</code>.
+    </>
+  ),
+  anthropic: (
+    <>
+      Paste an API key (<code>sk-ant-…</code>) or a subscription token from{" "}
+      <code>claude setup-token</code> (<code>sk-ant-oat…</code>) — the kind is detected
+      automatically. The subscription path uses your Claude subscription, subject to
+      Anthropic&apos;s ToS; use with your own account at your own risk.
+    </>
+  ),
+  openrouter: (
+    <>
+      Unlocks OpenRouter models on every document you own — pick one under Agents → Model.
+    </>
+  ),
+  litellm: (
+    <>
+      Unlocks LiteLLM models on every document you own — pick one under Agents → Model. If this
+      server doesn&apos;t provide a default, also set <code>LITELLM_BASE_URL</code> in the
+      document&apos;s Env menu.
+    </>
+  ),
+  github: (
+    <>
+      Used to clone and push the repositories you link to documents. Create a{" "}
+      <strong>fine-grained personal access token</strong> (GitHub → Settings → Developer settings)
+      scoped to just those repositories, with <em>Contents: read &amp; write</em>. Runs you trigger
+      use your token; without one, only public repositories work (read-only).
+    </>
+  )
+};
 
 // Which user credential a model provider needs. "local" needs none — that is
 // the free fallback itself.
@@ -26,13 +100,16 @@ const PROVIDER_CREDENTIAL: Record<string, CredentialProvider | null> = {
   local: null
 };
 
-// Agent config screen, used in two places:
+// The full-page "AI settings" screen, used in two places:
 // - variant "slack": post-Slack-connect landing (app/slack/connected/page.tsx)
 //   with a "Slack account connected" banner.
-// - variant "settings": the same screen reachable anytime from the normal UI
-//   (app/settings/agent/page.tsx), with a neutral heading.
-// Three blocks: banner, AI-credential status (warning + paste form +
-// self-hosted alternative when missing), and the user's default agent model.
+// - variant "settings": the same screen reachable anytime from the topbar
+//   "AI settings" link (app/settings/agent/page.tsx), with a neutral heading.
+// Sections: banner, AI credentials (full management — one credential per
+// provider, write-only, masked), default agent model, MCP bridge tokens,
+// personal skill library, and the self-hosted worker alternative. This
+// replaced the old topbar "AI credentials" popup — everything the popup did
+// lives here now.
 export function SlackConnectConfig({
   email,
   localModel,
@@ -48,6 +125,8 @@ export function SlackConnectConfig({
 
   // Credential paste form.
   const [valueDraft, setValueDraft] = useState("");
+  // Provider picked manually when the pasted value's format is unrecognizable.
+  const [fallbackProvider, setFallbackProvider] = useState<CredentialProvider | "">("");
   const [credBusy, setCredBusy] = useState(false);
 
   // Default model config.
@@ -55,6 +134,16 @@ export function SlackConnectConfig({
   const [effort, setEffort] = useState<string>(DEFAULT_AGENT_EFFORT);
   const [savedConfig, setSavedConfig] = useState<{ model: string; effort: string } | null>(null);
   const [configBusy, setConfigBusy] = useState(false);
+
+  // MCP bridge tokens. The plaintext command is only available right after
+  // creating a token.
+  const [mcpTokens, setMcpTokens] = useState<McpToken[]>([]);
+  const [mcpCommand, setMcpCommand] = useState<string | null>(null);
+  const [mcpCopied, setMcpCopied] = useState(false);
+  const [mcpBusy, setMcpBusy] = useState(false);
+
+  // Personal skill library.
+  const [skills, setSkills] = useState<UserSkillEntry[]>([]);
 
   // Self-hosted worker explainer.
   const [showWorker, setShowWorker] = useState(false);
@@ -66,12 +155,16 @@ export function SlackConnectConfig({
     let cancelled = false;
     (async () => {
       try {
-        const [credRes, defaultsRes] = await Promise.all([
+        const [credRes, defaultsRes, tokenRes, skillsRes] = await Promise.all([
           fetch("/api/user/credentials", { cache: "no-store" }),
-          fetch("/api/user/agent-defaults", { cache: "no-store" })
+          fetch("/api/user/agent-defaults", { cache: "no-store" }),
+          fetch("/api/user/mcp-tokens", { cache: "no-store" }),
+          fetch("/api/user/skills", { cache: "no-store" })
         ]);
         const credData = await credRes.json().catch(() => null);
         const defaultsData = await defaultsRes.json().catch(() => null);
+        const tokenData = await tokenRes.json().catch(() => null);
+        const skillsData = await skillsRes.json().catch(() => null);
         if (cancelled) return;
         if (credRes.ok) setCredentials(credData?.credentials ?? []);
         if (defaultsRes.ok && defaultsData?.defaults) {
@@ -81,6 +174,8 @@ export function SlackConnectConfig({
           setEffort(savedEffort);
           setSavedConfig({ model: savedModel, effort: savedEffort });
         }
+        if (tokenRes.ok) setMcpTokens(tokenData?.tokens ?? []);
+        if (skillsRes.ok) setSkills(skillsData?.skills ?? []);
         setLoaded(true);
       } catch {
         if (!cancelled) setError("Failed to load your settings — reload the page.");
@@ -100,18 +195,27 @@ export function SlackConnectConfig({
   const missingCredential = loaded && neededCredential !== null && !hasCredential(neededCredential);
   const fallbackName = localModel ? localModel.slice(LOCAL_MODEL_PREFIX.length) : null;
 
-  const detected = detectCredential(valueDraft.trim());
+  const trimmedDraft = valueDraft.trim();
+  const detected = detectCredential(trimmedDraft);
+  const isMcpToken = looksLikeMcpToken(trimmedDraft);
+  const needsFallbackChoice = Boolean(trimmedDraft) && !detected && !isMcpToken;
+  const effectiveProvider =
+    detected?.provider ?? (needsFallbackChoice ? fallbackProvider || null : null);
+  const providerConnected = Boolean(
+    effectiveProvider && credentials.some((credential) => credential.provider === effectiveProvider)
+  );
 
   async function handleSaveCredential() {
     const value = valueDraft.trim();
-    if (!value || !detected || credBusy) return;
+    const targetProvider = detectCredential(value)?.provider ?? fallbackProvider;
+    if (!value || !targetProvider || credBusy) return;
     setCredBusy(true);
     setError(null);
     try {
       const response = await fetch("/api/user/credentials", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: detected.provider, value })
+        body: JSON.stringify({ provider: targetProvider, value })
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) {
@@ -120,8 +224,31 @@ export function SlackConnectConfig({
       }
       setCredentials(data.credentials ?? []);
       setValueDraft("");
+      setFallbackProvider("");
+      emitTourEvent("credential-connected");
     } catch {
       setError("Failed to save credential.");
+    } finally {
+      setCredBusy(false);
+    }
+  }
+
+  async function handleDeleteCredential(targetProvider: CredentialProvider) {
+    if (credBusy) return;
+    setCredBusy(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/user/credentials", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: targetProvider })
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        setError(data?.error ?? "Failed to remove credential.");
+        return;
+      }
+      setCredentials(data.credentials ?? []);
     } finally {
       setCredBusy(false);
     }
@@ -153,6 +280,68 @@ export function SlackConnectConfig({
       setError("Failed to save the default model.");
     } finally {
       setConfigBusy(false);
+    }
+  }
+
+  async function handleCreateMcpToken() {
+    if (mcpBusy) return;
+    setMcpBusy(true);
+    setError(null);
+    setMcpCopied(false);
+    try {
+      const response = await fetch("/api/user/mcp-tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        setError(data?.error ?? "Failed to create MCP token.");
+        return;
+      }
+      setMcpTokens(data.tokens ?? []);
+      setMcpCommand(data.command ?? null);
+      if (data.command) {
+        try {
+          await navigator.clipboard.writeText(data.command);
+          setMcpCopied(true);
+        } catch {
+          // Clipboard can be unavailable (permissions, http) — the command stays visible to copy manually.
+        }
+      }
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
+  async function handleCopyMcpCommand() {
+    if (!mcpCommand) return;
+    try {
+      await navigator.clipboard.writeText(mcpCommand);
+      setMcpCopied(true);
+    } catch {
+      setError("Copy failed — select the command text and copy it manually.");
+    }
+  }
+
+  async function handleRevokeMcpToken(id: string) {
+    if (mcpBusy) return;
+    setMcpBusy(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/user/mcp-tokens", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id })
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        setError(data?.error ?? "Failed to revoke MCP token.");
+        return;
+      }
+      setMcpTokens(data.tokens ?? []);
+    } finally {
+      setMcpBusy(false);
     }
   }
 
@@ -197,137 +386,139 @@ export function SlackConnectConfig({
         </section>
       ) : (
         <section className="credentials-section slack-connect-success">
-          <strong className="credentials-section-title">Agent settings</strong>
+          <strong className="credentials-section-title">AI settings</strong>
           <p>
-            Signed in as <strong>{email}</strong>. Agent runs you trigger — Slack mentions of{" "}
-            <strong>@claudex</strong>, DMs, and documents without a pinned model — use the
-            credentials and default model configured here.
+            Signed in as <strong>{email}</strong>. Agent runs you trigger — AI edits, comment
+            replies, Slack mentions of <strong>@claudex</strong>, and documents without a pinned
+            model — use the credentials, default model and skills configured here.
           </p>
         </section>
       )}
 
       <section className="credentials-section">
         <strong className="credentials-section-title">AI credentials</strong>
+        <p>
+          One credential per provider, used for AI edits and replies on every document you own.
+          Values are write-only — shown masked, never in full. A key set in a document&apos;s Env
+          menu overrides these for that document.
+        </p>
+
         {!loaded ? (
           <p className="env-note">Loading…</p>
-        ) : missingCredential ? (
-          <div className="env-note env-note-error slack-connect-warning">
-            <strong>⚠️ You haven&apos;t added AI credentials yet.</strong>{" "}
-            {provider === "anthropic" ? (
-              <>
-                Without one, claudex runs on the free local model
-                {fallbackName ? (
-                  <>
-                    {" "}
-                    <code>{fallbackName}</code>
-                  </>
-                ) : null}{" "}
-                — much slower and weaker than Claude.
-              </>
-            ) : (
-              <>
-                The model you picked below needs {provider === "openrouter" ? "an OpenRouter" : "a LiteLLM"}{" "}
-                API key.
-              </>
-            )}{" "}
-            Add a credential below, or run agents on your own machine instead.
-          </div>
         ) : (
-          <div className="env-var-list">
-            {credentials.map((credential) => (
-              <div className="env-var-row" key={credential.provider}>
-                <span className="env-var-key">{credential.provider}</span>
-                <span className="env-var-value">{credential.masked}</span>
+          <>
+            {missingCredential ? (
+              <div className="env-note env-note-error slack-connect-warning">
+                <strong>⚠️ You haven&apos;t added AI credentials yet.</strong>{" "}
+                {provider === "anthropic" ? (
+                  <>
+                    Without one, agent runs use the free local model
+                    {fallbackName ? (
+                      <>
+                        {" "}
+                        <code>{fallbackName}</code>
+                      </>
+                    ) : null}{" "}
+                    — much slower and weaker than Claude.
+                  </>
+                ) : (
+                  <>
+                    The model you picked below needs{" "}
+                    {provider === "openrouter" ? "an OpenRouter" : "a LiteLLM"} API key.
+                  </>
+                )}{" "}
+                Add a credential below, or run agents on your own machine instead (see the
+                self-hosted section at the bottom).
               </div>
-            ))}
-          </div>
+            ) : null}
+
+            <div className="env-var-list">
+              {credentials.length > 0 ? (
+                credentials.map((credential) => (
+                  <div className="env-var-row" key={credential.provider}>
+                    <span className="env-var-key">{credentialLabel(credential)}</span>
+                    <span className="env-var-value">{credential.masked}</span>
+                    <button
+                      aria-label={`Remove ${credentialLabel(credential)}`}
+                      className="env-var-delete"
+                      disabled={credBusy}
+                      onClick={() => handleDeleteCredential(credential.provider)}
+                      title="Remove"
+                      type="button"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <div className="env-empty">No credentials connected.</div>
+              )}
+            </div>
+          </>
         )}
 
         <div className="env-add-row credentials-add-row">
           <input
             aria-label="Credential"
             onChange={(event) => setValueDraft(event.target.value)}
-            placeholder="Paste a credential: sk-ant-…, sk-or-…, LiteLLM key"
+            placeholder="Paste any credential: sk-ant-…, sk-or-…, github_pat_…, LiteLLM key"
             type="password"
             value={valueDraft}
           />
           <button
             className="ghost-button"
-            disabled={credBusy || !detected}
+            disabled={credBusy || !trimmedDraft || !effectiveProvider}
             onClick={handleSaveCredential}
             type="button"
           >
-            {credBusy ? "Saving…" : "Connect"}
+            {credBusy ? "Saving…" : providerConnected ? "Replace" : "Connect"}
           </button>
         </div>
-        <p className="env-note">
-          {detected ? (
-            <>
-              <strong>Detected: {detected.label}.</strong>
-            </>
-          ) : (
-            <>
-              Anthropic API keys (<code>sk-ant-…</code>), Claude subscription tokens (
-              <code>sk-ant-oat…</code>, from <code>claude setup-token</code>), OpenRouter keys (
-              <code>sk-or-…</code>) and LiteLLM keys are detected as you paste. Stored write-only,
-              shown masked. Manage them anytime under <strong>AI credentials</strong> in the app
-              topbar.
-            </>
-          )}
-        </p>
 
-        <div className="env-note">
-          <button
-            className="ghost-button"
-            onClick={() => setShowWorker((value) => !value)}
-            type="button"
-          >
-            {showWorker ? "Hide self-hosted option" : "Prefer not to share credentials? Run a self-hosted worker"}
-          </button>
-          {showWorker ? (
-            <div className="slack-connect-worker">
-              <p>
-                Instead of storing keys here, you can run the agent worker on <strong>your own
-                infrastructure</strong>: a Docker container that polls this app for jobs, runs
-                them locally with your keys (they never leave your machine), and pushes results
-                back. Flip a document to self-hosted in its agent panel afterwards.
-              </p>
-              {workerCommand ? (
-                <>
-                  <code className="env-note-command">{workerCommand}</code>
-                  <button
-                    className="ghost-button"
-                    onClick={() => {
-                      void navigator.clipboard.writeText(workerCommand).then(() => {
-                        setWorkerCopied(true);
-                        setTimeout(() => setWorkerCopied(false), 1500);
-                      });
-                    }}
-                    type="button"
-                  >
-                    {workerCopied ? "Copied ✓" : "Copy command"}
-                  </button>
-                </>
-              ) : (
+        {detected ? (
+          <p className="env-note">
+            <strong>Detected: {detected.label}.</strong> {PROVIDER_HINTS[detected.provider]}
+          </p>
+        ) : isMcpToken ? (
+          <p className="env-note env-note-error">
+            That is an r-docs MCP token (<code>gdai_…</code>), not a provider credential — use it
+            with <code>claude mcp add</code> instead.
+          </p>
+        ) : needsFallbackChoice ? (
+          <div className="env-note">
+            <p className="credentials-fallback-label">
+              Couldn&apos;t recognize this key&apos;s format. What is it?
+            </p>
+            <div className="credentials-fallback-options" role="radiogroup" aria-label="Credential type">
+              {FALLBACK_PROVIDER_OPTIONS.map((option) => (
                 <button
-                  className="ghost-button"
-                  disabled={workerBusy}
-                  onClick={() => void handleGenerateWorkerCommand()}
+                  aria-pressed={fallbackProvider === option.value}
+                  className={`ghost-button${fallbackProvider === option.value ? " active" : ""}`}
+                  key={option.value}
+                  onClick={() => setFallbackProvider(option.value)}
                   type="button"
                 >
-                  {workerBusy ? "Generating…" : "Generate worker command"}
+                  {option.label}
                 </button>
-              )}
+              ))}
             </div>
-          ) : null}
-        </div>
+            {fallbackProvider ? <p>{PROVIDER_HINTS[fallbackProvider]}</p> : null}
+          </div>
+        ) : (
+          <p className="env-note">
+            One field for everything: Anthropic API keys (<code>sk-ant-…</code>), Claude
+            subscription tokens (<code>sk-ant-oat…</code>, from <code>claude setup-token</code>),
+            OpenRouter keys (<code>sk-or-…</code>), GitHub tokens (<code>github_pat_…</code> /{" "}
+            <code>ghp_…</code>) and LiteLLM keys — the type is detected as you paste.
+          </p>
+        )}
       </section>
 
       <section className="credentials-section">
         <strong className="credentials-section-title">Default model</strong>
         <p>
-          Used whenever claudex runs for you and the channel hasn&apos;t pinned a model of its own
-          (channels can override this in their agent panel).
+          Used whenever an agent runs for you and the document or channel hasn&apos;t pinned a
+          model of its own (documents can override this in their agent panel).
         </p>
         <div className="slack-connect-config-row">
           <label className="agent-config-field">
@@ -404,11 +595,113 @@ export function SlackConnectConfig({
         </div>
       </section>
 
+      <section className="credentials-section">
+        <strong className="credentials-section-title">Connect via MCP</strong>
+        <p>
+          Let a local Claude Code (or any MCP client) read and edit your documents as you.
+          Creating a token copies a ready-to-paste <code>claude mcp add</code> command; the token
+          is shown only once.
+        </p>
+
+        {mcpTokens.length > 0 ? (
+          <div className="env-var-list">
+            {mcpTokens.map((token) => (
+              <div className="env-var-row" key={token.id}>
+                <span className="env-var-key">{token.label ?? "MCP token"}</span>
+                <span className="env-var-value">
+                  created {new Date(token.createdAt).toLocaleDateString()}
+                  {token.lastUsedAt ? ` · last used ${new Date(token.lastUsedAt).toLocaleDateString()}` : " · never used"}
+                </span>
+                <button
+                  aria-label="Revoke MCP token"
+                  className="env-var-delete"
+                  disabled={mcpBusy}
+                  onClick={() => handleRevokeMcpToken(token.id)}
+                  title="Revoke"
+                  type="button"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        <div className="credentials-actions">
+          <button className="ghost-button" disabled={mcpBusy} onClick={handleCreateMcpToken} type="button">
+            {mcpBusy ? "Working…" : "Connect via MCP"}
+          </button>
+          {mcpCommand ? (
+            <button className="ghost-button" disabled={mcpBusy} onClick={handleCopyMcpCommand} type="button">
+              {mcpCopied ? "Copied ✓" : "Copy command"}
+            </button>
+          ) : null}
+        </div>
+
+        {mcpCommand ? (
+          <p className="env-note">
+            Run this in your terminal{mcpCopied ? " (already in your clipboard)" : ""}:
+            <code className="env-note-command">{mcpCommand}</code>
+          </p>
+        ) : null}
+      </section>
+
+      <UserSkillsSection onSkillsChanged={setSkills} skills={skills} />
+
+      <section className="credentials-section">
+        <strong className="credentials-section-title">Self-hosted worker</strong>
+        <p>
+          Prefer not to store credentials here at all? Documents can run their agents on{" "}
+          <strong>your own infrastructure</strong> instead: a Docker container that polls this app
+          for jobs, runs them locally with your keys (they never leave your machine), and pushes
+          results back. Flip a document to self-hosted in its agent panel afterwards.
+        </p>
+        {showWorker || workerCommand ? (
+          <div className="slack-connect-worker">
+            {workerCommand ? (
+              <>
+                <code className="env-note-command">{workerCommand}</code>
+                <button
+                  className="ghost-button"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(workerCommand).then(() => {
+                      setWorkerCopied(true);
+                      setTimeout(() => setWorkerCopied(false), 1500);
+                    });
+                  }}
+                  type="button"
+                >
+                  {workerCopied ? "Copied ✓" : "Copy command"}
+                </button>
+              </>
+            ) : (
+              <button
+                className="ghost-button"
+                disabled={workerBusy}
+                onClick={() => void handleGenerateWorkerCommand()}
+                type="button"
+              >
+                {workerBusy ? "Generating…" : "Generate worker command"}
+              </button>
+            )}
+          </div>
+        ) : (
+          <button
+            className="ghost-button"
+            onClick={() => setShowWorker(true)}
+            type="button"
+          >
+            Set up a self-hosted worker
+          </button>
+        )}
+      </section>
+
       {error ? <p className="env-note env-note-error">{error}</p> : null}
 
       {variant === "slack" ? (
         <p className="env-note">
-          All set — head back to Slack and mention <strong>@claudex</strong>.
+          All set — head back to Slack and mention <strong>@claudex</strong>. You can change all of
+          this anytime under <strong>AI settings</strong> in the app topbar.
         </p>
       ) : null}
     </div>

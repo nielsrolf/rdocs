@@ -2606,9 +2606,10 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   color: #d93025;
 }
 
-/* "AI credentials" topbar dropdown. Sits in the app topbar, which lacks the
-   compact control overrides of the document topbar — so the panel scopes its
-   own: quieter note blocks (not pills), tighter inputs/buttons, wider panel. */
+/* Credential-section building blocks, shared by the full-page AI settings
+   screen (.slack-connect-card). .credentials-panel is kept for backwards
+   compatibility but no longer mounted (the topbar popup was merged into
+   /settings/agent). */
 .credentials-panel {
   width: min(480px, calc(100vw - 2rem));
   max-height: min(78vh, 640px);
@@ -5290,8 +5291,8 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   gap: 0.6rem;
 }
 
-/* Post-Slack-connect config screen (/slack/connected): full-page version of
-   the credentials dropdown — same section styling, standalone card. */
+/* Full-page AI settings screen (/settings/agent and /slack/connected):
+   credentials, default model, MCP, skills, self-hosted worker. */
 .slack-connect-shell {
   display: grid;
   justify-items: center;
@@ -5299,7 +5300,7 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 }
 
 .slack-connect-card {
-  width: min(100%, 560px);
+  width: min(100%, 680px);
   display: flex;
   flex-direction: column;
   gap: 0.9rem;

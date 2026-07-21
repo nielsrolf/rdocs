@@ -20,10 +20,37 @@ export type TourEventName =
   | "ask-ai"
   | "agent-run-started";
 
+// Some tour actions happen on a different page than the tour tooltip (e.g.
+// connecting a credential on /settings/agent while the tour waits in the
+// document). The event is also persisted so the tour can consume it when the
+// user navigates back (same tab) or via the storage event (other tab).
+const LAST_EVENT_KEY = "rdocs-tour-last-event";
+const LAST_EVENT_MAX_AGE_MS = 30 * 60 * 1000;
+
 /** Fire from app handlers so the matching tour step advances automatically. */
 export function emitTourEvent(name: TourEventName) {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent(TOUR_EVENT, { detail: name }));
+  try {
+    window.localStorage.setItem(LAST_EVENT_KEY, JSON.stringify({ name, at: Date.now() }));
+  } catch {
+    // Private-mode storage failures just lose cross-page auto-advance.
+  }
+}
+
+/** True (and clears the record) when `expected` fired recently, possibly on another page. */
+function consumePendingTourEvent(expected: TourEventName): boolean {
+  try {
+    const raw = window.localStorage.getItem(LAST_EVENT_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw) as { name?: string; at?: number };
+    if (parsed.name !== expected) return false;
+    if (typeof parsed.at !== "number" || Date.now() - parsed.at > LAST_EVENT_MAX_AGE_MS) return false;
+    window.localStorage.removeItem(LAST_EVENT_KEY);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 type TourState = {
@@ -126,16 +153,16 @@ const STEPS: TourStep[] = [
     title: "Connect AI credentials — or skip",
     body: (
       <>
-        Open <strong>AI credentials</strong> in the topbar and paste an Anthropic API key or a{" "}
-        <code>claude setup-token</code> subscription token — one field, the type is detected
-        automatically. Or skip this step: AI runs fall back to the free local qwen model, which
-        works but is <em>very</em> slow (minutes, not seconds). Your key is encrypted at rest, and
-        agents started through comment links run read-only without document or repository secrets.
-        Edit links grant full workspace agent access.
+        Open <strong>AI settings</strong> in the topbar — it opens the settings page — and paste an
+        Anthropic API key or a <code>claude setup-token</code> subscription token — one field, the
+        type is detected automatically. Then come back here; the tour continues where you left off.
+        Or skip this step: AI runs fall back to the free local qwen model, which works but is{" "}
+        <em>very</em> slow (minutes, not seconds). Your key is encrypted at rest, and agents started
+        through comment links run read-only without document or repository secrets. Edit links
+        grant full workspace agent access.
       </>
     ),
-    advanceOn: "credential-connected",
-    dock: true
+    advanceOn: "credential-connected"
   },
   {
     surface: "doc",
@@ -200,7 +227,7 @@ const STEPS: TourStep[] = [
         panel. Comment links get a read-only agent that can research and suggest without changing
         the repo; edit links also allow workspace commands and repository changes. Explore the rest
         at your own pace: share links, suggestion mode, exports, and the MCP bridge under AI
-        credentials.
+        settings.
       </>
     )
   }
@@ -242,7 +269,7 @@ function starterContent() {
         bullet("AI edits: select any text and click Edit with AI."),
         bullet("Comments: select text, Add comment, then Ask AI to get an answer in the thread."),
         bullet(
-          "AI credentials and GitHub PAT: connect your own Anthropic, OpenRouter or LiteLLM key and a GitHub personal access token under AI credentials in the topbar."
+          "AI credentials and GitHub PAT: connect your own Anthropic, OpenRouter or LiteLLM key and a GitHub personal access token under AI settings in the topbar."
         ),
         bullet("Linked repos: connect a GitHub repository so agents work in a real checkout."),
         bullet("Agents: run Claude on the whole document from the Agents panel.")
@@ -288,14 +315,36 @@ export function OnboardingTour({
     }
   }, [state, update]);
 
-  // Auto-advance on app events matching the current step.
+  // Auto-advance on app events matching the current step. Events can fire on
+  // another page (e.g. connecting a credential on /settings/agent): a pending
+  // event is consumed when the step (re)mounts after navigating back, and a
+  // storage event covers the other-tab case.
   useEffect(() => {
     if (!visible || !step?.advanceOn) return;
+    const expected = step.advanceOn;
+    if (consumePendingTourEvent(expected)) {
+      advance();
+      return;
+    }
     const handler = (event: Event) => {
-      if ((event as CustomEvent).detail === step.advanceOn) advance();
+      if ((event as CustomEvent).detail === expected) {
+        try {
+          window.localStorage.removeItem(LAST_EVENT_KEY);
+        } catch {
+          // ignore
+        }
+        advance();
+      }
+    };
+    const storageHandler = (event: StorageEvent) => {
+      if (event.key === LAST_EVENT_KEY && consumePendingTourEvent(expected)) advance();
     };
     window.addEventListener(TOUR_EVENT, handler);
-    return () => window.removeEventListener(TOUR_EVENT, handler);
+    window.addEventListener("storage", storageHandler);
+    return () => {
+      window.removeEventListener(TOUR_EVENT, handler);
+      window.removeEventListener("storage", storageHandler);
+    };
   }, [visible, step, advance]);
 
   // Track the anchor element's position (and highlight it).

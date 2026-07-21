@@ -474,22 +474,22 @@ export function AgentPanel({
               No AI credential connected — agents run on the free local model
               {fallbackModelName ? ` ${fallbackModelName}` : ""} (very slow), not{" "}
               {ANTHROPIC_AGENT_MODELS.find((m) => m.value === normalizedModel)?.label ?? "Claude"}.
-              Connect a credential in the AI credentials menu to use Claude.
+              Connect a credential under AI settings (topbar) to use Claude.
             </span>
           ) : modelIsOpenRouter && !hasOpenRouterKey ? (
             <span className="agent-config-hint">
               This model needs an OpenRouter key — add OPENROUTER_API_KEY in the Env menu or connect
-              one in AI credentials.
+              one under AI settings.
             </span>
           ) : modelIsLiteLlm && !hasLiteLlmKey ? (
             <span className="agent-config-hint">
-              This model needs a LiteLLM key — add LITELLM_API_KEY in the Env menu or connect one in
-              AI credentials.
+              This model needs a LiteLLM key — add LITELLM_API_KEY in the Env menu or connect one
+              under AI settings.
             </span>
           ) : !hasOpenRouterKey && !hasLiteLlmKey ? (
             <span className="agent-config-hint">
-              For OpenRouter/LiteLLM models, add a key in the Env menu or connect one in AI
-              credentials.
+              For OpenRouter/LiteLLM models, add a key in the Env menu or connect one under AI
+              settings.
             </span>
           ) : null}
         </div>
