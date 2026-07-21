@@ -5289,3 +5289,69 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   justify-content: flex-end;
   gap: 0.6rem;
 }
+
+/* Post-Slack-connect config screen (/slack/connected): full-page version of
+   the credentials dropdown — same section styling, standalone card. */
+.slack-connect-shell {
+  display: grid;
+  justify-items: center;
+  padding: 3rem 1rem;
+}
+
+.slack-connect-card {
+  width: min(100%, 560px);
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  padding: 1.5rem;
+  background: white;
+}
+
+.slack-connect-card select,
+.slack-connect-card input {
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  padding: 0.5rem 0.6rem;
+  font-size: 0.88rem;
+  background: white;
+}
+
+.slack-connect-card .ghost-button {
+  border-radius: 8px;
+  padding: 0.45rem 0.8rem;
+  font-size: 0.88rem;
+  background: white;
+  border-color: var(--border);
+}
+
+.slack-connect-card .env-add-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+}
+
+.slack-connect-warning {
+  line-height: 1.45;
+}
+
+.slack-connect-worker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.slack-connect-config-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.75rem;
+}
+
+.slack-connect-config-row .agent-config-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}

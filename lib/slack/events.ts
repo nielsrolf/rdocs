@@ -305,8 +305,30 @@ type StartSlackRunArgs = {
   hostDevRun?: boolean;
 };
 
+// The channel document's explicit agent config (set in its agent panel) wins;
+// when a field is unset there, fall back to the triggering user's personal
+// default (User.defaultAgentModel/-Effort, set on the Slack connect screen),
+// and finally to the app default downstream (sonnet-5, thinking off).
+async function resolveSlackAgentConfig(
+  document: { agentModel: string | null; agentEffort: string | null },
+  userId: string
+): Promise<{ model: string | null; effort: string | null }> {
+  let model = document.agentModel;
+  let effort = document.agentEffort;
+  if (model == null || effort == null) {
+    const user = await db.user.findUnique({
+      where: { id: userId },
+      select: { defaultAgentModel: true, defaultAgentEffort: true }
+    });
+    model = model ?? user?.defaultAgentModel ?? null;
+    effort = effort ?? user?.defaultAgentEffort ?? null;
+  }
+  return { model, effort };
+}
+
 export async function startSlackConversationRun(args: StartSlackRunArgs): Promise<string> {
   const { deps, surface, document, channel, channelName, teamId, triggerId, replyThreadTs } = args;
+  const agentConfig = await resolveSlackAgentConfig(document, args.userId);
 
   const aiRun = await db.aiRun.create({
     data: {
@@ -342,7 +364,7 @@ export async function startSlackConversationRun(args: StartSlackRunArgs): Promis
     documentTitle: document.title,
     documentContent: document.content,
     createdById: args.userId,
-    agentConfig: { model: document.agentModel, effort: document.agentEffort },
+    agentConfig,
     agentAccessMode: "workspace",
     runnerMode: document.runnerMode,
     hostDevRun: args.hostDevRun,

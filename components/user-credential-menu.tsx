@@ -293,6 +293,11 @@ export function UserCredentialMenu() {
     <details className="header-menu header-menu-right" data-tour="ai-credentials" ref={detailsRef}>
       <summary>AI credentials</summary>
       <div className="header-menu-panel env-panel credentials-panel">
+        <p className="env-note">
+          Looking for your <strong>default model</strong> (used for Slack mentions and new runs)?
+          Configure it on the <a href="/settings/agent">agent settings page</a>, together with
+          credentials and the self-hosted worker.
+        </p>
         <section className="credentials-section">
           <strong className="credentials-section-title">Your AI credentials</strong>
           <p>

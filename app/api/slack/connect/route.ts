@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { getRequestOrigin } from "@/lib/request-origin";
 import { verifySlackLinkToken } from "@/lib/slack/link-token";
 
 export const runtime = "nodejs";
@@ -54,8 +55,7 @@ export async function GET(request: Request) {
     slackUserId: claims.slackUserId
   });
 
-  return page(
-    "Slack account connected",
-    `Your Slack account is now linked to <strong>${user.email}</strong>. Head back to Slack and mention the bot again — it will run with your credentials.`
-  );
+  // Land on the claudex config screen: credential warning (free-local-model
+  // fallback), credential form, and the user's default model config.
+  return NextResponse.redirect(new URL("/slack/connected", getRequestOrigin(request)));
 }

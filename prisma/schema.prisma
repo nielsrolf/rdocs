@@ -12,6 +12,11 @@ model User {
   email             String               @unique
   name              String
   passwordHash      String
+  // Per-user default agent config: used when a run's document has no explicit
+  // agentModel/agentEffort (today: Slack channel/DM runs). Null = app default
+  // (claude-sonnet-5, thinking off). Same storable values as Document.agentModel.
+  defaultAgentModel  String?
+  defaultAgentEffort String?
   createdAt         DateTime             @default(now())
   updatedAt         DateTime             @updatedAt
   ownedDocuments    Document[]           @relation("DocumentOwner")
