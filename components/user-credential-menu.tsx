@@ -355,7 +355,7 @@ export function UserCredentialMenu() {
             </p>
           ) : isMcpToken ? (
             <p className="env-note env-note-error">
-              That is a gdocs-ai MCP token (<code>gdai_…</code>), not a provider credential — use
+              That is an r-docs MCP token (<code>gdai_…</code>), not a provider credential — use
               it with <code>claude mcp add</code> instead.
             </p>
           ) : needsFallbackChoice ? (

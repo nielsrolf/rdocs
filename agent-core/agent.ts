@@ -599,7 +599,7 @@ ${
       : "";
 
     const hostDevBlock = input.hostDevRun
-      ? `HOST DEV MODE: your workspace is the LIVE deployment directory of this very service (the rdocs/gdocs-ai repo, its real database, .env, logs, and running processes) — not an isolated copy. Read CLAUDE.md at the workspace root FIRST and follow its rules (tests-first bug fixes, restart recipe, log conventions).
+      ? `HOST DEV MODE: your workspace is the LIVE deployment directory of this very service (the r-docs repo, its real database, .env, logs, and running processes) — not an isolated copy. Read CLAUDE.md at the workspace root FIRST and follow its rules (tests-first bug fixes, restart recipe, log conventions).
 Critical: you run INSIDE the service you are working on. Restarting or rebuilding the service KILLS YOUR OWN RUN — if you must restart, first deliver your findings with post_slack_message (your final reply may be lost), and only then trigger the restart as the very last action, detached (nohup). Prefer leaving the restart to the user. Be conservative with the database; it is production data (snapshots exist under backups/).\n\n`
       : "";
 

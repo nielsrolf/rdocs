@@ -106,7 +106,20 @@ if [ -f "$DB_FILE" ]; then
   mkdir -p backups
   BACKUP_FILE="backups/dev_$(date +%Y%m%d_%H%M%S).db"
   log "backing up $DB_FILE -> $BACKUP_FILE"
-  sqlite3 "$DB_FILE" ".backup '$BACKUP_FILE'"
+  # Live server writes constantly; .backup needs a busy timeout or it dies
+  # instantly with "database is locked". Retry a few times to ride out any
+  # long write transaction.
+  BACKUP_OK=""
+  for _try in 1 2 3; do
+    if sqlite3 -cmd ".timeout 60000" "$DB_FILE" ".backup '$BACKUP_FILE'"; then
+      BACKUP_OK=1
+      break
+    fi
+    log "backup attempt $_try failed (database busy), retrying in 5s..."
+    rm -f "$BACKUP_FILE"
+    sleep 5
+  done
+  [ -n "$BACKUP_OK" ] || fail "could not back up $DB_FILE (database locked)"
   ls -t backups/dev_*.db 2>/dev/null | tail -n +4 | while read -r OLD_BAK; do
     log "pruning old backup $OLD_BAK"
     rm -f "$OLD_BAK"

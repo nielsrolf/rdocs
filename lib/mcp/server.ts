@@ -10,7 +10,7 @@ import { McpFileError } from "@/lib/mcp/workspace-files";
 // `claude mcp add --transport http` needs.
 
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
-const SERVER_INFO = { name: "gdocs-ai", title: "gdocs-ai documents", version: "1.0.0" };
+const SERVER_INFO = { name: "r-docs", title: "r-docs documents", version: "1.0.0" };
 
 type JsonRpcRequest = {
   jsonrpc?: string;
@@ -78,7 +78,7 @@ export async function handleMcpMessage(
           capabilities: { tools: {} },
           serverInfo: SERVER_INFO,
           instructions:
-            "Tools for reading and editing gdocs-ai documents. Start with read_document (accepts document URLs); make targeted edits with replace_in_document; upload widget/image files with upload_files or create_widget before referencing them in markdown."
+            "Tools for reading and editing r-docs documents. Start with read_document (accepts document URLs); make targeted edits with replace_in_document; upload widget/image files with upload_files or create_widget before referencing them in markdown."
         });
       }
       case "ping":

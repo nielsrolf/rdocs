@@ -89,7 +89,7 @@ export function normalizeCredentialInput(input: {
   }
   if (looksLikeMcpToken(value)) {
     throw new Error(
-      "That is a gdocs-ai MCP token (gdai_…), not a provider credential — use it with `claude mcp add` instead."
+      "That is an r-docs MCP token (gdai_…), not a provider credential — use it with `claude mcp add` instead."
     );
   }
   const provider = input.provider ?? detectCredential(value)?.provider;

@@ -1,4 +1,4 @@
-// Signed, short-lived tokens for linking a Slack identity to a gdocs-ai
+// Signed, short-lived tokens for linking a Slack identity to an r-docs
 // account. The bot posts a connect URL containing one of these; the connect
 // route verifies it and upserts the SlackAccountLink for the signed-in user.
 //

@@ -32,7 +32,7 @@ export const maxDuration = 90;
 // transport in stateless plain-JSON mode. Authenticated with a personal API
 // token (see the "Connect via MCP" section of the account menu):
 //
-//   claude mcp add --transport http gdocs-ai <origin>/api/mcp \
+//   claude mcp add --transport http r-docs <origin>/api/mcp \
 //     --header "Authorization: Bearer gdai_…"
 
 function unauthorized() {

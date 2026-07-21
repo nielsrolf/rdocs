@@ -194,7 +194,7 @@ async function initLocalWorkspace(workspace: string) {
 
 async function ensureWorkspaceGitIdentity(workspace: string, token: string | null) {
   const identity = await resolveGithubIdentity(token);
-  const name = identity?.login ?? "gdocs-ai";
+  const name = identity?.login ?? "r-docs";
   const email = identity
     ? `${identity.id}+${identity.login}@users.noreply.github.com`
     : "ai-agent@r-docs.local";
