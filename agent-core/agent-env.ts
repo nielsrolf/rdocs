@@ -118,7 +118,9 @@ export function applyProviderEnv(
     // The SDK requires a non-empty token; llama.cpp ignores it.
     key = "local-no-key";
   } else if (provider === "openrouter") {
-    baseUrl = OPENROUTER_BASE_URL;
+    // An env override exists so the credential broker can interpose itself
+    // (OPENROUTER_BASE_URL → the per-run broker URL, with a virtual key).
+    baseUrl = (env.OPENROUTER_BASE_URL?.trim() || OPENROUTER_BASE_URL).replace(/\/+$/, "");
     key = env.OPENROUTER_API_KEY?.trim();
     if (!key) {
       throw new Error(

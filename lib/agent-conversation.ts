@@ -162,7 +162,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       agentEnv,
       agentConfig: effectiveAgentConfig,
       usedFreeFallback
-    } = await loadAgentEnvWithFreeFallback(documentId, agentConfig, createdById);
+    } = await loadAgentEnvWithFreeFallback(documentId, agentConfig, createdById, { aiRunId });
     if (usedFreeFallback) {
       await recordAiRunEvent({
         aiRunId,

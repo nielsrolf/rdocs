@@ -199,7 +199,42 @@ export type DocumentAgentConfig = {
   effort?: string | null;
 };
 
-type SdkThinking = { type: "disabled" } | { type: "adaptive" };
+type SdkThinking =
+  | { type: "disabled" }
+  | { type: "adaptive" }
+  | { type: "enabled"; budgetTokens: number };
+
+// Fixed thinking budgets for third-party (OpenRouter / LiteLLM) models. The
+// Anthropic adaptive-thinking params are Claude-specific, but the classic
+// `thinking: { type: "enabled", budget_tokens: N }` form IS understood by both
+// compat endpoints and translated per model family:
+//   - OpenRouter's Anthropic-compatible /v1/messages maps budget_tokens onto
+//     its unified `reasoning` param (reasoning budget for Gemini-style models,
+//     effort tier for OpenAI-style ones; clamped to 1024..32000).
+//   - LiteLLM's /v1/messages maps it onto reasoning_effort / thinkingBudget
+//     for the downstream provider.
+// Budgets are chosen so the tiers land in distinct effort buckets downstream.
+export const THIRD_PARTY_THINKING_BUDGETS: Record<"low" | "medium" | "high", number> = {
+  low: 4096,
+  medium: 12288,
+  high: 32000
+};
+
+function parseEffort(effort: string | null | undefined): "low" | "medium" | "high" | null {
+  return effort === "low" || effort === "medium" || effort === "high" ? effort : null;
+}
+
+function thirdPartyThinking(effort: string | null | undefined): {
+  thinking: SdkThinking;
+  labelSuffix: string;
+} {
+  const parsed = parseEffort(effort);
+  if (!parsed) return { thinking: { type: "disabled" }, labelSuffix: "" };
+  return {
+    thinking: { type: "enabled", budgetTokens: THIRD_PARTY_THINKING_BUDGETS[parsed] },
+    labelSuffix: `+${parsed}`
+  };
+}
 
 export type ResolvedAgentSdkConfig = {
   /** Model id handed to the SDK: a canonical Claude id, a bare OpenRouter slug, or a bare LiteLLM model name. */
@@ -222,9 +257,12 @@ export type ResolvedAgentSdkConfig = {
  * An unrecognised model falls back; an unrecognised/"off"/missing effort disables
  * extended thinking — matching the pre-feature behaviour.
  *
- * OpenRouter and LiteLLM models always run with extended thinking disabled:
- * the adaptive thinking params are Anthropic-specific and may be rejected by
- * the compat endpoint for non-Claude models.
+ * OpenRouter and LiteLLM models honor the configured effort too, but through a
+ * fixed thinking-token budget (`thinking: { type: "enabled", budget_tokens }`)
+ * rather than Anthropic adaptive thinking — both compat endpoints translate
+ * that form into the downstream model's reasoning controls (see
+ * THIRD_PARTY_THINKING_BUDGETS). Local llama.cpp models always run with the
+ * thinking param disabled (the server doesn't implement it).
  */
 export function resolveAgentSdkConfig(
   config: DocumentAgentConfig | null | undefined,
@@ -241,21 +279,23 @@ export function resolveAgentSdkConfig(
 
   if (normalized.startsWith(OPENROUTER_MODEL_PREFIX)) {
     const slug = normalized.slice(OPENROUTER_MODEL_PREFIX.length);
+    const { thinking, labelSuffix } = thirdPartyThinking(config?.effort);
     return {
       model: slug,
       provider: "openrouter",
-      thinking: { type: "disabled" },
-      label: `openrouter:${slug}`
+      thinking,
+      label: `openrouter:${slug}${labelSuffix}`
     };
   }
 
   if (normalized.startsWith(LITELLM_MODEL_PREFIX)) {
     const name = normalized.slice(LITELLM_MODEL_PREFIX.length);
+    const { thinking, labelSuffix } = thirdPartyThinking(config?.effort);
     return {
       model: name,
       provider: "litellm",
-      thinking: { type: "disabled" },
-      label: `litellm:${name}`
+      thinking,
+      label: `litellm:${name}${labelSuffix}`
     };
   }
 

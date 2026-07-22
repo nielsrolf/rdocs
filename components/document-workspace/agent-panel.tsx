@@ -423,13 +423,13 @@ export function AgentPanel({
             <span className="agent-config-label">Thinking</span>
             <select
               className="agent-config-select"
-              disabled={!canWriteDocument || modelIsThirdParty}
+              disabled={!canWriteDocument || modelIsLocal}
               onChange={(event) => onAgentEffortChange(event.target.value)}
               title={
-                modelIsThirdParty
-                  ? "Extended thinking applies to Anthropic models"
+                modelIsLocal
+                  ? "Thinking control is not available for the free local model"
                   : canWriteDocument
-                    ? "Extended-thinking effort"
+                    ? "Extended-thinking effort (thinking budget for non-Claude models)"
                     : "Only editors can change thinking effort"
               }
               value={agentEffort}

@@ -227,11 +227,44 @@ model DocumentEnvVar {
   documentId String
   key        String
   value      String
+  // Whether this variable is a SECRET (API key/token — masked in the UI and
+  // eligible for credential-broker substitution) or plain configuration (URL,
+  // model name — shown in full). Null = auto-detect from the key name
+  // (isSecretEnvKey in lib/document-env.ts); true/false = explicit user choice.
+  isSecret   Boolean?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
   document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@unique([documentId, key])
+}
+
+// A per-run VIRTUAL credential minted by the agent credential broker
+// (lib/credential-broker). The agent's environment carries only the virtual
+// token; requests go to /api/broker/<id>/… where the broker swaps the virtual
+// token for the real credential and forwards to `upstreamBaseUrl`. The real
+// secret is stored encrypted (AES-256-GCM, CREDENTIAL_ENCRYPTION_KEY) and is
+// wiped when the key is revoked; `secretRef` ("host-claude-oauth") keys have
+// no stored secret — the credential is resolved live at proxy time so host
+// token refreshes are picked up mid-run. A key is only usable while its AiRun
+// is RUNNING (checked per request), not revoked, and not past expiresAt.
+model AgentBrokerKey {
+  id              String    @id @default(cuid())
+  tokenHash       String    @unique
+  aiRunId         String?
+  provider        String
+  upstreamBaseUrl String
+  // How the REAL credential is presented upstream: "authorization-bearer" or
+  // "x-api-key". Incoming virtual auth headers are stripped either way.
+  authMode        String
+  secret          String?
+  secretRef       String?
+  createdAt       DateTime  @default(now())
+  expiresAt       DateTime?
+  revokedAt       DateTime?
+  aiRun           AiRun?    @relation(fields: [aiRunId], references: [id], onDelete: Cascade)
+
+  @@index([aiRunId])
 }
 
 model DocumentMembership {
@@ -409,6 +442,7 @@ model AiRun {
   comments      Comment[]
   versions      DocumentVersion[]
   events        AiRunEvent[]
+  brokerKeys    AgentBrokerKey[]
 
   @@index([documentId, startedAt])
   @@index([documentId, status])

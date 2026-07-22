@@ -134,7 +134,8 @@ export async function runAskAiInBackground(input: {
       thread.documentId,
       // Doc agent-panel config -> triggering user's default -> app default.
       await resolveAgentConfigForUser(thread.document, createdById),
-      createdById
+      createdById,
+      { aiRunId }
     );
     if (usedFreeFallback) {
       await recordAiRunEvent({

@@ -259,9 +259,9 @@ export function SlackConnectConfig({
     setConfigBusy(true);
     setError(null);
     try {
-      // Thinking only applies to Anthropic models — persist what the locked
-      // selector actually shows, not a stale prior choice.
-      const effortToSave = provider === "anthropic" ? effort : "off";
+      // The free local model has no thinking control — persist what the
+      // locked selector actually shows, not a stale prior choice.
+      const effortToSave = effortLocked ? "off" : effort;
       const response = await fetch("/api/user/agent-defaults", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -371,7 +371,10 @@ export function SlackConnectConfig({
   const dirty =
     savedConfig === null || savedConfig.model !== normalizedModel || savedConfig.effort !== effort;
   const showLocalOption = Boolean(localModel);
-  const effortLocked = provider !== "anthropic";
+  // OpenRouter/LiteLLM models honor effort via a thinking-token budget (the
+  // compat endpoints translate it, e.g. GPT reasoning effort / Gemini thinking
+  // budget); only the free local llama.cpp model has no thinking control.
+  const effortLocked = provider === "local";
 
   return (
     <div className="slack-connect-card">

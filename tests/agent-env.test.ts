@@ -131,6 +131,18 @@ test("applyProviderEnv rewrites the env to OpenRouter's compat endpoint", () => 
   assert.equal(env.PATH, "/bin");
 });
 
+test("applyProviderEnv honors an OPENROUTER_BASE_URL override (credential broker)", () => {
+  const env = applyProviderEnv(
+    {
+      OPENROUTER_API_KEY: "rdocs-vk-virtual",
+      OPENROUTER_BASE_URL: "http://host.docker.internal:14141/api/broker/key123/"
+    },
+    "openrouter"
+  );
+  assert.equal(env.ANTHROPIC_BASE_URL, "http://host.docker.internal:14141/api/broker/key123");
+  assert.equal(env.ANTHROPIC_AUTH_TOKEN, "rdocs-vk-virtual");
+});
+
 test("applyProviderEnv throws a clear error when the OpenRouter key is missing", () => {
   for (const env of [{}, { OPENROUTER_API_KEY: "" }, { OPENROUTER_API_KEY: "   " }]) {
     assert.throws(() => applyProviderEnv(env as Record<string, string>, "openrouter"), /OPENROUTER_API_KEY/);

@@ -193,7 +193,7 @@ async function runAiEditInBackground(input: {
       agentEnv,
       agentConfig: effectiveAgentConfig,
       usedFreeFallback
-    } = await loadAgentEnvWithFreeFallback(documentId, agentConfig, createdById);
+    } = await loadAgentEnvWithFreeFallback(documentId, agentConfig, createdById, { aiRunId });
     if (usedFreeFallback) {
       await recordAiRunEvent({
         aiRunId,

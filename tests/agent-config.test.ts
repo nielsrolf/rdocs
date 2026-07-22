@@ -14,7 +14,8 @@ import {
   parseMaxTurns,
   resolveAgentSdkConfig,
   resolveRefusalFallbackModel,
-  REFUSAL_FALLBACK_MODEL
+  REFUSAL_FALLBACK_MODEL,
+  THIRD_PARTY_THINKING_BUDGETS
 } from "../lib/agent-config";
 
 test("parseMaxTurns defaults to an effectively-unbounded budget (never the old low cap)", () => {
@@ -88,15 +89,43 @@ test("an invalid or off effort disables extended thinking", () => {
   }
 });
 
-test("openrouter models resolve to the bare slug with thinking force-disabled", () => {
-  const resolved = resolveAgentSdkConfig({ model: "openrouter/openai/gpt-5.2", effort: "high" });
-  assert.equal(resolved.provider, "openrouter");
-  assert.equal(resolved.model, "openai/gpt-5.2");
-  // Anthropic-specific adaptive-thinking params must never reach the compat
-  // endpoint for non-Claude models, even when the document configured effort.
-  assert.deepEqual(resolved.thinking, { type: "disabled" });
-  assert.equal(resolved.effort, undefined);
-  assert.equal(resolved.label, "openrouter:openai/gpt-5.2");
+test("openrouter models honor effort as a fixed thinking-token budget", () => {
+  for (const effort of ["low", "medium", "high"] as const) {
+    const resolved = resolveAgentSdkConfig({ model: "openrouter/openai/gpt-5.2", effort });
+    assert.equal(resolved.provider, "openrouter");
+    assert.equal(resolved.model, "openai/gpt-5.2");
+    // Non-Claude models can't take Anthropic adaptive thinking, but both
+    // compat endpoints translate the classic budget_tokens form (GPT
+    // reasoning effort / Gemini thinking budget) — so effort maps to a
+    // fixed budget instead of being force-disabled.
+    assert.deepEqual(resolved.thinking, {
+      type: "enabled",
+      budgetTokens: THIRD_PARTY_THINKING_BUDGETS[effort]
+    });
+    // The SDK `effort` option is adaptive-thinking-specific — never set it
+    // for third-party providers.
+    assert.equal(resolved.effort, undefined);
+    assert.equal(resolved.label, `openrouter:openai/gpt-5.2+${effort}`);
+  }
+});
+
+test("openrouter models with effort off (or unset) keep thinking disabled", () => {
+  for (const effort of ["off", "", null, undefined, "bogus"]) {
+    const resolved = resolveAgentSdkConfig({
+      model: "openrouter/openai/gpt-5.2",
+      effort: effort as string
+    });
+    assert.deepEqual(resolved.thinking, { type: "disabled" });
+    assert.equal(resolved.effort, undefined);
+    assert.equal(resolved.label, "openrouter:openai/gpt-5.2");
+  }
+});
+
+test("third-party thinking budgets are distinct and within compat-endpoint clamps", () => {
+  const { low, medium, high } = THIRD_PARTY_THINKING_BUDGETS;
+  // OpenRouter clamps reasoning budgets to 1024..32000.
+  assert.ok(low >= 1024 && high <= 32000);
+  assert.ok(low < medium && medium < high, "tiers must be strictly increasing");
 });
 
 test("an openrouter env fallback routes through the openrouter provider too", () => {
@@ -184,13 +213,20 @@ test("resolveRefusalFallbackModel honors the env fallback model like resolveAgen
   assert.equal(resolveRefusalFallbackModel(null, "claude-sonnet-5"), null);
 });
 
-test("litellm models resolve to the bare name with thinking force-disabled", () => {
+test("litellm models honor effort as a fixed thinking-token budget", () => {
   const resolved = resolveAgentSdkConfig({ model: "litellm/anthropic/claude-opus-4-8", effort: "high" });
   assert.equal(resolved.provider, "litellm");
   assert.equal(resolved.model, "anthropic/claude-opus-4-8");
-  assert.deepEqual(resolved.thinking, { type: "disabled" });
+  assert.deepEqual(resolved.thinking, {
+    type: "enabled",
+    budgetTokens: THIRD_PARTY_THINKING_BUDGETS.high
+  });
   assert.equal(resolved.effort, undefined);
-  assert.equal(resolved.label, "litellm:anthropic/claude-opus-4-8");
+  assert.equal(resolved.label, "litellm:anthropic/claude-opus-4-8+high");
+
+  const off = resolveAgentSdkConfig({ model: "litellm/openai/gpt-5.6-luna", effort: "off" });
+  assert.deepEqual(off.thinking, { type: "disabled" });
+  assert.equal(off.label, "litellm:openai/gpt-5.6-luna");
 });
 
 test("isStorableAgentModel accepts well-formed litellm model names of any depth", () => {

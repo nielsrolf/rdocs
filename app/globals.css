@@ -2573,6 +2573,33 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   white-space: nowrap;
 }
 
+/* Row variant with the secret/config badge between key and value. */
+.env-var-row-classified {
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
+}
+
+.env-var-kind {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.env-var-kind-secret {
+  color: #b45309;
+  border-color: color-mix(in srgb, #b45309 40%, transparent);
+}
+
+.env-var-kind:hover {
+  border-color: var(--muted);
+}
+
 .env-var-delete {
   background: transparent;
   border: none;

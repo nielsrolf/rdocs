@@ -6,6 +6,7 @@ import { getCurrentUser } from "@/lib/auth";
 import {
   deleteDocumentEnv,
   listDocumentEnvMasked,
+  setDocumentEnvSecretFlag,
   upsertDocumentEnv
 } from "@/lib/document-env";
 import { canManageDocumentAutomation, resolveDocumentAccess } from "@/lib/permissions";
@@ -19,6 +20,15 @@ type RouteContext = {
 const upsertSchema = z.object({
   key: z.string().min(1).max(128),
   value: z.string().max(8192),
+  // Secret (masked + broker-eligible) vs plain config (shown in full).
+  // Omitted/null = auto-classify from the key name.
+  isSecret: z.boolean().optional().nullable(),
+  shareToken: z.string().optional().nullable()
+});
+
+const flagSchema = z.object({
+  key: z.string().min(1).max(128),
+  isSecret: z.boolean().nullable(),
   shareToken: z.string().optional().nullable()
 });
 
@@ -71,7 +81,28 @@ export async function POST(request: Request, { params }: RouteContext) {
     );
   }
 
-  await upsertDocumentEnv(id, key, parsed.data.value);
+  await upsertDocumentEnv(id, key, parsed.data.value, parsed.data.isSecret ?? undefined);
+  const vars = await listDocumentEnvMasked(id);
+  return NextResponse.json({ ok: true, vars });
+}
+
+// Reclassify an existing var (secret ↔ plain config) without resubmitting the
+// value. isSecret: true/false = explicit choice, null = back to auto-detect.
+export async function PATCH(request: Request, { params }: RouteContext) {
+  const { id } = await params;
+  const body = await request.json().catch(() => null);
+  const parsed = flagSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid request." }, { status: 400 });
+  }
+
+  const { error } = await requireEditAccess(id, parsed.data.shareToken ?? null);
+  if (error) return error;
+
+  const changed = await setDocumentEnvSecretFlag(id, parsed.data.key.trim(), parsed.data.isSecret);
+  if (!changed) {
+    return NextResponse.json({ error: "No such variable." }, { status: 404 });
+  }
   const vars = await listDocumentEnvMasked(id);
   return NextResponse.json({ ok: true, vars });
 }

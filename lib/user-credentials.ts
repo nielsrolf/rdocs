@@ -7,6 +7,10 @@ import {
   type CredentialProvider
 } from "@/lib/credential-detect";
 import { hasAnthropicCredential } from "@/lib/agent-runner/agent-credential";
+import {
+  brokerizeAgentEnvForRun,
+  credentialBrokerEnabled
+} from "@/lib/credential-broker";
 import { db } from "@/lib/db";
 import { loadDocumentEnv } from "@/lib/document-env";
 import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
@@ -529,6 +533,7 @@ const READ_ONLY_AGENT_ENV_KEYS = new Set([
   "ANTHROPIC_BASE_URL",
   "CLAUDE_CODE_OAUTH_TOKEN",
   "OPENROUTER_API_KEY",
+  "OPENROUTER_BASE_URL",
   "LITELLM_API_KEY",
   "LITELLM_BASE_URL",
   "LOCAL_MODEL_BASE_URL",
@@ -553,20 +558,34 @@ export function restrictAgentEnvForReadOnly(agentEnv: DocumentEnv): DocumentEnv 
 export async function loadAgentEnvWithFreeFallback(
   documentId: string,
   agentConfig: { model: string | null; effort: string | null },
-  runnerUserId: string | null = null
+  runnerUserId: string | null = null,
+  opts: { aiRunId?: string } = {}
 ): Promise<AgentRunEnvResolution> {
-  try {
-    const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model, runnerUserId);
-    return { agentEnv, agentConfig, usedFreeFallback: false };
-  } catch (error) {
-    const fallbackModel = freeLocalAgentModel();
-    const isCredentialMiss =
-      error instanceof Error && error.message === CONNECT_CREDENTIAL_MESSAGE;
-    if (!fallbackModel || !isCredentialMiss) {
-      throw error;
+  const resolved = await (async (): Promise<AgentRunEnvResolution> => {
+    try {
+      const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model, runnerUserId);
+      return { agentEnv, agentConfig, usedFreeFallback: false };
+    } catch (error) {
+      const fallbackModel = freeLocalAgentModel();
+      const isCredentialMiss =
+        error instanceof Error && error.message === CONNECT_CREDENTIAL_MESSAGE;
+      if (!fallbackModel || !isCredentialMiss) {
+        throw error;
+      }
+      const fallbackConfig = { model: fallbackModel, effort: agentConfig.effort };
+      const agentEnv = await loadAgentEnvForDocument(documentId, fallbackModel, runnerUserId);
+      return { agentEnv, agentConfig: fallbackConfig, usedFreeFallback: true };
     }
-    const fallbackConfig = { model: fallbackModel, effort: agentConfig.effort };
-    const agentEnv = await loadAgentEnvForDocument(documentId, fallbackModel, runnerUserId);
-    return { agentEnv, agentConfig: fallbackConfig, usedFreeFallback: true };
+  })();
+  // Credential broker (opt-in via AGENT_CREDENTIAL_BROKER): swap real API keys
+  // for per-run virtual keys pointing at /api/broker. No-op when disabled, when
+  // no run id is available to bind the keys to, or when nothing is brokerable.
+  if (opts.aiRunId && credentialBrokerEnabled()) {
+    const { agentEnv } = await brokerizeAgentEnvForRun(resolved.agentEnv, {
+      aiRunId: opts.aiRunId,
+      agentModel: resolved.agentConfig.model
+    });
+    return { ...resolved, agentEnv };
   }
+  return resolved;
 }

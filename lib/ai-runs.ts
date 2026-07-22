@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 
+import { revokeBrokerKeysForRun } from "@/lib/credential-broker";
 import { db } from "@/lib/db";
 
 // A RUNNING run is considered abandoned (server restart/crash) only after this
@@ -99,6 +100,9 @@ export async function failAbandonedAiRuns(
     where: { id: { in: abandonedIds }, status: { in: [...REAPABLE_STATUSES] } },
     data: { status: "FAILED", error, finishedAt }
   });
+  // Kill the reaped runs' broker keys too (the per-request run-status check
+  // already rejects them; this wipes the stored secret material as well).
+  await Promise.all(abandonedIds.map((id) => revokeBrokerKeysForRun(id).catch(() => 0)));
   return { failedIds: new Set(abandonedIds), error, finishedAt };
 }
 
@@ -141,7 +145,7 @@ export async function markAiRunSucceeded(
   aiRunId: string,
   data: Omit<Prisma.AiRunUpdateInput, "status" | "finishedAt" | "error">
 ) {
-  return db.aiRun.update({
+  const updated = await db.aiRun.update({
     where: { id: aiRunId },
     data: {
       ...data,
@@ -150,6 +154,10 @@ export async function markAiRunSucceeded(
       finishedAt: new Date()
     }
   });
+  // Credential broker: a finished run's virtual keys are dead (the per-request
+  // run-status check enforces it); revoking also wipes the stored secrets.
+  await revokeBrokerKeysForRun(aiRunId).catch(() => 0);
+  return updated;
 }
 
 const CONVERSATION_HISTORY_ROLES = new Set(["user", "agent"]);
