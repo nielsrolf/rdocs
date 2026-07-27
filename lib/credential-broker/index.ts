@@ -139,7 +139,13 @@ export function planBrokerRewrites(
         extraEnv: (url) => ({ ANTHROPIC_BASE_URL: url })
       });
     }
-  } else if (provider === "openrouter" && agentEnv.OPENROUTER_API_KEY?.trim()) {
+  }
+
+  // Tool credentials: OPENROUTER_API_KEY / LITELLM_API_KEY are injected into
+  // every run env (not just runs on that provider's models), so broker them
+  // whenever present — otherwise a real key would leak into e.g. a
+  // Claude-model run while the broker is supposed to hold all secrets.
+  if (agentEnv.OPENROUTER_API_KEY?.trim()) {
     plans.push({
       envKey: "OPENROUTER_API_KEY",
       provider: "openrouter",
@@ -149,7 +155,9 @@ export function planBrokerRewrites(
       // Requires applyProviderEnv to honor OPENROUTER_BASE_URL (agent-core).
       extraEnv: (url) => ({ OPENROUTER_BASE_URL: url })
     });
-  } else if (provider === "litellm" && agentEnv.LITELLM_API_KEY?.trim()) {
+  }
+
+  if (agentEnv.LITELLM_API_KEY?.trim()) {
     const upstream = (agentEnv.LITELLM_BASE_URL ?? hostEnv.LITELLM_BASE_URL)?.trim();
     if (upstream) {
       plans.push({

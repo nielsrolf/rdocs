@@ -359,3 +359,17 @@ test("config vars list in full, secrets masked, and the flag round-trips", async
 
   assert.equal(await setDocumentEnvSecretFlag(documentId, "NO_SUCH_VAR", true), false);
 });
+
+test("brokers openrouter/litellm tool keys even when the model is Anthropic", () => {
+  const plans = planBrokerRewrites(
+    {
+      ANTHROPIC_API_KEY: "sk-ant-real",
+      OPENROUTER_API_KEY: "sk-or-real",
+      LITELLM_API_KEY: "llk"
+    },
+    "claude-sonnet-5",
+    { hostEnv: { LITELLM_BASE_URL: "http://host.docker.internal:9274" } }
+  );
+  const providers = plans.map((p) => p.provider).sort();
+  assert.deepEqual(providers, ["anthropic", "litellm", "openrouter"]);
+});

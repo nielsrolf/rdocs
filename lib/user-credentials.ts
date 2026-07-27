@@ -210,6 +210,45 @@ export const PROVIDER_ENV_KEY = {
   litellm: "LITELLM_API_KEY"
 } as const;
 
+// Providers whose keys are useful to the agent as TOOL credentials (calling
+// the API from Bash/scripts), independent of which model runs the agent.
+// Anthropic is deliberately absent: ANTHROPIC_* is the SDK's model-routing
+// channel and applyProviderEnv clears/overwrites it for third-party-model
+// runs, so it stays model-gated. GitHub has its own resolution path.
+const TOOL_PROVIDER_ENV_KEY = {
+  openai: "OPENAI_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
+  litellm: "LITELLM_API_KEY"
+} as const;
+
+export type ToolCredentialProvider = keyof typeof TOOL_PROVIDER_ENV_KEY;
+
+export const TOOL_CREDENTIAL_PROVIDERS = Object.keys(
+  TOOL_PROVIDER_ENV_KEY
+) as ToolCredentialProvider[];
+
+/**
+ * Layer the user's connected provider keys into the agent env as TOOL
+ * credentials — every provider they connected, regardless of the run's model —
+ * so agents can call e.g. OpenAI or the LiteLLM proxy directly from scripts.
+ * A non-blank document-env value always wins (team/shared override).
+ */
+export function applyToolCredentialEnv(
+  agentEnv: DocumentEnv,
+  credentials: Partial<Record<ToolCredentialProvider, string>>
+): DocumentEnv {
+  let next: DocumentEnv | null = null;
+  for (const provider of TOOL_CREDENTIAL_PROVIDERS) {
+    const value = credentials[provider]?.trim();
+    if (!value) continue;
+    const keyVar = TOOL_PROVIDER_ENV_KEY[provider];
+    if (agentEnv[keyVar]?.trim()) continue;
+    next = next ?? { ...agentEnv };
+    next[keyVar] = value;
+  }
+  return next ?? agentEnv;
+}
+
 /**
  * Layer the document owner's credential onto an already-loaded document env.
  * `ownerCredential` is the owner's credential FOR THE MODEL'S PROVIDER
@@ -477,7 +516,23 @@ async function resolveModelCredentialEnv(
     !runnerCredential && provider !== "local" && doc?.ownerId && doc.ownerId !== runner?.id
       ? await getUserCredential(doc.ownerId, provider)
       : null;
-  const env = applyOwnerCredentialEnv(docEnv, runnerCredential ?? ownerCredential, agentModel);
+  const modelEnv = applyOwnerCredentialEnv(docEnv, runnerCredential ?? ownerCredential, agentModel);
+  // Tool credentials: EVERY provider key the triggering user (else the owner)
+  // connected goes into the run env — not just the model's provider — so the
+  // agent can call OpenAI / OpenRouter / the LiteLLM proxy directly from
+  // scripts. Doc-env values still win inside applyToolCredentialEnv.
+  const toolCredentials: Partial<Record<ToolCredentialProvider, string>> = {};
+  await Promise.all(
+    TOOL_CREDENTIAL_PROVIDERS.map(async (toolProvider) => {
+      const credential =
+        (runner ? await getUserCredential(runner.id, toolProvider) : null) ??
+        (doc?.ownerId && doc.ownerId !== runner?.id
+          ? await getUserCredential(doc.ownerId, toolProvider)
+          : null);
+      if (credential) toolCredentials[toolProvider] = credential.value;
+    })
+  );
+  const env = applyToolCredentialEnv(modelEnv, toolCredentials);
   const requirementError =
     credentialRequirementError(env, agentModel, [runner?.email, doc?.owner?.email]) ??
     providerKeyRequirementError(env, agentModel);

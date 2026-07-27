@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 import {
   applyOwnerCredentialEnv,
+  applyToolCredentialEnv,
   credentialRequirementError,
   decryptSecret,
   detectCredentialKind,
@@ -327,4 +328,32 @@ test("credentialRequirementError: litellm model bypasses the requirement and the
     }),
     null
   );
+});
+
+// --- tool-credential injection (all providers, regardless of model) --------
+
+test("applyToolCredentialEnv injects every provider key the user has connected", () => {
+  const env = applyToolCredentialEnv(
+    { FOO: "bar" },
+    { openai: "sk-openai-1", openrouter: "sk-or-1", litellm: "llk-1" }
+  );
+  assert.equal(env.OPENAI_API_KEY, "sk-openai-1");
+  assert.equal(env.OPENROUTER_API_KEY, "sk-or-1");
+  assert.equal(env.LITELLM_API_KEY, "llk-1");
+  assert.equal(env.FOO, "bar");
+});
+
+test("applyToolCredentialEnv: document env keys win over user credentials", () => {
+  const env = applyToolCredentialEnv(
+    { LITELLM_API_KEY: "doc-key", OPENAI_API_KEY: "  " },
+    { litellm: "user-key", openai: "sk-openai-user" }
+  );
+  assert.equal(env.LITELLM_API_KEY, "doc-key");
+  // Blank doc value does not block the user credential.
+  assert.equal(env.OPENAI_API_KEY, "sk-openai-user");
+});
+
+test("applyToolCredentialEnv: missing credentials leave the env untouched", () => {
+  const base = { FOO: "bar" };
+  assert.deepEqual(applyToolCredentialEnv(base, {}), base);
 });
