@@ -166,7 +166,9 @@ test("schedulerTick claims due tasks atomically and fires runs as the creator", 
   assert.equal(runs[0].createdById, alice.id, "fires with the creator's identity");
   assert.match(runs[0].message, /Scheduled task firing/);
   assert.match(runs[0].message, /check the eval dashboard/);
-  assert.ok(posted.some((p) => p.text.startsWith("⏰ Scheduled task:") && p.threadTs === "1000.000"));
+  // Thread-context firings must NOT post a kickoff message: the run replies
+  // into the existing thread anyway, and the raw instruction is agent-facing.
+  assert.ok(!posted.some((p) => p.text.startsWith("⏰ Scheduled task:")), "no kickoff in thread context");
 
   const bumped = await db.scheduledTask.findUnique({ where: { id: task.id } });
   assert.ok(bumped!.nextRunAt.getTime() > Date.now(), "recurring task advances nextRunAt");
@@ -197,13 +199,16 @@ test("one-shot tasks disable after firing; unlinked creators disable the task", 
     }
   });
   const runs: ConversationRunInput[] = [];
-  const { deps } = makeDeps(runs);
+  const { deps, posted } = makeDeps(runs);
   const fired = await schedulerTick(new Date(), deps);
   assert.equal(fired, 1);
   const after = await db.scheduledTask.findUnique({ where: { id: oneShot.id } });
   assert.ok(after!.disabledAt, "one-shot task disables after firing");
   // Channel context: run replies into the fresh kickoff thread, not an old one.
   assert.equal(runs.length, 1);
+  // Channel context DOES post a kickoff — its ts is the thread root each
+  // firing replies into.
+  assert.ok(posted.some((p) => p.text.startsWith("⏰ Scheduled task:")), "kickoff required in channel context");
 
   // A task whose creator has no Slack link in that team disables instead of running.
   const bob = await db.user.create({
@@ -227,4 +232,40 @@ test("one-shot tasks disable after firing; unlinked creators disable the task", 
   assert.equal(result, null);
   const orphanAfter = await db.scheduledTask.findUnique({ where: { id: orphan.id } });
   assert.ok(orphanAfter!.disabledAt);
+});
+
+test("schedule_task / cancel in a DM stays agent-facing: no channel announcements", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeLinkedUser(teamId, "UALICE", "dm-alice");
+  const dmChannel = `D-${teamId}`;
+  const doc = await db.document.create({
+    data: { ownerId: alice.id, title: "dm", kind: "slack_channel", content: "{}", slackTeamId: teamId, slackChannelId: dmChannel }
+  });
+  const run = await db.aiRun.create({
+    data: {
+      documentId: doc.id,
+      triggerType: "SLACK_MENTION",
+      triggerId: `${dmChannel}:2000.000`,
+      createdById: alice.id,
+      instruction: "x"
+    }
+  });
+  const { deps, posted } = makeDeps([]);
+  const claims = { slackTeamId: teamId, slackUserId: "UALICE", aiRunId: run.id };
+
+  const created = await handleSlackAgentToolCall(
+    { tool: "schedule_task", args: { instruction: "remind me", at: new Date(Date.now() + 3600_000).toISOString() } },
+    { claims, slack: deps.slack, botUserId: BOT }
+  );
+  assert.ok(created.ok, created.text);
+  assert.equal(posted.length, 0, "DM scheduling must not post an announcement — the agent's own reply covers it");
+
+  const task = await db.scheduledTask.findFirst({ where: { documentId: doc.id, disabledAt: null } });
+  assert.ok(task);
+  const cancelled = await handleSlackAgentToolCall(
+    { tool: "cancel_scheduled_task", args: { task_id: task!.id } },
+    { claims, slack: deps.slack, botUserId: BOT }
+  );
+  assert.ok(cancelled.ok, cancelled.text);
+  assert.equal(posted.length, 0, "DM cancel must not post an announcement");
 });

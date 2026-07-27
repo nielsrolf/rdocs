@@ -92,16 +92,19 @@ export async function fireScheduledTask(task: ScheduledTaskRow, deps?: SlackEven
     return null;
   }
 
-  // Kickoff message: in-thread for thread context; top-level (starting a fresh
-  // thread per firing) for channel context. Its ts is the reaction anchor.
-  const kickoffText = `⏰ Scheduled task: ${task.instruction.slice(0, 200)}`;
-  const kickoff = await resolvedDeps.slack.postMessage({
-    channel: task.slackChannelId,
-    text: kickoffText,
-    ...(task.contextType === "slack_thread" && task.slackThreadTs ? { threadTs: task.slackThreadTs } : {})
-  });
-  const threadRoot =
-    task.contextType === "slack_thread" && task.slackThreadTs ? task.slackThreadTs : kickoff.ts ?? undefined;
+  // Kickoff message: ONLY for channel context, where each firing starts a
+  // fresh top-level thread — the kickoff's ts is that thread's root (and the
+  // reaction anchor). Thread-context firings post no kickoff: the run replies
+  // into the existing thread anyway, and the raw instruction is agent-facing
+  // noise there (users already saw the schedule confirmation).
+  const isThreadContext = task.contextType === "slack_thread" && !!task.slackThreadTs;
+  const kickoff = isThreadContext
+    ? { ts: undefined as string | undefined }
+    : await resolvedDeps.slack.postMessage({
+        channel: task.slackChannelId,
+        text: `⏰ Scheduled task: ${task.instruction.slice(0, 200)}`
+      });
+  const threadRoot = isThreadContext ? task.slackThreadTs ?? undefined : kickoff.ts ?? undefined;
   const triggerId = threadRoot ? `${task.slackChannelId}:${threadRoot}` : `${task.slackChannelId}:scheduled`;
 
   const previousRun = await db.aiRun.findFirst({

@@ -238,18 +238,23 @@ export async function handleSlackAgentToolCall(
           nextRunAt
         }
       });
-      // Visible consent: the channel learns a recurring task now exists, who
-      // it runs as, and how to stop it — regardless of what the agent says.
-      await slack
-        .postMessage({
-          channel: runChannel,
-          ...(context === "slack_thread" && runThreadTs ? { threadTs: runThreadTs } : {}),
-          text:
-            `⏰ Scheduled task created (id ${task.id}): "${instruction.slice(0, 150)}"\n` +
-            `${cron ? `Recurs: \`${cron}\`${timezone ? ` (${timezone})` : ""}` : `Runs once`} — next firing ${nextRunAt.toISOString()}. ` +
-            `It runs with the scheduler's credentials. Anyone in this channel can cancel it (ask the bot to cancel scheduled task ${task.id}).`
-        })
-        .catch(() => null);
+      // Visible consent — but only where it informs someone other than the
+      // scheduler: in shared channels, members learn a task now exists, who it
+      // runs as, and how to stop it, regardless of what the agent says. In a
+      // 1:1 DM the only human IS the scheduler, so the announcement is pure
+      // noise (the agent's own reply confirms the schedule); skip it there.
+      if (!runChannel.startsWith("D")) {
+        await slack
+          .postMessage({
+            channel: runChannel,
+            ...(context === "slack_thread" && runThreadTs ? { threadTs: runThreadTs } : {}),
+            text:
+              `⏰ Scheduled task created (id ${task.id}): "${instruction.slice(0, 150)}"\n` +
+              `${cron ? `Recurs: \`${cron}\`${timezone ? ` (${timezone})` : ""}` : `Runs once`} — next firing ${nextRunAt.toISOString()}. ` +
+              `It runs with the scheduler's credentials. Anyone in this channel can cancel it (ask the bot to cancel scheduled task ${task.id}).`
+          })
+          .catch(() => null);
+      }
       return {
         ok: true,
         text: `Scheduled (id ${task.id}). Next firing: ${nextRunAt.toISOString()}${cron ? `, recurring ${cron}` : ", one-shot"}.`
@@ -287,13 +292,17 @@ export async function handleSlackAgentToolCall(
     const denied = await assertReadable(slack, botUserId, claims, task.slackChannelId);
     if (denied) return { ok: false, text: denied };
     await db.scheduledTask.update({ where: { id: taskId }, data: { disabledAt: new Date() } });
-    await slack
-      .postMessage({
-        channel: task.slackChannelId,
-        ...(task.slackThreadTs ? { threadTs: task.slackThreadTs } : {}),
-        text: `⏰ Scheduled task ${task.id} cancelled.`
-      })
-      .catch(() => null);
+    // Same DM rule as creation: only announce cancellations where other
+    // channel members could care; in a 1:1 DM the agent's reply is enough.
+    if (!task.slackChannelId.startsWith("D")) {
+      await slack
+        .postMessage({
+          channel: task.slackChannelId,
+          ...(task.slackThreadTs ? { threadTs: task.slackThreadTs } : {}),
+          text: `⏰ Scheduled task ${task.id} cancelled.`
+        })
+        .catch(() => null);
+    }
     return { ok: true, text: `Cancelled scheduled task ${task.id}.` };
   }
 

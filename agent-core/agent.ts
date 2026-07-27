@@ -1403,7 +1403,15 @@ async function runClaudeResearchAgentOnce(
         "ExitWorktree",
         "EnterPlanMode",
         "ExitPlanMode",
-        "ToolSearch"
+        "ToolSearch",
+        // Harness-builtin schedulers are SESSION-ONLY: our runs exit after
+        // submit_response, so a CronCreate/ScheduleWakeup "reminder" silently
+        // dies with the process and never fires (this bit a real DM user).
+        // Persistent scheduling must go through the schedule_task tool.
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "ScheduleWakeup"
       ],
       mcpServers: {
         gdocs: mcpServer,
