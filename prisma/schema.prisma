@@ -422,6 +422,11 @@ model AiRun {
   // executes. Distinguishes "quiet but alive" (long tool waits emit no
   // AiRunEvents) from "owning server died" for the stale-run reaper.
   heartbeatAt   DateTime?
+  // The Claude Agent SDK session id of this run's transcript (recorded at SDK
+  // init, so even failed/cancelled runs are resumable). Follow-up runs in the
+  // same conversation resume this session — the model then sees all its prior
+  // messages AND tool calls, not a replayed plain-text transcript.
+  sdkSessionId  String?
   selectionId        String?
   // The document text that was selected when a SELECTION_EDIT run started
   // (truncated). The live marker can vanish long before anyone reads the run

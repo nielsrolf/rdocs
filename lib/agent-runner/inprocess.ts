@@ -38,6 +38,11 @@ export class InProcessRunner implements AgentRunner {
       onProgress: options?.onProgress,
       onComment: options?.onComment,
       onSlackMessage: options?.onSlackMessage,
+      // Session transcripts go to the host's default CLAUDE_CONFIG_DIR here
+      // (redirecting it would break host credential lookup); resume finds them
+      // there via the SDK's cross-project search. options.sessionDirHostPath
+      // is container-only and deliberately ignored.
+      onSessionId: options?.onSessionId,
       agentConfig: options?.agentConfig,
       agentEnv: options?.agentEnv,
       validateSubmission,

@@ -121,6 +121,9 @@ async function main() {
       // Interim Slack updates cross the boundary the same way; the host posts
       // them to the thread.
       onSlackMessage: (text) => emit({ type: "slack_message", text }),
+      // The SDK session id crosses as its own frame so the host can persist it
+      // (AiRun.sdkSessionId) for follow-up session resume.
+      onSessionId: (sessionId) => emit({ type: "session", sessionId }),
       agentConfig: job.agentConfig as never,
       agentEnv: job.agentEnv,
       validateSubmission,

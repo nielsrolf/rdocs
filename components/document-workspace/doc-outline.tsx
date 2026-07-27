@@ -2,7 +2,7 @@ import type { Editor } from "@tiptap/react";
 import { useEffect, useRef, useState } from "react";
 
 import { createHeadingHashNav } from "./heading-hash-nav";
-import { getActiveTabId, type TabSummary } from "./tabs";
+import { getActiveTabId, tabHashSlug, type TabSummary } from "./tabs";
 
 type OutlineEntry = {
   // Absolute position of the heading in the doc.
@@ -226,22 +226,45 @@ export function DocOutline({
 
   const [copiedSlug, setCopiedSlug] = useState<string | null>(null);
 
-  async function copyHeadingLink(entry: OutlineEntry) {
+  async function copyLinkForSlug(slug: string, promptLabel: string) {
     if (typeof window === "undefined") return;
-    const url = `${window.location.origin}${window.location.pathname}${window.location.search}#${entry.slug}`;
+    const url = `${window.location.origin}${window.location.pathname}${window.location.search}#${slug}`;
     try {
       await navigator.clipboard.writeText(url);
     } catch {
-      window.prompt("Copy heading link:", url);
+      window.prompt(promptLabel, url);
     }
-    setCopiedSlug(entry.slug);
+    setCopiedSlug(slug);
     window.setTimeout(() => {
-      setCopiedSlug((current) => (current === entry.slug ? null : current));
+      setCopiedSlug((current) => (current === slug ? null : current));
     }, 1500);
+  }
+
+  async function copyHeadingLink(entry: OutlineEntry) {
+    await copyLinkForSlug(entry.slug, "Copy heading link:");
+  }
+
+  async function copyTabLink(tab: TabSummary) {
+    await copyLinkForSlug(tabHashSlug(tab.id), "Copy tab link:");
   }
 
   const entriesRef = useRef<OutlineEntry[]>([]);
   entriesRef.current = entries;
+  const tabsRef = useRef<TabSummary[]>([]);
+  tabsRef.current = tabs;
+
+  // Tabs are navigable via "#tab=<id>" hashes; expose them to the hash nav as
+  // pseudo-entries pointing at the top of the tab's content.
+  function hashNavEntries(): OutlineEntry[] {
+    const tabEntries: OutlineEntry[] = tabsRef.current.map((tab) => ({
+      pos: tab.contentFrom,
+      level: 1,
+      text: tab.title,
+      slug: tabHashSlug(tab.id),
+      tabId: tab.id
+    }));
+    return [...tabEntries, ...entriesRef.current];
+  }
   const attemptHashScrollRef = useRef<(entry: OutlineEntry) => boolean>(() => false);
   attemptHashScrollRef.current = (entry: OutlineEntry) => {
     if (!editor) return false;
@@ -269,7 +292,7 @@ export function DocOutline({
     if (!editor || typeof window === "undefined") return;
     const nav = createHeadingHashNav({
       getHash: () => window.location.hash.replace(/^#/, ""),
-      getEntries: () => entriesRef.current,
+      getEntries: () => hashNavEntries(),
       attemptScroll: (entry) => attemptHashScrollRef.current(entry as OutlineEntry)
     });
     hashNavRef.current = nav;
@@ -285,7 +308,7 @@ export function DocOutline({
 
   useEffect(() => {
     hashNavRef.current?.onEntriesChanged();
-  }, [entries]);
+  }, [entries, tabs]);
 
   if (collapsed) {
     return (
@@ -364,7 +387,9 @@ export function DocOutline({
                     totalTabs={tabs.length}
                     isActive={tab.id === activeTabId}
                     canEdit={canEditTabs}
+                    copied={copiedSlug === tabHashSlug(tab.id)}
                     onSelect={() => scrollToTab(tab)}
+                    onCopyLink={() => void copyTabLink(tab)}
                     onRename={onRenameTab}
                     onDelete={onDeleteTab}
                     onReorder={onReorderTab}
@@ -418,7 +443,9 @@ function TabRow({
   totalTabs,
   isActive,
   canEdit,
+  copied,
   onSelect,
+  onCopyLink,
   onRename,
   onDelete,
   onReorder
@@ -428,7 +455,9 @@ function TabRow({
   totalTabs: number;
   isActive: boolean;
   canEdit: boolean;
+  copied: boolean;
   onSelect: () => void;
+  onCopyLink: () => void;
   onRename?: (tabId: string, title: string) => void;
   onDelete?: (tabId: string) => void;
   onReorder?: (tabId: string, direction: TabReorderDirection) => void;
@@ -481,6 +510,20 @@ function TabRow({
           <span className="doc-tab-title">{tab.title}</span>
         </button>
       )}
+      {!editing ? (
+        <button
+          aria-label={`Copy link to tab ${tab.title}`}
+          className="doc-outline-copy"
+          onClick={(event) => {
+            event.stopPropagation();
+            onCopyLink();
+          }}
+          title={copied ? "Copied!" : "Copy link to tab"}
+          type="button"
+        >
+          {copied ? <CheckIcon /> : <LinkIcon />}
+        </button>
+      ) : null}
       {canEdit && !editing ? (
         <div className="doc-tab-actions">
           <button

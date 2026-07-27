@@ -78,3 +78,16 @@ test("getDocumentMarkdown: empty tab still emits wrapper so LLM sees the tab", (
   const markdown = getDocumentMarkdown(doc);
   assert.match(markdown, /<tab title="Empty">\s*<\/tab>/);
 });
+
+// --- tab hash links (#tab=<id>) ---
+
+test("tabHashSlug / tabIdFromHashSlug round-trip and reject heading slugs", async () => {
+  const { tabHashSlug, tabIdFromHashSlug } = await import("../components/document-workspace/tabs");
+  const slug = tabHashSlug("abc-123");
+  assert.equal(slug, "tab=abc-123");
+  assert.equal(tabIdFromHashSlug(slug), "abc-123");
+  // Heading slugs (slugify strips '=') can never collide with the tab namespace.
+  assert.equal(tabIdFromHashSlug("results"), null);
+  assert.equal(tabIdFromHashSlug("tab-2"), null);
+  assert.equal(tabIdFromHashSlug("tab="), null);
+});

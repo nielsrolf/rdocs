@@ -364,6 +364,81 @@ test("thread context from other participants is prepended to the instruction", a
   assert.doesNotMatch(runs[0].message, /1001\.000.*can you investigate.*\n/, "triggering message not duplicated in context");
 });
 
+test("a follow-up that will resume the SDK session skips the thread transcript prepend", async () => {
+  // With real session resume the model already has the whole conversation
+  // (messages + tool calls) in context — replaying the Slack thread transcript
+  // would only waste the instruction budget it used to overflow.
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-resume-alice");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const { client } = makeFakeSlack([
+    { ts: "1000.000", user: "UALICE", text: "original ask" },
+    { ts: "1000.500", botId: "B1", text: "a long earlier bot reply" },
+    { ts: "1001.000", user: "UALICE", text: `<@${BOT_USER_ID}> follow up please` }
+  ]);
+  const runs: ConversationRunInput[] = [];
+  const first = await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
+  await db.aiRun.update({
+    where: { id: (first as { aiRunId: string }).aiRunId },
+    data: { status: "SUCCEEDED", sdkSessionId: "sdk-sess-1" }
+  });
+
+  const second = await handleSlackAppMention(
+    mention({ teamId, ts: "1001.000", threadTs: "1000.000", text: `<@${BOT_USER_ID}> follow up please` }),
+    depsWith(client, runs)
+  );
+  assert.equal(second.handled, true);
+  assert.equal(runs[1].message, "follow up please");
+  assert.doesNotMatch(runs[1].message, /Recent messages in this Slack thread/);
+
+  // A previous run WITHOUT a recorded session id keeps the transcript prepend.
+  await db.aiRun.update({
+    where: { id: (second as { aiRunId: string }).aiRunId },
+    data: { status: "SUCCEEDED", sdkSessionId: null }
+  });
+  const third = await handleSlackAppMention(
+    mention({ teamId, ts: "1002.000", threadTs: "1000.000", text: `<@${BOT_USER_ID}> one more` }),
+    depsWith(client, runs)
+  );
+  assert.equal(third.handled, true);
+  assert.match(runs[2].message, /Recent messages in this Slack thread/);
+  assert.match(runs[2].message, /one more$/);
+});
+
+test("a long thread never truncates away the new user message", async () => {
+  // Regression: the thread context is PREPENDED to the instruction and the
+  // whole string used to be tail-sliced to MAX_INSTRUCTION_LENGTH — a long
+  // earlier bot reply pushed the actual new message past the limit, so the
+  // agent received only replayed context and no question at all.
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-alice-long");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const hugeBotReply = "lorem ipsum analysis ".repeat(600); // ~12.6k chars > 8k cap
+  const { client } = makeFakeSlack([
+    { ts: "1000.000", user: "UALICE", text: "big brainstorming prompt" },
+    { ts: "1000.500", botId: "B1", text: hugeBotReply },
+    { ts: "1001.000", user: "UALICE", text: `<@${BOT_USER_ID}> please turn it into a worksheet` }
+  ]);
+  const runs: ConversationRunInput[] = [];
+  const result = await handleSlackAppMention(
+    mention({
+      teamId,
+      ts: "1001.000",
+      threadTs: "1000.000",
+      text: `<@${BOT_USER_ID}> please turn it into a worksheet`
+    }),
+    depsWith(client, runs)
+  );
+  assert.equal(result.handled, true);
+  assert.ok(runs[0].message.length <= 8000, `instruction too long: ${runs[0].message.length}`);
+  assert.match(runs[0].message, /please turn it into a worksheet$/, "new user message must survive truncation");
+  assert.match(runs[0].message, /Recent messages in this Slack thread/, "trimmed context should still be present");
+});
+
 test("run input carries slack context and interim messages post as mrkdwn", async () => {
   const teamId = `T-${crypto.randomUUID()}`;
   const alice = await makeUser("slack-alice7");

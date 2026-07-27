@@ -78,6 +78,16 @@ export type ClaudeResearchAgentInput = {
     message: string;
   }>;
   /**
+   * Claude Agent SDK session id to resume. When set, the SDK replays the
+   * session's full transcript (messages AND tool calls) from
+   * `$CLAUDE_CONFIG_DIR/projects/**` into the new run, so follow-up turns get
+   * real continuity instead of the plain-text conversationHistory replay
+   * (callers pass one or the other, never both). Shell/bash state is NOT part
+   * of the transcript — the workspace is recreated from the branch as usual.
+   * Serializable — travels with the job into the container runner.
+   */
+  resumeSessionId?: string | null;
+  /**
    * Present when the conversation happens in Slack (the claudex bot). Enables
    * the post_slack_message tool and adds channel context to the prompt.
    * Serializable — travels with the job into the container runner.
@@ -172,6 +182,13 @@ export type ClaudeAgentRunOptions = {
    * in-process runs, where there is no container to kill.
    */
   signal?: AbortSignal;
+  /**
+   * Called once with the SDK session id of this run (from the system/init
+   * message). The host persists it (AiRun.sdkSessionId) so a follow-up turn in
+   * the same conversation can resume the session. Runtime-only; the container
+   * runner bridges it as a "session" frame.
+   */
+  onSessionId?: (sessionId: string) => void | Promise<void>;
   validateSubmission?: ClaudeAgentSubmissionValidator;
   /** Per-document model + thinking-effort selection (see lib/agent-config). */
   agentConfig?: DocumentAgentConfig;
@@ -579,6 +596,13 @@ function buildUserPromptRaw(input: ClaudeResearchAgentInput) {
   if (input.mode === "conversation") {
     const historyText = formatConversationHistory(input.conversationHistory);
     const historyBlock = historyText ? `Earlier in this conversation:\n${historyText}\n\n` : "";
+    // Real session resume: the SDK already replayed the prior transcript
+    // (messages + tool calls), so no history block is needed — but the
+    // execution environment did NOT survive: the workspace was recreated from
+    // the branch and the document may have moved on.
+    const resumeBlock = input.resumeSessionId
+      ? `This message continues your earlier session in this conversation — your previous messages and tool calls are already in context. Note what did NOT survive since your last turn: your workspace was recreated fresh from the conversation's branch (committed files are present; uncommitted files and shell state are gone), and the document may have changed — the CURRENT document content and comment threads are in your system prompt. Re-read files or re-run commands instead of assuming earlier uncommitted state still exists.\n\n`
+      : "";
     const slack = input.slackContext;
     const slackBlock = slack
       ? `This conversation is happening in Slack (${
@@ -609,7 +633,7 @@ Critical: you run INSIDE the service you are working on. Restarting or rebuildin
 
     return `Trigger: document-level agent conversation.
 
-${slackBlock}${hostDevBlock}${githubBlock}${historyBlock}New user message:
+${resumeBlock}${slackBlock}${hostDevBlock}${githubBlock}${historyBlock}New user message:
 ${instruction}
 
 You may inspect or modify workspace files if that helps. Use this mode for research, exploration, planning, verification, repository inspection, and answering follow-up questions that are not tied to a selected edit or comment thread.
@@ -1335,6 +1359,11 @@ async function runClaudeResearchAgentOnce(
     buildAgentEnv(process.env, options.agentEnv),
     sdkConfig.provider
   );
+  // Session transcripts: the SDK writes/reads them under
+  // $CLAUDE_CONFIG_DIR/projects/**. In the container runner CLAUDE_CONFIG_DIR
+  // is set on the container env (the bind-mounted per-conversation session
+  // dir) and buildAgentEnv passes it through here; the in-process runner keeps
+  // the default config dir (redirecting it would break host credential lookup).
   const promptEnvKeys = agentEnvKeysForPrompt(options.agentEnv ?? {}, agentProcessEnv);
   const envDisclosure =
     promptEnvKeys.length > 0
@@ -1391,6 +1420,10 @@ async function runClaudeResearchAgentOnce(
           : {})
       },
       maxTurns: parseMaxTurns(process.env.CLAUDE_AGENT_MAX_TURNS),
+      // Real session continuity for follow-up turns: the SDK loads the prior
+      // transcript (messages + tool calls) from $CLAUDE_CONFIG_DIR/projects/**
+      // — it searches all project dirs, so a different worktree cwd is fine.
+      ...(input.resumeSessionId ? { resume: input.resumeSessionId } : {}),
       model: sdkConfig.model,
       thinking: sdkConfig.thinking,
       ...(sdkConfig.effort ? { effort: sdkConfig.effort } : {}),
@@ -1429,9 +1462,18 @@ async function runClaudeResearchAgentOnce(
   let resultText = "";
   let resultStopReason: string | null = null;
   let errors: string[] = [];
+  // Record the session id the moment the SDK announces it (system/init), so
+  // even runs that later fail or get cancelled are resumable.
+  let sessionIdReported = false;
 
   try {
     for await (const message of agentQuery) {
+      if (!sessionIdReported && "session_id" in message && typeof message.session_id === "string" && message.session_id) {
+        sessionIdReported = true;
+        if (options.onSessionId) {
+          void Promise.resolve(options.onSessionId(message.session_id)).catch(() => null);
+        }
+      }
       if (message.type === "assistant") {
         handleAssistantMessage(message, onProgress);
       } else if (message.type === "result") {

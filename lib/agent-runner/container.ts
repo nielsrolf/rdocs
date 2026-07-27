@@ -88,11 +88,13 @@ export class ContainerRunner implements AgentRunner {
     const output = await this.spawnJob({
       job,
       workspaceHostPath: job.input.workspacePath,
+      sessionDirHostPath: options?.sessionDirHostPath,
       agentEnv: job.agentEnv,
       agentModel: job.agentConfig?.model,
       onProgress: options?.onProgress,
       onComment: options?.onComment,
       onSlackMessage: options?.onSlackMessage,
+      onSessionId: options?.onSessionId,
       signal: options?.signal,
       containerName: options?.containerName
     });
@@ -118,11 +120,13 @@ export class ContainerRunner implements AgentRunner {
   private async spawnJob(opts: {
     job: unknown;
     workspaceHostPath: string;
+    sessionDirHostPath?: string;
     agentEnv?: DocumentEnv;
     agentModel?: string | null;
     onProgress?: AgentRunOptions["onProgress"];
     onComment?: AgentRunOptions["onComment"];
     onSlackMessage?: AgentRunOptions["onSlackMessage"];
+    onSessionId?: AgentRunOptions["onSessionId"];
     signal?: AbortSignal;
     containerName?: string;
   }): Promise<Record<string, unknown>> {
@@ -156,6 +160,7 @@ export class ContainerRunner implements AgentRunner {
         image,
         name: opts.containerName,
         workspaceHostPath: opts.workspaceHostPath,
+        sessionDirHostPath: opts.sessionDirHostPath,
         envFileHostPath: envFile,
         uid: process.getuid?.(),
         gid: process.getgid?.(),
@@ -177,7 +182,8 @@ export class ContainerRunner implements AgentRunner {
         try {
           return await this.spawnContainer(runtime, args, opts.job, opts.onProgress, opts.onComment, opts.onSlackMessage, {
             signal: opts.signal,
-            containerName: opts.containerName
+            containerName: opts.containerName,
+            onSessionId: opts.onSessionId
           });
         } catch (error) {
           // A killed container manifests as "exited without a result" — never
@@ -221,7 +227,7 @@ export class ContainerRunner implements AgentRunner {
     onProgress?: AgentRunOptions["onProgress"],
     onComment?: AgentRunOptions["onComment"],
     onSlackMessage?: AgentRunOptions["onSlackMessage"],
-    cancel?: { signal?: AbortSignal; containerName?: string }
+    cancel?: { signal?: AbortSignal; containerName?: string; onSessionId?: AgentRunOptions["onSessionId"] }
   ): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       const child = spawn(runtime, args, { stdio: ["pipe", "pipe", "pipe"] });
@@ -267,6 +273,7 @@ export class ContainerRunner implements AgentRunner {
           event?: ClaudeAgentProgressEvent;
           comment?: { findText?: unknown; body?: unknown };
           text?: unknown;
+          sessionId?: unknown;
           output?: Record<string, unknown>;
           message?: string;
         };
@@ -296,6 +303,11 @@ export class ContainerRunner implements AgentRunner {
             pending.push(Promise.resolve(onSlackMessage(frame.text)).catch(() => {}));
           } else {
             process.stderr.write("[agent-container] dropped slack_message frame (no handler)\n");
+          }
+        } else if (frame.type === "session" && typeof frame.sessionId === "string" && frame.sessionId) {
+          // SDK session id — the host persists it for follow-up session resume.
+          if (cancel?.onSessionId) {
+            pending.push(Promise.resolve(cancel.onSessionId(frame.sessionId)).catch(() => {}));
           }
         } else if (frame.type === "result" && frame.output) {
           result = frame.output;

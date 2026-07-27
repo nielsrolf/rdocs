@@ -3103,6 +3103,9 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 /* The active tab's break renders as the tab's in-document title header, so
    users don't need to duplicate the tab name as an h1 inside the tab. */
 .tab-break-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   padding-bottom: 0.45rem;
   margin-bottom: 0.9rem;
   border-bottom: 1px solid rgba(60, 64, 67, 0.18);
@@ -3110,11 +3113,61 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .tab-break-header-title {
   display: block;
+  flex: 1;
+  min-width: 0;
   font-size: 2rem;
   font-weight: 700;
   line-height: 1.2;
   color: var(--text);
   letter-spacing: -0.01em;
+}
+
+/* Editable tab title: looks identical to the static header until focused. */
+.tab-break-header-input {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  width: 100%;
+  font-family: inherit;
+  user-select: text;
+  border-radius: 6px;
+}
+
+.tab-break-header-input:hover {
+  background: rgba(60, 64, 67, 0.05);
+}
+
+.tab-break-header-input:focus {
+  outline: none;
+  background: rgba(26, 115, 232, 0.06);
+}
+
+.tab-break-copy {
+  opacity: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.tab-break-header:hover .tab-break-copy,
+.tab-break-copy:focus-visible {
+  opacity: 1;
+}
+
+.tab-break-copy:hover {
+  background: rgba(26, 115, 232, 0.12);
+  color: rgb(26, 115, 232);
 }
 
 .tab-hidden-block {
@@ -3181,6 +3234,7 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 }
 
 .doc-outline-row:hover .doc-outline-copy,
+.doc-tab-row:hover .doc-outline-copy,
 .doc-outline-copy:focus-visible {
   opacity: 1;
 }

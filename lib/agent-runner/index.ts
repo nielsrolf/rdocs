@@ -36,6 +36,14 @@ export type AgentRunOptions = {
   // Live mid-run Slack updates (see ClaudeAgentRunOptions.onSlackMessage).
   // Runtime-only — never shipped as part of the serialized job.
   onSlackMessage?: ClaudeAgentRunOptions["onSlackMessage"];
+  // Reports the run's SDK session id (see ClaudeAgentRunOptions.onSessionId)
+  // so the host can persist it for follow-up session resume. Runtime-only.
+  onSessionId?: ClaudeAgentRunOptions["onSessionId"];
+  // Host path of the per-conversation session store. Container runner:
+  // bind-mounted rw and exported as CLAUDE_CONFIG_DIR, so SDK session
+  // transcripts survive the container. Ignored by the in-process runner
+  // (which uses the host's default config dir) and the self-hosted runner.
+  sessionDirHostPath?: string;
   validation?: SubmissionValidationSpec;
   agentConfig?: DocumentAgentConfig;
   agentEnv?: DocumentEnv;

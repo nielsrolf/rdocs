@@ -11,6 +11,15 @@ export type ContainerRunSpec = {
   workspaceHostPath: string;
   /** Host path of the --env-file (read by the container runtime on the host). */
   envFileHostPath: string;
+  /**
+   * Host path of the per-conversation SDK session store. When set, it is
+   * bind-mounted rw at containerSessionDir and exported as CLAUDE_CONFIG_DIR,
+   * so session transcripts (messages + tool calls) survive the container and
+   * follow-up runs can resume the session. Without it, transcripts land in the
+   * tmpfs HOME and die with the container.
+   */
+  sessionDirHostPath?: string;
+  containerSessionDir?: string; // default "/agent-sessions"
   uid?: number;
   gid?: number;
   memory?: string; // e.g. "2g"
@@ -45,6 +54,10 @@ const HOST_FS_ENV_VARS = new Set([
   "XDG_CACHE_HOME",
   "XDG_DATA_HOME",
   "XDG_RUNTIME_DIR",
+  // Points at a host directory; inside the container it is either unset (tmpfs
+  // HOME default) or set explicitly to the mounted session dir by
+  // buildContainerRunArgs — a leaked host value would break both.
+  "CLAUDE_CONFIG_DIR",
   "SSL_CERT_FILE",
   "SSL_CERT_DIR",
   "NODE_EXTRA_CA_CERTS"
@@ -128,8 +141,14 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
   args.push("--env-file", spec.envFileHostPath);
   args.push("-e", `HOME=${home}`, "-e", "TMPDIR=/tmp", "-e", `AGENT_WORKSPACE=${workspace}`);
 
-  // The ONLY host path exposed: this document's worktree.
+  // The document's worktree — plus, for conversation runs, the conversation's
+  // session store (SDK transcripts) so follow-up runs can resume the session.
   args.push("-w", workspace, "-v", `${spec.workspaceHostPath}:${workspace}`);
+  if (spec.sessionDirHostPath) {
+    const sessionDir = spec.containerSessionDir ?? "/agent-sessions";
+    args.push("-v", `${spec.sessionDirHostPath}:${sessionDir}`);
+    args.push("-e", `CLAUDE_CONFIG_DIR=${sessionDir}`);
+  }
 
   args.push(spec.image);
   return args;

@@ -342,12 +342,111 @@ export const AttachmentChip = Node.create({
   }
 });
 
-function TabBreakView({ node }: NodeViewProps) {
+function TabBreakView({ editor, node, updateAttributes }: NodeViewProps) {
   const title = (node.attrs.title as string) || "Untitled tab";
+  const tabId = typeof node.attrs.tabId === "string" ? node.attrs.tabId : "";
+  const editable = editor.isEditable;
+  const [draft, setDraft] = useState(title);
+  const [focused, setFocused] = useState(false);
+  const [copied, setCopied] = useState(false);
+  // Escape blurs the input synchronously, before React applies the reverted
+  // draft state — this flag makes the blur handler skip the commit.
+  const cancelEditRef = useRef(false);
+
+  // Keep the draft in sync with remote renames, but never clobber what the
+  // user is typing right now.
+  useEffect(() => {
+    if (!focused) setDraft(title);
+  }, [title, focused]);
+
+  function commitTitle() {
+    const next = draft.trim() || "Untitled tab";
+    if (next !== title) {
+      updateAttributes({ title: next });
+    }
+    setDraft(next);
+  }
+
+  async function copyTabLink() {
+    if (!tabId || typeof window === "undefined") return;
+    const url = `${window.location.origin}${window.location.pathname}${window.location.search}#tab=${tabId}`;
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      window.prompt("Copy tab link:", url);
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  }
+
   return (
     <NodeViewWrapper className="tab-break-node" contentEditable={false} data-tab-break>
       <div aria-label={`Tab: ${title}`} className="tab-break-header" role="heading" aria-level={1}>
-        <span className="tab-break-header-title">{title}</span>
+        {editable ? (
+          <input
+            aria-label="Tab title"
+            className="tab-break-header-title tab-break-header-input"
+            onBlur={() => {
+              setFocused(false);
+              if (cancelEditRef.current) {
+                cancelEditRef.current = false;
+                setDraft(title);
+                return;
+              }
+              commitTitle();
+            }}
+            onChange={(event) => setDraft(event.target.value)}
+            onFocus={() => setFocused(true)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                (event.target as HTMLInputElement).blur();
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                cancelEditRef.current = true;
+                (event.target as HTMLInputElement).blur();
+              }
+            }}
+            placeholder="Untitled tab"
+            spellCheck={false}
+            value={draft}
+          />
+        ) : (
+          <span className="tab-break-header-title">{title}</span>
+        )}
+        {tabId ? (
+          <button
+            aria-label={`Copy link to tab ${title}`}
+            className="tab-break-copy"
+            onClick={() => void copyTabLink()}
+            title={copied ? "Copied!" : "Copy link to tab"}
+            type="button"
+          >
+            {copied ? (
+              <svg aria-hidden="true" focusable="false" height="14" viewBox="0 0 16 16" width="14">
+                <path
+                  d="M3.5 8.5l3 3 6-6.5"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="1.7"
+                />
+              </svg>
+            ) : (
+              <svg aria-hidden="true" focusable="false" height="14" viewBox="0 0 16 16" width="14">
+                <path
+                  d="M6.5 9.5L9.5 6.5M6 4.5h-1a3 3 0 100 6h1m4-6h1a3 3 0 110 6h-1"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="1.6"
+                />
+              </svg>
+            )}
+          </button>
+        ) : null}
       </div>
     </NodeViewWrapper>
   );

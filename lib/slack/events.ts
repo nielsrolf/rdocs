@@ -553,7 +553,7 @@ async function handleIncomingSlackMessage(
   const previousRun = await db.aiRun.findFirst({
     where: { documentId: document.id, triggerId, status: { in: ["SUCCEEDED", "FAILED"] } },
     orderBy: { startedAt: "desc" },
-    select: { id: true }
+    select: { id: true, sdkSessionId: true }
   });
 
   // Files attached to the message: persisted as document attachments RIGHT
@@ -638,8 +638,29 @@ async function handleIncomingSlackMessage(
   // A voice-only message: the transcript IS the user's message.
   const effectiveBody = !hasTypedText && transcripts.length > 0 ? transcripts.join("\n") : instructionBody;
 
-  const threadContext = await buildThreadContext(deps, event);
-  const instruction = [threadContext, filesNote, transcriptNote, ...voiceNotes, effectiveBody]
+  // The user's message (plus notes about attachments/voice) must ALWAYS
+  // survive the length cap — only the prepended thread context is expendable.
+  // A plain tail-slice on the joined string used to silently drop the new
+  // message whenever an earlier (long) bot reply filled the cap, so follow-up
+  // runs received only replayed context and no question at all.
+  const messagePart = [filesNote, transcriptNote, ...voiceNotes, effectiveBody]
+    .filter(Boolean)
+    .join("\n\n")
+    .slice(0, MAX_INSTRUCTION_LENGTH);
+  // A follow-up that will resume the previous run's SDK session needs no
+  // replayed thread transcript — the model already has the whole conversation
+  // (messages AND tool calls) in its resumed context. (If the resume later
+  // falls back — missing/GC'd transcript — the runner replays the AiRunEvent
+  // history instead, which covers the same ground.)
+  const threadContext = previousRun?.sdkSessionId ? null : await buildThreadContext(deps, event);
+  const contextBudget = MAX_INSTRUCTION_LENGTH - messagePart.length - 2;
+  const trimmedContext =
+    threadContext && threadContext.length > contextBudget
+      ? contextBudget > 400
+        ? `Recent messages in this Slack thread (older/longer messages omitted for length):\n…${threadContext.slice(threadContext.length - contextBudget + 100)}`
+        : null
+      : threadContext;
+  const instruction = [trimmedContext, messagePart]
     .filter(Boolean)
     .join("\n\n")
     .slice(0, MAX_INSTRUCTION_LENGTH);

@@ -229,6 +229,21 @@ export function ensureTabsHaveContent(editor: Editor): boolean {
   return true;
 }
 
+// Tab links use a dedicated hash namespace ("#tab=<id>") that can never
+// collide with heading slugs: slugify strips '=' so no heading slug ever
+// starts with "tab=".
+const TAB_HASH_PREFIX = "tab=";
+
+export function tabHashSlug(tabId: string): string {
+  return `${TAB_HASH_PREFIX}${tabId}`;
+}
+
+export function tabIdFromHashSlug(hash: string): string | null {
+  if (!hash.startsWith(TAB_HASH_PREFIX)) return null;
+  const id = hash.slice(TAB_HASH_PREFIX.length);
+  return id || null;
+}
+
 export function createTabId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();

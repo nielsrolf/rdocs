@@ -19,6 +19,7 @@ import {
   registerRunAbortController
 } from "@/lib/agent-runner/run-registry";
 import { createAgentRunner, getAgentRunner, getSelfHostedRunner } from "@/lib/agent-runner";
+import { planSessionResume, recordRunSessionId, withConversationLock } from "@/lib/agent-sessions";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
 import { loadAgentEnvWithFreeFallback, restrictAgentEnvForReadOnly } from "@/lib/user-credentials";
@@ -96,7 +97,40 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
   let outcome: ConversationRunOutcome | null = null;
 
   try {
-    const { history: conversationHistory } = await buildConversationHistory(documentId, previousRunId);
+    const runner = hostDevRun
+      ? createAgentRunner("inprocess")
+      : isSelfHosted
+        ? getSelfHostedRunner()
+        : getAgentRunner();
+
+    // Real session resume: when the follow-up chain has a recorded SDK session
+    // whose transcript is still on disk, the run resumes it — the model sees
+    // all its prior messages AND tool calls, uncapped. The plain-text
+    // transcript replay (buildConversationHistory) remains the fallback for
+    // pre-feature runs, GC'd sessions, and the self-hosted/http runners.
+    const sessionsSupported = runner.mode === "container" || runner.mode === "inprocess";
+    const sessionPlan = sessionsSupported
+      ? await planSessionResume({ documentId, aiRunId, previousRunId, runnerMode: runner.mode }).catch(
+          (error) => {
+            console.warn("[agent-conversation] session resume planning failed; falling back to transcript replay", {
+              aiRunId,
+              error: error instanceof Error ? error.message : error
+            });
+            return null;
+          }
+        )
+      : null;
+    const resumeSessionId = sessionPlan?.resumeSessionId ?? null;
+    const { history: conversationHistory } = resumeSessionId
+      ? { history: [] as Array<{ role: string; message: string }> }
+      : await buildConversationHistory(documentId, previousRunId);
+    if (resumeSessionId) {
+      await recordAiRunEvent({
+        aiRunId,
+        role: "system",
+        message: "Resuming the previous agent session — the model sees its full prior context (messages and tool calls)."
+      });
+    }
 
     // Host dev runs operate directly on the deployment checkout — no worktree,
     // no end-of-run commit/cleanup. selfHosted runs never get a worktree from
@@ -187,12 +221,9 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       documentText
     });
 
-    const runner = hostDevRun
-      ? createAgentRunner("inprocess")
-      : isSelfHosted
-        ? getSelfHostedRunner()
-        : getAgentRunner();
-    const result = await runner.run({
+    const result = await withConversationLock(
+      sessionPlan?.conversationKey ?? aiRunId,
+      () => runner.run({
       mode: "conversation",
       hostDevRun,
       githubAuthAvailable: Boolean(agentEnv.GITHUB_TOKEN?.trim() || agentEnv.GH_TOKEN?.trim()),
@@ -213,6 +244,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       workspaceOverview,
       instruction: message,
       conversationHistory,
+      resumeSessionId,
       slackContext,
       slackTools
     }, {
@@ -225,6 +257,11 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       validation: { kind: "conversation", documentText: suggestionAnchorText },
       onComment: commentRecorder.onComment,
       onSlackMessage,
+      // Persist the run's SDK session id (recorded at init, so failed and
+      // cancelled runs stay resumable) and, for the container runner, mount
+      // the conversation's session dir as CLAUDE_CONFIG_DIR.
+      onSessionId: sessionsSupported ? (sessionId) => recordRunSessionId(aiRunId, sessionId) : undefined,
+      sessionDirHostPath: sessionPlan?.sessionDir,
       trustedHostRun: hostDevRun,
       onProgress: async (event) => {
         await Promise.all([
@@ -239,7 +276,8 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
           })
         ]).catch(() => null);
       }
-    });
+    })
+    );
 
     const commit = linkedRepo && agentAccessMode === "workspace"
       ? await commitWorkspaceChanges({
