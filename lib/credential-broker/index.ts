@@ -47,12 +47,20 @@ export function credentialBrokerEnabled(
  * reach the host via host.docker.internal; the in-process runner via
  * loopback. Behind the blue/green setup the stable entry point is Caddy on
  * :14141 either way. Override with AGENT_BROKER_BASE_URL.
+ *
+ * `runnerMode` is the ACTUAL runner of this run and wins over the global
+ * AGENT_RUNNER_MODE: host-dev Slack runs force the in-process runner on a
+ * container-mode deployment, and host.docker.internal does not resolve on the
+ * host (FailedToOpenSocket).
  */
-export function brokerBaseUrl(env: Record<string, string | undefined> = process.env): string {
+export function brokerBaseUrl(
+  env: Record<string, string | undefined> = process.env,
+  runnerMode?: string
+): string {
   const explicit = env.AGENT_BROKER_BASE_URL?.trim();
   if (explicit) return explicit.replace(/\/+$/, "");
-  const host =
-    (env.AGENT_RUNNER_MODE || "container") === "inprocess" ? "127.0.0.1" : "host.docker.internal";
+  const mode = runnerMode ?? env.AGENT_RUNNER_MODE ?? "container";
+  const host = mode === "inprocess" ? "127.0.0.1" : "host.docker.internal";
   return `http://${host}:14141`;
 }
 
@@ -193,6 +201,8 @@ export async function brokerizeAgentEnvForRun(
     agentModel: string | null | undefined;
     hostEnv?: Record<string, string | undefined>;
     homeDir?: string;
+    /** Actual runner mode of this run — beats AGENT_RUNNER_MODE for the broker URL. */
+    runnerMode?: string;
   }
 ): Promise<BrokerizeResult> {
   const hostEnv = opts.hostEnv ?? process.env;
@@ -204,7 +214,7 @@ export async function brokerizeAgentEnvForRun(
   const plans = planBrokerRewrites(agentEnv, opts.agentModel, { hostEnv, hostOAuthAvailable });
   if (plans.length === 0) return { agentEnv, minted: [] };
 
-  const base = brokerBaseUrl(hostEnv);
+  const base = brokerBaseUrl(hostEnv, opts.runnerMode);
   const next: DocumentEnv = { ...agentEnv };
   const minted: string[] = [];
   for (const plan of plans) {

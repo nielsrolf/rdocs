@@ -614,7 +614,7 @@ export async function loadAgentEnvWithFreeFallback(
   documentId: string,
   agentConfig: { model: string | null; effort: string | null },
   runnerUserId: string | null = null,
-  opts: { aiRunId?: string } = {}
+  opts: { aiRunId?: string; runnerMode?: string } = {}
 ): Promise<AgentRunEnvResolution> {
   const resolved = await (async (): Promise<AgentRunEnvResolution> => {
     try {
@@ -638,7 +638,8 @@ export async function loadAgentEnvWithFreeFallback(
   if (opts.aiRunId && credentialBrokerEnabled()) {
     const { agentEnv } = await brokerizeAgentEnvForRun(resolved.agentEnv, {
       aiRunId: opts.aiRunId,
-      agentModel: resolved.agentConfig.model
+      agentModel: resolved.agentConfig.model,
+      runnerMode: opts.runnerMode
     });
     return { ...resolved, agentEnv };
   }

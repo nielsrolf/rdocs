@@ -34,3 +34,4 @@ scripts/_*
 # Generated demo video artifacts (kept local)
 demo-video/
 claudex.env
+.env.bak*

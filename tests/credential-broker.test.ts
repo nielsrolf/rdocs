@@ -150,6 +150,38 @@ test("brokerize replaces the real key, and the minted key round-trips", async ()
   }
 });
 
+// Regression: a host-dev Slack run forces the in-process runner even when the
+// deployment default is AGENT_RUNNER_MODE=container. The broker URL must follow
+// the ACTUAL runner of the run, not the global env — host.docker.internal does
+// not resolve on the host, so an in-process run given a container-shaped broker
+// URL dies with FailedToOpenSocket.
+test("brokerize honors the per-run runner mode over AGENT_RUNNER_MODE", async () => {
+  const run = await makeRun();
+  const { agentEnv, minted } = await brokerizeAgentEnvForRun(
+    { ANTHROPIC_API_KEY: "sk-ant-real-secret" },
+    { aiRunId: run.id, agentModel: "claude-sonnet-5", hostEnv: BROKER_ON, runnerMode: "inprocess" }
+  );
+  assert.deepEqual(minted, ["anthropic"]);
+  assert.match(agentEnv.ANTHROPIC_BASE_URL!, /^http:\/\/127\.0\.0\.1:14141\/api\/broker\//);
+
+  // And the inverse: a container run under an inprocess-default deployment
+  // must get the docker-reachable host.
+  const run2 = await makeRun();
+  const containerized = await brokerizeAgentEnvForRun(
+    { ANTHROPIC_API_KEY: "sk-ant-real-secret" },
+    {
+      aiRunId: run2.id,
+      agentModel: "claude-sonnet-5",
+      hostEnv: { AGENT_CREDENTIAL_BROKER: "1", AGENT_RUNNER_MODE: "inprocess" },
+      runnerMode: "container"
+    }
+  );
+  assert.match(
+    containerized.agentEnv.ANTHROPIC_BASE_URL!,
+    /^http:\/\/host\.docker\.internal:14141\/api\/broker\//
+  );
+});
+
 test("brokerize is a no-op when the flag is off", async () => {
   const run = await makeRun();
   const { agentEnv, minted } = await brokerizeAgentEnvForRun(
