@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 
+import { removeRunContainers, type ContainerCleanupOptions } from "@/lib/agent-runner/container-cleanup";
 import { revokeBrokerKeysForRun } from "@/lib/credential-broker";
 import { db } from "@/lib/db";
 
@@ -56,7 +57,8 @@ const REAPABLE_STATUSES = new Set(["RUNNING", "PENDING"]);
 // Their heartbeats are fresh, so the silence rule spares them.
 export async function failAbandonedAiRuns(
   runs: Array<{ id: string; status: string; startedAt: Date }>,
-  now = Date.now()
+  now = Date.now(),
+  deps: { containerCleanup?: ContainerCleanupOptions } = {}
 ): Promise<AbandonedRunResult | null> {
   // Runs younger than the threshold cannot have been silent longer than it, so
   // this pre-filter also avoids the event lookup on every poll of a fresh run.
@@ -103,6 +105,11 @@ export async function failAbandonedAiRuns(
   // Kill the reaped runs' broker keys too (the per-request run-status check
   // already rejects them; this wipes the stored secret material as well).
   await Promise.all(abandonedIds.map((id) => revokeBrokerKeysForRun(id).catch(() => 0)));
+  // Kill the reaped runs' agent containers. A reaped run's owning process is
+  // dead (silence rule), so even if its container is still executing, nobody
+  // consumes the result — leaving it alive only burns tokens/CPU. Best-effort:
+  // in-process runs and already-exited `--rm` containers make `rm -f` a no-op.
+  await removeRunContainers(abandonedIds, deps.containerCleanup).catch(() => {});
   return { failedIds: new Set(abandonedIds), error, finishedAt };
 }
 
@@ -219,60 +226,95 @@ export async function recordAiRunEvent(input: {
   });
 }
 
-// How many run rows the document poll returns, and how many of each run's
-// events. The event window must show the LATEST activity — a run that outgrows
-// it should drop its oldest events, not freeze.
-export const AI_RUN_LIST_LIMIT = 12;
+// How many run rows the document poll returns, how many of the newest runs
+// carry their event timelines inline, and how many events each of those runs
+// ships. The event window must show the LATEST activity — a run that outgrows
+// it should drop its oldest events, not freeze. Older runs are returned
+// WITHOUT events (`eventsOmitted: true`) to keep the 2s poll payload sane; the
+// client lazy-loads their events from the run-detail route when a conversation
+// is opened. Runs older than the list limit are not shown at all — 200 rows is
+// far beyond what the sidebar can usefully display.
+export const AI_RUN_LIST_LIMIT = 200;
+export const AI_RUN_EVENT_RUNS = 12;
 export const AI_RUN_EVENT_WINDOW = 80;
 
 // The run list the document poll (and the agent view) is built from. Shared
 // with tests so the event-window behavior is pinned by a regression test.
 export async function fetchDocumentAiRuns(documentId: string) {
-  const runs = await db.aiRun.findMany({
-    where: { documentId },
-    orderBy: { startedAt: "desc" },
-    take: AI_RUN_LIST_LIMIT,
-    select: {
-      id: true,
-      triggerType: true,
-      triggerId: true,
-      selectionId: true,
-      selectedText: true,
-      parentRunId: true,
-      instruction: true,
-      status: true,
-      progress: true,
-      model: true,
-      workspacePath: true,
-      branchName: true,
-      commitSha: true,
-      commitUrl: true,
-      error: true,
-      startedAt: true,
-      finishedAt: true,
-      appliedAt: true,
-      // Live comments left mid-run (add_comment). Carried in the polled list so
-      // clients can anchor them while the run is still working.
-      agentComments: true,
-      events: {
-        // Newest N, then flipped back to chronological below — asc+take would
-        // pin the window to a long run's FIRST N events and freeze the timeline.
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        take: AI_RUN_EVENT_WINDOW,
-        select: {
-          id: true,
-          role: true,
-          message: true,
-          createdAt: true
+  const runSelect = {
+    id: true,
+    triggerType: true,
+    triggerId: true,
+    selectionId: true,
+    selectedText: true,
+    parentRunId: true,
+    instruction: true,
+    status: true,
+    progress: true,
+    model: true,
+    workspacePath: true,
+    branchName: true,
+    commitSha: true,
+    commitUrl: true,
+    error: true,
+    startedAt: true,
+    finishedAt: true,
+    appliedAt: true,
+    // Live comments left mid-run (add_comment). Carried in the polled list so
+    // clients can anchor them while the run is still working.
+    agentComments: true
+  } as const;
+
+  const [recentRuns, olderRuns] = await Promise.all([
+    // Newest runs ship their event timelines inline — these are the ones that
+    // can still be RUNNING and streaming.
+    db.aiRun.findMany({
+      where: { documentId },
+      orderBy: { startedAt: "desc" },
+      take: AI_RUN_EVENT_RUNS,
+      select: {
+        ...runSelect,
+        events: {
+          // Newest N, then flipped back to chronological below — asc+take would
+          // pin the window to a long run's FIRST N events and freeze the timeline.
+          orderBy: [{ createdAt: "desc" as const }, { id: "desc" as const }],
+          take: AI_RUN_EVENT_WINDOW,
+          select: {
+            id: true,
+            role: true,
+            message: true,
+            createdAt: true
+          }
         }
       }
-    }
-  });
-  return runs.map((run) => ({
-    ...run,
-    agentComments: parseAgentComments(run.agentComments),
-    events: [...run.events].reverse()
-  }));
+    }),
+    // Older runs come back WITHOUT events so long histories (e.g. Slack channel
+    // docs) stay visible in the sidebar without bloating every 2s poll. Their
+    // events are immutable (terminal runs) and lazy-loaded from the run-detail
+    // route when the conversation is opened.
+    db.aiRun.findMany({
+      where: { documentId },
+      orderBy: { startedAt: "desc" },
+      skip: AI_RUN_EVENT_RUNS,
+      take: AI_RUN_LIST_LIMIT - AI_RUN_EVENT_RUNS,
+      select: runSelect
+    })
+  ]);
+
+  return [
+    ...recentRuns.map((run) => ({
+      ...run,
+      agentComments: parseAgentComments(run.agentComments),
+      events: [...run.events].reverse(),
+      eventsOmitted: false
+    })),
+    ...olderRuns.map((run) => ({
+      ...run,
+      agentComments: parseAgentComments(run.agentComments),
+      events: [] as Array<{ id: string; role: string; message: string; createdAt: Date }>,
+      eventsOmitted: true
+    }))
+  ];
 }
 
 function parseAgentComments(raw: string | null): Array<{ threadId: string; findText: string }> {
@@ -313,9 +355,12 @@ export function serializeAiRun(run: {
     message: string;
     createdAt: Date;
   }>;
+  /** True when this run's events were dropped from the poll payload (lazy-loaded client-side). */
+  eventsOmitted?: boolean;
 }) {
   return {
     ...run,
+    eventsOmitted: run.eventsOmitted ?? false,
     selectionId: run.selectionId ?? null,
     selectedText: run.selectedText ?? null,
     parentRunId: run.parentRunId ?? null,

@@ -67,7 +67,7 @@ import {
 import { CommentRail } from "./document-workspace/comment-rail";
 import { layoutCommentRail } from "./document-workspace/comment-rail-layout";
 import { DocOutline, OUTLINE_MAX_WIDTH, OUTLINE_MIN_WIDTH } from "./document-workspace/doc-outline";
-import { MoveBlock, SlashTab, StrikeShortcut, TaskItem } from "./document-workspace/editor-extras";
+import { MoveBlock, SlashTab, StrikeShortcut, TabIndentGuard, TaskItem } from "./document-workspace/editor-extras";
 import { EnvironmentMenu } from "./document-workspace/environment-menu";
 import { SkillsMenu } from "./document-workspace/skills-menu";
 import { ExportMenu } from "./document-workspace/export-menu";
@@ -153,6 +153,7 @@ import {
   type ActiveAiRunView,
   type ActiveAiTarget,
   type AiEditImage,
+  type AiRunEventView,
   type AiEditWidget,
   type CommentTagFilterValue,
   type DocumentWorkspaceProps,
@@ -262,6 +263,20 @@ export function DocumentWorkspace({
     login: string | null;
     tokenSource: string;
   } | null>(null);
+  // Slack-channel workspace link (Document.workspaceDocumentId): when set, this
+  // doc's agent runs use the channel document's workspace instead of a repo of
+  // its own. Loaded lazily the first time the Repo menu is opened.
+  const [workspaceLink, setWorkspaceLink] = useState<{
+    id: string;
+    title: string;
+    slackChannelId: string | null;
+  } | null>(null);
+  const [workspaceChannels, setWorkspaceChannels] = useState<
+    { id: string; title: string; slackChannelId: string | null }[]
+  >([]);
+  const [workspaceLinkLoaded, setWorkspaceLinkLoaded] = useState(false);
+  const [workspaceLinkChoice, setWorkspaceLinkChoice] = useState("");
+  const [workspaceLinkBusy, setWorkspaceLinkBusy] = useState(false);
   // Bumped on every doc-changing transaction (local or remote) so anchor-derived
   // memos (e.g. visibleThreads) recompute when content — and its comment anchors —
   // is deleted. Keeps orphaned comments from lingering after a select-all delete.
@@ -364,6 +379,13 @@ export function DocumentWorkspace({
   // (config + run history) instead of the mostly-empty notebook body.
   const [agentPanelOpen, setAgentPanelOpen] = useState(documentKind === "slack_channel");
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  // Events of older runs the poll returns without timelines (`eventsOmitted`).
+  // Those runs are terminal, so their events are immutable — fetched once from
+  // the run-detail route when their conversation is opened, then cached here
+  // and merged into the conversation view. Kept separate from `aiRuns` so the
+  // 2s poll (which never carries these events) can't clobber them.
+  const [archivedRunEvents, setArchivedRunEvents] = useState<Record<string, AiRunEventView[]>>({});
+  const archivedRunEventsRequestedRef = useRef<Set<string>>(new Set());
   const [composeMode, setComposeMode] = useState<"selected" | "new">("selected");
   const [agentMessage, setAgentMessage] = useState("");
   const [agentBusy, setAgentBusy] = useState(false);
@@ -402,6 +424,7 @@ export function DocumentWorkspace({
   const [newTagDraft, setNewTagDraft] = useState("");
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [outlineWidth, setOutlineWidth] = useState(220);
+  const [commentsCollapsed, setCommentsCollapsed] = useState(false);
   const [activeTabId, setActiveTabIdState] = useState<string | null>(null);
   const [tabs, setTabs] = useState<TabSummary[]>([]);
   const [tableControlsActive, setTableControlsActive] = useState(false);
@@ -593,6 +616,10 @@ export function DocumentWorkspace({
       if (stored === "true") {
         setOutlineCollapsed(true);
       }
+      const storedComments = window.localStorage.getItem("r-docs:comments-collapsed");
+      if (storedComments === "true") {
+        setCommentsCollapsed(true);
+      }
       const storedWidth = window.localStorage.getItem("r-docs:outline-width");
       if (storedWidth) {
         const parsed = Number.parseInt(storedWidth, 10);
@@ -615,6 +642,17 @@ export function DocumentWorkspace({
       // Ignore quota / privacy errors.
     }
   }, [outlineCollapsed]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        "r-docs:comments-collapsed",
+        commentsCollapsed ? "true" : "false"
+      );
+    } catch {
+      // Ignore quota / privacy errors.
+    }
+  }, [commentsCollapsed]);
 
   useEffect(() => {
     try {
@@ -1277,6 +1315,7 @@ export function DocumentWorkspace({
       TaskItem.configure({ nested: true }),
       StrikeShortcut,
       MoveBlock,
+      TabIndentGuard,
       slashTabExtension,
       Image.configure({
         allowBase64: true,
@@ -1982,7 +2021,59 @@ export function DocumentWorkspace({
           : "Repository link removed"
       );
     }
+    if (data.repository.repoUrl) {
+      // The server clears the workspace link when a repo is linked.
+      setWorkspaceLink(null);
+    }
     setRepoBusy(false);
+  }
+
+  async function refreshWorkspaceLink() {
+    if (!canManageAutomation) {
+      return;
+    }
+    const response = await fetch(`/api/documents/${documentId}/workspace-link`).catch(() => null);
+    const data = await response?.json().catch(() => null);
+    if (!response?.ok || !data) {
+      return;
+    }
+    setWorkspaceLink(data.link ?? null);
+    setWorkspaceChannels(Array.isArray(data.channels) ? data.channels : []);
+    setWorkspaceLinkLoaded(true);
+  }
+
+  async function handleSetWorkspaceLink(targetDocumentId: string | null) {
+    if (!canManageAutomation || workspaceLinkBusy) {
+      return;
+    }
+    setWorkspaceLinkBusy(true);
+    setRepoNotice(null);
+    const response = await fetch(`/api/documents/${documentId}/workspace-link`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceDocumentId: targetDocumentId })
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      reportClientError(data?.error ?? "Unable to update the workspace link.", "workspace-link", {
+        documentId,
+        targetDocumentId,
+        status: response.status
+      });
+      setWorkspaceLinkBusy(false);
+      return;
+    }
+    setWorkspaceLink(data?.link ?? null);
+    if (data?.link) {
+      // Linking a channel workspace clears any linked repo server-side.
+      setRepoUrl("");
+      setRepoBranch("");
+      setRepoAccessIssue(null);
+      setRepoNotice(`Connected to the ${data.link.title} workspace`);
+    } else {
+      setRepoNotice("Workspace link removed");
+    }
+    setWorkspaceLinkBusy(false);
   }
 
   async function handleInsertWidget() {
@@ -3729,7 +3820,16 @@ export function DocumentWorkspace({
   }, [editor, orderedThreads, activeThreadId]);
   const selectedVersion =
     historyVersions.find((version) => version.id === selectedVersionId) ?? historyVersions[0] ?? null;
-  const conversations = useMemo(() => buildConversations(aiRuns), [aiRuns]);
+  const conversations = useMemo(() => {
+    // Splice lazily-loaded events back into the older runs the poll ships
+    // without timelines, so opening an archived conversation shows its history.
+    const merged = aiRuns.map((run) =>
+      run.eventsOmitted && archivedRunEvents[run.id]
+        ? { ...run, events: archivedRunEvents[run.id], eventsOmitted: false }
+        : run
+    );
+    return buildConversations(merged);
+  }, [aiRuns, archivedRunEvents]);
   const selectedConversation = useMemo(() => {
     if (composeMode === "new") return null;
     if (selectedConversationId) {
@@ -3738,6 +3838,31 @@ export function DocumentWorkspace({
     }
     return conversations[0] ?? null;
   }, [composeMode, conversations, selectedConversationId]);
+
+  // Lazy-load the event timelines of the selected conversation's older runs
+  // (the poll flags them `eventsOmitted`). One fetch per run, deduped across
+  // renders; failures clear the guard so a re-select retries.
+  useEffect(() => {
+    if (!selectedConversation) return;
+    for (const run of selectedConversation.runs) {
+      if (!run.eventsOmitted || archivedRunEventsRequestedRef.current.has(run.id)) continue;
+      archivedRunEventsRequestedRef.current.add(run.id);
+      const shareQuery = shareToken ? `?share=${encodeURIComponent(shareToken)}` : "";
+      fetch(`/api/documents/${documentId}/ai-runs/${run.id}${shareQuery}`, { cache: "no-store" })
+        .then((response) => (response.ok ? response.json() : null))
+        .then((data) => {
+          const events = data?.aiRun?.events;
+          if (Array.isArray(events)) {
+            setArchivedRunEvents((previous) => ({ ...previous, [run.id]: events }));
+          } else {
+            archivedRunEventsRequestedRef.current.delete(run.id);
+          }
+        })
+        .catch(() => {
+          archivedRunEventsRequestedRef.current.delete(run.id);
+        });
+    }
+  }, [selectedConversation, documentId, shareToken]);
 
   useEffect(() => {
     if (composeMode === "new") return;
@@ -4457,18 +4582,28 @@ export function DocumentWorkspace({
             </div>
           </details>
 
-          <details className="header-menu header-menu-wide" data-tour="repo-menu">
+          <details
+            className="header-menu header-menu-wide"
+            data-tour="repo-menu"
+            onToggle={(event) => {
+              if (event.currentTarget.open && !workspaceLinkLoaded) {
+                void refreshWorkspaceLink();
+              }
+            }}
+          >
             <summary>Repo</summary>
             <div className="header-menu-panel research-repo-panel">
               <div>
                 <strong>Research repository</strong>
                 <p>
-                  {repoUrl
+                  {workspaceLink
+                    ? `Using the shared workspace of ${workspaceLink.title} (Slack channel).`
+                    : repoUrl
                     ? `${repoUrl}${repoBranch ? ` on ${repoBranch}` : ""}${repoUrl.startsWith("https://huggingface.co/") ? " (read-only)" : ""}`
                     : "Link a GitHub repo, or a public HuggingFace repo (read-only), to give the AI a checked-out workspace."}
                 </p>
               </div>
-              {canWriteDocument ? (
+              {canWriteDocument && !workspaceLink ? (
                 <div className="research-repo-controls">
                   <input
                     aria-label="Repository URL"
@@ -4490,6 +4625,57 @@ export function DocumentWorkspace({
                   >
                     {repoBusy ? "Saving..." : "Save"}
                   </button>
+                </div>
+              ) : null}
+              {canManageAutomation && documentKind !== "slack_channel" ? (
+                <div>
+                  <strong>Slack channel workspace</strong>
+                  <p>
+                    {workspaceLink
+                      ? "Agent runs on this doc read and write the channel's shared workspace (repos checked out there included)."
+                      : "Instead of linking a repo, share the workspace of a Slack channel your claudex bot works in — this doc's agent then sees the same files and context."}
+                  </p>
+                  {workspaceLink ? (
+                    <div className="research-repo-controls">
+                      <button
+                        className="ghost-button"
+                        disabled={workspaceLinkBusy}
+                        onClick={() => handleSetWorkspaceLink(null)}
+                        type="button"
+                      >
+                        {workspaceLinkBusy ? "Disconnecting..." : `Disconnect ${workspaceLink.title}`}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="research-repo-controls">
+                      <select
+                        aria-label="Slack channel workspace"
+                        onChange={(event) => setWorkspaceLinkChoice(event.target.value)}
+                        value={workspaceLinkChoice}
+                      >
+                        <option value="">
+                          {workspaceLinkLoaded
+                            ? workspaceChannels.length
+                              ? "Choose a Slack channel..."
+                              : "No Slack channel workspaces available"
+                            : "Loading channels..."}
+                        </option>
+                        {workspaceChannels.map((channel) => (
+                          <option key={channel.id} value={channel.id}>
+                            {channel.title}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        className="ghost-button"
+                        disabled={workspaceLinkBusy || !workspaceLinkChoice}
+                        onClick={() => handleSetWorkspaceLink(workspaceLinkChoice || null)}
+                        type="button"
+                      >
+                        {workspaceLinkBusy ? "Connecting..." : "Connect"}
+                      </button>
+                    </div>
+                  )}
                 </div>
               ) : null}
               {repoNotice ? <span className="subtle-pill">{repoNotice}</span> : null}
@@ -4610,6 +4796,7 @@ export function DocumentWorkspace({
       <div
         className="editor-stage"
         data-outline-collapsed={outlineCollapsed ? "true" : "false"}
+        data-comments-collapsed={commentsCollapsed ? "true" : "false"}
         data-public-view={isPublicView ? "true" : "false"}
         data-comments-hidden={isPublicView && !hasUnresolvedThreads ? "true" : "false"}
         style={{ "--outline-width": `${isPublicView ? 0 : outlineCollapsed ? 36 : Math.round(outlineWidth)}px` } as React.CSSProperties}
@@ -4737,6 +4924,8 @@ export function DocumentWorkspace({
 
         {isPublicView && !hasUnresolvedThreads ? null : (
         <CommentRail
+          collapsed={commentsCollapsed}
+          onToggleCollapsed={() => setCommentsCollapsed((value) => !value)}
           threads={threads}
           orderedThreads={orderedThreads}
           activeThreadId={activeThreadId}

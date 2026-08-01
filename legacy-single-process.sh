@@ -25,7 +25,7 @@ for _ in $(seq 1 15); do
   if [ -z "$LISTENERS" ]; then
     break
   fi
-  echo "[gdocs-ai.sh] killing previous listener(s) on :$PORT: $LISTENERS"
+  echo "[legacy-single-process.sh] killing previous listener(s) on :$PORT: $LISTENERS"
   # shellcheck disable=SC2086
   kill $LISTENERS 2>/dev/null || true
   sleep 1
@@ -38,7 +38,7 @@ for _ in $(seq 1 15); do
   fi
 done
 if [ -n "$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)" ]; then
-  echo "[gdocs-ai.sh] port $PORT still occupied; refusing to build over a running server" >&2
+  echo "[legacy-single-process.sh] port $PORT still occupied; refusing to build over a running server" >&2
   exit 1
 fi
 
@@ -49,7 +49,7 @@ fi
 # side, so cloudflared is untouched.
 STALE_SERVERS=$(lsof -nP -iTCP:"$PORT" -sTCP:ESTABLISHED 2>/dev/null | awk -v pat=":$PORT->" 'NR>1 && index($9, pat) > 0 {print $2}' | sort -u || true)
 if [ -n "$STALE_SERVERS" ]; then
-  echo "[gdocs-ai.sh] killing stale server(s) still holding :$PORT connections: $STALE_SERVERS"
+  echo "[legacy-single-process.sh] killing stale server(s) still holding :$PORT connections: $STALE_SERVERS"
   # shellcheck disable=SC2086
   kill -9 $STALE_SERVERS 2>/dev/null || true
   sleep 1
@@ -65,10 +65,10 @@ DB_FILE="prisma/dev.db"
 if [ -f "$DB_FILE" ]; then
   mkdir -p backups
   BACKUP_FILE="backups/dev_$(date +%Y%m%d_%H%M%S).db"
-  echo "[gdocs-ai.sh] backing up $DB_FILE -> $BACKUP_FILE"
+  echo "[legacy-single-process.sh] backing up $DB_FILE -> $BACKUP_FILE"
   sqlite3 "$DB_FILE" ".backup '$BACKUP_FILE'"
   ls -t backups/dev_*.db 2>/dev/null | tail -n +4 | while read -r OLD; do
-    echo "[gdocs-ai.sh] pruning old backup $OLD"
+    echo "[legacy-single-process.sh] pruning old backup $OLD"
     rm -f "$OLD"
   done
 fi

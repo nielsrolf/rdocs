@@ -409,6 +409,10 @@ function TabBreakView({ editor, node, updateAttributes }: NodeViewProps) {
             }}
             placeholder="Untitled tab"
             spellCheck={false}
+            // Keep the input out of the tab order: it lives inside the editor
+            // DOM, so a Tab press the editor doesn't consume would otherwise
+            // move focus ("the cursor") into the tab heading. Click to rename.
+            tabIndex={-1}
             value={draft}
           />
         ) : (
@@ -419,6 +423,8 @@ function TabBreakView({ editor, node, updateAttributes }: NodeViewProps) {
             aria-label={`Copy link to tab ${title}`}
             className="tab-break-copy"
             onClick={() => void copyTabLink()}
+            // Out of the tab order for the same reason as the title input.
+            tabIndex={-1}
             title={copied ? "Copied!" : "Copy link to tab"}
             type="button"
           >

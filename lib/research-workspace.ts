@@ -13,6 +13,11 @@ export type LinkedRepository = {
   url: string | null;
   branch: string | null;
   workspace: string;
+  // The document whose directory actually holds the base workspace. Equal to
+  // the requested document id unless that document links a shared workspace
+  // (Document.workspaceDocumentId → a slack_channel document); then it is the
+  // target's id, and worktrees/merges/GC all happen under the target's dir.
+  workspaceDocumentId: string;
 };
 
 export type LinkedRepositoryWorktree = LinkedRepository & {
@@ -222,12 +227,48 @@ export function getGithubCommitUrl(repoUrl: string | null | undefined, commitSha
   return repoPath ? `https://github.com/${repoPath}/commit/${commitSha}` : null;
 }
 
+// Resolve the document whose directory holds the base workspace. A document
+// with `workspaceDocumentId` set shares the workspace of that target document
+// (a slack_channel doc) instead of having one of its own. Resolution is
+// exactly ONE level deep — the target's own workspaceDocumentId is ignored —
+// so links can never form cycles. A dangling target falls back to the
+// document's own workspace (logged, never fatal).
+export async function resolveWorkspaceDocumentId(documentId: string): Promise<string | null> {
+  const document = await db.document.findUnique({
+    where: { id: documentId },
+    select: { id: true, workspaceDocumentId: true }
+  });
+  if (!document) {
+    return null;
+  }
+  if (!document.workspaceDocumentId || document.workspaceDocumentId === documentId) {
+    return documentId;
+  }
+  const target = await db.document.findUnique({
+    where: { id: document.workspaceDocumentId },
+    select: { id: true }
+  });
+  if (!target) {
+    console.warn(
+      "[research-workspace] linked workspace document is gone; using own workspace",
+      { documentId, workspaceDocumentId: document.workspaceDocumentId }
+    );
+    return documentId;
+  }
+  return target.id;
+}
+
 export async function ensureLinkedRepository(
   documentId: string,
   options: { requireClean?: boolean; pushPendingChanges?: boolean; runnerUserId?: string | null } = {}
 ): Promise<LinkedRepository | null> {
+  const workspaceDocumentId = await resolveWorkspaceDocumentId(documentId);
+  if (!workspaceDocumentId) {
+    return null;
+  }
+
   const document = await db.document.findUnique({
-    where: { id: documentId },
+    where: { id: workspaceDocumentId },
     select: {
       id: true,
       repoUrl: true,
@@ -245,7 +286,11 @@ export async function ensureLinkedRepository(
   // pinned into the repo-local config below, so later background ops (salvage,
   // reaper merges) reuse the last resolved auth. Null → anonymous git.
   const githubAuth = document.repoUrl?.startsWith("https://github.com/")
-    ? await resolveGithubAuthForDocument(documentId, options.runnerUserId ?? null)
+    ? // Auth follows the WORKSPACE-owning document (its env / owner PAT): the
+      // workspace's git config is shared by every doc linking it, so it must
+      // not depend on which linking doc triggered this call. The triggering
+      // user's PAT still participates via runnerUserId.
+      await resolveGithubAuthForDocument(document.id, options.runnerUserId ?? null)
     : null;
 
   const workspace = document.repoWorkspace || getWorkspacePath(document.id, document.repoUrl);
@@ -311,7 +356,8 @@ export async function ensureLinkedRepository(
   return {
     url: document.repoUrl,
     branch: document.repoBranch,
-    workspace
+    workspace,
+    workspaceDocumentId: document.id
   };
 }
 
@@ -330,7 +376,9 @@ export async function ensureLinkedRepositoryWorktree(
     return null;
   }
 
-  const worktree = getWorktreePath(documentId, linked.url, runId);
+  // Worktrees live next to the base checkout — under the WORKSPACE-owning
+  // document's dir — so gcStaleWorktrees and `git worktree prune` see them.
+  const worktree = getWorktreePath(linked.workspaceDocumentId, linked.url, runId);
   const branchName = `ai/${slugifyBranchPart(documentId)}/${slugifyBranchPart(runId)}`;
   const baseRef = linked.branch && linked.url ? `origin/${linked.branch}` : "HEAD";
 

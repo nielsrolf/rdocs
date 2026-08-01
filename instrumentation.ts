@@ -19,6 +19,8 @@ export async function register() {
   const { sweepAbandonedAiRuns } = await import("@/lib/ai-runs");
   const { gcStaleWorktrees } = await import("@/lib/research-workspace");
 
+  const { reconcileRunContainers } = await import("@/lib/agent-runner/container-cleanup");
+
   const runSweep = async (label: string) => {
     const { failed, scanned } = await sweepAbandonedAiRuns();
     if (failed.length > 0) {
@@ -34,6 +36,17 @@ export async function register() {
         });
       });
     }
+    // Ghost-container sweep: remove agent containers whose run is terminal or
+    // unknown (e.g. the docker CLI died with a crashed/redeployed server while
+    // the container kept running). RUNNING/PENDING runs' containers are spared
+    // — they may belong to a draining blue/green sibling; if that sibling is
+    // truly dead, the silence reaper above fails the run and kills its
+    // container in the same pass.
+    await reconcileRunContainers().catch((error) => {
+      console.error(`[${label}] container reconcile failed`, {
+        error: error instanceof Error ? error.message : error
+      });
+    });
   };
 
   try {

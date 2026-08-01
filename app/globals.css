@@ -2786,8 +2786,9 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .editor-stage {
   --outline-width: 220px;
+  --comments-width: 320px;
   display: grid;
-  grid-template-columns: var(--outline-width) minmax(0, 980px) 320px;
+  grid-template-columns: var(--outline-width) minmax(0, 980px) var(--comments-width);
   justify-content: center;
   gap: 24px;
   align-items: start;
@@ -2797,11 +2798,15 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   --outline-width: 36px;
 }
 
+.editor-stage[data-comments-collapsed="true"] {
+  --comments-width: 36px;
+}
+
 /* Public/view-only renders no outline, so the grid children are just
    [editor-page-shell, CommentRail]. Don't reserve a leading outline track —
    otherwise the editor lands in a 0-width column and wraps one char per line. */
 .editor-stage[data-public-view="true"] {
-  grid-template-columns: minmax(0, 980px) 320px;
+  grid-template-columns: minmax(0, 980px) var(--comments-width);
 }
 
 .editor-stage[data-public-view="true"][data-comments-hidden="true"] {
@@ -2819,7 +2824,7 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   width: min(100%, 980px);
   min-height: calc(100vh - 168px);
   margin: 0 auto;
-  padding: 72px 96px;
+  padding: 44px 56px;
   position: relative;
   background: white;
 }
@@ -3511,6 +3516,64 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .comment-rail {
   position: relative;
+}
+
+/* Collapse/expand toggle for the comments sidebar (mirrors the outline toggle). */
+.comment-rail-header {
+  /* Floats just above the first card slot (cards start at top: 16px). */
+  position: absolute;
+  top: -8px;
+  right: 0;
+  z-index: 6;
+}
+
+.comment-rail-collapsed {
+  min-height: 0 !important;
+  padding: 0.4rem 0;
+  display: flex;
+  justify-content: center;
+  position: sticky;
+  top: 72px;
+}
+
+.comment-rail-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  padding: 0;
+}
+
+.comment-rail-header .comment-rail-toggle {
+  background: white;
+  border-color: var(--border);
+}
+
+.comment-rail-toggle:hover {
+  background: rgba(60, 64, 67, 0.08);
+  color: var(--text);
+}
+
+.comment-rail-count {
+  position: absolute;
+  top: -6px;
+  right: -7px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--accent, #1a73e8);
+  color: white;
+  font-size: 0.62rem;
+  font-weight: 600;
+  line-height: 15px;
+  text-align: center;
 }
 
 .comment-filter-panel {

@@ -4,6 +4,9 @@ import { aggregateReactions, type RawReaction } from "@/lib/reactions";
 import { parseSourceLinks, serializeSourceLinks } from "@/lib/sources";
 
 const VERSION_SNAPSHOT_COOLDOWN_MS = 45_000;
+// Versions store full content snapshots; without a cap a busy document grows
+// the SQLite file by megabytes per save until queries time out.
+const MAX_VERSIONS_PER_DOCUMENT = 50;
 const DEFAULT_THREAD_TAGS = ["Resolved", "Footnote"];
 
 export function normalizeThreadTags(tags: unknown) {
@@ -499,6 +502,9 @@ export async function maybeCreateVersionSnapshot(input: {
     latestVersion?.title === input.nextTitle && latestVersion?.content === input.nextContent;
 
   if (!input.force && (withinCooldown || snapshotMatchesLatest)) {
+    if (!previousIsArchived) {
+      await pruneVersionHistory(input.documentId);
+    }
     return;
   }
 
@@ -513,4 +519,19 @@ export async function maybeCreateVersionSnapshot(input: {
       aiRunId: input.aiRunId ?? null
     }
   });
+
+  await pruneVersionHistory(input.documentId);
+}
+
+async function pruneVersionHistory(documentId: string) {
+  const excess = await db.documentVersion.findMany({
+    where: { documentId },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { id: true },
+    skip: MAX_VERSIONS_PER_DOCUMENT
+  });
+
+  if (excess.length > 0) {
+    await db.documentVersion.deleteMany({ where: { id: { in: excess.map((row) => row.id) } } });
+  }
 }

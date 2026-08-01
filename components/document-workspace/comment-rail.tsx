@@ -86,7 +86,38 @@ function CommentReactions({
   );
 }
 
+function CommentsIcon() {
+  return (
+    <svg aria-hidden="true" focusable="false" height="16" viewBox="0 0 16 16" width="16">
+      <path
+        d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2v-7z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinejoin="round"
+        strokeWidth="1.4"
+      />
+    </svg>
+  );
+}
+
+function ChevronRightIcon() {
+  return (
+    <svg aria-hidden="true" focusable="false" height="14" viewBox="0 0 16 16" width="14">
+      <path
+        d="M6 3l5 5-5 5"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+    </svg>
+  );
+}
+
 export function CommentRail({
+  collapsed = false,
+  onToggleCollapsed,
   threads,
   orderedThreads,
   activeThreadId,
@@ -119,6 +150,8 @@ export function CommentRail({
   onEditComment,
   onToggleReaction
 }: {
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
   threads: ThreadView[];
   orderedThreads: ThreadView[];
   activeThreadId: string | null;
@@ -155,8 +188,40 @@ export function CommentRail({
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
 
+  if (collapsed) {
+    return (
+      <aside className="comment-rail comment-rail-collapsed" aria-label="Comments" data-tour="comment-rail">
+        <button
+          aria-label="Show comments"
+          className="comment-rail-toggle"
+          onClick={onToggleCollapsed}
+          title="Show comments"
+          type="button"
+        >
+          <CommentsIcon />
+          {threads.length > 0 ? (
+            <span className="comment-rail-count">{threads.length}</span>
+          ) : null}
+        </button>
+      </aside>
+    );
+  }
+
   return (
     <aside className="comment-rail" data-tour="comment-rail" style={{ minHeight: railHeight }}>
+      {onToggleCollapsed ? (
+        <div className="comment-rail-header">
+          <button
+            aria-label="Hide comments"
+            className="comment-rail-toggle"
+            onClick={onToggleCollapsed}
+            title="Hide comments"
+            type="button"
+          >
+            <ChevronRightIcon />
+          </button>
+        </div>
+      ) : null}
       {threads.length === 0 ? (
         <div className="comment-rail-empty">
           <p>

@@ -42,7 +42,7 @@ If the legacy single-process server still owns `:14141`, `deploy.sh` kills it
 `:14141` in its place. cloudflared config does not change. After bootstrap,
 every subsequent deploy is zero-downtime.
 
-`gdocs-ai.sh` remains as the legacy/emergency single-process path (it serves
+`legacy-single-process.sh` remains as the legacy/emergency single-process path (it serves
 `.next` on `:14141` directly); don't mix the two — if you fall back to it,
 stop Caddy (`kill $(cat .lb.pid)`) and both color servers first.
 

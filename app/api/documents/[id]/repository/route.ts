@@ -99,7 +99,10 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     data: {
       repoUrl,
       repoBranch,
-      repoWorkspace: repoUrl ? getWorkspacePath(id, repoUrl) : null
+      repoWorkspace: repoUrl ? getWorkspacePath(id, repoUrl) : null,
+      // Linking a repo gives the doc its own workspace again — mutually
+      // exclusive with sharing a Slack channel document's workspace.
+      ...(repoUrl ? { workspaceDocumentId: null } : {})
     },
     select: {
       repoUrl: true,

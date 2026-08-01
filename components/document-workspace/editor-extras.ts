@@ -82,6 +82,23 @@ export const MoveBlock = Extension.create({
   }
 });
 
+// Tab/Shift-Tab must never trigger the browser's focus navigation while
+// typing in the editor: the tab-title rename input lives inside the editor
+// DOM, so an unconsumed Tab press used to move focus into the tab heading
+// instead of indenting. Higher-priority bindings (ListItem/TaskItem sink &
+// lift, table cell navigation) run first; this low-priority fallback swallows
+// whatever they decline so the caret stays put.
+export const TabIndentGuard = Extension.create({
+  name: "tabIndentGuard",
+  priority: 50,
+  addKeyboardShortcuts() {
+    return {
+      Tab: () => true,
+      "Shift-Tab": () => true
+    };
+  }
+});
+
 const slashTabRegex = /^\/tab\s$/;
 
 export const SlashTab = Extension.create<{

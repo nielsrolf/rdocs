@@ -208,7 +208,7 @@ else
     [ -n "$LB_HOLDERS" ] && kill -9 $LB_HOLDERS 2>/dev/null || true
     sleep 1
     # Also reap SIGTERM survivors still holding established server-side sockets
-    # (the orphaned-next-server failure mode; see gdocs-ai.sh).
+    # (the orphaned-next-server failure mode; see legacy-single-process.sh).
     STALE=$(lsof -nP -iTCP:"$LB_PORT" -sTCP:ESTABLISHED 2>/dev/null | awk -v pat=":$LB_PORT->" 'NR>1 && index($9, pat) > 0 {print $2}' | sort -u || true)
     # shellcheck disable=SC2086
     [ -n "$STALE" ] && kill -9 $STALE 2>/dev/null || true

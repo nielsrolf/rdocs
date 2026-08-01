@@ -16,6 +16,7 @@ import type { AgentRunner, AgentRunOptions, MergeResolveJob } from "./index";
 import { toAgentJob } from "./index";
 import { buildContainerEnv, buildContainerRunArgs, serializeEnvFile } from "./container-args";
 import { HOST_SESSION_EXPIRED_MESSAGE, resolveContainerCredentialEnv } from "./agent-credential";
+import { agentRunSemaphore } from "./concurrency";
 import { RunCancelledError } from "./run-registry";
 
 // Transient container-level failures (spawn / exit-without-result) get one
@@ -134,6 +135,37 @@ export class ContainerRunner implements AgentRunner {
     const image = process.env.AGENT_CONTAINER_IMAGE || "gdocs-agent:local";
     const readOnly = process.env.AGENT_CONTAINER_READONLY !== "false";
 
+    // Concurrency cap: runs beyond AGENT_MAX_CONCURRENT_RUNS queue here (FIFO)
+    // instead of piling containers onto the docker VM. The slot is held across
+    // the auth/transient retries below — a retry is the same run, not a new one.
+    const semaphore = agentRunSemaphore();
+    if (semaphore.activeCount >= semaphore.limit && opts.onProgress) {
+      await Promise.resolve(
+        opts.onProgress({
+          role: "system",
+          message: `Queued: all ${semaphore.limit} agent slots are busy (position ${semaphore.queuedCount + 1} in queue).`
+        })
+      ).catch(() => {});
+    }
+    let releaseSlot: () => void;
+    try {
+      releaseSlot = await semaphore.acquire(opts.signal);
+    } catch (error) {
+      if (opts.signal?.aborted) throw new RunCancelledError();
+      throw error;
+    }
+    try {
+      return await this.spawnJobWithSlot(opts, { runtime, image, readOnly });
+    } finally {
+      releaseSlot();
+    }
+  }
+
+  private async spawnJobWithSlot(
+    opts: Parameters<ContainerRunner["spawnJob"]>[0],
+    ctx: { runtime: string; image: string; readOnly: boolean }
+  ): Promise<Record<string, unknown>> {
+    const { runtime, image, readOnly } = ctx;
     const tmpDir = await mkdtemp(path.join(os.tmpdir(), "gdocs-agent-"));
     const envFile = path.join(tmpDir, "env");
     const usesProviderKey = agentModelProvider(opts.agentModel) !== "anthropic";

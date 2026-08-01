@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { AI_RUN_EVENT_WINDOW } from "@/lib/ai-runs";
 import { getCurrentUser } from "@/lib/auth";
 import { cancelAiRun } from "@/lib/agent-runner/run-registry";
 import { db } from "@/lib/db";
@@ -58,7 +59,20 @@ export async function GET(request: Request, { params }: RouteContext) {
       replacementSources: true,
       suggestions: true,
       agentComments: true,
-      suggestOnly: true
+      suggestOnly: true,
+      // Full-window timeline for this run. The polled document list only ships
+      // events inline for the newest runs (`eventsOmitted` on the rest); the
+      // agent panel lazy-loads older conversations' events from here.
+      events: {
+        orderBy: [{ createdAt: "desc" as const }, { id: "desc" as const }],
+        take: AI_RUN_EVENT_WINDOW,
+        select: {
+          id: true,
+          role: true,
+          message: true,
+          createdAt: true
+        }
+      }
     }
   });
 
@@ -102,7 +116,9 @@ export async function GET(request: Request, { params }: RouteContext) {
       sources,
       suggestions,
       agentComments,
-      suggestOnly: run.suggestOnly
+      suggestOnly: run.suggestOnly,
+      // Flipped back to chronological order for rendering.
+      events: [...run.events].reverse()
     }
   });
 }

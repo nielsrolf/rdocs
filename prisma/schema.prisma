@@ -124,6 +124,13 @@ model Document {
   repoUrl         String?
   repoBranch      String?
   repoWorkspace   String?
+  // When set, this document has NO workspace of its own: all agent runs use
+  // the base workspace of the referenced document instead (a slack_channel
+  // document — the per-channel agent workspace). Mutually exclusive with
+  // repoUrl. Resolved exactly one level deep in ensureLinkedRepository; a
+  // dangling id falls back to the document's own local workspace. Plain string
+  // (no Prisma relation) so deleting the target never cascades here.
+  workspaceDocumentId String?
   activeAiRunId   String?
   agentModel      String?
   agentEffort     String?

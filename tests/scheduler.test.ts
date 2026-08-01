@@ -178,6 +178,15 @@ test("schedulerTick claims due tasks atomically and fires runs as the creator", 
   // Second tick: nothing due anymore.
   const again = await schedulerTick(new Date(), deps);
   assert.equal(again, 0);
+
+  // Tests share the REAL database with the running service. A recurring task
+  // left enabled here is picked up by the production scheduler the next
+  // morning and fires a real agent run (this happened: dozens of leaked
+  // "check the eval dashboard" tasks spawned 24 containers at 09:00). Always
+  // disable fixture tasks before the test ends.
+  await db.scheduledTask.updateMany({ where: { documentId: doc.id }, data: { disabledAt: new Date() } });
+  const cleaned = await db.scheduledTask.findFirst({ where: { documentId: doc.id, disabledAt: null } });
+  assert.equal(cleaned, null, "scheduler test must not leak enabled tasks into the shared DB");
 });
 
 test("one-shot tasks disable after firing; unlinked creators disable the task", async () => {

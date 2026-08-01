@@ -162,6 +162,8 @@ export type ActiveAiRunView = {
   /** Comments the agent has left so far ({threadId, findText}); grows mid-run. */
   agentComments?: Array<{ threadId: string; findText: string }>;
   events?: AiRunEventView[];
+  /** True when the poll dropped this run's events (older run) — the panel lazy-loads them from the run-detail route. */
+  eventsOmitted?: boolean;
 };
 
 export type AgentToast = {
