@@ -1038,6 +1038,63 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   border-color: #24222d;
 }
 
+.agent-term-prompt {
+  color: #7ee29a;
+  font-weight: 700;
+  user-select: none;
+}
+
+.agent-term-stderr {
+  color: #ff9d97;
+}
+
+.agent-tool-truncated {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.agent-file-view {
+  border: 1px solid rgba(117, 85, 204, 0.14);
+  border-radius: 6px;
+  background: #fbfaff;
+  overflow: auto;
+  max-height: 22rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.agent-file-line {
+  display: flex;
+}
+
+.agent-file-num {
+  flex: 0 0 auto;
+  min-width: 3ch;
+  padding: 0 0.6rem 0 0.5rem;
+  text-align: right;
+  color: var(--muted);
+  opacity: 0.65;
+  user-select: none;
+  border-right: 1px solid rgba(117, 85, 204, 0.12);
+}
+
+.agent-file-text {
+  flex: 1 1 auto;
+  padding: 0 0.6rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agent-file-view-add {
+  background: rgba(46, 133, 64, 0.05);
+}
+
+.agent-file-view-add .agent-file-text {
+  color: #1f6b38;
+}
+
 .agent-diff {
   border: 1px solid rgba(117, 85, 204, 0.14);
   border-radius: 6px;

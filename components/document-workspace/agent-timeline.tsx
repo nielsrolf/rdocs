@@ -244,6 +244,148 @@ function describeToolResult(resultText: string): string {
   return lines === 1 ? truncate(resultText, 40) : `${lines} lines`;
 }
 
+/**
+ * Decode the JSON string value of `key` inside `text`, tolerating text that is
+ * NOT valid JSON because the event was clipped at the storage cap mid-string.
+ * Returns everything decoded up to the truncation point. This is what lets
+ * historical runs (whose tool_use_result payloads were stored as possibly
+ * truncated JSON) still render file views, diffs and terminal output.
+ */
+export function extractJsonStringField(text: string, key: string): string | null {
+  const keyIdx = text.indexOf(`"${key}"`);
+  if (keyIdx === -1) return null;
+  let i = text.indexOf(":", keyIdx + key.length + 2);
+  if (i === -1) return null;
+  i++;
+  while (i < text.length && /\s/.test(text[i])) i++;
+  if (text[i] !== '"') return null;
+  i++;
+  let out = "";
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"') return out;
+    if (ch === "\\") {
+      const next = text[i + 1];
+      if (next === undefined) break;
+      if (next === "n") out += "\n";
+      else if (next === "t") out += "\t";
+      else if (next === "r") out += "\r";
+      else if (next === "u") {
+        const hex = text.slice(i + 2, i + 6);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) break;
+        out += String.fromCharCode(parseInt(hex, 16));
+        i += 6;
+        continue;
+      } else out += next;
+      i += 2;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  // Ran off the end: the stored event was clipped inside this string.
+  return out || null;
+}
+
+export type ToolResultData =
+  | { kind: "bash"; stdout: string; stderr: string; truncated: boolean }
+  | { kind: "file"; filePath: string | null; content: string; startLine: number; truncated: boolean }
+  | { kind: "editResult"; filePath: string | null; oldText: string; newText: string; truncated: boolean }
+  | { kind: "write"; filePath: string | null; content: string; created: boolean; truncated: boolean }
+  | { kind: "grep"; content: string; numMatches: number | null };
+
+/**
+ * Interpret a tool_result event for a known builtin tool. Payloads are the
+ * SDK's tool_use_result JSON — complete when small, clipped mid-JSON when
+ * large — so this parses strictly first and falls back to lenient
+ * field extraction on truncated payloads.
+ */
+export function parseToolResultData(toolName: string, message: string): ToolResultData | null {
+  const trimmed = message.trim();
+  if (!trimmed.startsWith("{")) return null;
+  let obj: Record<string, unknown> | null = null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      obj = parsed as Record<string, unknown>;
+    }
+  } catch {
+    obj = null;
+  }
+  const truncated = obj === null;
+  const str = (key: string): string | null => {
+    if (obj) {
+      const v = obj[key];
+      return typeof v === "string" ? v : null;
+    }
+    return extractJsonStringField(trimmed, key);
+  };
+
+  if (toolName === "Bash") {
+    const stdout = str("stdout");
+    const stderr = str("stderr");
+    if (stdout === null && stderr === null) return null;
+    return { kind: "bash", stdout: stdout ?? "", stderr: stderr ?? "", truncated };
+  }
+  if (toolName === "Read") {
+    let content: string | null = null;
+    let filePath: string | null = null;
+    let startLine = 1;
+    if (obj && obj.file && typeof obj.file === "object") {
+      const file = obj.file as Record<string, unknown>;
+      content = typeof file.content === "string" ? file.content : null;
+      filePath = typeof file.filePath === "string" ? file.filePath : null;
+      if (typeof file.startLine === "number") startLine = file.startLine;
+    } else if (!obj) {
+      content = extractJsonStringField(trimmed, "content");
+      filePath = extractJsonStringField(trimmed, "filePath");
+      const startMatch = trimmed.match(/"startLine"\s*:\s*(\d+)/);
+      if (startMatch) startLine = Number(startMatch[1]);
+    }
+    if (content === null) return null;
+    return { kind: "file", filePath, content, startLine, truncated };
+  }
+  if (toolName === "Edit" || toolName === "MultiEdit") {
+    const oldText = str("oldString");
+    const newText = str("newString");
+    if (oldText === null && newText === null) return null;
+    return {
+      kind: "editResult",
+      filePath: str("filePath"),
+      oldText: oldText ?? "",
+      newText: newText ?? "",
+      truncated
+    };
+  }
+  if (toolName === "Write") {
+    const content = str("content");
+    if (content === null) return null;
+    const type = str("type");
+    return { kind: "write", filePath: str("filePath"), content, created: type === "create", truncated };
+  }
+  if (toolName === "Grep" || toolName === "Glob") {
+    const content = str("content");
+    if (content === null) return null;
+    const matchCount = trimmed.match(/"numMatches"\s*:\s*(\d+)/);
+    return { kind: "grep", content, numMatches: matchCount ? Number(matchCount[1]) : null };
+  }
+  return null;
+}
+
+function describeToolResultData(data: ToolResultData): string {
+  if (data.kind === "bash") {
+    const out = data.stdout || data.stderr;
+    if (!out.trim()) return "done";
+    const lines = out.trimEnd().split("\n");
+    return lines.length === 1 ? truncate(lines[0], 40) : `${lines.length} lines`;
+  }
+  if (data.kind === "file") return `${data.content.split("\n").length} lines`;
+  if (data.kind === "editResult") return "applied";
+  if (data.kind === "write") return `${data.content.split("\n").length} lines written`;
+  if (data.numMatches !== null) return `${data.numMatches} matches`;
+  return `${data.content.split("\n").length} results`;
+}
+
 function DiffBlock({ diff }: { diff: ToolDiff }) {
   return (
     <div className="agent-diff">
@@ -290,18 +432,59 @@ function TodoBody({ todos }: { todos: Array<{ content?: unknown; status?: unknow
   );
 }
 
+/** Line-numbered read-only file viewer (Read / Write payloads). */
+function FileView({
+  content,
+  startLine,
+  tone
+}: {
+  content: string;
+  startLine: number;
+  tone?: "add";
+}) {
+  const lines = content.split("\n");
+  return (
+    <div className={cn("agent-file-view", tone === "add" && "agent-file-view-add")}>
+      {lines.map((line, i) => (
+        <div className="agent-file-line" key={i}>
+          <span className="agent-file-num">{startLine + i}</span>
+          <span className="agent-file-text">{line || " "}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TruncationNote({ truncated }: { truncated: boolean }) {
+  if (!truncated) return null;
+  return <div className="agent-tool-truncated">output clipped for the timeline</div>;
+}
+
 /** Custom expanded body for the builtin tools; null falls back to Input/Output JSON. */
-function renderToolBody(parsed: ParsedToolCall | null, resultText: string): ReactNode | null {
+function renderToolBody(
+  parsed: ParsedToolCall | null,
+  resultData: ToolResultData | null,
+  resultText: string
+): ReactNode | null {
   if (!parsed?.args) return null;
   const args = parsed.args;
   if (parsed.name === "Bash" && typeof args.command === "string") {
+    const bash = resultData?.kind === "bash" ? resultData : null;
     return (
       <>
         {typeof args.description === "string" && args.description ? (
           <div className="agent-tool-desc">{args.description}</div>
         ) : null}
-        <pre className="agent-tool-pre agent-tool-pre-terminal">{`$ ${args.command}`}</pre>
-        {resultText ? (
+        <pre className="agent-tool-pre agent-tool-pre-terminal">
+          <span className="agent-term-prompt">$ </span>
+          {args.command}
+          {bash && (bash.stdout || bash.stderr) ? "\n" : null}
+          {bash?.stdout ? bash.stdout.trimEnd() : null}
+          {bash?.stderr ? <span className="agent-term-stderr">{`\n${bash.stderr.trimEnd()}`}</span> : null}
+        </pre>
+        {bash ? (
+          <TruncationNote truncated={bash.truncated} />
+        ) : resultText ? (
           <>
             <div className="agent-tool-label">Output</div>
             <pre className="agent-tool-pre">{resultText}</pre>
@@ -310,12 +493,73 @@ function renderToolBody(parsed: ParsedToolCall | null, resultText: string): Reac
       </>
     );
   }
-  const diff = extractToolDiff(parsed);
-  if (diff) {
+  if (parsed.name === "Read" && resultData?.kind === "file") {
+    // A clipped payload loses its startLine field (it serializes after the
+    // content) — recover the position from the Read call's offset argument.
+    const startLine =
+      resultData.truncated && resultData.startLine === 1 && typeof args.offset === "number"
+        ? Math.max(1, args.offset)
+        : resultData.startLine;
     return (
       <>
-        {diff.filePath ? <div className="agent-tool-desc"><code>{diff.filePath}</code></div> : null}
-        <DiffBlock diff={diff} />
+        {resultData.filePath ? (
+          <div className="agent-tool-desc"><code>{resultData.filePath}</code></div>
+        ) : null}
+        <FileView content={resultData.content} startLine={startLine} />
+        <TruncationNote truncated={resultData.truncated} />
+      </>
+    );
+  }
+  if (parsed.name === "Write") {
+    const write = resultData?.kind === "write" ? resultData : null;
+    const content = write?.content ?? (typeof args.content === "string" ? args.content : null);
+    if (content !== null) {
+      return (
+        <>
+          {typeof args.file_path === "string" ? (
+            <div className="agent-tool-desc"><code>{args.file_path}</code></div>
+          ) : null}
+          <FileView content={content} startLine={1} tone="add" />
+          <TruncationNote truncated={write?.truncated ?? false} />
+        </>
+      );
+    }
+  }
+  if (parsed.name === "Edit" || parsed.name === "MultiEdit") {
+    // Prefer the RESULT payload: it exists for historical runs and, when the
+    // JSON parses cleanly, it is the complete edit (input summaries are
+    // clipped). Fall back to the input diff while the result is pending.
+    const fromResult = resultData?.kind === "editResult" ? resultData : null;
+    const diff: ToolDiff | null = fromResult
+      ? { filePath: fromResult.filePath, edits: [{ oldText: fromResult.oldText, newText: fromResult.newText }] }
+      : extractToolDiff(parsed);
+    if (diff) {
+      return (
+        <>
+          {diff.filePath ?? (typeof args.file_path === "string" ? args.file_path : null) ? (
+            <div className="agent-tool-desc">
+              <code>{diff.filePath ?? String(args.file_path)}</code>
+            </div>
+          ) : null}
+          <DiffBlock diff={diff} />
+          <TruncationNote truncated={fromResult?.truncated ?? false} />
+        </>
+      );
+    }
+  }
+  if ((parsed.name === "Grep" || parsed.name === "Glob") && resultData?.kind === "grep") {
+    return (
+      <>
+        <pre className="agent-tool-pre">{resultData.content}</pre>
+      </>
+    );
+  }
+  const inputDiff = extractToolDiff(parsed);
+  if (inputDiff) {
+    return (
+      <>
+        {inputDiff.filePath ? <div className="agent-tool-desc"><code>{inputDiff.filePath}</code></div> : null}
+        <DiffBlock diff={inputDiff} />
         {resultText ? (
           <>
             <div className="agent-tool-label">Output</div>
@@ -357,11 +601,18 @@ const AgentToolBlock = memo(
     ) : (
       <code className="agent-tool-arg">{truncate(call.message, 120)}</code>
     );
-    const resultText = result ? formatToolResult(result.message) : "";
-    const customBody = renderToolBody(parsed, resultText);
+    const resultData = result && parsed ? parseToolResultData(parsed.name, result.message) : null;
+    const resultText = result && !resultData ? formatToolResult(result.message) : "";
+    const customBody = renderToolBody(parsed, resultData, resultText);
     const argsPretty = parsed?.args ? JSON.stringify(parsed.args, null, 2) : null;
     const hasDetails = Boolean(customBody || argsPretty || resultText);
-    const meta = result ? describeToolResult(resultText) : running ? "running…" : null;
+    const meta = result
+      ? resultData
+        ? describeToolResultData(resultData)
+        : describeToolResult(resultText)
+      : running
+        ? "running…"
+        : null;
 
     return (
       <details className={cn("agent-tool", !hasDetails && "agent-tool-empty")}>
