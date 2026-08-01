@@ -404,11 +404,42 @@ function emitProgress(
   ).catch(() => null);
 }
 
+function clipText(value: unknown, limit: number) {
+  if (typeof value !== "string") return undefined;
+  return value.length <= limit ? value : `${value.slice(0, limit)}…`;
+}
+
 function toolInputSummary(name: string, value: unknown) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const input = value as Record<string, unknown>;
-    if (["Read", "Edit", "MultiEdit", "Write"].includes(name) && input.file_path) {
-      return compactValue({ file_path: input.file_path });
+    if (name === "Read" && input.file_path) {
+      const summary: Record<string, unknown> = { file_path: input.file_path };
+      if (typeof input.offset === "number") summary.offset = input.offset;
+      if (typeof input.limit === "number") summary.limit = input.limit;
+      return compactValue(summary);
+    }
+    // Keep a bounded slice of the edit payload so the agent-panel timeline can
+    // render a real diff. clipText per field keeps the whole JSON under the
+    // event size cap — a compactValue truncation mid-JSON would make the
+    // message unparseable and lose the diff entirely.
+    if (name === "Edit" && input.file_path) {
+      return compactValue({
+        file_path: input.file_path,
+        old_string: clipText(input.old_string, 400),
+        new_string: clipText(input.new_string, 400)
+      });
+    }
+    if (name === "MultiEdit" && input.file_path) {
+      const edits = Array.isArray(input.edits)
+        ? input.edits.slice(0, 5).map((edit) => {
+            const e = (edit && typeof edit === "object" ? edit : {}) as Record<string, unknown>;
+            return { old_string: clipText(e.old_string, 160), new_string: clipText(e.new_string, 160) };
+          })
+        : undefined;
+      return compactValue({ file_path: input.file_path, edits });
+    }
+    if (name === "Write" && input.file_path) {
+      return compactValue({ file_path: input.file_path, content: clipText(input.content, 600) });
     }
     if (["Grep", "Glob"].includes(name)) {
       const summary: Record<string, unknown> = {};

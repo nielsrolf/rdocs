@@ -961,6 +961,157 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   word-break: break-word;
 }
 
+/* --- Lifecycle step rows (run started / submitting / finishing) --- */
+
+.agent-step {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.12rem 0.5rem;
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+
+.agent-step-icon {
+  flex: 0 0 auto;
+  width: 0.85rem;
+  text-align: center;
+  font-size: 0.68rem;
+  color: #3f9d5f;
+}
+
+.agent-step-active .agent-step-icon {
+  color: #7555cc;
+  animation: agent-thinking-bounce 1.2s infinite ease-in-out both;
+}
+
+.agent-step-label {
+  flex: 0 1 auto;
+  letter-spacing: 0.01em;
+}
+
+.agent-step-time {
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+/* Consecutive steps read as one checklist. */
+.agent-timeline > .agent-step + .agent-step {
+  margin-top: -0.72rem;
+}
+
+/* --- Final reply badge --- */
+
+.agent-reply-chip {
+  display: inline-block;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: rgba(117, 85, 204, 0.12);
+  color: #7555cc;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.agent-bubble-reply .agent-bubble-body {
+  border-left: 3px solid rgba(117, 85, 204, 0.45);
+}
+
+/* --- Tool body: terminal + diff + todos --- */
+
+.agent-tool-desc {
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.agent-tool-prompt {
+  color: #3f9d5f;
+  font-weight: 700;
+}
+
+.agent-tool-pre-terminal {
+  background: #24222d;
+  color: #e6e2f2;
+  border-color: #24222d;
+}
+
+.agent-diff {
+  border: 1px solid rgba(117, 85, 204, 0.14);
+  border-radius: 6px;
+  overflow: auto;
+  max-height: 20rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.agent-diff-hunk + .agent-diff-hunk {
+  border-top: 1px dashed rgba(117, 85, 204, 0.25);
+}
+
+.agent-diff-line {
+  display: flex;
+  gap: 0.45rem;
+  padding: 0 0.6rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agent-diff-sign {
+  flex: 0 0 auto;
+  user-select: none;
+  font-weight: 700;
+}
+
+.agent-diff-del {
+  background: rgba(197, 34, 31, 0.08);
+  color: #8f2320;
+}
+
+.agent-diff-add {
+  background: rgba(46, 133, 64, 0.1);
+  color: #1f6b38;
+}
+
+.agent-todo-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+}
+
+.agent-todo-item {
+  display: flex;
+  gap: 0.45rem;
+  align-items: baseline;
+}
+
+.agent-todo-mark {
+  flex: 0 0 auto;
+  width: 0.9rem;
+  text-align: center;
+  color: var(--muted);
+}
+
+.agent-todo-completed {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.agent-todo-completed .agent-todo-mark {
+  color: #3f9d5f;
+  text-decoration: none;
+}
+
+.agent-todo-in_progress .agent-todo-mark {
+  color: #7555cc;
+}
+
 /* --- Thinking indicator --- */
 
 .agent-thinking {
@@ -2418,6 +2569,38 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   padding: 0.58rem 0.7rem;
 }
 
+/* The Slack-channel workspace link gets its own full-width row inside the
+   repo panel (the panel itself is a 3-column grid), separated by a divider. */
+.workspace-link-section {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(360px, 1.4fr);
+  gap: 0.85rem;
+  align-items: center;
+  border-top: 1px solid var(--border);
+  padding-top: 0.85rem;
+}
+
+.workspace-link-controls {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) auto;
+  gap: 0.55rem;
+  align-items: center;
+  width: 100%;
+}
+
+.workspace-link-controls select {
+  border-radius: 8px;
+  padding: 0.58rem 0.7rem;
+  min-width: 0;
+  width: 100%;
+}
+
+.workspace-link-controls button {
+  white-space: nowrap;
+  justify-self: start;
+}
+
 .dashboard-header-actions {
   display: flex;
   align-items: center;
@@ -2802,11 +2985,31 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   --comments-width: 36px;
 }
 
+/* Both sidebars collapsed: stop capping the page at 980px and let it fill
+   the shell (same width as the menu bar), minus the two 36px toggle strips. */
+.editor-stage[data-outline-collapsed="true"][data-comments-collapsed="true"] {
+  grid-template-columns: var(--outline-width) minmax(0, 1fr) var(--comments-width);
+}
+
+.editor-stage[data-outline-collapsed="true"][data-comments-collapsed="true"] .editor-page {
+  width: 100%;
+}
+
 /* Public/view-only renders no outline, so the grid children are just
    [editor-page-shell, CommentRail]. Don't reserve a leading outline track —
    otherwise the editor lands in a 0-width column and wraps one char per line. */
 .editor-stage[data-public-view="true"] {
   grid-template-columns: minmax(0, 980px) var(--comments-width);
+}
+
+/* Public view has no outline sidebar, so collapsing the comments alone frees
+   the full width. */
+.editor-stage[data-public-view="true"][data-comments-collapsed="true"] {
+  grid-template-columns: minmax(0, 1fr) var(--comments-width);
+}
+
+.editor-stage[data-public-view="true"][data-comments-collapsed="true"] .editor-page {
+  width: 100%;
 }
 
 .editor-stage[data-public-view="true"][data-comments-hidden="true"] {
@@ -4563,11 +4766,14 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   .hero-card,
   .dashboard-grid,
   .editor-stage,
-  .research-repo-panel {
+  .research-repo-panel,
+  .workspace-link-section {
     grid-template-columns: 1fr;
   }
 
-  .editor-stage[data-outline-collapsed="true"] {
+  .editor-stage[data-outline-collapsed="true"],
+  .editor-stage[data-outline-collapsed="true"][data-comments-collapsed="true"],
+  .editor-stage[data-public-view="true"][data-comments-collapsed="true"] {
     grid-template-columns: 1fr;
   }
 
@@ -4691,7 +4897,8 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
     align-items: stretch;
   }
 
-  .research-repo-controls {
+  .research-repo-controls,
+  .workspace-link-controls {
     grid-template-columns: 1fr;
   }
 

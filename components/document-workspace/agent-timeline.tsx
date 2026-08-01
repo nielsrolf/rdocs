@@ -45,6 +45,95 @@ export function isUsingProgressMessage(message: string): boolean {
   return /^Using\s+[A-Za-z][A-Za-z0-9_]*\.?\s*$/.test(message.trim());
 }
 
+/**
+ * Human-oriented tool label. MCP tools arrive as `mcp__server__tool_name`;
+ * render them as `server: tool name` so "mcp__gdocs__post_slack_message"
+ * reads as "gdocs: post slack message".
+ */
+export function toolDisplayName(name: string): string {
+  if (name.startsWith("mcp__")) {
+    const parts = name.split("__");
+    const server = parts[1] || "mcp";
+    const tool = parts.slice(2).join("__").replace(/_/g, " ") || "tool";
+    return `${server}: ${tool}`;
+  }
+  return name;
+}
+
+/** file edits extracted from Edit / MultiEdit / Write tool inputs, for diff rendering. */
+export type ToolDiff = {
+  filePath: string | null;
+  edits: Array<{ oldText: string; newText: string }>;
+};
+
+export function extractToolDiff(parsed: ParsedToolCall): ToolDiff | null {
+  const args = parsed.args;
+  if (!args) return null;
+  const filePath = typeof args.file_path === "string" ? args.file_path : null;
+  if (parsed.name === "Edit") {
+    const oldText = typeof args.old_string === "string" ? args.old_string : null;
+    const newText = typeof args.new_string === "string" ? args.new_string : null;
+    if (oldText === null && newText === null) return null;
+    return { filePath, edits: [{ oldText: oldText ?? "", newText: newText ?? "" }] };
+  }
+  if (parsed.name === "MultiEdit" && Array.isArray(args.edits)) {
+    const edits = (args.edits as unknown[])
+      .map((edit) => {
+        if (!edit || typeof edit !== "object") return null;
+        const e = edit as { old_string?: unknown; new_string?: unknown };
+        const oldText = typeof e.old_string === "string" ? e.old_string : null;
+        const newText = typeof e.new_string === "string" ? e.new_string : null;
+        if (oldText === null && newText === null) return null;
+        return { oldText: oldText ?? "", newText: newText ?? "" };
+      })
+      .filter((e): e is { oldText: string; newText: string } => Boolean(e));
+    if (edits.length === 0) return null;
+    return { filePath, edits };
+  }
+  if (parsed.name === "Write" && typeof args.content === "string") {
+    return { filePath, edits: [{ oldText: "", newText: args.content }] };
+  }
+  return null;
+}
+
+/**
+ * Known lifecycle plumbing emitted by agent-core as `system` events. These are
+ * progress markers, not agent prose — render them as quiet step rows instead
+ * of italic notes so they don't read like part of the conversation.
+ */
+export function lifecycleStepLabel(message: string): string | null {
+  const t = message.trim();
+  if (/^Starting Claude research agent\.?$/.test(t)) return "Run started";
+  if (/^Submitting final response\.?$/.test(t)) return "Submitting final response";
+  if (/^Preparing document update\.?$/.test(t)) return "Finishing up";
+  return null;
+}
+
+/**
+ * Interim Slack activity ("Posted to Slack: hi", "Shared plot.png to Slack")
+ * — turn into a tool-style presentation instead of a raw text row.
+ */
+function parseSlackActivity(message: string): { label: string; summary: string } | null {
+  const t = message.trim();
+  if (t.startsWith("Posted to Slack: ")) {
+    return { label: "slack message", summary: t.slice("Posted to Slack: ".length) };
+  }
+  const shared = t.match(/^Shared (.+) to Slack$/);
+  if (shared) {
+    return { label: "slack file", summary: shared[1] };
+  }
+  return null;
+}
+
+function readLineRange(args: Record<string, unknown>): string | null {
+  const offset = typeof args.offset === "number" ? args.offset : null;
+  const limit = typeof args.limit === "number" ? args.limit : null;
+  if (offset !== null && limit !== null) return `lines ${offset}–${offset + limit}`;
+  if (offset !== null) return `from line ${offset}`;
+  if (limit !== null) return `first ${limit} lines`;
+  return null;
+}
+
 export function renderToolSummary(parsed: ParsedToolCall): ReactNode {
   const { name, args, body } = parsed;
   if (!args) {
@@ -54,12 +143,18 @@ export function renderToolSummary(parsed: ParsedToolCall): ReactNode {
     return <code className="agent-tool-arg">{truncate(body, 80)}</code>;
   }
   if (name === "Bash" && typeof args.command === "string") {
-    return <code className="agent-tool-arg">{truncate(args.command, 90)}</code>;
+    return (
+      <code className="agent-tool-arg" title={typeof args.description === "string" ? args.description : undefined}>
+        <span className="agent-tool-prompt">$</span> {truncate(args.command, 90)}
+      </code>
+    );
   }
   if (typeof args.file_path === "string") {
+    const range = name === "Read" ? readLineRange(args) : null;
     return (
       <code className="agent-tool-arg" title={args.file_path}>
         {basename(args.file_path)}
+        {range ? <span className="agent-tool-arg-muted"> · {range}</span> : null}
       </code>
     );
   }
@@ -76,6 +171,24 @@ export function renderToolSummary(parsed: ParsedToolCall): ReactNode {
       <code className="agent-tool-arg">
         {truncate(`${args.pattern}${where}`, 80)}
       </code>
+    );
+  }
+  if ((name === "WebSearch" || name === "web_search") && typeof args.query === "string") {
+    return <code className="agent-tool-arg">{truncate(args.query, 80)}</code>;
+  }
+  if ((name === "WebFetch" || name === "web_fetch") && typeof args.url === "string") {
+    return <code className="agent-tool-arg">{truncate(args.url, 80)}</code>;
+  }
+  if ((name === "Task" || name === "Agent") && typeof args.description === "string") {
+    return <code className="agent-tool-arg">{truncate(args.description, 80)}</code>;
+  }
+  if (name === "TodoWrite" && Array.isArray(args.todos)) {
+    const todos = args.todos as Array<{ content?: unknown; status?: unknown }>;
+    const done = todos.filter((t) => t && t.status === "completed").length;
+    return (
+      <span className="agent-tool-arg agent-tool-arg-muted">
+        {done}/{todos.length} done
+      </span>
     );
   }
   if (typeof args.glob === "string") {
@@ -131,6 +244,93 @@ function describeToolResult(resultText: string): string {
   return lines === 1 ? truncate(resultText, 40) : `${lines} lines`;
 }
 
+function DiffBlock({ diff }: { diff: ToolDiff }) {
+  return (
+    <div className="agent-diff">
+      {diff.edits.map((edit, editIdx) => (
+        <div className="agent-diff-hunk" key={editIdx}>
+          {edit.oldText
+            ? edit.oldText.split("\n").map((line, i) => (
+                <div className="agent-diff-line agent-diff-del" key={`o${i}`}>
+                  <span className="agent-diff-sign">-</span>
+                  {line || " "}
+                </div>
+              ))
+            : null}
+          {edit.newText
+            ? edit.newText.split("\n").map((line, i) => (
+                <div className="agent-diff-line agent-diff-add" key={`n${i}`}>
+                  <span className="agent-diff-sign">+</span>
+                  {line || " "}
+                </div>
+              ))
+            : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TodoBody({ todos }: { todos: Array<{ content?: unknown; status?: unknown }> }) {
+  return (
+    <ul className="agent-todo-list">
+      {todos.map((todo, i) => {
+        const status = typeof todo?.status === "string" ? todo.status : "pending";
+        const content = typeof todo?.content === "string" ? todo.content : typeof (todo as { subject?: unknown })?.subject === "string" ? String((todo as { subject?: unknown }).subject) : "";
+        return (
+          <li className={cn("agent-todo-item", `agent-todo-${status}`)} key={i}>
+            <span className="agent-todo-mark" aria-hidden>
+              {status === "completed" ? "✓" : status === "in_progress" ? "◐" : "○"}
+            </span>
+            {content}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/** Custom expanded body for the builtin tools; null falls back to Input/Output JSON. */
+function renderToolBody(parsed: ParsedToolCall | null, resultText: string): ReactNode | null {
+  if (!parsed?.args) return null;
+  const args = parsed.args;
+  if (parsed.name === "Bash" && typeof args.command === "string") {
+    return (
+      <>
+        {typeof args.description === "string" && args.description ? (
+          <div className="agent-tool-desc">{args.description}</div>
+        ) : null}
+        <pre className="agent-tool-pre agent-tool-pre-terminal">{`$ ${args.command}`}</pre>
+        {resultText ? (
+          <>
+            <div className="agent-tool-label">Output</div>
+            <pre className="agent-tool-pre">{resultText}</pre>
+          </>
+        ) : null}
+      </>
+    );
+  }
+  const diff = extractToolDiff(parsed);
+  if (diff) {
+    return (
+      <>
+        {diff.filePath ? <div className="agent-tool-desc"><code>{diff.filePath}</code></div> : null}
+        <DiffBlock diff={diff} />
+        {resultText ? (
+          <>
+            <div className="agent-tool-label">Output</div>
+            <pre className="agent-tool-pre">{resultText}</pre>
+          </>
+        ) : null}
+      </>
+    );
+  }
+  if (parsed.name === "TodoWrite" && Array.isArray(args.todos)) {
+    return <TodoBody todos={args.todos as Array<{ content?: unknown; status?: unknown }>} />;
+  }
+  return null;
+}
+
 // One collapsed row per tool call, codex-style: the summary line carries the
 // tool name, its key argument and a size hint of the output; expanding reveals
 // the full input/output. Always a <details> element — a result arriving later
@@ -148,13 +348,19 @@ const AgentToolBlock = memo(
     running: boolean;
   }) {
     const parsed = parseToolMessage(call.message);
-    const name = parsed?.name ?? "tool";
-    const summary = parsed ? renderToolSummary(parsed) : (
+    const slack = !parsed ? parseSlackActivity(call.message) : null;
+    const name = parsed ? toolDisplayName(parsed.name) : slack ? slack.label : "tool";
+    const summary = parsed ? (
+      renderToolSummary(parsed)
+    ) : slack ? (
+      <code className="agent-tool-arg">{truncate(slack.summary, 120)}</code>
+    ) : (
       <code className="agent-tool-arg">{truncate(call.message, 120)}</code>
     );
     const resultText = result ? formatToolResult(result.message) : "";
+    const customBody = renderToolBody(parsed, resultText);
     const argsPretty = parsed?.args ? JSON.stringify(parsed.args, null, 2) : null;
-    const hasDetails = Boolean(argsPretty || resultText);
+    const hasDetails = Boolean(customBody || argsPretty || resultText);
     const meta = result ? describeToolResult(resultText) : running ? "running…" : null;
 
     return (
@@ -176,18 +382,22 @@ const AgentToolBlock = memo(
         </summary>
         {hasDetails ? (
           <div className="agent-tool-body">
-            {argsPretty ? (
+            {customBody ?? (
               <>
-                <div className="agent-tool-label">Input</div>
-                <pre className="agent-tool-pre">{argsPretty}</pre>
+                {argsPretty ? (
+                  <>
+                    <div className="agent-tool-label">Input</div>
+                    <pre className="agent-tool-pre">{argsPretty}</pre>
+                  </>
+                ) : null}
+                {resultText ? (
+                  <>
+                    <div className="agent-tool-label">Output</div>
+                    <pre className="agent-tool-pre">{resultText}</pre>
+                  </>
+                ) : null}
               </>
-            ) : null}
-            {resultText ? (
-              <>
-                <div className="agent-tool-label">Output</div>
-                <pre className="agent-tool-pre">{resultText}</pre>
-              </>
-            ) : null}
+            )}
           </div>
         ) : null}
       </details>
@@ -201,14 +411,22 @@ const AgentToolBlock = memo(
     prev.running === next.running
 );
 
-type GroupedAgentEvent =
+export type GroupedAgentEvent =
   | { kind: "message"; role: "user" | "agent" | "system" | "error"; event: AiRunEventView; key: string }
+  | { kind: "step"; label: string; event: AiRunEventView; key: string }
   | { kind: "tool"; call: AiRunEventView; result: AiRunEventView | null; key: string };
 
-function groupAgentEvents(events: AiRunEventView[]): GroupedAgentEvent[] {
+export function groupAgentEvents(events: AiRunEventView[]): GroupedAgentEvent[] {
   const out: GroupedAgentEvent[] = [];
+  let prevRaw: AiRunEventView | null = null;
   for (let i = 0; i < events.length; i++) {
     const ev = events[i];
+    // Exact consecutive duplicates (e.g. a submit retried after validation)
+    // add nothing but noise.
+    if (prevRaw && prevRaw.role === ev.role && prevRaw.message === ev.message) {
+      continue;
+    }
+    prevRaw = ev;
     if (ev.role === "tool") {
       // "Using Read." is a low-value progress signal — keep only when a richer
       // "Read: {...}" event isn't right next to it.
@@ -233,14 +451,43 @@ function groupAgentEvents(events: AiRunEventView[]): GroupedAgentEvent[] {
     if (ev.role === "tool_result") {
       continue;
     }
+    if (!ev.message.trim()) continue;
+    if (ev.role === "system") {
+      const step = lifecycleStepLabel(ev.message);
+      if (step) {
+        out.push({ kind: "step", label: step, event: ev, key: ev.id });
+        continue;
+      }
+    }
     const role: "user" | "agent" | "system" | "error" =
       ev.role === "user" || ev.role === "agent" || ev.role === "system" || ev.role === "error"
         ? ev.role
         : "agent";
-    if (!ev.message.trim()) continue;
     out.push({ kind: "message", role, event: ev, key: ev.id });
   }
   return out;
+}
+
+/**
+ * The agent's final reply is recorded as a plain `agent` event after the
+ * submit lifecycle steps — indistinguishable from interim commentary without
+ * this: the last agent message after the last "Submitting final response"
+ * step (and after the last user message) is the submitted reply. Returns the
+ * grouped index to badge, or -1 (e.g. while the run is still streaming).
+ */
+export function findFinalReplyIndex(grouped: GroupedAgentEvent[], isRunning: boolean): number {
+  if (isRunning) return -1;
+  let lastSubmit = -1;
+  let lastUser = -1;
+  let lastAgent = -1;
+  for (let i = 0; i < grouped.length; i++) {
+    const item = grouped[i];
+    if (item.kind === "step" && item.label === "Submitting final response") lastSubmit = i;
+    if (item.kind === "message" && item.role === "user") lastUser = i;
+    if (item.kind === "message" && item.role === "agent") lastAgent = i;
+  }
+  if (lastSubmit === -1 || lastSubmit < lastUser) return -1;
+  return lastAgent > lastSubmit ? lastAgent : -1;
 }
 
 export function AgentTimeline({
@@ -260,6 +507,7 @@ export function AgentTimeline({
 }) {
   const grouped = useMemo(() => groupAgentEvents(events), [events]);
   const isRunning = status === "RUNNING";
+  const finalReplyIdx = useMemo(() => findFinalReplyIndex(grouped, isRunning), [grouped, isRunning]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -289,6 +537,18 @@ export function AgentTimeline({
         if (item.kind === "tool") {
           return <AgentToolBlock call={item.call} key={item.key} result={item.result} running={isRunning} />;
         }
+        if (item.kind === "step") {
+          const active = isRunning && idx === grouped.length - 1;
+          return (
+            <div className={cn("agent-step", active && "agent-step-active")} key={item.key}>
+              <span className="agent-step-icon" aria-hidden>
+                {active ? "◌" : "✓"}
+              </span>
+              <span className="agent-step-label">{item.label}</span>
+              <span className="agent-step-time">{formatRelativeTime(item.event.createdAt)}</span>
+            </div>
+          );
+        }
         const { event, role } = item;
         const prev = idx > 0 ? grouped[idx - 1] : null;
         const isContinuation =
@@ -310,14 +570,20 @@ export function AgentTimeline({
           );
         }
         if (role === "agent") {
+          const isFinalReply = idx === finalReplyIdx;
           return (
             <div
-              className={cn("agent-bubble agent-bubble-agent", isContinuation && "agent-bubble-continuation")}
+              className={cn(
+                "agent-bubble agent-bubble-agent",
+                isContinuation && !isFinalReply && "agent-bubble-continuation",
+                isFinalReply && "agent-bubble-reply"
+              )}
               key={item.key}
             >
-              {!isContinuation ? (
+              {!isContinuation || isFinalReply ? (
                 <div className="agent-bubble-meta">
                   <span>Claude</span>
+                  {isFinalReply ? <span className="agent-reply-chip">reply</span> : null}
                   <span>{formatRelativeTime(event.createdAt)}</span>
                 </div>
               ) : null}

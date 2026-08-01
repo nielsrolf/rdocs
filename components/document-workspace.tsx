@@ -4628,15 +4628,17 @@ export function DocumentWorkspace({
                 </div>
               ) : null}
               {canManageAutomation && documentKind !== "slack_channel" ? (
-                <div>
-                  <strong>Slack channel workspace</strong>
-                  <p>
-                    {workspaceLink
-                      ? "Agent runs on this doc read and write the channel's shared workspace (repos checked out there included)."
-                      : "Instead of linking a repo, share the workspace of a Slack channel your claudex bot works in — this doc's agent then sees the same files and context."}
-                  </p>
+                <div className="workspace-link-section">
+                  <div>
+                    <strong>Slack channel workspace</strong>
+                    <p>
+                      {workspaceLink
+                        ? "Agent runs on this doc read and write the channel's shared workspace (repos checked out there included)."
+                        : "Instead of linking a repo, share the workspace of a Slack channel your claudex bot works in — this doc's agent then sees the same files and context."}
+                    </p>
+                  </div>
                   {workspaceLink ? (
-                    <div className="research-repo-controls">
+                    <div className="workspace-link-controls">
                       <button
                         className="ghost-button"
                         disabled={workspaceLinkBusy}
@@ -4647,7 +4649,7 @@ export function DocumentWorkspace({
                       </button>
                     </div>
                   ) : (
-                    <div className="research-repo-controls">
+                    <div className="workspace-link-controls">
                       <select
                         aria-label="Slack channel workspace"
                         onChange={(event) => setWorkspaceLinkChoice(event.target.value)}
