@@ -4,9 +4,13 @@ import { aggregateReactions, type RawReaction } from "@/lib/reactions";
 import { parseSourceLinks, serializeSourceLinks } from "@/lib/sources";
 
 const VERSION_SNAPSHOT_COOLDOWN_MS = 45_000;
-// Versions store full content snapshots; without a cap a busy document grows
-// the SQLite file by megabytes per save until queries time out.
-const MAX_VERSIONS_PER_DOCUMENT = 50;
+// Versions store full content snapshots; without retention a busy document
+// grows the SQLite file by megabytes per save until queries time out (the DB
+// once reached 39GB this way). Retention: keep every snapshot from the last
+// VERSION_RETENTION_FULL_MS, thin older ones to the newest per UTC day, and
+// hard-cap the total per document as a backstop against single-day bursts.
+const VERSION_RETENTION_FULL_MS = 24 * 60 * 60 * 1000;
+const MAX_VERSIONS_PER_DOCUMENT = 500;
 const DEFAULT_THREAD_TAGS = ["Resolved", "Footnote"];
 
 export function normalizeThreadTags(tags: unknown) {
@@ -523,15 +527,36 @@ export async function maybeCreateVersionSnapshot(input: {
   await pruneVersionHistory(input.documentId);
 }
 
-async function pruneVersionHistory(documentId: string) {
-  const excess = await db.documentVersion.findMany({
+export async function pruneVersionHistory(documentId: string, now: number = Date.now()) {
+  const versions = await db.documentVersion.findMany({
     where: { documentId },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    select: { id: true },
-    skip: MAX_VERSIONS_PER_DOCUMENT
+    select: { id: true, createdAt: true }
   });
 
-  if (excess.length > 0) {
-    await db.documentVersion.deleteMany({ where: { id: { in: excess.map((row) => row.id) } } });
+  const fullRetentionCutoff = now - VERSION_RETENTION_FULL_MS;
+  const seenDays = new Set<string>();
+  const excess: string[] = [];
+
+  versions.forEach((version, index) => {
+    if (index >= MAX_VERSIONS_PER_DOCUMENT) {
+      excess.push(version.id);
+      return;
+    }
+    if (version.createdAt.getTime() >= fullRetentionCutoff) {
+      return;
+    }
+    const day = version.createdAt.toISOString().slice(0, 10);
+    if (seenDays.has(day)) {
+      excess.push(version.id);
+    } else {
+      seenDays.add(day);
+    }
+  });
+
+  for (let index = 0; index < excess.length; index += 200) {
+    await db.documentVersion.deleteMany({ where: { id: { in: excess.slice(index, index + 200) } } });
   }
+
+  return excess.length;
 }
