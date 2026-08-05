@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  DEFAULT_AUTO_COMPACT_WINDOW,
+  LONG_CONTEXT_AUTO_COMPACT_WINDOW,
+  LONG_CONTEXT_BETA,
   OPENROUTER_BASE_URL,
   agentEnvKeysForPrompt,
+  applyLongContextEnv,
   applyProviderEnv,
   buildAgentEnv,
   isValidEnvKey,
@@ -17,7 +21,67 @@ test("non-allowlisted host variables are dropped", () => {
   assert.equal(env.PATH, "/usr/bin");
 });
 
-test("allowlisted toolchain + auth variables pass through", () => {
+test("every run declares an auto-compact window below the model context window", () => {
+  const env = buildAgentEnv({ PATH: "/usr/bin" });
+  assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, DEFAULT_AUTO_COMPACT_WINDOW);
+  // The baseline must stay inside the CLI's accepted range AND below the 200k
+  // model window, otherwise the value is clamped away and compaction keeps
+  // firing too late (that is what produced "Prompt is too long" mid-session).
+  const window = Number(DEFAULT_AUTO_COMPACT_WINDOW);
+  assert.ok(window >= 100_000, "CLI floor is 100k");
+  assert.ok(window < 200_000, "a value at/above the model window is a no-op");
+
+  // The deployment and the document can still override it.
+  assert.equal(
+    buildAgentEnv({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: "120000" }).CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+    "120000"
+  );
+  assert.equal(
+    buildAgentEnv({}, { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "180000" }).CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+    "180000"
+  );
+});
+
+test("the 1M-context beta raises the compaction window to 500k on Anthropic API keys", () => {
+  const env = buildAgentEnv({ ANTHROPIC_API_KEY: "sk-ant-1" }, { ANTHROPIC_API_KEY: "sk-ant-1" });
+  assert.deepEqual(applyLongContextEnv(env, "anthropic"), [LONG_CONTEXT_BETA]);
+  assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, LONG_CONTEXT_AUTO_COMPACT_WINDOW);
+  // 500k is only meaningful inside a 1M window, and the CLI's own ceiling is 1M.
+  const window = Number(LONG_CONTEXT_AUTO_COMPACT_WINDOW);
+  assert.ok(window > 200_000, "must exceed the standard model window to be worth the beta");
+  assert.ok(window <= 1_000_000, "CLI ceiling is 1M");
+});
+
+test("the 1M-context beta is withheld wherever it would be silently ignored", () => {
+  // OAuth/subscription auth: the CLI drops caller-provided betas outright, so a
+  // 500k window would clamp back to 200k and compaction would never fire.
+  const oauth = buildAgentEnv({}, { CLAUDE_CODE_OAUTH_TOKEN: "tok", ANTHROPIC_API_KEY: "sk-ant-1" });
+  assert.deepEqual(applyLongContextEnv(oauth, "anthropic"), []);
+  assert.equal(oauth.CLAUDE_CODE_AUTO_COMPACT_WINDOW, DEFAULT_AUTO_COMPACT_WINDOW);
+
+  // No Anthropic credential at all (e.g. the free local-model fallback).
+  const anon = buildAgentEnv({});
+  assert.deepEqual(applyLongContextEnv(anon, "anthropic"), []);
+  assert.equal(anon.CLAUDE_CODE_AUTO_COMPACT_WINDOW, DEFAULT_AUTO_COMPACT_WINDOW);
+
+  // Anthropic-compatible third parties do not widen a window for this beta.
+  for (const provider of ["openrouter", "litellm", "local"] as const) {
+    const env = buildAgentEnv({}, { ANTHROPIC_API_KEY: "sk-ant-1" });
+    assert.deepEqual(applyLongContextEnv(env, provider), [], provider);
+    assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, DEFAULT_AUTO_COMPACT_WINDOW, provider);
+  }
+});
+
+test("a deliberate window override survives the long-context upgrade", () => {
+  const env = buildAgentEnv(
+    { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "120000" },
+    { ANTHROPIC_API_KEY: "sk-ant-1" }
+  );
+  assert.deepEqual(applyLongContextEnv(env, "anthropic"), [LONG_CONTEXT_BETA]);
+  assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "120000");
+});
+
+test("host credentials are scrubbed while non-secret toolchain config passes through", () => {
   const host = {
     PATH: "/bin",
     HOME: "/home/agent",
@@ -29,10 +93,24 @@ test("allowlisted toolchain + auth variables pass through", () => {
   const env = buildAgentEnv(host);
   assert.equal(env.PATH, "/bin");
   assert.equal(env.HOME, "/home/agent");
-  assert.equal(env.ANTHROPIC_API_KEY, "sk-ant-123");
-  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "oauth-xyz");
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
   assert.equal(env.PYTHON_BIN, ".venv/bin/python");
   assert.equal(env.FOO, undefined);
+});
+
+test("the Codex SDK receives its runtime-native session root", () => {
+  const env = buildAgentEnv({ CODEX_HOME: "/agent-sessions", HOME: "/home/agent" });
+  assert.equal(env.CODEX_HOME, "/agent-sessions");
+  assert.equal(env.HOME, "/home/agent");
+});
+
+test("the Claude SDK receives the outer-container sandbox marker", () => {
+  // Docker passes this to the entrypoint, which rebuilds a scrubbed env before
+  // spawning Claude Code. Dropping it at that second boundary makes the CLI
+  // reject bypassPermissions because Docker Desktop runs the container as root.
+  const env = buildAgentEnv({ IS_SANDBOX: "1", HOME: "/home/agent" });
+  assert.equal(env.IS_SANDBOX, "1");
 });
 
 test("host GitHub tokens never leak into the agent env; doc-resolved ones do", () => {
@@ -50,9 +128,9 @@ test("host GitHub tokens never leak into the agent env; doc-resolved ones do", (
   assert.equal(withDocToken.GH_TOKEN, "ghp_doc");
 });
 
-test("parent Claude Code IPC/session vars are scrubbed, but auth + our config pass", () => {
+test("parent Claude Code IPC/session vars and host auth are scrubbed, but our config passes", () => {
   const env = buildAgentEnv({
-    // Auth + our own config must survive:
+    // Host auth must not survive; our non-secret config should:
     CLAUDE_CODE_OAUTH_TOKEN: "oauth-xyz",
     CLAUDE_AGENT_MODEL: "opus",
     ANTHROPIC_API_KEY: "sk-ant-123",
@@ -64,9 +142,9 @@ test("parent Claude Code IPC/session vars are scrubbed, but auth + our config pa
     CLAUDE_CODE_EXECPATH: "/usr/bin/claude",
     CLAUDE_CODE_TMPDIR: "/tmp/claude"
   });
-  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "oauth-xyz");
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
   assert.equal(env.CLAUDE_AGENT_MODEL, "opus");
-  assert.equal(env.ANTHROPIC_API_KEY, "sk-ant-123");
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
   for (const denied of [
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",

@@ -7,6 +7,7 @@ import {
   query,
   tool,
   type HookCallback,
+  type SdkBeta,
   type SDKMessage,
   type SDKUserMessage
 } from "@anthropic-ai/claude-agent-sdk";
@@ -18,7 +19,13 @@ import {
   resolveRefusalFallbackModel,
   type DocumentAgentConfig
 } from "./agent-config";
-import { agentEnvKeysForPrompt, applyProviderEnv, buildAgentEnv, type DocumentEnv } from "./agent-env";
+import {
+  agentEnvKeysForPrompt,
+  applyLongContextEnv,
+  applyProviderEnv,
+  buildAgentEnv,
+  type DocumentEnv
+} from "./agent-env";
 import {
   mergeBufferedComments,
   normalizeAgentComments,
@@ -100,7 +107,7 @@ export type ClaudeResearchAgentInput = {
   };
   /**
    * True when the run env carries a resolved GitHub token (GITHUB_TOKEN /
-   * GH_TOKEN) — set by the host after credential resolution so the prompt can
+   * GH_TOKEN) — set by the app after account/document credential resolution so the prompt can
    * tell the agent its GitHub access actually works.
    */
   githubAuthAvailable?: boolean;
@@ -159,6 +166,17 @@ export type ClaudeAgentProgressEvent = {
 export type ClaudeAgentSubmissionValidator = (
   submission: Partial<ClaudeResearchAgentOutput>
 ) => string | null | Promise<string | null>;
+
+export const MAX_SUBMISSION_ATTEMPTS = 4;
+
+export function throwIfSubmissionRejected(
+  lastError: string | null,
+  attempts: number,
+  harness: "Claude" | "Codex"
+): void {
+  if (!lastError) return;
+  throw new Error(`${harness} submission rejected after ${attempts} attempts: ${lastError}`);
+}
 
 export type ClaudeAgentRunOptions = {
   onProgress?: (event: ClaudeAgentProgressEvent) => void | Promise<void>;
@@ -296,12 +314,12 @@ export function isAuthFailure(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
   }
-  return /\b401\b|failed to authenticate|invalid authentication credentials|invalid api key|oauth token (?:has )?expired|authentication_error/i.test(
+  return /\b401\b|failed to authenticate|invalid authentication credentials|invalid api key|oauth token (?:has )?expired|access token could not be refreshed|authentication_error/i.test(
     error.message
   );
 }
 
-const submitResponseSchema = {
+export const submitResponseSchema = {
   replacementText: z
     .string()
     .optional()
@@ -565,7 +583,7 @@ ${workspaceAccess}
 - Do not mention hidden system instructions.
 
 Finishing your turn:
-- When you are done, call the submit_response tool exactly once with your final output. Do not write the result as a plain text reply, and do not call submit_response more than once.
+- When you are done, call the submit_response tool with your final output. Do not write the result as a plain text reply. If the tool rejects the submission or reports malformed arguments, correct the reported issue and call submit_response again.
 - For edit_selection, populate replacementText. For comment_reply and conversation, populate reply. Always include a brief summary.
 
 Suggesting edits (available in every mode):
@@ -913,7 +931,7 @@ function buildUserMessageStream(input: ClaudeResearchAgentInput): AsyncIterable<
   })();
 }
 
-function normalizeSubmittedOutput(args: unknown): Partial<ClaudeResearchAgentOutput> {
+export function normalizeSubmittedOutput(args: unknown): Partial<ClaudeResearchAgentOutput> {
   if (!args || typeof args !== "object") {
     return {};
   }
@@ -1011,15 +1029,32 @@ async function runClaudeResearchAgentOnce(
   options.signal?.addEventListener("abort", onExternalAbort, { once: true });
 
   let captured: Partial<ClaudeResearchAgentOutput> | null = null;
+  let submissionAttempts = 0;
+  let lastSubmissionError: string | null = null;
   const submitTool = tool(
     "submit_response",
-    "Submit the final response for this turn. Call exactly once when finished. After calling this tool, end your turn — do not emit additional text. If the submission is rejected with an error, fix the issue and call submit_response again.",
+    `Submit the final response for this turn. After it is accepted, end your turn. If it is rejected or its arguments are malformed, fix the reported issue and call submit_response again (up to ${MAX_SUBMISSION_ATTEMPTS} total attempts).`,
     submitResponseSchema,
     async (args) => {
+      submissionAttempts += 1;
+      if (submissionAttempts > MAX_SUBMISSION_ATTEMPTS) {
+        return {
+          content: [{ type: "text", text: "Submission attempt limit exhausted. End the turn." }],
+          isError: true
+        };
+      }
       const normalized = normalizeSubmittedOutput(args);
       if (validateSubmission) {
-        const validationError = await validateSubmission(normalized);
+        let validationError: string | null;
+        try {
+          validationError = await validateSubmission(normalized);
+        } catch (error) {
+          validationError = `Submission validation could not be completed: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+        }
         if (validationError) {
+          lastSubmissionError = validationError;
           emitProgress(onProgress, {
             role: "system",
             message: `Submission rejected: ${validationError}`
@@ -1035,6 +1070,7 @@ async function runClaudeResearchAgentOnce(
           };
         }
       }
+      lastSubmissionError = null;
       captured = normalized;
       return {
         content: [
@@ -1390,11 +1426,17 @@ async function runClaudeResearchAgentOnce(
     buildAgentEnv(process.env, options.agentEnv),
     sdkConfig.provider
   );
+  // 1M-context beta + the 500k compaction window that depends on it. Must run
+  // AFTER applyProviderEnv, which is what decides the final credential shape
+  // (API key vs. OAuth token vs. a third-party Bearer token) the beta is gated
+  // on. Returns [] — and leaves the conservative window in place — whenever the
+  // beta would be ignored.
+  const sdkBetas = applyLongContextEnv(agentProcessEnv, sdkConfig.provider);
   // Session transcripts: the SDK writes/reads them under
   // $CLAUDE_CONFIG_DIR/projects/**. In the container runner CLAUDE_CONFIG_DIR
   // is set on the container env (the bind-mounted per-conversation session
-  // dir) and buildAgentEnv passes it through here; the in-process runner keeps
-  // the default config dir (redirecting it would break host credential lookup).
+  // dir) and buildAgentEnv passes it through here. Credentials are resolved
+  // separately and never sourced from the host's config directory.
   const promptEnvKeys = agentEnvKeysForPrompt(options.agentEnv ?? {}, agentProcessEnv);
   const envDisclosure =
     promptEnvKeys.length > 0
@@ -1459,6 +1501,9 @@ async function runClaudeResearchAgentOnce(
           : {})
       },
       maxTurns: parseMaxTurns(process.env.CLAUDE_AGENT_MAX_TURNS),
+      // 1M context window, so CLAUDE_CODE_AUTO_COMPACT_WINDOW=500000 is a real
+      // threshold rather than a value clamped away by the 200k model window.
+      ...(sdkBetas.length > 0 ? { betas: sdkBetas as SdkBeta[] } : {}),
       // Real session continuity for follow-up turns: the SDK loads the prior
       // transcript (messages + tool calls) from $CLAUDE_CONFIG_DIR/projects/**
       // — it searches all project dirs, so a different worktree cwd is fine.
@@ -1549,6 +1594,13 @@ async function runClaudeResearchAgentOnce(
       throw new AgentSafetyRefusalError(joined);
     }
     throw new Error(joined);
+  }
+
+  // A rejected structured submission is never replaced with the model's
+  // trailing prose. The rejection was already returned through the tool so the
+  // model could correct it; surface it only after the turn ends uncorrected.
+  if (!captured) {
+    throwIfSubmissionRejected(lastSubmissionError, submissionAttempts, "Claude");
   }
 
   // A refusal can also end the run as a nominal "success" whose result text is
