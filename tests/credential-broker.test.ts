@@ -71,21 +71,15 @@ test("plans an x-api-key rewrite for an Anthropic API key run", () => {
   });
 });
 
-test("plans a bearer rewrite for an OAuth token, and host-oauth via secretRef", () => {
+test("plans a bearer rewrite only for an explicitly resolved OAuth token", () => {
   const oauth = planBrokerRewrites({ CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-x" }, "claude-sonnet-5", {
     hostEnv: {}
   });
   assert.equal(oauth[0].authMode, "authorization-bearer");
   assert.equal(oauth[0].secretValue, "sk-ant-oat-x");
 
-  const hostFallback = planBrokerRewrites({}, "claude-sonnet-5", {
-    hostEnv: {},
-    hostOAuthAvailable: true
-  });
-  assert.equal(hostFallback.length, 1);
-  assert.equal(hostFallback[0].envKey, "CLAUDE_CODE_OAUTH_TOKEN");
-  assert.equal(hostFallback[0].secretRef, "host-claude-oauth");
-  assert.equal(hostFallback[0].secretValue, undefined);
+  const noHostFallback = planBrokerRewrites({}, "claude-sonnet-5", { hostEnv: {} });
+  assert.deepEqual(noHostFallback, []);
 });
 
 test("brokers the active provider key (openrouter/litellm) plus OPENAI_API_KEY", () => {
@@ -298,6 +292,8 @@ test("proxy swaps the virtual bearer token for the real credential", async () =>
     assert.equal(seen.headers.authorization, "Bearer real-upstream-key");
     assert.equal(seen.headers["anthropic-beta"], "oauth-2025-04-20");
     assert.equal(seen.body, JSON.stringify({ hello: "world" }));
+    assert.equal(seen.headers["transfer-encoding"], undefined);
+    assert.equal(Number(seen.headers["content-length"]), Buffer.byteLength(seen.body));
   } finally {
     upstream.server.close();
   }

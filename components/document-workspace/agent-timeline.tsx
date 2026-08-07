@@ -103,7 +103,7 @@ export function extractToolDiff(parsed: ParsedToolCall): ToolDiff | null {
  */
 export function lifecycleStepLabel(message: string): string | null {
   const t = message.trim();
-  if (/^Starting Claude research agent\.?$/.test(t)) return "Run started";
+  if (/^Starting (?:Claude|Codex) research agent\.?$/.test(t)) return "Run started";
   if (/^Submitting final response\.?$/.test(t)) return "Submitting final response";
   if (/^Preparing document update\.?$/.test(t)) return "Finishing up";
   return null;
@@ -292,7 +292,20 @@ export type ToolResultData =
   | { kind: "file"; filePath: string | null; content: string; startLine: number; truncated: boolean }
   | { kind: "editResult"; filePath: string | null; oldText: string; newText: string; truncated: boolean }
   | { kind: "write"; filePath: string | null; content: string; created: boolean; truncated: boolean }
-  | { kind: "grep"; content: string; numMatches: number | null };
+  | { kind: "grep"; content: string; numMatches: number | null }
+  // Read of an image file. `base64` is only set when the stored payload is
+  // complete (small images) — screenshots overflow the event cap, leaving an
+  // unusable base64 prefix, so the renderer shows a placeholder instead.
+  | { kind: "image"; base64: string | null; truncated: boolean }
+  | {
+      kind: "taskOutput";
+      status: string | null;
+      description: string | null;
+      output: string;
+      exitCode: number | null;
+      retrievalStatus: string | null;
+      truncated: boolean;
+    };
 
 /**
  * Interpret a tool_result event for a known builtin tool. Payloads are the
@@ -328,6 +341,17 @@ export function parseToolResultData(toolName: string, message: string): ToolResu
     return { kind: "bash", stdout: stdout ?? "", stderr: stderr ?? "", truncated };
   }
   if (toolName === "Read") {
+    // Image reads: {"type":"image","file":{"base64":"..."}}. The base64 of a
+    // real screenshot always overflows the event cap, so a complete payload
+    // (renderable inline) is the exception, not the rule.
+    if ((obj ? obj.type === "image" : str("type") === "image")) {
+      let base64: string | null = null;
+      if (obj && obj.file && typeof obj.file === "object") {
+        const file = obj.file as Record<string, unknown>;
+        if (typeof file.base64 === "string") base64 = file.base64;
+      }
+      return { kind: "image", base64, truncated };
+    }
     let content: string | null = null;
     let filePath: string | null = null;
     let startLine = 1;
@@ -369,6 +393,35 @@ export function parseToolResultData(toolName: string, message: string): ToolResu
     const matchCount = trimmed.match(/"numMatches"\s*:\s*(\d+)/);
     return { kind: "grep", content, numMatches: matchCount ? Number(matchCount[1]) : null };
   }
+  if (toolName === "TaskOutput") {
+    // {"retrieval_status": "...", "task": {"task_id", "status", "description", "output", "exitCode"}}
+    const task = obj && obj.task && typeof obj.task === "object" ? (obj.task as Record<string, unknown>) : null;
+    const field = (key: string): string | null => {
+      if (task) {
+        const v = task[key];
+        return typeof v === "string" ? v : null;
+      }
+      if (obj) return null;
+      return extractJsonStringField(trimmed, key);
+    };
+    const output = field("output");
+    const status = field("status");
+    if (output === null && status === null) return null;
+    const exitMatch = trimmed.match(/"exitCode"\s*:\s*(-?\d+)/);
+    return {
+      kind: "taskOutput",
+      status,
+      description: field("description"),
+      output: output ?? "",
+      exitCode: exitMatch ? Number(exitMatch[1]) : null,
+      retrievalStatus: obj
+        ? typeof obj.retrieval_status === "string"
+          ? obj.retrieval_status
+          : null
+        : extractJsonStringField(trimmed, "retrieval_status"),
+      truncated
+    };
+  }
   return null;
 }
 
@@ -382,6 +435,14 @@ function describeToolResultData(data: ToolResultData): string {
   if (data.kind === "file") return `${data.content.split("\n").length} lines`;
   if (data.kind === "editResult") return "applied";
   if (data.kind === "write") return `${data.content.split("\n").length} lines written`;
+  if (data.kind === "image") return "image";
+  if (data.kind === "taskOutput") {
+    if (data.retrievalStatus === "timeout") return "still running";
+    if (data.status === "completed") {
+      return data.exitCode !== null && data.exitCode !== 0 ? `exit ${data.exitCode}` : "completed";
+    }
+    return data.status ?? "done";
+  }
   if (data.numMatches !== null) return `${data.numMatches} matches`;
   return `${data.content.split("\n").length} results`;
 }
@@ -460,6 +521,25 @@ function TruncationNote({ truncated }: { truncated: boolean }) {
   return <div className="agent-tool-truncated">output clipped for the timeline</div>;
 }
 
+/** MCP tools whose payload is a human-readable message (show it, not the ack). */
+export function slackMessageField(name: string): "text" | null {
+  return name.endsWith("post_slack_message") ? "text" : null;
+}
+
+const IMAGE_MEDIA_TYPES: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml"
+};
+
+function imageMediaTypeFromPath(filePath: string | null): string {
+  const ext = filePath?.match(/\.([a-zA-Z0-9]+)$/)?.[1]?.toLowerCase() ?? "";
+  return IMAGE_MEDIA_TYPES[ext] ?? "image/png";
+}
+
 /** Custom expanded body for the builtin tools; null falls back to Input/Output JSON. */
 function renderToolBody(
   parsed: ParsedToolCall | null,
@@ -468,6 +548,12 @@ function renderToolBody(
 ): ReactNode | null {
   if (!parsed?.args) return null;
   const args = parsed.args;
+  const messageField = slackMessageField(parsed.name);
+  if (messageField && typeof args[messageField] === "string") {
+    // The interesting content is the MESSAGE the agent sent, not the tool's
+    // "Posted." acknowledgement.
+    return <MarkdownBody body={String(args[messageField])} className="agent-tool-message markdown-body" />;
+  }
   if (parsed.name === "Bash" && typeof args.command === "string") {
     const bash = resultData?.kind === "bash" ? resultData : null;
     return (
@@ -490,6 +576,27 @@ function renderToolBody(
             <pre className="agent-tool-pre">{resultText}</pre>
           </>
         ) : null}
+      </>
+    );
+  }
+  if (parsed.name === "Read" && resultData?.kind === "image") {
+    const filePath = typeof args.file_path === "string" ? args.file_path : null;
+    return (
+      <>
+        {filePath ? (
+          <div className="agent-tool-desc"><code>{filePath}</code></div>
+        ) : null}
+        {resultData.base64 ? (
+          <img
+            alt={filePath ? basename(filePath) : "image read by the agent"}
+            className="agent-tool-image"
+            src={`data:${imageMediaTypeFromPath(filePath)};base64,${resultData.base64}`}
+          />
+        ) : (
+          <div className="agent-tool-image-placeholder">
+            <span aria-hidden>🖼</span> Image file — preview not stored in the timeline
+          </div>
+        )}
       </>
     );
   }
@@ -546,6 +653,26 @@ function renderToolBody(
         </>
       );
     }
+  }
+  if (parsed.name === "TaskOutput" && resultData?.kind === "taskOutput") {
+    const statusLine = [
+      resultData.description,
+      resultData.status ? `status: ${resultData.status}` : null,
+      resultData.exitCode !== null ? `exit ${resultData.exitCode}` : null
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    return (
+      <>
+        {statusLine ? <div className="agent-tool-desc">{statusLine}</div> : null}
+        {resultData.output.trim() ? (
+          <pre className="agent-tool-pre agent-tool-pre-terminal">{resultData.output.trimEnd()}</pre>
+        ) : (
+          <div className="agent-tool-desc">No output yet.</div>
+        )}
+        <TruncationNote truncated={resultData.truncated} />
+      </>
+    );
   }
   if ((parsed.name === "Grep" || parsed.name === "Glob") && resultData?.kind === "grep") {
     return (
@@ -609,7 +736,10 @@ const AgentToolBlock = memo(
     const meta = result
       ? resultData
         ? describeToolResultData(resultData)
-        : describeToolResult(resultText)
+        : parsed && slackMessageField(parsed.name)
+          ? // The "Posted." ack is tool plumbing; the body shows the message.
+            "posted"
+          : describeToolResult(resultText)
       : running
         ? "running…"
         : null;
@@ -741,13 +871,19 @@ export function findFinalReplyIndex(grouped: GroupedAgentEvent[], isRunning: boo
   return lastAgent > lastSubmit ? lastAgent : -1;
 }
 
+export function agentDisplayName(model: string | null | undefined): string {
+  return model?.toLowerCase().startsWith("codex") ? "Codex" : "Claude";
+}
+
 export function AgentTimeline({
+  agentName = "Claude",
   events,
   progress,
   status,
   intro,
   outro
 }: {
+  agentName?: string;
   events: AiRunEventView[];
   progress: string | null;
   status: string;
@@ -833,7 +969,7 @@ export function AgentTimeline({
             >
               {!isContinuation || isFinalReply ? (
                 <div className="agent-bubble-meta">
-                  <span>Claude</span>
+                  <span>{agentName}</span>
                   {isFinalReply ? <span className="agent-reply-chip">reply</span> : null}
                   <span>{formatRelativeTime(event.createdAt)}</span>
                 </div>

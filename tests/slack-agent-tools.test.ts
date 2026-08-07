@@ -11,6 +11,7 @@ const BOT = "UBOT";
 
 // C_BOTH: bot + alice + bob; C_ALICE: private, bot + alice only; C_NOBOT: alice only.
 const uploads: Array<{ channel: string; threadTs?: string; filename: string; size: number }> = [];
+const postedMessages: Array<{ channel: string; threadTs?: string; text: string }> = [];
 
 function makeSlack(): SlackClient {
   const membership: Record<string, string[]> = {
@@ -23,7 +24,8 @@ function makeSlack(): SlackClient {
     C_ALICE: [{ ts: "2.0", user: "UALICE", text: "secret plan" }]
   };
   return {
-    async postMessage() {
+    async postMessage(args) {
+      postedMessages.push(args);
       return { ts: null };
     },
     async postEphemeral() {},
@@ -291,4 +293,32 @@ test("send_file uploads into the run's own thread after a membership check", asy
     { claims: { slackTeamId: teamId, slackUserId: "UBOB", aiRunId: runPrivate.id }, slack, botUserId: BOT }
   );
   assert.equal(denied.ok, false);
+});
+
+test("post_slack_message posts only into the run's own thread", async () => {
+  const crypto = await import("node:crypto");
+  const { db } = await import("../lib/db");
+  const user = await db.user.create({
+    data: { email: `psm-${crypto.randomUUID()}@example.com`, name: "psm", passwordHash: "x" }
+  });
+  const doc = await db.document.create({ data: { ownerId: user.id, title: "x", content: "{}" } });
+  const run = await db.aiRun.create({
+    data: { documentId: doc.id, triggerType: "SLACK_MENTION", triggerId: "C_BOTH:1.0", instruction: "x" }
+  });
+  const before = postedMessages.length;
+  const result = await handleSlackAgentToolCall(
+    { tool: "post_slack_message", args: { text: "**Update**: checking another thread" } },
+    {
+      claims: { slackTeamId: "T1", slackUserId: "UALICE", aiRunId: run.id },
+      slack: makeSlack(),
+      botUserId: BOT
+    }
+  );
+  assert.equal(result.ok, true);
+  assert.equal(postedMessages.length, before + 1);
+  assert.deepEqual(postedMessages.at(-1), {
+    channel: "C_BOTH",
+    threadTs: "1.0",
+    text: "*Update*: checking another thread"
+  });
 });

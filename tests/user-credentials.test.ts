@@ -135,7 +135,7 @@ test("resolution precedence: owner credential fills in when doc env has none", (
   assert.equal(env.ANTHROPIC_API_KEY, "sk-ant-owner");
 });
 
-test("resolution precedence: no owner credential leaves env untouched for host fallback", () => {
+test("resolution precedence: no owner credential leaves env untouched for requirement handling", () => {
   const env = applyOwnerCredentialEnv({ FOO: "bar" }, null, "claude-sonnet-5");
   assert.deepEqual(env, { FOO: "bar" });
 });
@@ -192,6 +192,24 @@ test("owner's litellm key fills in when the doc env has none", () => {
   assert.equal(env.LITELLM_BASE_URL, "http://host.docker.internal:9274");
 });
 
+test("Codex native OpenAI and LiteLLM models receive only their matching provider key", () => {
+  const openai = applyOwnerCredentialEnv(
+    {},
+    { kind: "api_key", value: "sk-openai-owner" },
+    "codex/openai/gpt-5.6-terra"
+  );
+  assert.equal(openai.OPENAI_API_KEY, "sk-openai-owner");
+  assert.equal(openai.ANTHROPIC_API_KEY, undefined);
+
+  const litellm = applyOwnerCredentialEnv(
+    { LITELLM_BASE_URL: "http://litellm:4000" },
+    { kind: "api_key", value: "sk-litellm-owner" },
+    "codex/litellm/anthropic/claude-opus-4-8"
+  );
+  assert.equal(litellm.LITELLM_API_KEY, "sk-litellm-owner");
+  assert.equal(litellm.ANTHROPIC_API_KEY, undefined);
+});
+
 test("doc env litellm key wins over the owner's per-user key", () => {
   const env = applyOwnerCredentialEnv(
     { LITELLM_API_KEY: "sk-litellm-doc" },
@@ -219,20 +237,28 @@ test("providerKeyRequirementError: third-party model with no key anywhere → ac
   );
 });
 
-test("providerKeyRequirementError: null when the key is present or the model is Anthropic", () => {
+test("providerKeyRequirementError: native Codex needs OpenAI key; valid providers pass", () => {
   assert.equal(providerKeyRequirementError({ OPENROUTER_API_KEY: "sk-or-v1-x" }, "openrouter/openai/gpt-5.2"), null);
   assert.equal(providerKeyRequirementError({ LITELLM_API_KEY: "sk-x" }, "litellm/openai/gpt-5"), null);
   assert.equal(providerKeyRequirementError({}, "claude-sonnet-5"), null);
   assert.equal(providerKeyRequirementError({}, null), null);
+  assert.match(
+    providerKeyRequirementError({}, "codex/openai/gpt-5.6-terra") ?? "",
+    /OPENAI_API_KEY.*AI settings/i
+  );
+  assert.equal(
+    providerKeyRequirementError({ OPENAI_API_KEY: "sk-openai" }, "codex/openai/gpt-5.6-terra"),
+    null
+  );
+  assert.equal(
+    providerKeyRequirementError({ LITELLM_API_KEY: "sk-x" }, "codex/litellm/anthropic/claude-opus-4-8"),
+    null
+  );
 });
 
-// --- phase-4 flag behavior -------------------------------------------------
+// --- explicit credential requirement ---------------------------------------
 
-test("credentialRequirementError: off by default (no flag)", () => {
-  assert.equal(credentialRequirementError({}, "claude-sonnet-5", null, {}), null);
-});
-
-test("credentialRequirementError: flag on + no credential → clear error", () => {
+test("credentialRequirementError: no credential always gives a clear error", () => {
   const msg = credentialRequirementError({}, "claude-sonnet-5", null, {
     AGENT_REQUIRE_USER_CREDENTIAL: "1"
   });
@@ -257,52 +283,28 @@ test("credentialRequirementError: flag on + openrouter model → ok (uses OPENRO
   );
 });
 
-// --- host-fallback owner allowlist ------------------------------------------
-
-const ALLOWLIST = { AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS: "owner@example.com, Second@Example.com" };
-
-test("host allowlist: non-allowlisted owner without credential → error (no host fallback)", () => {
-  const msg = credentialRequirementError({}, "claude-sonnet-5", "stranger@example.com", ALLOWLIST);
-  assert.match(msg ?? "", /Connect an Anthropic credential/i);
-});
-
-test("host allowlist: allowlisted owner without credential → ok (host fallback allowed)", () => {
-  assert.equal(credentialRequirementError({}, "claude-sonnet-5", "owner@example.com", ALLOWLIST), null);
-});
-
-test("host allowlist: matching is case- and whitespace-insensitive", () => {
-  assert.equal(
-    credentialRequirementError({}, "claude-sonnet-5", "  second@example.COM ", ALLOWLIST),
-    null
+test("host allowlist settings cannot enable fallback, while an account credential works", () => {
+  const hostEnv = { AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS: "owner@example.com" };
+  assert.match(
+    credentialRequirementError({}, "claude-sonnet-5", "owner@example.com", hostEnv) ?? "",
+    /Connect an Anthropic credential/i
   );
-});
-
-test("host allowlist: unknown owner email (null) → error when allowlist is set", () => {
-  const msg = credentialRequirementError({}, "claude-sonnet-5", null, ALLOWLIST);
-  assert.match(msg ?? "", /Connect an Anthropic credential/i);
-});
-
-test("host allowlist: non-allowlisted owner WITH a credential → ok (their own key is used)", () => {
   assert.equal(
     credentialRequirementError(
       { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-x" },
       "claude-sonnet-5",
       "stranger@example.com",
-      ALLOWLIST
+      hostEnv
     ),
     null
   );
 });
 
-test("host allowlist: openrouter model bypasses the allowlist", () => {
+test("openrouter model bypasses the Anthropic requirement", () => {
   assert.equal(
-    credentialRequirementError({}, "openrouter/openai/gpt-5.2", "stranger@example.com", ALLOWLIST),
+    credentialRequirementError({}, "openrouter/openai/gpt-5.2", "stranger@example.com", {}),
     null
   );
-});
-
-test("host allowlist: unset → host fallback stays open for everyone (back-compat)", () => {
-  assert.equal(credentialRequirementError({}, "claude-sonnet-5", "stranger@example.com", {}), null);
 });
 
 test("litellm models never receive the owner's Anthropic credential", () => {

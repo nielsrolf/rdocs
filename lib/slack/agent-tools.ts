@@ -11,10 +11,12 @@
 
 import { db } from "@/lib/db";
 import type { SlackToolsClaims } from "@/lib/slack/link-token";
+import { markdownToMrkdwn } from "@/lib/slack/mrkdwn";
 import type { SlackClient, SlackMessage } from "@/lib/slack/web";
 
 export type SlackAgentToolRequest = {
   tool:
+    | "post_slack_message"
     | "list_slack_channels"
     | "read_slack_channel"
     | "read_slack_thread"
@@ -84,6 +86,25 @@ export async function handleSlackAgentToolCall(
   context: { claims: SlackToolsClaims; slack: SlackClient; botUserId: string }
 ): Promise<SlackAgentToolResult> {
   const { claims, slack, botUserId } = context;
+
+  if (request.tool === "post_slack_message") {
+    const run = await db.aiRun.findUnique({
+      where: { id: claims.aiRunId },
+      select: { triggerId: true }
+    });
+    if (!run?.triggerId) return { ok: false, text: "This run has no Slack conversation to post into." };
+    const [channel, rawThreadTs] = run.triggerId.split(":", 2);
+    const denied = await assertReadable(slack, botUserId, claims, channel);
+    if (denied) return { ok: false, text: denied };
+    const text = typeof request.args.text === "string" ? request.args.text.trim() : "";
+    if (!text) return { ok: false, text: "text is required." };
+    await slack.postMessage({
+      channel,
+      ...(rawThreadTs && rawThreadTs !== "dm" ? { threadTs: rawThreadTs } : {}),
+      text: markdownToMrkdwn(text.slice(0, 2000))
+    });
+    return { ok: true, text: "Posted. Do not repeat this update in the final reply." };
+  }
 
   if (request.tool === "recent_activity") {
     // Cross-project activity feed for the DM overview agent. Visibility is the

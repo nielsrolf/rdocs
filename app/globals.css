@@ -1054,6 +1054,35 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   font-style: italic;
 }
 
+/* Inline preview of an image the agent Read (data URI, small images only). */
+.agent-tool-image {
+  display: block;
+  max-width: 100%;
+  max-height: 20rem;
+  border: 1px solid rgba(117, 85, 204, 0.14);
+  border-radius: 6px;
+}
+
+.agent-tool-image-placeholder {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px dashed rgba(117, 85, 204, 0.3);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+/* Message payload of Slack-posting tools, rendered as prose instead of JSON. */
+.agent-tool-message {
+  padding: 0.45rem 0.6rem;
+  border-left: 3px solid rgba(117, 85, 204, 0.35);
+  background: rgba(117, 85, 204, 0.05);
+  border-radius: 0 6px 6px 0;
+  font-size: 0.8rem;
+}
+
 .agent-file-view {
   border: 1px solid rgba(117, 85, 204, 0.14);
   border-radius: 6px;
@@ -1204,9 +1233,19 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 /* --- Composer --- */
 
-/* Final-edit payload of a succeeded selection-edit run. Lives at the END of
-   the timeline scroll, collapsed by default — the edit is already applied to
-   the document, so it must be reachable without covering the conversation. */
+/* Persisted run outputs: final edits/replies, in-document comments and tracked
+   suggestions. These live after the transcript so tool chatter never obscures
+   what the run actually delivered. */
+.agent-run-artifact-list,
+.agent-run-artifacts {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.agent-run-artifacts + .agent-run-artifacts {
+  padding-top: 0.15rem;
+}
+
 .agent-result {
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
@@ -1256,6 +1295,90 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   user-select: text;
   border-top: 1px solid var(--border);
   padding-top: 0.6rem;
+}
+
+.agent-artifact {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  overflow: hidden;
+}
+
+.agent-artifact-reply {
+  border-left: 3px solid var(--accent);
+}
+
+.agent-artifact-comment {
+  border-left: 3px solid #d59c39;
+}
+
+.agent-artifact-suggestion {
+  border-left: 3px solid #4a9a73;
+}
+
+.agent-artifact > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.agent-artifact > summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-artifact-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.15rem;
+  padding: 0.45rem 0.75rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.agent-artifact-header strong {
+  color: var(--text);
+  font-size: 0.78rem;
+}
+
+.agent-artifact-header span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-artifact-reason {
+  margin: 0;
+  padding: 0.55rem 0.8rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.agent-artifact-diff {
+  border-top: 1px solid var(--border);
+  font-size: 0.78rem;
+}
+
+.agent-artifact-diff pre {
+  display: grid;
+  grid-template-columns: 1.4rem minmax(0, 1fr);
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0.5rem 0.7rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.agent-artifact-before {
+  color: #a34444;
+  background: color-mix(in srgb, #d85b5b 9%, transparent);
+}
+
+.agent-artifact-after {
+  color: #277451;
+  background: color-mix(in srgb, #45a474 10%, transparent);
 }
 
 /* --- Conversation context card (what triggered the run) --- */

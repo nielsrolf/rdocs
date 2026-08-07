@@ -6,8 +6,17 @@ import {
   isAuthFailure,
   isRetryableAgentError,
   retryWithBackoff,
+  throwIfSubmissionRejected,
   TRANSIENT_RETRY_DELAYS_MS
 } from "../lib/ai";
+
+test("Claude cannot silently fall back to plain text after a rejected submit_response", () => {
+  assert.throws(
+    () => throwIfSubmissionRejected("Suggestion findText was not found.", 2, "Claude"),
+    /Claude submission rejected after 2 attempts.*findText was not found/is
+  );
+  assert.doesNotThrow(() => throwIfSubmissionRejected(null, 0, "Claude"));
+});
 
 test("isRetryableAgentError matches broadened transient API + container signals", () => {
   for (const message of [
@@ -42,6 +51,7 @@ test("isAuthFailure classifies 401 / auth-credential errors and ignores others",
   for (const message of [
     "Claude Code returned an error result: Failed to authenticate. API Error: 401 Invalid authentication credentials",
     "API Error: 401",
+    "Your access token could not be refreshed because you have since logged out or signed in to another account.",
     "invalid authentication credentials",
     "OAuth token has expired",
     "authentication_error: invalid api key"

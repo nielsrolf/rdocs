@@ -12,7 +12,7 @@
 //     Anthropic-compatible endpoint via the same SDK. Requires the document
 //     env to provide OPENROUTER_API_KEY (see applyProviderEnv in agent-env.ts).
 //   - "litellm": any model name served by a LiteLLM proxy, stored with a
-//     "litellm/" prefix (e.g. "litellm/anthropic/claude-opus-4-8") and run
+//     "litellm/" prefix (e.g. "litellm/anthropic/claude-opus-5") and run
 //     through LiteLLM's Anthropic-compatible /v1/messages endpoint. Requires
 //     LITELLM_API_KEY (document env) and LITELLM_BASE_URL (document env, or a
 //     host default — see applyProviderEnv in agent-env.ts).
@@ -23,7 +23,8 @@
 //     the server can move machines with a one-line .env change). Also the
 //     automatic fallback for Anthropic-model runs with no credential anywhere.
 
-export type AgentModelProvider = "anthropic" | "openrouter" | "litellm" | "local";
+export type AgentHarness = "claude-code" | "codex";
+export type AgentModelProvider = "anthropic" | "openai" | "openrouter" | "litellm" | "local";
 
 export type AgentModelOption = {
   /** Value stored on Document.agentModel. */
@@ -36,11 +37,13 @@ export type AgentModelOption = {
 export const OPENROUTER_MODEL_PREFIX = "openrouter/";
 export const LITELLM_MODEL_PREFIX = "litellm/";
 export const LOCAL_MODEL_PREFIX = "local/";
+export const CODEX_OPENAI_MODEL_PREFIX = "codex/openai/";
+export const CODEX_LITELLM_MODEL_PREFIX = "codex/litellm/";
 
 export const ANTHROPIC_AGENT_MODELS: readonly AgentModelOption[] = [
   { value: "claude-sonnet-5", label: "Sonnet 5", hint: "Fast, capable default", provider: "anthropic" },
   { value: "claude-fable-5", label: "Fable 5", hint: "Most capable, premium", provider: "anthropic" },
-  { value: "claude-opus-4-8", label: "Opus 4.8", hint: "Deep agentic work", provider: "anthropic" }
+  { value: "claude-opus-5", label: "Opus 5", hint: "Deep agentic work", provider: "anthropic" }
 ] as const;
 
 // Curated OpenRouter picks shown when the document has an OPENROUTER_API_KEY.
@@ -78,10 +81,29 @@ export const LITELLM_AGENT_MODELS: readonly AgentModelOption[] = OPENROUTER_AGEN
   })
 );
 
-// Historical values stored on existing Document rows before canonical ids.
+// Codex uses the OpenAI Responses protocol. Native models authenticate with an
+// account/document OpenAI key; LiteLLM models use the deployment's
+// OpenAI-compatible /v1 Responses endpoint. Host Codex login state is never
+// considered. Direct Anthropic API models are deliberately not represented.
+export const CODEX_OPENAI_AGENT_MODELS: readonly AgentModelOption[] = [
+  { value: "codex/openai/gpt-5.6-sol", label: "GPT-5.6 Sol", hint: "OpenAI flagship", provider: "openai" },
+  { value: "codex/openai/gpt-5.6-terra", label: "GPT-5.6 Terra", hint: "Balanced coding default", provider: "openai" },
+  { value: "codex/openai/gpt-5.6-luna", label: "GPT-5.6 Luna", hint: "Fast coding model", provider: "openai" }
+] as const;
+
+export const CODEX_LITELLM_AGENT_MODELS: readonly AgentModelOption[] =
+  LITELLM_AGENT_MODELS.map((model) => ({
+    ...model,
+    value: `${CODEX_LITELLM_MODEL_PREFIX}${model.value.slice(LITELLM_MODEL_PREFIX.length)}`
+  }));
+
+// Historical values stored on existing Document rows before canonical ids,
+// plus superseded canonical ids remapped to their successor (Opus 4.8 → 5:
+// same price, strictly newer; keeps old rows storable without a migration).
 const LEGACY_MODEL_ALIASES: Record<string, string> = {
   sonnet: "claude-sonnet-5",
-  opus: "claude-opus-4-8"
+  opus: "claude-opus-5",
+  "claude-opus-4-8": "claude-opus-5"
 };
 
 // Kept for existing consumers (UI dropdown, route enums historically derived
@@ -102,14 +124,33 @@ export const AGENT_EFFORTS = [
 export type AgentEffort = (typeof AGENT_EFFORTS)[number]["value"];
 
 export const DEFAULT_AGENT_MODEL = "claude-sonnet-5";
+export const DEFAULT_CODEX_AGENT_MODEL = "codex/openai/gpt-5.6-terra";
+export const DEFAULT_CODEX_LITELLM_AGENT_MODEL = "codex/litellm/openai/gpt-5.6-terra";
 export const DEFAULT_AGENT_EFFORT: AgentEffort = "off";
+
+/** Pick the usable Codex route when the harness is selected from scratch. */
+export function defaultCodexAgentModelForCredentials(input: {
+  hasOpenAiKey: boolean;
+  hasLiteLlmKey: boolean;
+}): string {
+  return input.hasLiteLlmKey && !input.hasOpenAiKey
+    ? DEFAULT_CODEX_LITELLM_AGENT_MODEL
+    : DEFAULT_CODEX_AGENT_MODEL;
+}
+
+/** Equivalent OpenAI-compatible LiteLLM route for a native Codex model. */
+export function codexLiteLlmFallbackModel(value: unknown): string | null {
+  if (!isCodexOpenAiAgentModel(value)) return null;
+  const model = normalizeAgentModel(value as string).slice(CODEX_OPENAI_MODEL_PREFIX.length);
+  return `${CODEX_LITELLM_MODEL_PREFIX}openai/${model}`;
+}
 
 // An OpenRouter slug is "<author>/<model>", optionally with a ":variant"
 // suffix (e.g. ":free"). Dots and dashes appear in real slugs; spaces, path
 // traversal, and empty segments must not.
 const OPENROUTER_SLUG_RE = /^[a-z0-9][\w.-]*\/[a-z0-9][\w.:-]*$/i;
 // A LiteLLM model name is one or more "/"-separated segments (deployments route
-// names like "anthropic/claude-opus-4-8", "openrouter/openai/gpt-5", or a bare
+// names like "anthropic/claude-opus-5", "openrouter/openai/gpt-5", or a bare
 // alias like "embedding"). Same character discipline as OpenRouter slugs.
 const LITELLM_MODEL_RE = /^[a-z0-9][\w.:-]*(\/[a-z0-9][\w.:-]*)*$/i;
 const MAX_MODEL_VALUE_LENGTH = 160;
@@ -140,12 +181,30 @@ export function isLocalAgentModel(value: unknown): boolean {
   );
 }
 
+export function isCodexOpenAiAgentModel(value: unknown): boolean {
+  return typeof value === "string" && normalizeAgentModel(value).startsWith(CODEX_OPENAI_MODEL_PREFIX);
+}
+
+export function isCodexLiteLlmAgentModel(value: unknown): boolean {
+  return typeof value === "string" && normalizeAgentModel(value).startsWith(CODEX_LITELLM_MODEL_PREFIX);
+}
+
+export function isCodexAgentModel(value: unknown): boolean {
+  return isCodexOpenAiAgentModel(value) || isCodexLiteLlmAgentModel(value);
+}
+
+export function agentHarnessForModel(value: unknown): AgentHarness {
+  return isCodexAgentModel(value) ? "codex" : "claude-code";
+}
+
 /**
  * Which provider a stored Document.agentModel routes through. Anything without
  * a recognized provider prefix is treated as Anthropic (canonical ids, legacy
  * aliases, and unknown values that will fall back downstream).
  */
 export function agentModelProvider(value: unknown): AgentModelProvider {
+  if (isCodexOpenAiAgentModel(value)) return "openai";
+  if (isCodexLiteLlmAgentModel(value)) return "litellm";
   if (isOpenRouterAgentModel(value)) return "openrouter";
   if (isLiteLlmAgentModel(value)) return "litellm";
   if (isLocalAgentModel(value)) return "local";
@@ -167,6 +226,14 @@ export function isStorableAgentModel(value: unknown): value is string {
     return false;
   }
   const normalized = normalizeAgentModel(value);
+  if (normalized.startsWith(CODEX_OPENAI_MODEL_PREFIX)) {
+    const name = normalized.slice(CODEX_OPENAI_MODEL_PREFIX.length);
+    return !name.includes("..") && LITELLM_MODEL_RE.test(name);
+  }
+  if (normalized.startsWith(CODEX_LITELLM_MODEL_PREFIX)) {
+    const name = normalized.slice(CODEX_LITELLM_MODEL_PREFIX.length);
+    return !name.includes("..") && LITELLM_MODEL_RE.test(name);
+  }
   if (isKnownAnthropicModel(normalized)) return true;
   if (normalized.startsWith(OPENROUTER_MODEL_PREFIX)) {
     const slug = normalized.slice(OPENROUTER_MODEL_PREFIX.length);
@@ -184,6 +251,28 @@ export function isStorableAgentModel(value: unknown): value is string {
     return LITELLM_MODEL_RE.test(name);
   }
   return false;
+}
+
+export type ResolvedCodexAgentConfig = {
+  model: string;
+  provider: "openai" | "litellm";
+  effort?: "low" | "medium" | "high";
+  label: string;
+};
+
+export function resolveCodexAgentConfig(
+  config: DocumentAgentConfig | null | undefined
+): ResolvedCodexAgentConfig {
+  const requested = isCodexAgentModel(config?.model) ? normalizeAgentModel(config!.model!) : DEFAULT_CODEX_AGENT_MODEL;
+  const provider = requested.startsWith(CODEX_LITELLM_MODEL_PREFIX) ? "litellm" : "openai";
+  const prefix = provider === "litellm" ? CODEX_LITELLM_MODEL_PREFIX : CODEX_OPENAI_MODEL_PREFIX;
+  const effort = parseEffort(config?.effort) ?? undefined;
+  return {
+    model: requested.slice(prefix.length),
+    provider,
+    effort,
+    label: `codex-sdk:${provider}/${requested.slice(prefix.length)}${effort ? `+${effort}` : ""}`
+  };
 }
 
 export function isAgentModel(value: unknown): value is AgentModel {
@@ -244,7 +333,7 @@ export type ResolvedAgentSdkConfig = {
   /** Only set when extended thinking is enabled. */
   effort?: "low" | "medium" | "high";
   /**
-   * Stable label persisted on AiRun.model, e.g. "claude-agent-sdk:claude-opus-4-8+high"
+   * Stable label persisted on AiRun.model, e.g. "claude-agent-sdk:claude-opus-5+high"
    * or "openrouter:openai/gpt-5.2".
    */
   label: string;
@@ -331,10 +420,11 @@ export function resolveAgentSdkConfig(
 // claude-fable-5 runs behind safety classifiers with a significant false-positive
 // rate on benign work (the API docs call this out for security/life-sciences
 // adjacent content). A classifier block surfaces as stop_reason "refusal" and
-// kills the whole agent run. Opus 4.8 is the documented fallback target for
-// those refusals, so a refused Fable run is rerun once on Opus. Other models
-// (including OpenRouter ones) don't sit behind these classifiers — no fallback.
-export const REFUSAL_FALLBACK_MODEL = "claude-opus-4-8";
+// kills the whole agent run. Opus (now claude-opus-5, previously 4.8) is the
+// fallback target for those refusals, so a refused Fable run is rerun once on
+// Opus. Other models (including OpenRouter ones) don't sit behind these
+// classifiers — no fallback.
+export const REFUSAL_FALLBACK_MODEL = "claude-opus-5";
 const REFUSAL_PRONE_MODELS = new Set(["claude-fable-5"]);
 
 /**

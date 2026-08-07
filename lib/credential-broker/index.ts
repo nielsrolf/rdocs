@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 
 import { agentModelProvider } from "@/agent-core/agent-config";
 import { OPENROUTER_BASE_URL, type DocumentEnv } from "@/agent-core/agent-env";
-import { readHostClaudeOAuth, OAUTH_EXPIRY_MARGIN_MS } from "@/lib/agent-runner/agent-credential";
 import { db } from "@/lib/db";
 import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
 
@@ -13,9 +12,7 @@ import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
 // per request, swaps in the real credential, and forwards to the upstream.
 //
 // Coverage (first increment — LLM credentials with reliable base-URL support):
-//   - ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN (Anthropic-model runs),
-//     including the host ~/.claude OAuth fallback (stored as secretRef so the
-//     credential is re-read live at proxy time → mid-run refreshes work);
+//   - ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN (Anthropic-model runs);
 //   - OPENAI_API_KEY (always, when configured in the run env);
 //   - OPENROUTER_API_KEY / LITELLM_API_KEY (when the selected model routes
 //     through that provider — applyProviderEnv then points the SDK at the
@@ -90,17 +87,13 @@ export type BrokerRewritePlan = {
 
 /**
  * Which credentials in this run env get brokered, and how. Pure — no DB, no
- * token minting — so the substitution logic is unit-testable. `hostOAuth`
- * mirrors the container runner's host ~/.claude fallback: when the env has no
- * Anthropic credential but the host session exists, the broker takes over that
- * injection with a live secretRef instead of copying the raw token in.
+ * token minting — so the substitution logic is unit-testable.
  */
 export function planBrokerRewrites(
   agentEnv: DocumentEnv,
   agentModel: string | null | undefined,
   opts: {
     hostEnv?: Record<string, string | undefined>;
-    hostOAuthAvailable?: boolean;
   } = {}
 ): BrokerRewritePlan[] {
   const hostEnv = opts.hostEnv ?? process.env;
@@ -135,15 +128,6 @@ export function planBrokerRewrites(
         upstreamBaseUrl: "https://api.anthropic.com",
         authMode: "authorization-bearer",
         secretValue: agentEnv.CLAUDE_CODE_OAUTH_TOKEN.trim(),
-        extraEnv: (url) => ({ ANTHROPIC_BASE_URL: url })
-      });
-    } else if (opts.hostOAuthAvailable) {
-      plans.push({
-        envKey: "CLAUDE_CODE_OAUTH_TOKEN",
-        provider: "anthropic",
-        upstreamBaseUrl: "https://api.anthropic.com",
-        authMode: "authorization-bearer",
-        secretRef: "host-claude-oauth",
         extraEnv: (url) => ({ ANTHROPIC_BASE_URL: url })
       });
     }
@@ -208,10 +192,7 @@ export async function brokerizeAgentEnvForRun(
   const hostEnv = opts.hostEnv ?? process.env;
   if (!credentialBrokerEnabled(hostEnv)) return { agentEnv, minted: [] };
 
-  const hostOAuthAvailable =
-    agentModelProvider(opts.agentModel) === "anthropic" &&
-    Boolean(readHostClaudeOAuth({ homeDir: opts.homeDir ?? hostEnv.HOME }));
-  const plans = planBrokerRewrites(agentEnv, opts.agentModel, { hostEnv, hostOAuthAvailable });
+  const plans = planBrokerRewrites(agentEnv, opts.agentModel, { hostEnv });
   if (plans.length === 0) return { agentEnv, minted: [] };
 
   const base = brokerBaseUrl(hostEnv, opts.runnerMode);
@@ -300,16 +281,7 @@ export async function resolveBrokerRequest(
   }
 
   let secretValue: string | null = null;
-  if (key.secretRef === "host-claude-oauth") {
-    const oauth = readHostClaudeOAuth({ homeDir: opts.homeDir ?? process.env.HOME });
-    if (!oauth) {
-      return { ok: false, status: 401, error: "Host Claude session unavailable." };
-    }
-    if (typeof oauth.expiresAt === "number" && oauth.expiresAt <= now + OAUTH_EXPIRY_MARGIN_MS) {
-      return { ok: false, status: 401, error: "Host Claude session expired." };
-    }
-    secretValue = oauth.token;
-  } else if (key.secret) {
+  if (key.secret) {
     try {
       secretValue = decryptSecret(key.secret);
     } catch {

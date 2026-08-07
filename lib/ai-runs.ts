@@ -274,6 +274,7 @@ export async function fetchDocumentAiRuns(documentId: string) {
       take: AI_RUN_EVENT_RUNS,
       select: {
         ...runSelect,
+        _count: { select: { events: true } },
         events: {
           // Newest N, then flipped back to chronological below — asc+take would
           // pin the window to a long run's FIRST N events and freeze the timeline.
@@ -302,17 +303,22 @@ export async function fetchDocumentAiRuns(documentId: string) {
   ]);
 
   return [
-    ...recentRuns.map((run) => ({
+    ...recentRuns.map(({ _count, ...run }) => ({
       ...run,
       agentComments: parseAgentComments(run.agentComments),
       events: [...run.events].reverse(),
-      eventsOmitted: false
+      eventsOmitted: false,
+      // The run outgrew the poll window — its EARLIEST events are missing from
+      // this payload. The client lazy-loads the full timeline from the
+      // run-detail route when the conversation is opened.
+      eventsClipped: _count.events > AI_RUN_EVENT_WINDOW
     })),
     ...olderRuns.map((run) => ({
       ...run,
       agentComments: parseAgentComments(run.agentComments),
       events: [] as Array<{ id: string; role: string; message: string; createdAt: Date }>,
-      eventsOmitted: true
+      eventsOmitted: true,
+      eventsClipped: false
     }))
   ];
 }
@@ -357,10 +363,13 @@ export function serializeAiRun(run: {
   }>;
   /** True when this run's events were dropped from the poll payload (lazy-loaded client-side). */
   eventsOmitted?: boolean;
+  /** True when the run outgrew the inline event window — earliest events missing (lazy-loaded client-side). */
+  eventsClipped?: boolean;
 }) {
   return {
     ...run,
     eventsOmitted: run.eventsOmitted ?? false,
+    eventsClipped: run.eventsClipped ?? false,
     selectionId: run.selectionId ?? null,
     selectedText: run.selectedText ?? null,
     parentRunId: run.parentRunId ?? null,

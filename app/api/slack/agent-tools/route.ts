@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { handleSlackAgentToolCall } from "@/lib/slack/agent-tools";
+import { handleSlackAgentMcpMessage } from "@/lib/slack/agent-tools-mcp";
 import { verifySlackToolsToken } from "@/lib/slack/link-token";
 import { createSlackWebClient, slackAuthTest } from "@/lib/slack/web";
 
@@ -9,6 +10,7 @@ export const runtime = "nodejs";
 
 const toolRequestSchema = z.object({
   tool: z.enum([
+    "post_slack_message",
     "list_slack_channels",
     "read_slack_channel",
     "read_slack_thread",
@@ -41,30 +43,40 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json().catch(() => null);
-  const parsed = toolRequestSchema.safeParse(body);
-  if (!parsed.success) {
-    return NextResponse.json({ ok: false, text: "Invalid tool request payload." }, { status: 400 });
-  }
-
   if (!cachedBotUserId) {
     cachedBotUserId = (await slackAuthTest(botToken)).userId;
     if (!cachedBotUserId) {
       return NextResponse.json({ ok: false, text: "Slack auth.test failed." }, { status: 502 });
     }
   }
+  const botUserId = cachedBotUserId;
 
-  try {
-    const result = await handleSlackAgentToolCall(parsed.data, {
+  const execute = async (toolRequest: z.infer<typeof toolRequestSchema>) => {
+    const result = await handleSlackAgentToolCall(toolRequest, {
       claims,
       slack: createSlackWebClient(botToken),
-      botUserId: cachedBotUserId
+      botUserId
     });
     console.log("[slack] agent tool call", {
       aiRunId: claims.aiRunId,
-      tool: parsed.data.tool,
+      tool: toolRequest.tool,
       ok: result.ok
     });
-    return NextResponse.json(result);
+    return result;
+  };
+
+  try {
+    if (body && typeof body === "object" && !Array.isArray(body) && "jsonrpc" in body) {
+      const payload = await handleSlackAgentMcpMessage(body, execute);
+      return payload === null
+        ? new Response(null, { status: 202 })
+        : NextResponse.json(payload);
+    }
+    const parsed = toolRequestSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({ ok: false, text: "Invalid tool request payload." }, { status: 400 });
+    }
+    return NextResponse.json(await execute(parsed.data));
   } catch (error) {
     return NextResponse.json(
       { ok: false, text: `Tool failed: ${error instanceof Error ? error.message : "unknown error"}` },

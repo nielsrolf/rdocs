@@ -142,17 +142,23 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
   const [
     envHasOpenRouterKey,
     envHasLiteLlmKey,
+    envHasOpenAiKey,
     ownerHasOpenRouterKeyOnly,
     ownerHasLiteLlmKeyOnly,
     viewerHasOpenRouterKey,
-    viewerHasLiteLlmKey
+    viewerHasLiteLlmKey,
+    ownerHasOpenAiKeyOnly,
+    viewerHasOpenAiKey
   ] = await Promise.all([
     hasDocumentEnvKey(id, "OPENROUTER_API_KEY"),
     hasDocumentEnvKey(id, "LITELLM_API_KEY"),
+    hasDocumentEnvKey(id, "OPENAI_API_KEY"),
     hasUserCredential(access.document.ownerId, "openrouter"),
     hasUserCredential(access.document.ownerId, "litellm"),
     viewerId ? hasUserCredential(viewerId, "openrouter") : Promise.resolve(false),
-    viewerId ? hasUserCredential(viewerId, "litellm") : Promise.resolve(false)
+    viewerId ? hasUserCredential(viewerId, "litellm") : Promise.resolve(false),
+    hasUserCredential(access.document.ownerId, "openai"),
+    viewerId ? hasUserCredential(viewerId, "openai") : Promise.resolve(false)
   ]);
   // Whether an Anthropic-model run started by this viewer would actually run
   // on the free local model (no credential anywhere) — surfaced in the UI so
@@ -172,8 +178,10 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
   const effectiveAgentEffort = access.document.agentEffort ?? viewerDefaults?.defaultAgentEffort ?? null;
   const credentialHasOpenRouterKey = ownerHasOpenRouterKeyOnly || viewerHasOpenRouterKey;
   const credentialHasLiteLlmKey = ownerHasLiteLlmKeyOnly || viewerHasLiteLlmKey;
+  const credentialHasOpenAiKey = ownerHasOpenAiKeyOnly || viewerHasOpenAiKey;
   const initialHasOpenRouterKey = envHasOpenRouterKey || credentialHasOpenRouterKey;
   const initialHasLiteLlmKey = envHasLiteLlmKey || credentialHasLiteLlmKey;
+  const initialHasOpenAiKey = envHasOpenAiKey || credentialHasOpenAiKey;
   const initialCollaborationVersion = await getCollaborationVersion(
     access.document.id,
     access.document.content,
@@ -201,10 +209,12 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         initialRunnerMode={access.document.runnerMode}
         initialHasOpenRouterKey={initialHasOpenRouterKey}
         initialHasLiteLlmKey={initialHasLiteLlmKey}
+        initialHasOpenAiKey={initialHasOpenAiKey}
         localAgentModel={freeLocalAgentModel()}
         anthropicFreeFallback={anthropicFreeFallback}
         credentialHasOpenRouterKey={credentialHasOpenRouterKey}
         credentialHasLiteLlmKey={credentialHasLiteLlmKey}
+        credentialHasOpenAiKey={credentialHasOpenAiKey}
         initialThreads={normalizedThreads}
         initialFocusThreadId={focusThreadId}
         initialTitle={access.document.title}

@@ -192,7 +192,8 @@ async function runAiEditInBackground(input: {
     const {
       agentEnv,
       agentConfig: effectiveAgentConfig,
-      usedFreeFallback
+      usedFreeFallback,
+      usedProviderFallback
     } = await loadAgentEnvWithFreeFallback(documentId, agentConfig, createdById, {
       aiRunId,
       runnerMode: runner.mode
@@ -202,6 +203,13 @@ async function runAiEditInBackground(input: {
         aiRunId,
         role: "system",
         message: `No AI credential connected — running on the free local model (${effectiveAgentConfig.model}). It is much slower than Claude (first output can take a few minutes). Connect a credential under AI settings in the topbar to use Claude.`
+      });
+    }
+    if (usedProviderFallback) {
+      await recordAiRunEvent({
+        aiRunId,
+        role: "system",
+        message: `No OpenAI credential connected — routing Codex through LiteLLM as ${effectiveAgentConfig.model}.`
       });
     }
     if (agentAccessMode === "read_only") {

@@ -4,6 +4,9 @@ import { test } from "node:test";
 import {
   DEFAULT_AGENT_MAX_TURNS,
   DEFAULT_AGENT_MODEL,
+  DEFAULT_CODEX_AGENT_MODEL,
+  defaultCodexAgentModelForCredentials,
+  agentHarnessForModel,
   agentModelProvider,
   isAgentEffort,
   isAgentModel,
@@ -13,10 +16,53 @@ import {
   normalizeAgentModel,
   parseMaxTurns,
   resolveAgentSdkConfig,
+  resolveCodexAgentConfig,
   resolveRefusalFallbackModel,
   REFUSAL_FALLBACK_MODEL,
   THIRD_PARTY_THINKING_BUDGETS
 } from "../lib/agent-config";
+
+test("Codex models encode harness and provider without allowing direct Anthropic API routing", () => {
+  assert.equal(agentHarnessForModel("claude-sonnet-5"), "claude-code");
+  assert.equal(agentHarnessForModel("litellm/openai/gpt-5.6-terra"), "claude-code");
+  assert.equal(agentHarnessForModel("codex/openai/gpt-5.6-terra"), "codex");
+  assert.equal(agentHarnessForModel("codex/litellm/anthropic/claude-opus-4-8"), "codex");
+
+  assert.equal(isStorableAgentModel(DEFAULT_CODEX_AGENT_MODEL), true);
+  assert.equal(isStorableAgentModel("codex/litellm/anthropic/claude-opus-4-8"), true);
+  assert.equal(isStorableAgentModel("codex/anthropic/claude-opus-4-8"), false);
+  assert.equal(isStorableAgentModel("codex/openai/../../secret"), false);
+});
+
+test("Codex defaults to LiteLLM when it is the only connected Codex provider", () => {
+  assert.equal(
+    defaultCodexAgentModelForCredentials({ hasOpenAiKey: false, hasLiteLlmKey: true }),
+    "codex/litellm/openai/gpt-5.6-terra"
+  );
+  assert.equal(
+    defaultCodexAgentModelForCredentials({ hasOpenAiKey: true, hasLiteLlmKey: true }),
+    DEFAULT_CODEX_AGENT_MODEL
+  );
+  assert.equal(
+    defaultCodexAgentModelForCredentials({ hasOpenAiKey: false, hasLiteLlmKey: false }),
+    DEFAULT_CODEX_AGENT_MODEL
+  );
+});
+
+test("resolveCodexAgentConfig selects native OpenAI or LiteLLM Responses providers", () => {
+  assert.deepEqual(resolveCodexAgentConfig({ model: "codex/openai/gpt-5.6-terra", effort: "high" }), {
+    model: "gpt-5.6-terra",
+    provider: "openai",
+    effort: "high",
+    label: "codex-sdk:openai/gpt-5.6-terra+high"
+  });
+  assert.deepEqual(resolveCodexAgentConfig({ model: "codex/litellm/anthropic/claude-opus-4-8" }), {
+    model: "anthropic/claude-opus-4-8",
+    provider: "litellm",
+    effort: undefined,
+    label: "codex-sdk:litellm/anthropic/claude-opus-4-8"
+  });
+});
 
 test("parseMaxTurns defaults to an effectively-unbounded budget (never the old low cap)", () => {
   // Regression: the merge-conflict resolver used to cap at 8 turns and die with
@@ -44,27 +90,29 @@ test("defaults to the built-in model with thinking disabled when unconfigured", 
 });
 
 test("uses the env fallback model when the document has no explicit model", () => {
-  const resolved = resolveAgentSdkConfig({ effort: "off" }, "claude-opus-4-8");
-  assert.equal(resolved.model, "claude-opus-4-8");
+  const resolved = resolveAgentSdkConfig({ effort: "off" }, "claude-opus-5");
+  assert.equal(resolved.model, "claude-opus-5");
   assert.deepEqual(resolved.thinking, { type: "disabled" });
 });
 
 test("legacy alias values (documents and env fallback) normalize to canonical ids", () => {
   assert.equal(normalizeAgentModel("sonnet"), "claude-sonnet-5");
-  assert.equal(normalizeAgentModel("opus"), "claude-opus-4-8");
+  assert.equal(normalizeAgentModel("opus"), "claude-opus-5");
+  // Superseded canonical id: existing rows keep working, remapped on read.
+  assert.equal(normalizeAgentModel("claude-opus-4-8"), "claude-opus-5");
   assert.equal(normalizeAgentModel("claude-fable-5"), "claude-fable-5");
 
   const fromDocument = resolveAgentSdkConfig({ model: "opus", effort: "high" });
-  assert.equal(fromDocument.model, "claude-opus-4-8");
-  assert.equal(fromDocument.label, "claude-agent-sdk:claude-opus-4-8+high");
+  assert.equal(fromDocument.model, "claude-opus-5");
+  assert.equal(fromDocument.label, "claude-agent-sdk:claude-opus-5+high");
 
   const fromEnvFallback = resolveAgentSdkConfig(null, "sonnet");
   assert.equal(fromEnvFallback.model, "claude-sonnet-5");
 });
 
 test("an explicit document model overrides the env fallback", () => {
-  const resolved = resolveAgentSdkConfig({ model: "claude-opus-4-8", effort: null }, "claude-sonnet-5");
-  assert.equal(resolved.model, "claude-opus-4-8");
+  const resolved = resolveAgentSdkConfig({ model: "claude-opus-5", effort: null }, "claude-sonnet-5");
+  assert.equal(resolved.model, "claude-opus-5");
 });
 
 test("an unrecognised model falls back instead of being passed through", () => {
@@ -74,10 +122,10 @@ test("an unrecognised model falls back instead of being passed through", () => {
 
 test("enables adaptive thinking with the chosen effort level", () => {
   for (const effort of ["low", "medium", "high"] as const) {
-    const resolved = resolveAgentSdkConfig({ model: "claude-opus-4-8", effort });
+    const resolved = resolveAgentSdkConfig({ model: "claude-opus-5", effort });
     assert.deepEqual(resolved.thinking, { type: "adaptive" });
     assert.equal(resolved.effort, effort);
-    assert.equal(resolved.label, `claude-agent-sdk:claude-opus-4-8+${effort}`);
+    assert.equal(resolved.label, `claude-agent-sdk:claude-opus-5+${effort}`);
   }
 });
 
@@ -138,6 +186,7 @@ test("isStorableAgentModel accepts known models, legacy aliases, and well-formed
   for (const value of [
     "claude-sonnet-5",
     "claude-fable-5",
+    "claude-opus-5",
     "claude-opus-4-8",
     "sonnet",
     "opus",
@@ -190,15 +239,15 @@ test("type guards accept known values and reject unknown ones", () => {
 
 test("resolveRefusalFallbackModel maps a fable run to opus and nothing else", () => {
   // The one case that should fall back: a Fable run refused by the safety
-  // classifiers reruns on Opus 4.8.
+  // classifiers reruns on Opus.
   assert.equal(
     resolveRefusalFallbackModel({ model: "claude-fable-5", effort: "high" }),
     REFUSAL_FALLBACK_MODEL
   );
-  assert.equal(REFUSAL_FALLBACK_MODEL, "claude-opus-4-8");
+  assert.equal(REFUSAL_FALLBACK_MODEL, "claude-opus-5");
 
   // Already on the fallback model (or another Anthropic model): no fallback.
-  assert.equal(resolveRefusalFallbackModel({ model: "claude-opus-4-8" }), null);
+  assert.equal(resolveRefusalFallbackModel({ model: "claude-opus-5" }), null);
   assert.equal(resolveRefusalFallbackModel({ model: "claude-sonnet-5" }), null);
   assert.equal(resolveRefusalFallbackModel(null), null);
 

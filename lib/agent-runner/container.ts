@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -10,12 +10,16 @@ import type {
   DocumentEnv
 } from "@/agent-core";
 
-import { agentModelProvider, isAuthFailure, isRetryableAgentError, mergeBufferedComments } from "@/agent-core";
+import { agentHarnessForModel, agentModelProvider, isAuthFailure, isRetryableAgentError, mergeBufferedComments } from "@/agent-core";
 
 import type { AgentRunner, AgentRunOptions, MergeResolveJob } from "./index";
 import { toAgentJob } from "./index";
-import { buildContainerEnv, buildContainerRunArgs, serializeEnvFile } from "./container-args";
-import { HOST_SESSION_EXPIRED_MESSAGE, resolveContainerCredentialEnv } from "./agent-credential";
+import { buildContainerEnv, buildContainerRunArgs, resolveContainerUser, serializeEnvFile } from "./container-args";
+import {
+  CONNECT_ANTHROPIC_CREDENTIAL_MESSAGE,
+  CONNECT_OPENAI_CREDENTIAL_MESSAGE,
+  resolveContainerCredentialEnv
+} from "./agent-credential";
 import { agentRunSemaphore } from "./concurrency";
 import { RunCancelledError } from "./run-registry";
 
@@ -41,6 +45,7 @@ export function classifyContainerFailure(
   ctx: {
     /** True for OpenRouter/LiteLLM jobs, which authenticate with a durable provider key. */
     usesProviderKey: boolean;
+    harness?: "claude-code" | "codex";
     authRetried: boolean;
     transientAttempt: number;
     delaysMs?: number[];
@@ -48,15 +53,13 @@ export function classifyContainerFailure(
 ): ContainerFailureDecision {
   const delaysMs = ctx.delaysMs ?? CONTAINER_TRANSIENT_DELAYS_MS;
   if (isAuthFailure(error)) {
-    // OpenRouter/LiteLLM jobs use a durable API key: re-resolving can't refresh
-    // it, so fail fast. Anthropic jobs get exactly one re-resolve-and-retry.
-    if (!ctx.usesProviderKey && !ctx.authRetried) {
-      return { action: "auth-retry" };
-    }
     return {
       action: "auth-fail",
       message:
-        `[agent-runner] agent authentication failed (401). ${HOST_SESSION_EXPIRED_MESSAGE} ` +
+        ctx.harness === "codex"
+          ? `[agent-runner] Codex authentication failed (401). ${CONNECT_OPENAI_CREDENTIAL_MESSAGE} Verify the OpenAI/LiteLLM credential selected for this model. ` +
+            `Original error: ${error instanceof Error ? error.message : String(error)}`
+          : `[agent-runner] agent authentication failed (401). ${CONNECT_ANTHROPIC_CREDENTIAL_MESSAGE} ` +
         `Original error: ${error instanceof Error ? error.message : String(error)}`
     };
   }
@@ -132,7 +135,10 @@ export class ContainerRunner implements AgentRunner {
     containerName?: string;
   }): Promise<Record<string, unknown>> {
     const runtime = process.env.AGENT_CONTAINER_RUNTIME || "docker";
-    const image = process.env.AGENT_CONTAINER_IMAGE || "gdocs-agent:local";
+    const harness = agentHarnessForModel(opts.agentModel);
+    const image = harness === "codex"
+      ? process.env.CODEX_AGENT_CONTAINER_IMAGE || "gdocs-codex-agent:local"
+      : process.env.AGENT_CONTAINER_IMAGE || "gdocs-agent:local";
     const readOnly = process.env.AGENT_CONTAINER_READONLY !== "false";
 
     // Concurrency cap: runs beyond AGENT_MAX_CONCURRENT_RUNS queue here (FIFO)
@@ -168,12 +174,21 @@ export class ContainerRunner implements AgentRunner {
     const { runtime, image, readOnly } = ctx;
     const tmpDir = await mkdtemp(path.join(os.tmpdir(), "gdocs-agent-"));
     const envFile = path.join(tmpDir, "env");
-    const usesProviderKey = agentModelProvider(opts.agentModel) !== "anthropic";
+    const harness = agentHarnessForModel(opts.agentModel);
+    const provider = agentModelProvider(opts.agentModel);
+    const usesProviderKey = provider !== "anthropic";
+    const sessionDirHostPath = harness === "codex"
+      ? opts.sessionDirHostPath ?? path.join(tmpDir, "codex-home")
+      : opts.sessionDirHostPath;
     try {
-      // (Re-)resolve the credential and rewrite the env-file. Called once up front
-      // and again before an auth retry, so a token Claude Code refreshed on the
-      // host in the meantime is picked up (the credential is snapshotted into the
-      // env-file, not read live by the container).
+      if (harness === "codex") {
+        await mkdir(sessionDirHostPath!, { recursive: true });
+        // Older builds copied the host login into conversation storage. Remove
+        // that credential artifact without touching Codex's native rollouts.
+        await rm(path.join(sessionDirHostPath!, "auth.json"), { force: true });
+      }
+      // Validate the already-resolved document/account credential and write the
+      // isolated env file. Host credential files are never read or mounted.
       const prepareEnv = async () => {
         const containerEnv = buildContainerEnv(process.env, opts.agentEnv ?? {});
         const { added, warning, error } = resolveContainerCredentialEnv(containerEnv, opts.agentModel, {
@@ -188,14 +203,15 @@ export class ContainerRunner implements AgentRunner {
         await writeFile(envFile, serializeEnvFile(containerEnv), { mode: 0o600 });
       };
 
+      const containerUser = resolveContainerUser(process.platform, process.getuid?.(), process.getgid?.());
       const args = buildContainerRunArgs({
         image,
         name: opts.containerName,
         workspaceHostPath: opts.workspaceHostPath,
-        sessionDirHostPath: opts.sessionDirHostPath,
+        sessionDirHostPath,
+        agentHarness: harness,
         envFileHostPath: envFile,
-        uid: process.getuid?.(),
-        gid: process.getgid?.(),
+        ...containerUser,
         memory: process.env.AGENT_CONTAINER_MEMORY || "4g",
         cpus: process.env.AGENT_CONTAINER_CPUS || undefined,
         pidsLimit: 512,
@@ -223,12 +239,9 @@ export class ContainerRunner implements AgentRunner {
           if (opts.signal?.aborted) {
             throw new RunCancelledError();
           }
-          const decision = classifyContainerFailure(error, { usesProviderKey, authRetried, transientAttempt });
+          const decision = classifyContainerFailure(error, { harness, usesProviderKey, authRetried, transientAttempt });
           if (decision.action === "auth-retry") {
             authRetried = true;
-            console.warn(
-              "[agent-runner] agent authentication failed (401); re-reading host credentials and retrying once."
-            );
             continue;
           }
           if (decision.action === "auth-fail") {

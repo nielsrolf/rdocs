@@ -89,6 +89,7 @@ export type DocumentWorkspaceProps = {
   initialRunnerMode: string;
   initialHasOpenRouterKey: boolean;
   initialHasLiteLlmKey: boolean;
+  initialHasOpenAiKey: boolean;
   /** The deployment's free local model ("local/<name>") when configured. */
   localAgentModel: string | null;
   /** True when an Anthropic-model run started by this viewer has no credential
@@ -100,6 +101,7 @@ export type DocumentWorkspaceProps = {
    * these, so they keep the model groups unlocked. */
   credentialHasOpenRouterKey: boolean;
   credentialHasLiteLlmKey: boolean;
+  credentialHasOpenAiKey: boolean;
   isAuthenticated: boolean;
   isOwner: boolean;
   shareToken: string | null;
@@ -164,6 +166,8 @@ export type ActiveAiRunView = {
   events?: AiRunEventView[];
   /** True when the poll dropped this run's events (older run) — the panel lazy-loads them from the run-detail route. */
   eventsOmitted?: boolean;
+  /** True when the run outgrew the poll's per-run event window — its EARLIEST events are missing; the panel lazy-loads the full timeline and merges. */
+  eventsClipped?: boolean;
 };
 
 export type AgentToast = {

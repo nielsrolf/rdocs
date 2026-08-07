@@ -153,6 +153,38 @@ test("provider-key misses do NOT fall back (only the Anthropic credential miss d
   );
 });
 
+test("native Codex selection falls back to the matching LiteLLM Responses model when that is the available credential", async () => {
+  const owner = await makeUser("codex-litellm-fallback");
+  await upsertUserCredential(
+    owner.id,
+    normalizeCredentialInput({ provider: "litellm", value: "sk-litellm-owner" })
+  );
+  const doc = await makeDoc(owner.id);
+
+  const result = await loadAgentEnvWithFreeFallback(
+    doc.id,
+    { model: "codex/openai/gpt-5.6-terra", effort: "medium" },
+    owner.id
+  );
+  assert.equal(result.usedFreeFallback, false);
+  assert.equal(result.usedProviderFallback, true);
+  assert.equal(result.agentConfig.model, "codex/litellm/openai/gpt-5.6-terra");
+  assert.equal(result.agentEnv.LITELLM_API_KEY, "sk-litellm-owner");
+});
+
+test("native Codex selection still fails clearly when neither OpenAI nor LiteLLM is connected", async () => {
+  const owner = await makeUser("codex-no-provider");
+  const doc = await makeDoc(owner.id);
+  await assert.rejects(
+    () => loadAgentEnvWithFreeFallback(
+      doc.id,
+      { model: "codex/openai/gpt-5.6-terra", effort: null },
+      owner.id
+    ),
+    /OPENAI_API_KEY/
+  );
+});
+
 test("anthropicRunUsesFreeFallback: true without a credential, false once one is connected", async () => {
   const owner = await makeUser("fallback-predicate");
   const doc = await makeDoc(owner.id);

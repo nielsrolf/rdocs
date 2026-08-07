@@ -110,7 +110,13 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
     // pre-feature runs, GC'd sessions, and the self-hosted/http runners.
     const sessionsSupported = runner.mode === "container" || runner.mode === "inprocess";
     const sessionPlan = sessionsSupported
-      ? await planSessionResume({ documentId, aiRunId, previousRunId, runnerMode: runner.mode }).catch(
+      ? await planSessionResume({
+          documentId,
+          aiRunId,
+          previousRunId,
+          runnerMode: runner.mode,
+          agentModel: agentConfig.model
+        }).catch(
           (error) => {
             console.warn("[agent-conversation] session resume planning failed; falling back to transcript replay", {
               aiRunId,
@@ -129,6 +135,20 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
         aiRunId,
         role: "system",
         message: "Resuming the previous agent session — the model sees its full prior context (messages and tool calls)."
+      });
+    } else if (sessionPlan?.resumeUnavailableSessionId) {
+      // Never degrade silently: the model is about to lose every tool call of
+      // the conversation and all but the last few chat messages. Say it in the
+      // timeline so a confused-looking follow-up has a visible cause.
+      console.warn("[agent-conversation] session transcript unavailable; degraded to transcript replay", {
+        aiRunId,
+        sessionId: sessionPlan.resumeUnavailableSessionId
+      });
+      await recordAiRunEvent({
+        aiRunId,
+        role: "system",
+        message:
+          "The previous session transcript is no longer available, so this run continues from a condensed chat transcript only — earlier tool calls and file reads are NOT in context."
       });
     }
 
@@ -195,7 +215,8 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
     const {
       agentEnv,
       agentConfig: effectiveAgentConfig,
-      usedFreeFallback
+      usedFreeFallback,
+      usedProviderFallback
     } = await loadAgentEnvWithFreeFallback(documentId, agentConfig, createdById, {
       aiRunId,
       runnerMode: runner.mode
@@ -205,6 +226,13 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
         aiRunId,
         role: "system",
         message: `No AI credential connected — running on the free local model (${effectiveAgentConfig.model}). It is much slower than Claude (first output can take a few minutes). Connect a credential under AI settings in the topbar to use Claude.`
+      });
+    }
+    if (usedProviderFallback) {
+      await recordAiRunEvent({
+        aiRunId,
+        role: "system",
+        message: `No OpenAI credential connected — routing Codex through LiteLLM as ${effectiveAgentConfig.model}.`
       });
     }
     if (agentAccessMode === "read_only") {

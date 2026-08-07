@@ -5,12 +5,16 @@ import { useEffect, useState, type ReactNode } from "react";
 import {
   AGENT_EFFORTS,
   ANTHROPIC_AGENT_MODELS,
+  CODEX_LITELLM_AGENT_MODELS,
+  CODEX_OPENAI_AGENT_MODELS,
+  defaultCodexAgentModelForCredentials,
   DEFAULT_AGENT_EFFORT,
   DEFAULT_AGENT_MODEL,
   LITELLM_AGENT_MODELS,
   LOCAL_MODEL_PREFIX,
   OPENROUTER_AGENT_MODELS,
   agentModelProvider,
+  agentHarnessForModel,
   normalizeAgentModel
 } from "@/agent-core/agent-config";
 import {
@@ -57,8 +61,9 @@ const FALLBACK_PROVIDER_OPTIONS: Array<{ value: CredentialProvider; label: strin
 const PROVIDER_HINTS: Record<CredentialProvider, ReactNode> = {
   openai: (
     <>
-      Used for voice-message transcription in the Slack bot (Whisper) — not for
-      agent runs. Keys start with <code>sk-</code> / <code>sk-proj-</code>.
+      Used for native Codex agent runs and voice-message transcription in the Slack bot. Keys start
+      with <code>sk-</code> / <code>sk-proj-</code>. Native Codex may alternatively use the
+      deployment&apos;s saved ChatGPT login.
     </>
   ),
   anthropic: (
@@ -95,6 +100,7 @@ const PROVIDER_HINTS: Record<CredentialProvider, ReactNode> = {
 // the free fallback itself.
 const PROVIDER_CREDENTIAL: Record<string, CredentialProvider | null> = {
   anthropic: "anthropic",
+  openai: "openai",
   openrouter: "openrouter",
   litellm: "litellm",
   local: null
@@ -190,6 +196,7 @@ export function SlackConnectConfig({
     credentials.some((credential) => credential.provider === provider);
 
   const normalizedModel = normalizeAgentModel(model);
+  const harness = agentHarnessForModel(normalizedModel);
   const provider = agentModelProvider(normalizedModel);
   const neededCredential = PROVIDER_CREDENTIAL[provider];
   const missingCredential = loaded && neededCredential !== null && !hasCredential(neededCredential);
@@ -427,7 +434,11 @@ export function SlackConnectConfig({
                 ) : (
                   <>
                     The model you picked below needs{" "}
-                    {provider === "openrouter" ? "an OpenRouter" : "a LiteLLM"} API key.
+                    {provider === "openrouter"
+                      ? "an OpenRouter"
+                      : provider === "openai"
+                        ? "an OpenAI (unless this server has a Codex subscription login)"
+                        : "a LiteLLM"} API key.
                   </>
                 )}{" "}
                 Add a credential below, or run agents on your own machine instead (see the
@@ -525,12 +536,31 @@ export function SlackConnectConfig({
         </p>
         <div className="slack-connect-config-row">
           <label className="agent-config-field">
+            <span className="agent-config-label">Harness</span>
+            <select
+              className="agent-config-select"
+              onChange={(event) => setModel(
+                event.target.value === "codex"
+                  ? defaultCodexAgentModelForCredentials({
+                      hasOpenAiKey: hasCredential("openai"),
+                      hasLiteLlmKey: hasCredential("litellm")
+                    })
+                  : DEFAULT_AGENT_MODEL
+              )}
+              value={harness}
+            >
+              <option value="claude-code">Claude Code</option>
+              <option value="codex">Codex</option>
+            </select>
+          </label>
+          <label className="agent-config-field">
             <span className="agent-config-label">Model</span>
             <select
               className="agent-config-select"
               onChange={(event) => setModel(event.target.value)}
               value={normalizedModel}
             >
+              {harness === "claude-code" ? <>
               <optgroup label="Anthropic">
                 {ANTHROPIC_AGENT_MODELS.map((option) => (
                   <option key={option.value} value={option.value}>
@@ -569,6 +599,26 @@ export function SlackConnectConfig({
                   ) : null}
                 </optgroup>
               ) : null}
+              </> : <>
+                <optgroup label="OpenAI">
+                  {CODEX_OPENAI_AGENT_MODELS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label} — {option.hint}</option>
+                  ))}
+                  {provider === "openai" && !CODEX_OPENAI_AGENT_MODELS.some((option) => option.value === normalizedModel) ? (
+                    <option value={normalizedModel}>{normalizedModel}</option>
+                  ) : null}
+                </optgroup>
+                {hasCredential("litellm") || provider === "litellm" ? (
+                  <optgroup label="LiteLLM (OpenAI Responses)">
+                    {CODEX_LITELLM_AGENT_MODELS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                    {provider === "litellm" && !CODEX_LITELLM_AGENT_MODELS.some((option) => option.value === normalizedModel) ? (
+                      <option value={normalizedModel}>{normalizedModel}</option>
+                    ) : null}
+                  </optgroup>
+                ) : null}
+              </>}
             </select>
           </label>
           <label className="agent-config-field">
@@ -577,7 +627,7 @@ export function SlackConnectConfig({
               className="agent-config-select"
               disabled={effortLocked}
               onChange={(event) => setEffort(event.target.value)}
-              title={effortLocked ? "Extended thinking applies to Anthropic models" : "Extended-thinking effort"}
+              title={effortLocked ? "Thinking control is unavailable for the local model" : "Reasoning effort"}
               value={effortLocked ? "off" : effort}
             >
               {AGENT_EFFORTS.map((option) => (

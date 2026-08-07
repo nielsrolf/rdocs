@@ -18,15 +18,17 @@ test("agent model + thinking effort can be configured and persist", async ({ bas
     // Open the Agents panel.
     await page.getByRole("button", { name: /^Agents/ }).click();
 
-    const modelSelect = page.locator(".agent-config-select").first();
-    const effortSelect = page.locator(".agent-config-select").nth(1);
+    const harnessSelect = page.locator(".agent-config-select").first();
+    const modelSelect = page.locator(".agent-config-select").nth(1);
+    const effortSelect = page.locator(".agent-config-select").nth(2);
 
     // Defaults reflect the unconfigured document.
-    await expect(modelSelect).toHaveValue("sonnet");
+    await expect(harnessSelect).toHaveValue("claude-code");
+    await expect(modelSelect).toHaveValue("claude-sonnet-5");
     await expect(effortSelect).toHaveValue("off");
 
     // Change both and wait for the PATCH to land (save indicator returns to Saved).
-    await modelSelect.selectOption("opus");
+    await modelSelect.selectOption("claude-opus-5");
     await effortSelect.selectOption("high");
 
     await expect
@@ -37,14 +39,15 @@ test("agent model + thinking effort can be configured and persist", async ({ bas
         });
         return `${row?.agentModel}:${row?.agentEffort}`;
       })
-      .toBe("opus:high");
+      .toBe("claude-opus-5:high");
 
     // The choice survives a reload (server round-trips it back into the UI).
     await page.reload();
     await expect(editor(page)).toBeVisible();
     await page.getByRole("button", { name: /^Agents/ }).click();
-    await expect(page.locator(".agent-config-select").first()).toHaveValue("opus");
-    await expect(page.locator(".agent-config-select").nth(1)).toHaveValue("high");
+    await expect(page.locator(".agent-config-select").first()).toHaveValue("claude-code");
+    await expect(page.locator(".agent-config-select").nth(1)).toHaveValue("claude-opus-5");
+    await expect(page.locator(".agent-config-select").nth(2)).toHaveValue("high");
   } finally {
     await context.close();
     await cleanupFixture(user.id, document.id);
@@ -65,6 +68,7 @@ test("agent config selectors are disabled without edit access", async ({ baseURL
     await page.getByRole("button", { name: /^Agents/ }).click();
     await expect(page.locator(".agent-config-select").first()).toBeDisabled();
     await expect(page.locator(".agent-config-select").nth(1)).toBeDisabled();
+    await expect(page.locator(".agent-config-select").nth(2)).toBeDisabled();
   } finally {
     await context.close();
     await cleanupFixture(user.id, document.id);

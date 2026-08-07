@@ -129,7 +129,8 @@ export async function runAskAiInBackground(input: {
     const {
       agentEnv,
       agentConfig: effectiveAgentConfig,
-      usedFreeFallback
+      usedFreeFallback,
+      usedProviderFallback
     } = await loadAgentEnvWithFreeFallback(
       thread.documentId,
       // Doc agent-panel config -> triggering user's default -> app default.
@@ -142,6 +143,13 @@ export async function runAskAiInBackground(input: {
         aiRunId,
         role: "system",
         message: `No AI credential connected — running on the free local model (${effectiveAgentConfig.model}). It is much slower than Claude (first output can take a few minutes). Connect a credential under AI settings in the topbar to use Claude.`
+      });
+    }
+    if (usedProviderFallback) {
+      await recordAiRunEvent({
+        aiRunId,
+        role: "system",
+        message: `No OpenAI credential connected — routing Codex through LiteLLM as ${effectiveAgentConfig.model}.`
       });
     }
     if (agentAccessMode === "read_only") {
@@ -288,7 +296,9 @@ export async function runAskAiInBackground(input: {
     await recordAiRunEvent({
       aiRunId,
       role: "agent",
-      message: aiReply.summary || "Finished AI comment reply."
+      // The timeline should show what was actually posted, not merely the
+      // structured response's terse bookkeeping summary.
+      message: aiReply.reply ?? aiReply.summary ?? "The research agent finished without a reply."
     });
 
     const serialized = serializeComment(comment);

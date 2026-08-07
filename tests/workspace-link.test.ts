@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -48,6 +50,69 @@ async function cleanup(documentIds: string[], userIds: string[]) {
     await db.user.deleteMany({ where: { id } });
   }
 }
+
+function git(cwd: string, ...args: string[]) {
+  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+test("managed run checkout follows the fetched remote default branch and has self-contained git metadata", async () => {
+  const user = await makeUser();
+  const fixture = await fs.mkdtemp(path.join(os.tmpdir(), "rdocs-remote-refresh-"));
+  const source = path.join(fixture, "source");
+  const remote = path.join(fixture, "remote.git");
+  await fs.mkdir(source);
+  git(source, "init", "--initial-branch=master");
+  git(source, "config", "user.email", "test@example.com");
+  git(source, "config", "user.name", "Test");
+  await fs.writeFile(path.join(source, "README.md"), "initial\n");
+  git(source, "add", ".");
+  git(source, "commit", "-m", "initial");
+  execFileSync("git", ["clone", "--bare", source, remote]);
+
+  const doc = await db.document.create({
+    data: { ownerId: user.id, title: "Remote refresh", content: "{}", repoUrl: remote }
+  });
+
+  try {
+    // Materialize the app's base clone while the remote only has the initial commit.
+    const first = await ensureLinkedRepositoryWorktree(doc.id, "run-before-remote-update");
+    assert.ok(first);
+    await removeRunWorktree(first);
+
+    // Advance the remote without touching the app's checked-out local branch.
+    await fs.mkdir(path.join(source, "pilot"));
+    await fs.writeFile(path.join(source, "pilot", "run.py"), "print('pilot')\n");
+    git(source, "add", ".");
+    git(source, "commit", "-m", "add pilot");
+    git(source, "remote", "add", "origin", remote);
+    git(source, "push", "origin", "master");
+
+    // Simulate local workspace content that cannot be pushed yet. Both
+    // harnesses must see this draft AND the newly fetched remote pilot files.
+    await fs.writeFile(path.join(first.baseWorkspace, "local-draft.txt"), "uncommitted workspace draft\n");
+    await fs.mkdir(path.join(remote, "hooks"), { recursive: true });
+    const rejectPush = path.join(remote, "hooks", "pre-receive");
+    await fs.writeFile(rejectPush, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+
+    const refreshed = await ensureLinkedRepositoryWorktree(doc.id, "run-after-remote-update");
+    assert.ok(refreshed);
+    assert.equal(await fs.readFile(path.join(refreshed.worktree, "pilot", "run.py"), "utf8"), "print('pilot')\n");
+    assert.equal(
+      await fs.readFile(path.join(refreshed.worktree, "local-draft.txt"), "utf8"),
+      "uncommitted workspace draft\n"
+    );
+    assert.equal(
+      (await fs.stat(path.join(refreshed.worktree, ".git"))).isDirectory(),
+      true,
+      "the isolated checkout must remain a git repository when mounted without the base clone"
+    );
+    assert.equal(git(refreshed.worktree, "status", "--short"), "");
+    await removeRunWorktree(refreshed);
+  } finally {
+    await fs.rm(fixture, { recursive: true, force: true });
+    await cleanup([doc.id], [user.id]);
+  }
+});
 
 test("runs on a linked doc share the slack channel document's workspace", async () => {
   const user = await makeUser();

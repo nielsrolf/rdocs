@@ -1,4 +1,9 @@
-import { agentModelProvider, DEFAULT_AGENT_MODEL } from "@/agent-core";
+import {
+  agentHarnessForModel,
+  agentModelProvider,
+  codexLiteLlmFallbackModel,
+  DEFAULT_AGENT_MODEL
+} from "@/agent-core";
 import { maskSecret, type DocumentEnv } from "@/lib/agent-env";
 import {
   detectCredential,
@@ -27,9 +32,8 @@ export { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
 // DocumentEnvVar.
 //
 // Resolution precedence when building a run's agent env:
-//   document env (DocumentEnvVar) → document OWNER's UserCredential → host
-//   ~/.claude fallback (Anthropic only, handled downstream in
-//   agent-credential.ts).
+//   document env (DocumentEnvVar) → triggering user's UserCredential →
+//   document owner's UserCredential. Host credentials are never considered.
 
 export type { CredentialKind, CredentialProvider } from "@/lib/credential-detect";
 
@@ -206,6 +210,7 @@ export async function deleteUserCredential(
 
 /** The document-env variable each third-party provider authenticates with. */
 export const PROVIDER_ENV_KEY = {
+  openai: "OPENAI_API_KEY",
   openrouter: "OPENROUTER_API_KEY",
   litellm: "LITELLM_API_KEY"
 } as const;
@@ -262,8 +267,8 @@ export function applyToolCredentialEnv(
  *     precedence rules — api_key → ANTHROPIC_API_KEY (and drop any
  *     CLAUDE_CODE_OAUTH_TOKEN); oauth → CLAUDE_CODE_OAUTH_TOKEN (and drop any
  *     ANTHROPIC_API_KEY, since the SDK would otherwise prefer the key).
- *   - No owner credential → unchanged; for Anthropic the host ~/.claude
- *     fallback (downstream) applies as before.
+ *   - No owner credential → unchanged; the requirement check fails or the
+ *     configured free local model is selected.
  */
 export function applyOwnerCredentialEnv(
   agentEnv: DocumentEnv,
@@ -305,65 +310,35 @@ export function providerKeyRequirementError(
 ): string | null {
   const provider = agentModelProvider(agentModel);
   if (provider === "anthropic") return null;
+  if (provider === "openai" && agentHarnessForModel(agentModel) !== "codex") return null;
   if (provider === "local") {
     if (agentEnv.LOCAL_MODEL_BASE_URL?.trim() || env.LOCAL_MODEL_BASE_URL?.trim()) return null;
     return "Local model selected but LOCAL_MODEL_BASE_URL is not configured on this server.";
   }
   const keyVar = PROVIDER_ENV_KEY[provider];
   if (agentEnv[keyVar]?.trim()) return null;
-  const label = provider === "openrouter" ? "OpenRouter" : "LiteLLM";
-  return `${label} model selected but no ${keyVar} is available. Add it in the document's Env menu, or connect a ${label} key under AI settings (topbar).`;
-}
-
-function isFlagEnabled(value: string | undefined): boolean {
-  if (!value) return false;
-  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
-}
-
-function parseEmailAllowlist(value: string | undefined): string[] | null {
-  if (!value) return null;
-  const emails = value
-    .split(",")
-    .map((email) => email.trim().toLowerCase())
-    .filter(Boolean);
-  return emails.length > 0 ? emails : null;
+  const label = provider === "openrouter" ? "OpenRouter" : provider === "litellm" ? "LiteLLM" : "OpenAI";
+  const article = label === "LiteLLM" ? "a" : "an";
+  return `${label} model selected but no ${keyVar} is available. Add it in the document's Env menu, or connect ${article} ${label} key under AI settings (topbar).`;
 }
 
 export const CONNECT_CREDENTIAL_MESSAGE =
   "Connect an Anthropic credential in settings to run AI features.";
 
 /**
- * Guards on falling back to the HOST ~/.claude credential. Returns a clear
- * user-facing message (so the run fails fast instead of hitting a cryptic 401)
- * when the resolved env has no Anthropic credential, the model routes through
- * the Anthropic provider (OpenRouter/LiteLLM bring their own keys), and either:
- *   - AGENT_REQUIRE_USER_CREDENTIAL is set (phase-4 multi-tenant mode: host
- *     fallback disabled for everyone), or
- *   - AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS is set and none of the accounts
- *     behind the run — the triggering user or the document owner — is on that
- *     comma-separated allowlist (host subscription is reserved for the listed
- *     accounts; everyone else brings their own key).
- * Returns null otherwise (fallback permitted).
+ * Require an explicitly resolved account/document Anthropic credential.
+ * Extra parameters remain for call-site compatibility but never authorize a
+ * host fallback.
  */
 export function credentialRequirementError(
   agentEnv: DocumentEnv,
   agentModel: string | null | undefined,
-  accountEmail: string | null | undefined | Array<string | null | undefined> = null,
-  env: Record<string, string | undefined> = process.env
+  _accountEmail: string | null | undefined | Array<string | null | undefined> = null,
+  _env: Record<string, string | undefined> = process.env
 ): string | null {
   if (agentModelProvider(agentModel) !== "anthropic") return null;
   if (hasAnthropicCredential(agentEnv)) return null;
-  if (isFlagEnabled(env.AGENT_REQUIRE_USER_CREDENTIAL)) return CONNECT_CREDENTIAL_MESSAGE;
-  const allowlist = parseEmailAllowlist(env.AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS);
-  if (allowlist) {
-    const emails = (Array.isArray(accountEmail) ? accountEmail : [accountEmail])
-      .filter((email): email is string => Boolean(email))
-      .map((email) => email.trim().toLowerCase());
-    if (!emails.some((email) => allowlist.includes(email))) {
-      return CONNECT_CREDENTIAL_MESSAGE;
-    }
-  }
-  return null;
+  return CONNECT_CREDENTIAL_MESSAGE;
 }
 
 // --- GitHub auth resolution ------------------------------------------------
@@ -374,33 +349,19 @@ export function credentialRequirementError(
 //   document env GITHUB_TOKEN (team/shared override)
 //     → the TRIGGERING user's connected GitHub PAT
 //     → the document OWNER's connected GitHub PAT
-//     → the HOST token (the shared bot account), but ONLY when the runner or
-//       owner is on AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS (same trust boundary
-//       as the host Claude credential). Without that gate any user could read
-//       and push every repo the bot account can see by simply linking it.
+// Host tokens are never considered.
 //
 // A null result means "operate anonymously": public repos still clone/pull,
 // pushes fail with a clear message.
 
-export type GithubAuthSource = "document-env" | "runner" | "owner" | "host";
+export type GithubAuthSource = "document-env" | "runner" | "owner";
 
 export type GithubAuth = { token: string; source: GithubAuthSource };
-
-function hostTokenPermitted(
-  emails: Array<string | null | undefined>,
-  env: Record<string, string | undefined>
-): boolean {
-  const allowlist = parseEmailAllowlist(env.AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS);
-  if (!allowlist) return true;
-  return emails
-    .filter((email): email is string => Boolean(email))
-    .some((email) => allowlist.includes(email.trim().toLowerCase()));
-}
 
 export async function resolveGithubAuthForDocument(
   documentId: string,
   runnerUserId: string | null = null,
-  env: Record<string, string | undefined> = process.env
+  _env: Record<string, string | undefined> = process.env
 ): Promise<GithubAuth | null> {
   const doc = await db.document.findUnique({
     where: { id: documentId },
@@ -428,29 +389,17 @@ export async function resolveGithubAuthForDocument(
     doc?.ownerId && doc.ownerId !== runner?.id ? await getUserCredential(doc.ownerId, "github") : null;
   if (ownerCredential) return { token: ownerCredential.value, source: "owner" };
 
-  const hostToken = env.GITHUB_TOKEN?.trim();
-  if (hostToken && hostTokenPermitted([runner?.email, doc?.owner?.email], env)) {
-    return { token: hostToken, source: "host" };
-  }
-
   return null;
 }
 
 /** Same resolution for a user outside any document (e.g. validating a PAT). */
 export async function resolveGithubAuthForUser(
   userId: string | null,
-  env: Record<string, string | undefined> = process.env
+  _env: Record<string, string | undefined> = process.env
 ): Promise<GithubAuth | null> {
   if (userId) {
     const credential = await getUserCredential(userId, "github");
     if (credential) return { token: credential.value, source: "runner" };
-  }
-  const hostToken = env.GITHUB_TOKEN?.trim();
-  if (hostToken) {
-    const user = userId
-      ? await db.user.findUnique({ where: { id: userId }, select: { email: true } })
-      : null;
-    if (hostTokenPermitted([user?.email], env)) return { token: hostToken, source: "host" };
   }
   return null;
 }
@@ -465,7 +414,7 @@ export async function resolveGithubAuthForUser(
  * Credential precedence:
  *   document env (team/shared override) → the TRIGGERING user's credential
  *   (runs you start bill your account) → the document OWNER's credential →
- *   host fallback (Anthropic only, allowlist-gated downstream).
+ *   no host fallback.
  */
 export async function loadAgentEnvForDocument(
   documentId: string,
@@ -545,7 +494,7 @@ async function resolveModelCredentialEnv(
 /**
  * Would an Anthropic-model run on this document, triggered by this user, run
  * on the free local model instead? True exactly when no Anthropic credential
- * resolves anywhere (doc env → runner → owner → permitted host fallback) AND
+ * resolves anywhere (doc env → runner → owner) AND
  * the deployment offers a free local model. Used to tell users up front that
  * "Sonnet 5" would actually run as the local model.
  */
@@ -576,6 +525,8 @@ export type AgentRunEnvResolution = {
   /** Stored-model shape ("local/<name>" when the fallback fired). */
   agentConfig: { model: string | null; effort: string | null };
   usedFreeFallback: boolean;
+  /** Native Codex lacked OpenAI auth and transparently used the same model through LiteLLM. */
+  usedProviderFallback: boolean;
 };
 
 // A share-link commenter's agent may use the selected model, but it must not
@@ -619,8 +570,26 @@ export async function loadAgentEnvWithFreeFallback(
   const resolved = await (async (): Promise<AgentRunEnvResolution> => {
     try {
       const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model, runnerUserId);
-      return { agentEnv, agentConfig, usedFreeFallback: false };
+      return { agentEnv, agentConfig, usedFreeFallback: false, usedProviderFallback: false };
     } catch (error) {
+      const litellmModel = codexLiteLlmFallbackModel(agentConfig.model);
+      const isMissingOpenAi =
+        error instanceof Error && error.message.includes("OPENAI_API_KEY");
+      if (litellmModel && isMissingOpenAi) {
+        const fallbackConfig = { model: litellmModel, effort: agentConfig.effort };
+        try {
+          const agentEnv = await loadAgentEnvForDocument(documentId, litellmModel, runnerUserId);
+          return {
+            agentEnv,
+            agentConfig: fallbackConfig,
+            usedFreeFallback: false,
+            usedProviderFallback: true
+          };
+        } catch {
+          // Preserve the native OpenAI error when LiteLLM is not configured either.
+          throw error;
+        }
+      }
       const fallbackModel = freeLocalAgentModel();
       const isCredentialMiss =
         error instanceof Error && error.message === CONNECT_CREDENTIAL_MESSAGE;
@@ -629,7 +598,12 @@ export async function loadAgentEnvWithFreeFallback(
       }
       const fallbackConfig = { model: fallbackModel, effort: agentConfig.effort };
       const agentEnv = await loadAgentEnvForDocument(documentId, fallbackModel, runnerUserId);
-      return { agentEnv, agentConfig: fallbackConfig, usedFreeFallback: true };
+      return {
+        agentEnv,
+        agentConfig: fallbackConfig,
+        usedFreeFallback: true,
+        usedProviderFallback: false
+      };
     }
   })();
   // Credential broker (opt-in via AGENT_CREDENTIAL_BROKER): swap real API keys

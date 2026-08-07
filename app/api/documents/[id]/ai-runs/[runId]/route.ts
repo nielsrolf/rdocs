@@ -1,10 +1,13 @@
 import { NextResponse } from "next/server";
 
-import { AI_RUN_EVENT_WINDOW } from "@/lib/ai-runs";
 import { getCurrentUser } from "@/lib/auth";
 import { cancelAiRun } from "@/lib/agent-runner/run-registry";
 import { db } from "@/lib/db";
 import { canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
+
+// Safety cap on the lazy-loaded full timeline — orders of magnitude above the
+// poll's per-run window, small enough to bound a pathological run's payload.
+const AI_RUN_DETAIL_EVENT_CAP = 5000;
 
 type RouteContext = {
   params: Promise<{
@@ -60,12 +63,27 @@ export async function GET(request: Request, { params }: RouteContext) {
       suggestions: true,
       agentComments: true,
       suggestOnly: true,
-      // Full-window timeline for this run. The polled document list only ships
-      // events inline for the newest runs (`eventsOmitted` on the rest); the
-      // agent panel lazy-loads older conversations' events from here.
+      // Persisted application outputs are the source of truth for the result
+      // view. In particular, comment-reply runs historically stored only the
+      // model's short summary in AiRunEvent; the actual reply lives here.
+      comments: {
+        orderBy: [{ createdAt: "asc" as const }, { id: "asc" as const }],
+        select: {
+          id: true,
+          threadId: true,
+          body: true,
+          createdAt: true,
+          thread: { select: { anchorText: true } }
+        }
+      },
+      // FULL timeline for this run (generous safety cap, far above any real
+      // run). The polled document list only ships a small tail window per run
+      // (`eventsClipped`) and omits events on older runs (`eventsOmitted`);
+      // the agent panel lazy-loads complete timelines from here, so this
+      // route must not apply the poll's per-run window.
       events: {
         orderBy: [{ createdAt: "desc" as const }, { id: "desc" as const }],
-        take: AI_RUN_EVENT_WINDOW,
+        take: AI_RUN_DETAIL_EVENT_CAP,
         select: {
           id: true,
           role: true,
@@ -116,6 +134,13 @@ export async function GET(request: Request, { params }: RouteContext) {
       sources,
       suggestions,
       agentComments,
+      comments: run.comments.map((comment) => ({
+        id: comment.id,
+        threadId: comment.threadId,
+        anchorText: comment.thread.anchorText,
+        body: comment.body,
+        createdAt: comment.createdAt
+      })),
       suggestOnly: run.suggestOnly,
       // Flipped back to chronological order for rendering.
       events: [...run.events].reverse()

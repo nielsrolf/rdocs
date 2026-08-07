@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  agentDisplayName,
   extractJsonStringField,
   extractToolDiff,
   findFinalReplyIndex,
@@ -9,8 +10,10 @@ import {
   lifecycleStepLabel,
   parseToolMessage,
   parseToolResultData,
+  slackMessageField,
   toolDisplayName
 } from "../components/document-workspace/agent-timeline";
+import { mergeRunEventTimelines } from "../components/document-workspace/conversations";
 import type { AiRunEventView } from "../components/document-workspace/types";
 
 let seq = 0;
@@ -28,6 +31,11 @@ test("toolDisplayName prettifies MCP tool names", () => {
   assert.equal(toolDisplayName("mcp__gdocs__post_slack_message"), "gdocs: post slack message");
   assert.equal(toolDisplayName("mcp__rdocs__read_document"), "rdocs: read document");
   assert.equal(toolDisplayName("Bash"), "Bash");
+});
+
+test("agentDisplayName reflects the run harness", () => {
+  assert.equal(agentDisplayName("codex-sdk:litellm/openai/gpt-5.6-sol+medium"), "Codex");
+  assert.equal(agentDisplayName("claude-agent-sdk:claude-opus-5"), "Claude");
 });
 
 test("extractToolDiff reads Edit / MultiEdit / Write payloads", () => {
@@ -56,6 +64,7 @@ test("extractToolDiff reads Edit / MultiEdit / Write payloads", () => {
 
 test("lifecycle plumbing becomes step rows, not prose", () => {
   assert.equal(lifecycleStepLabel("Starting Claude research agent."), "Run started");
+  assert.equal(lifecycleStepLabel("Starting Codex research agent."), "Run started");
   assert.equal(lifecycleStepLabel("Submitting final response."), "Submitting final response");
   assert.equal(lifecycleStepLabel("Preparing document update."), "Finishing up");
   assert.equal(lifecycleStepLabel("Some other system note."), null);
@@ -166,9 +175,105 @@ test("parseToolResultData survives payloads clipped mid-JSON", () => {
   assert.equal(bash.truncated, true);
 });
 
+test("parseToolResultData renders image Reads as image data, never raw base64 JSON", () => {
+  // Small image: payload fits the event cap intact → inline-renderable.
+  const complete = JSON.stringify({ type: "image", file: { base64: "aGVsbG8=" } });
+  assert.deepEqual(parseToolResultData("Read", complete), {
+    kind: "image",
+    base64: "aGVsbG8=",
+    truncated: false
+  });
+
+  // Screenshot: base64 overflows the 1400-char cap → clipped mid-string. The
+  // partial base64 is unusable, so it must come back null (placeholder row).
+  const big = JSON.stringify({ type: "image", file: { base64: "i".repeat(3000) } });
+  const clipped = big.slice(0, 1400);
+  const data = parseToolResultData("Read", clipped);
+  assert.ok(data && data.kind === "image");
+  assert.equal(data.base64, null);
+  assert.equal(data.truncated, true);
+});
+
+test("parseToolResultData reads TaskOutput task payloads", () => {
+  const message = JSON.stringify({
+    retrieval_status: "success",
+    task: {
+      task_id: "abc123",
+      task_type: "local_bash",
+      status: "completed",
+      description: "Blue/green deploy",
+      output: "[deploy] done.\n",
+      exitCode: 0
+    }
+  });
+  assert.deepEqual(parseToolResultData("TaskOutput", message), {
+    kind: "taskOutput",
+    status: "completed",
+    description: "Blue/green deploy",
+    output: "[deploy] done.\n",
+    exitCode: 0,
+    retrievalStatus: "success",
+    truncated: false
+  });
+
+  // Clipped mid-output: status/description serialize before output, so they
+  // survive; the output prefix is still shown.
+  const big = JSON.stringify({
+    retrieval_status: "success",
+    task: { task_id: "x", status: "completed", description: "long job", output: "line\n".repeat(600) }
+  });
+  const clippedData = parseToolResultData("TaskOutput", big.slice(0, 300));
+  assert.ok(clippedData && clippedData.kind === "taskOutput");
+  assert.equal(clippedData.status, "completed");
+  assert.equal(clippedData.description, "long job");
+  assert.ok(clippedData.output.startsWith("line\n"));
+  assert.equal(clippedData.truncated, true);
+});
+
+test("slackMessageField identifies message-payload MCP tools", () => {
+  assert.equal(slackMessageField("mcp__gdocs__post_slack_message"), "text");
+  assert.equal(slackMessageField("mcp__gdocs__read_slack_channel"), null);
+  assert.equal(slackMessageField("Bash"), null);
+});
+
 test("parseToolResultData ignores non-JSON results", () => {
   assert.equal(parseToolResultData("Edit", "Error: File has not been read yet."), null);
   assert.equal(parseToolResultData("Bash", "plain text output"), null);
+});
+
+// --- clipped-run timeline merging (long sessions must not lose their start) ---
+
+test("mergeRunEventTimelines unions archived beginning with polled tail", () => {
+  const at = (i: number) => new Date(1700000000000 + i * 1000).toISOString();
+  const mk = (i: number): AiRunEventView => ({
+    id: `e${String(i).padStart(3, "0")}`,
+    role: "tool",
+    message: `event ${i}`,
+    createdAt: at(i)
+  });
+  // Archived fetch captured events 0..9; the poll window has 6..12 (overlap + new tail).
+  const archived = Array.from({ length: 10 }, (_, i) => mk(i));
+  const polled = Array.from({ length: 7 }, (_, i) => mk(i + 6));
+  const merged = mergeRunEventTimelines(archived, polled);
+  assert.equal(merged.length, 13, "overlap deduped by id");
+  assert.equal(merged[0].message, "event 0", "the beginning survives");
+  assert.equal(merged[merged.length - 1].message, "event 12", "the live tail survives");
+  for (let i = 1; i < merged.length; i++) {
+    assert.ok(
+      new Date(merged[i - 1].createdAt).getTime() <= new Date(merged[i].createdAt).getTime(),
+      "chronological order"
+    );
+  }
+});
+
+test("mergeRunEventTimelines breaks createdAt ties by id", () => {
+  const t = new Date(1700000000000).toISOString();
+  const a: AiRunEventView = { id: "a", role: "tool", message: "first", createdAt: t };
+  const b: AiRunEventView = { id: "b", role: "tool", message: "second", createdAt: t };
+  assert.deepEqual(
+    mergeRunEventTimelines([b], [a]).map((e) => e.id),
+    ["a", "b"]
+  );
 });
 
 test("extractJsonStringField decodes escapes and stops at closing quote", () => {

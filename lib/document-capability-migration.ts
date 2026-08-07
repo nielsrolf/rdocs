@@ -4,9 +4,10 @@ import { scrubSerializedDocumentCapabilities } from "@/lib/content";
 import { db } from "@/lib/db";
 
 // DocumentVersion holds gigabytes of content across all rows; loading the
-// whole table in one findMany overflows Node's string-conversion limits
-// (`Failed to convert rust String into napi string`), so page by cursor.
-const PAGE_SIZE = 100;
+// whole table — or even a page of 100 large snapshots — overflows Node's
+// string-conversion limits (`Failed to convert rust String into napi string`),
+// so page by cursor with a deliberately small content-bearing batch.
+export const DOCUMENT_VERSION_MIGRATION_PAGE_SIZE = 10;
 
 async function applyInChunks(operations: Prisma.PrismaPromise<unknown>[]) {
   for (let index = 0; index < operations.length; index += 100) {
@@ -30,7 +31,7 @@ export async function migratePersistedDocumentCapabilities() {
     const versions: { id: string; content: string }[] = await db.documentVersion.findMany({
       select: { id: true, content: true },
       orderBy: { id: "asc" },
-      take: PAGE_SIZE,
+      take: DOCUMENT_VERSION_MIGRATION_PAGE_SIZE,
       ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {})
     });
     if (versions.length === 0) break;

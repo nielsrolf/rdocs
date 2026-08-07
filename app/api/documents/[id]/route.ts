@@ -248,6 +248,9 @@ export async function GET(request: Request, { params }: RouteContext) {
       hasLiteLlmKey:
         (await hasDocumentEnvKey(access.document.id, "LITELLM_API_KEY")) ||
         (await hasUserCredential(access.document.ownerId, "litellm")),
+      hasOpenAiKey:
+        (await hasDocumentEnvKey(access.document.id, "OPENAI_API_KEY")) ||
+        (await hasUserCredential(access.document.ownerId, "openai")),
       updatedAt: access.document.updatedAt
     },
     threads,

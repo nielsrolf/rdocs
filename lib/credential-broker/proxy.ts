@@ -106,16 +106,19 @@ export async function handleBrokerProxyRequest(
   const hasBody = !["GET", "HEAD"].includes(request.method.toUpperCase());
   let upstream: Response;
   try {
+    // Buffer once at the trust boundary. Forwarding Next's incoming stream
+    // makes undici use chunked transfer encoding; some OpenAI-compatible
+    // Responses endpoints reject that even though their JSON payload is valid.
+    const body = hasBody ? new Uint8Array(await request.arrayBuffer()) : undefined;
+    if (body) headers.set("content-length", String(body.byteLength));
     upstream = await fetchImpl(upstreamUrl, {
       method: request.method,
       headers,
-      body: hasBody ? request.body : undefined,
+      body,
       // Never follow a redirect: it could re-send the real credential to a
       // host we did not vet. The client sees the redirect status as-is.
       redirect: "manual",
       cache: "no-store",
-      // @ts-expect-error - undici needs duplex for streamed request bodies.
-      duplex: hasBody ? "half" : undefined
     });
   } catch (error) {
     console.warn(

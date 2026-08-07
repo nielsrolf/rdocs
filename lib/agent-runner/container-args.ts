@@ -20,6 +20,8 @@ export type ContainerRunSpec = {
    */
   sessionDirHostPath?: string;
   containerSessionDir?: string; // default "/agent-sessions"
+  /** Which SDK owns the mounted native session directory. */
+  agentHarness?: "claude-code" | "codex";
   uid?: number;
   gid?: number;
   memory?: string; // e.g. "2g"
@@ -35,6 +37,21 @@ export type ContainerRunSpec = {
   // Linux-only; register the runtime with the engine before using it.
   ociRuntime?: string;
 };
+
+export function resolveContainerUser(
+  platform: NodeJS.Platform,
+  uid: number | undefined,
+  gid: number | undefined
+): Pick<ContainerRunSpec, "uid" | "gid"> {
+  // Docker Desktop's Linux VM exposes macOS bind mounts as root:root even
+  // when the host path belongs to the current macOS user. Passing the macOS
+  // numeric UID therefore makes both /workspace and CODEX_HOME unwritable.
+  // Container root is still bounded by cap-drop/no-new-privileges/read-only
+  // rootfs and Docker Desktop maps created bind-mount files back to the host
+  // user. Native Linux preserves real UIDs, so keep the host UID there.
+  if (platform === "darwin") return { uid: undefined, gid: undefined };
+  return { uid, gid };
+}
 
 // Host env vars that are meaningless or actively wrong inside the container
 // (they point at host filesystem locations). Dropped from the container env;
@@ -58,6 +75,7 @@ const HOST_FS_ENV_VARS = new Set([
   // HOME default) or set explicitly to the mounted session dir by
   // buildContainerRunArgs — a leaked host value would break both.
   "CLAUDE_CONFIG_DIR",
+  "CODEX_HOME",
   "SSL_CERT_FILE",
   "SSL_CERT_DIR",
   "NODE_EXTRA_CA_CERTS"
@@ -140,6 +158,14 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
   // Secrets/tokens (host-read env-file), plus container-appropriate HOME/TMPDIR.
   args.push("--env-file", spec.envFileHostPath);
   args.push("-e", `HOME=${home}`, "-e", "TMPDIR=/tmp", "-e", `AGENT_WORKSPACE=${workspace}`);
+  if (spec.agentHarness === "claude-code") {
+    // Docker Desktop must run as container root so its root-owned bind mounts
+    // remain writable. Claude Code normally rejects bypassPermissions as root,
+    // but explicitly permits it when IS_SANDBOX=1 because an outer sandbox is
+    // the security boundary. That is exactly this runner: capabilities are
+    // dropped, privilege escalation is forbidden, and the rootfs is read-only.
+    args.push("-e", "IS_SANDBOX=1");
+  }
 
   // The document's worktree — plus, for conversation runs, the conversation's
   // session store (SDK transcripts) so follow-up runs can resume the session.
@@ -147,7 +173,7 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
   if (spec.sessionDirHostPath) {
     const sessionDir = spec.containerSessionDir ?? "/agent-sessions";
     args.push("-v", `${spec.sessionDirHostPath}:${sessionDir}`);
-    args.push("-e", `CLAUDE_CONFIG_DIR=${sessionDir}`);
+    args.push("-e", `${spec.agentHarness === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"}=${sessionDir}`);
   }
 
   args.push(spec.image);

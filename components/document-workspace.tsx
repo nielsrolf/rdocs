@@ -23,6 +23,7 @@ import {
   isLiteLlmAgentModel,
   isLocalAgentModel,
   isOpenRouterAgentModel,
+  agentHarnessForModel,
   normalizeAgentModel
 } from "@/lib/agent-config";
 import type { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
@@ -111,7 +112,7 @@ import { useCollaborationStream } from "./document-workspace/use-collaboration-s
 import { usePresence } from "./document-workspace/use-presence";
 import { FindBar } from "./document-workspace/find-bar";
 import { SearchExtension } from "./document-workspace/search";
-import { aiRunsFingerprint, buildConversations, selectionBlocksRunSync } from "./document-workspace/conversations";
+import { aiRunsFingerprint, buildConversations, mergeRunEventTimelines, selectionBlocksRunSync } from "./document-workspace/conversations";
 import { createLatexRenderExtension } from "./document-workspace/latex";
 import { AttachmentChip, EmbeddedWidget, RepoImage, TabBreak } from "./document-workspace/nodes";
 import {
@@ -236,10 +237,12 @@ export function DocumentWorkspace({
   initialRunnerMode,
   initialHasOpenRouterKey,
   initialHasLiteLlmKey,
+  initialHasOpenAiKey,
   localAgentModel,
   anthropicFreeFallback,
   credentialHasOpenRouterKey,
   credentialHasLiteLlmKey,
+  credentialHasOpenAiKey,
   isAuthenticated,
   isOwner,
   shareToken,
@@ -257,6 +260,7 @@ export function DocumentWorkspace({
   const [runnerMode, setRunnerMode] = useState(initialRunnerMode ?? "managed");
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(initialHasOpenRouterKey);
   const [hasLiteLlmKey, setHasLiteLlmKey] = useState(initialHasLiteLlmKey);
+  const [hasOpenAiKey, setHasOpenAiKey] = useState(initialHasOpenAiKey);
   const [repoBusy, setRepoBusy] = useState(false);
   const [repoNotice, setRepoNotice] = useState<string | null>(null);
   const [repoAccessIssue, setRepoAccessIssue] = useState<{
@@ -312,7 +316,7 @@ export function DocumentWorkspace({
   const maybeShowFreeFallbackNotice = useCallback(() => {
     if (!anthropicFreeFallback || freeFallbackNoticeShownRef.current) return;
     const model = normalizeAgentModel(agentModel);
-    const usesAnthropic =
+    const usesAnthropic = agentHarnessForModel(model) === "claude-code" &&
       !isOpenRouterAgentModel(model) && !isLiteLlmAgentModel(model) && !isLocalAgentModel(model);
     if (!usesAnthropic) return;
     freeFallbackNoticeShownRef.current = true;
@@ -323,9 +327,11 @@ export function DocumentWorkspace({
   }, [anthropicFreeFallback, agentModel, localAgentModel]);
   // Optimistic progress line for a just-started run — must not claim "Claude"
   // when the credential-less free fallback will do the work.
-  const startingProgress = anthropicFreeFallback
-    ? "Starting free local model agent (no credential connected — this is slow)."
-    : "Starting Claude research agent.";
+  const startingProgress = agentHarnessForModel(agentModel) === "codex"
+    ? "Starting Codex research agent."
+    : anthropicFreeFallback
+      ? "Starting free local model agent (no credential connected — this is slow)."
+      : "Starting Claude research agent.";
   const reportClientError = useCallback(
     (message: string, scope: string, data?: unknown) => {
       setGlobalError(message);
@@ -379,11 +385,12 @@ export function DocumentWorkspace({
   // (config + run history) instead of the mostly-empty notebook body.
   const [agentPanelOpen, setAgentPanelOpen] = useState(documentKind === "slack_channel");
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
-  // Events of older runs the poll returns without timelines (`eventsOmitted`).
-  // Those runs are terminal, so their events are immutable — fetched once from
-  // the run-detail route when their conversation is opened, then cached here
-  // and merged into the conversation view. Kept separate from `aiRuns` so the
-  // 2s poll (which never carries these events) can't clobber them.
+  // Full timelines lazily fetched from the run-detail route: for older runs
+  // the poll returns without events (`eventsOmitted`) and for long runs whose
+  // earliest events fell out of the poll's tail window (`eventsClipped`).
+  // Fetched once per run when its conversation is opened, cached here and
+  // merged into the conversation view. Kept separate from `aiRuns` so the
+  // 2s poll (which never carries the missing events) can't clobber them.
   const [archivedRunEvents, setArchivedRunEvents] = useState<Record<string, AiRunEventView[]>>({});
   const archivedRunEventsRequestedRef = useRef<Set<string>>(new Set());
   const [composeMode, setComposeMode] = useState<"selected" | "new">("selected");
@@ -3821,13 +3828,26 @@ export function DocumentWorkspace({
   const selectedVersion =
     historyVersions.find((version) => version.id === selectedVersionId) ?? historyVersions[0] ?? null;
   const conversations = useMemo(() => {
-    // Splice lazily-loaded events back into the older runs the poll ships
-    // without timelines, so opening an archived conversation shows its history.
-    const merged = aiRuns.map((run) =>
-      run.eventsOmitted && archivedRunEvents[run.id]
-        ? { ...run, events: archivedRunEvents[run.id], eventsOmitted: false }
-        : run
-    );
+    // Splice lazily-loaded events back into runs the poll ships incomplete:
+    // older runs come without timelines (`eventsOmitted` — replace outright),
+    // and long runs come with only their latest window (`eventsClipped` — the
+    // archived fetch has the beginning, the poll has the live tail, so merge
+    // the two by event id).
+    const merged = aiRuns.map((run) => {
+      const archived = archivedRunEvents[run.id];
+      if (!archived) return run;
+      if (run.eventsOmitted) {
+        return { ...run, events: archived, eventsOmitted: false };
+      }
+      if (run.eventsClipped) {
+        return {
+          ...run,
+          events: mergeRunEventTimelines(archived, run.events ?? []),
+          eventsClipped: false
+        };
+      }
+      return run;
+    });
     return buildConversations(merged);
   }, [aiRuns, archivedRunEvents]);
   const selectedConversation = useMemo(() => {
@@ -3839,13 +3859,17 @@ export function DocumentWorkspace({
     return conversations[0] ?? null;
   }, [composeMode, conversations, selectedConversationId]);
 
-  // Lazy-load the event timelines of the selected conversation's older runs
-  // (the poll flags them `eventsOmitted`). One fetch per run, deduped across
-  // renders; failures clear the guard so a re-select retries.
+  // Lazy-load the full event timelines of the selected conversation's runs the
+  // poll ships incomplete: older runs without events (`eventsOmitted`) and long
+  // runs whose earliest events fell out of the poll window (`eventsClipped`).
+  // One fetch per run, deduped across renders; failures clear the guard so a
+  // re-select retries. For a still-RUNNING clipped run one fetch is enough —
+  // its missing events are the immutable beginning, and the live tail keeps
+  // arriving through the poll (merged in the conversations memo above).
   useEffect(() => {
     if (!selectedConversation) return;
     for (const run of selectedConversation.runs) {
-      if (!run.eventsOmitted || archivedRunEventsRequestedRef.current.has(run.id)) continue;
+      if (!(run.eventsOmitted || run.eventsClipped) || archivedRunEventsRequestedRef.current.has(run.id)) continue;
       archivedRunEventsRequestedRef.current.add(run.id);
       const shareQuery = shareToken ? `?share=${encodeURIComponent(shareToken)}` : "";
       fetch(`/api/documents/${documentId}/ai-runs/${run.id}${shareQuery}`, { cache: "no-store" })
@@ -4722,6 +4746,7 @@ export function DocumentWorkspace({
               onKeysChanged={(keys) => {
                 setHasOpenRouterKey(keys.includes("OPENROUTER_API_KEY") || credentialHasOpenRouterKey);
                 setHasLiteLlmKey(keys.includes("LITELLM_API_KEY") || credentialHasLiteLlmKey);
+                setHasOpenAiKey(keys.includes("OPENAI_API_KEY") || credentialHasOpenAiKey);
               }}
             />
           ) : null}
@@ -4979,6 +5004,7 @@ export function DocumentWorkspace({
           onEnvKeysChanged={(keys) => {
             setHasOpenRouterKey(keys.includes("OPENROUTER_API_KEY") || credentialHasOpenRouterKey);
             setHasLiteLlmKey(keys.includes("LITELLM_API_KEY") || credentialHasLiteLlmKey);
+            setHasOpenAiKey(keys.includes("OPENAI_API_KEY") || credentialHasOpenAiKey);
           }}
           title={title}
           documentId={documentId}
@@ -5000,6 +5026,7 @@ export function DocumentWorkspace({
           agentEffort={agentEffort}
           hasOpenRouterKey={hasOpenRouterKey}
           hasLiteLlmKey={hasLiteLlmKey}
+          hasOpenAiKey={hasOpenAiKey}
           localModel={localAgentModel}
           anthropicFreeFallback={anthropicFreeFallback}
           runnerMode={runnerMode}

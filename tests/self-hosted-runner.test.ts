@@ -250,6 +250,12 @@ test("ask-ai on a selfHosted document: no worktree, enqueues a SelfHostedJob, po
     where: { threadId: thread.id, aiRunId: aiRun.id }
   });
   assert.equal(posted?.body, "Here is the worker's reply.");
+
+  const finalEvent = await db.aiRunEvent.findFirst({
+    where: { aiRunId: aiRun.id, role: "agent" },
+    orderBy: { createdAt: "desc" }
+  });
+  assert.equal(finalEvent?.message, "Here is the worker's reply.");
 });
 
 test("agent-conversation on a selfHosted document: no worktree, enqueues a SelfHostedJob, resolves via the worker's result", async () => {

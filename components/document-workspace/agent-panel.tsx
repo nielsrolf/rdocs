@@ -6,6 +6,12 @@ import { useEffect, useState } from "react";
 import {
   AGENT_EFFORTS,
   ANTHROPIC_AGENT_MODELS,
+  CODEX_LITELLM_AGENT_MODELS,
+  CODEX_LITELLM_MODEL_PREFIX,
+  CODEX_OPENAI_AGENT_MODELS,
+  CODEX_OPENAI_MODEL_PREFIX,
+  DEFAULT_AGENT_MODEL,
+  defaultCodexAgentModelForCredentials,
   LOCAL_MODEL_PREFIX,
   isLocalAgentModel,
   LITELLM_AGENT_MODELS,
@@ -15,82 +21,151 @@ import {
   isLiteLlmAgentModel,
   isOpenRouterAgentModel,
   isStorableAgentModel,
+  agentHarnessForModel,
   normalizeAgentModel
 } from "@/lib/agent-config";
 import { cn, truncate } from "@/lib/utils";
 
-import { AgentTimeline } from "./agent-timeline";
+import { AgentTimeline, agentDisplayName } from "./agent-timeline";
 import type { AgentConversation } from "./conversations";
 import { MarkdownBody } from "./markdown";
-import type { ActiveAiRunView, ThreadView } from "./types";
+import {
+  classifyRunArtifacts,
+  hasRenderableRunArtifacts,
+  type RunArtifactComment,
+  type RunArtifactSuggestion
+} from "./run-result";
+import type { ActiveAiRunView, AiRunEventView, ThreadView } from "./types";
 import { formatRelativeTime } from "./utils";
 
-// The final edit a SUCCEEDED selection-edit run produced. The polled run list
-// intentionally omits the (potentially large) replacement payload, so this
-// fetches the run detail once per run id and renders it with a copy affordance
-// — previously the session view never showed WHAT the agent actually wrote.
-// Rendered at the END of the timeline scroll, collapsed by default: the edit
-// is already applied to the document, so it should be reachable, not pinned
-// over the conversation.
+// Structured outputs are persisted separately from the streaming transcript.
+// Render those application artifacts directly: this recovers historical
+// comment runs whose event stream contains only a terse summary, and gives
+// edits, review comments, and tracked suggestions first-class presentations.
 function RunResultBlock({
   documentId,
+  events,
   run,
   shareToken
 }: {
   documentId: string;
+  events: AiRunEventView[];
   run: ActiveAiRunView;
   shareToken?: string | null;
 }) {
-  const [replacementText, setReplacementText] = useState<string | null>(null);
+  const [payload, setPayload] = useState<{
+    replacementText: string | null;
+    comments: RunArtifactComment[];
+    suggestions: RunArtifactSuggestion[];
+  } | null>(null);
   const [copied, setCopied] = useState(false);
-  const isEditResult = run.triggerType === "SELECTION_EDIT" && run.status === "SUCCEEDED";
+  const commentVersion = run.agentComments?.length ?? 0;
 
   useEffect(() => {
     let alive = true;
-    setReplacementText(null);
+    setPayload(null);
     setCopied(false);
-    if (!isEditResult) return;
     const shareQuery = shareToken ? `?share=${encodeURIComponent(shareToken)}` : "";
     fetch(`/api/documents/${documentId}/ai-runs/${run.id}${shareQuery}`, { cache: "no-store" })
       .then((response) => response.json())
       .then((data) => {
         if (!alive) return;
-        const text = data?.aiRun?.replacementText;
-        setReplacementText(typeof text === "string" && text.trim() ? text : null);
+        const detail = data?.aiRun;
+        setPayload({
+          replacementText:
+            typeof detail?.replacementText === "string" && detail.replacementText.trim()
+              ? detail.replacementText
+              : null,
+          comments: Array.isArray(detail?.comments) ? detail.comments : [],
+          suggestions: Array.isArray(detail?.suggestions) ? detail.suggestions : []
+        });
       })
       .catch(() => {});
     return () => {
       alive = false;
     };
-  }, [documentId, run.id, isEditResult, shareToken]);
+  }, [documentId, run.id, run.status, commentVersion, shareToken]);
 
-  if (!isEditResult || !replacementText) {
+  if (!payload) {
     return null;
   }
 
+  const artifacts = classifyRunArtifacts({
+    triggerType: run.triggerType,
+    triggerId: run.triggerId ?? null,
+    replacementText: payload.replacementText,
+    comments: payload.comments,
+    suggestions: payload.suggestions
+  });
+  // New runs also record the real final reply in the event timeline. Suppress
+  // that duplicate; historical runs whose event contains only the summary keep
+  // the persisted comment reply here.
+  const eventMessages = new Set(events.map((event) => event.message.trim()));
+  const finalReplies = artifacts.finalReplies.filter(
+    (comment) => !eventMessages.has(comment.body.trim())
+  );
+  const visible = { ...artifacts, finalReplies };
+  if (!hasRenderableRunArtifacts(visible)) return null;
+
   return (
-    <details className="agent-result">
-      <summary className="agent-result-header">
-        <span className="agent-tool-caret" aria-hidden />
-        <span className="agent-result-title">Final edit</span>
-        <span className="agent-result-hint">{`${replacementText.split("\n").length} lines`}</span>
-        <button
-          className="ghost-button agent-result-copy"
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            void navigator.clipboard?.writeText(replacementText).then(() => {
-              setCopied(true);
-              window.setTimeout(() => setCopied(false), 1500);
-            });
-          }}
-          type="button"
-        >
-          {copied ? "Copied" : "Copy"}
-        </button>
-      </summary>
-      <MarkdownBody body={replacementText} className="agent-result-body markdown-body" />
-    </details>
+    <section className="agent-run-artifacts" aria-label="Run results">
+      {visible.finalEdit ? (
+        <details className="agent-result" open>
+          <summary className="agent-result-header">
+            <span className="agent-tool-caret" aria-hidden />
+            <span className="agent-result-title">Final edit</span>
+            <span className="agent-result-hint">{`${visible.finalEdit.split("\n").length} lines`}</span>
+            <button
+              className="ghost-button agent-result-copy"
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void navigator.clipboard?.writeText(visible.finalEdit!).then(() => {
+                  setCopied(true);
+                  window.setTimeout(() => setCopied(false), 1500);
+                });
+              }}
+              type="button"
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </summary>
+          <MarkdownBody body={visible.finalEdit} className="agent-result-body markdown-body" />
+        </details>
+      ) : null}
+
+      {visible.finalReplies.map((comment) => (
+        <div className="agent-artifact agent-artifact-reply" key={comment.id}>
+          <div className="agent-artifact-header"><strong>Final comment reply</strong></div>
+          <MarkdownBody body={comment.body} className="agent-result-body markdown-body" />
+        </div>
+      ))}
+
+      {visible.standaloneComments.map((comment) => (
+        <div className="agent-artifact agent-artifact-comment" key={comment.id}>
+          <div className="agent-artifact-header">
+            <strong>Comment</strong>
+            {comment.anchorText ? <span>on “{truncate(comment.anchorText, 90)}”</span> : null}
+          </div>
+          <MarkdownBody body={comment.body} className="agent-result-body markdown-body" />
+        </div>
+      ))}
+
+      {visible.suggestions.map((suggestion, index) => (
+        <details className="agent-artifact agent-artifact-suggestion" key={`${suggestion.findText}-${index}`}>
+          <summary className="agent-artifact-header">
+            <span className="agent-tool-caret" aria-hidden />
+            <strong>Suggestion {index + 1}</strong>
+            {suggestion.reason ? <span>{truncate(suggestion.reason, 100)}</span> : null}
+          </summary>
+          {suggestion.reason ? <p className="agent-artifact-reason">{suggestion.reason}</p> : null}
+          <div className="agent-artifact-diff">
+            <pre className="agent-artifact-before"><span>−</span>{suggestion.findText}</pre>
+            <pre className="agent-artifact-after"><span>+</span>{suggestion.replacementText || "(delete)"}</pre>
+          </div>
+        </details>
+      ))}
+    </section>
   );
 }
 
@@ -206,6 +281,7 @@ export function AgentPanel({
   agentEffort,
   hasOpenRouterKey,
   hasLiteLlmKey,
+  hasOpenAiKey,
   localModel,
   anthropicFreeFallback,
   runnerMode,
@@ -241,6 +317,7 @@ export function AgentPanel({
   agentEffort: string;
   hasOpenRouterKey: boolean;
   hasLiteLlmKey: boolean;
+  hasOpenAiKey: boolean;
   /** The deployment's free local model ("local/<name>") when configured. */
   localModel: string | null;
   /** No Anthropic credential anywhere: Anthropic-model runs would actually
@@ -270,13 +347,17 @@ export function AgentPanel({
   // provider's prefix gets applied on commit.
   const OPENROUTER_CUSTOM_SENTINEL = "__openrouter_custom__";
   const LITELLM_CUSTOM_SENTINEL = "__litellm_custom__";
-  const [customMode, setCustomMode] = useState<"openrouter" | "litellm" | null>(null);
+  const CODEX_OPENAI_CUSTOM_SENTINEL = "__codex_openai_custom__";
+  const CODEX_LITELLM_CUSTOM_SENTINEL = "__codex_litellm_custom__";
+  const [customMode, setCustomMode] = useState<"openrouter" | "litellm" | "codex-openai" | "codex-litellm" | null>(null);
   const [customDraft, setCustomDraft] = useState("");
   const [customError, setCustomError] = useState<string | null>(null);
 
   // Legacy stored aliases ("sonnet"/"opus") display as their canonical model;
   // the canonical value is what gets PATCHed on the next change.
   const normalizedModel = normalizeAgentModel(agentModel);
+  const harness = agentHarnessForModel(normalizedModel);
+  const isCodex = harness === "codex";
   const modelIsOpenRouter = isOpenRouterAgentModel(normalizedModel);
   const modelIsLiteLlm = isLiteLlmAgentModel(normalizedModel);
   const modelIsLocal = isLocalAgentModel(normalizedModel);
@@ -303,17 +384,35 @@ export function AgentPanel({
   // Keep a stored third-party selection visible even if its key was deleted.
   const showOpenRouterGroup = hasOpenRouterKey || modelIsOpenRouter;
   const showLiteLlmGroup = hasLiteLlmKey || modelIsLiteLlm;
+  const codexModelIsLiteLlm = normalizedModel.startsWith(CODEX_LITELLM_MODEL_PREFIX);
+  const storedCustomCodexOpenAiModel =
+    normalizedModel.startsWith(CODEX_OPENAI_MODEL_PREFIX) &&
+    !CODEX_OPENAI_AGENT_MODELS.some((m) => m.value === normalizedModel)
+      ? normalizedModel
+      : null;
+  const storedCustomCodexLiteLlmModel =
+    codexModelIsLiteLlm && !CODEX_LITELLM_AGENT_MODELS.some((m) => m.value === normalizedModel)
+      ? normalizedModel
+      : null;
 
   function commitCustomSlug() {
     const raw = customDraft.trim();
     if (!raw || !customMode) return;
-    const prefix = customMode === "openrouter" ? OPENROUTER_MODEL_PREFIX : LITELLM_MODEL_PREFIX;
+    const prefix = customMode === "openrouter"
+      ? OPENROUTER_MODEL_PREFIX
+      : customMode === "litellm"
+        ? LITELLM_MODEL_PREFIX
+        : customMode === "codex-openai"
+          ? CODEX_OPENAI_MODEL_PREFIX
+          : CODEX_LITELLM_MODEL_PREFIX;
     const value = raw.startsWith(prefix) ? raw : `${prefix}${raw}`;
     if (!isStorableAgentModel(value)) {
       setCustomError(
         customMode === "openrouter"
           ? "Enter an OpenRouter slug like openai/gpt-5.2"
-          : "Enter a LiteLLM model name like anthropic/claude-opus-4-8"
+          : customMode === "codex-openai"
+            ? "Enter an OpenAI model name like gpt-5.6-terra"
+            : "Enter a LiteLLM model name like anthropic/claude-opus-5"
       );
       return;
     }
@@ -347,14 +446,38 @@ export function AgentPanel({
             onRunnerModeChange={onRunnerModeChange}
           />
           <label className="agent-config-field">
+            <span className="agent-config-label">Harness</span>
+            <select
+              className="agent-config-select"
+              disabled={!canWriteDocument}
+              onChange={(event) => {
+                setCustomMode(null);
+                onAgentModelChange(
+                  event.target.value === "codex"
+                    ? defaultCodexAgentModelForCredentials({ hasOpenAiKey, hasLiteLlmKey })
+                    : DEFAULT_AGENT_MODEL
+                );
+              }}
+              title="Agent execution harness"
+              value={harness}
+            >
+              <option value="claude-code">Claude Code</option>
+              <option value="codex">Codex</option>
+            </select>
+          </label>
+          <label className="agent-config-field">
             <span className="agent-config-label">Model</span>
             <select
               className="agent-config-select"
               disabled={!canWriteDocument}
               onChange={(event) => {
                 const value = event.target.value;
-                if (value === OPENROUTER_CUSTOM_SENTINEL || value === LITELLM_CUSTOM_SENTINEL) {
-                  setCustomMode(value === OPENROUTER_CUSTOM_SENTINEL ? "openrouter" : "litellm");
+                if ([OPENROUTER_CUSTOM_SENTINEL, LITELLM_CUSTOM_SENTINEL, CODEX_OPENAI_CUSTOM_SENTINEL, CODEX_LITELLM_CUSTOM_SENTINEL].includes(value)) {
+                  setCustomMode(
+                    value === OPENROUTER_CUSTOM_SENTINEL ? "openrouter" :
+                    value === LITELLM_CUSTOM_SENTINEL ? "litellm" :
+                    value === CODEX_OPENAI_CUSTOM_SENTINEL ? "codex-openai" : "codex-litellm"
+                  );
                   setCustomError(null);
                   return;
                 }
@@ -367,9 +490,14 @@ export function AgentPanel({
                   ? OPENROUTER_CUSTOM_SENTINEL
                   : customMode === "litellm"
                     ? LITELLM_CUSTOM_SENTINEL
+                    : customMode === "codex-openai"
+                      ? CODEX_OPENAI_CUSTOM_SENTINEL
+                      : customMode === "codex-litellm"
+                        ? CODEX_LITELLM_CUSTOM_SENTINEL
                     : normalizedModel
               }
             >
+              {!isCodex ? <>
               <optgroup label="Anthropic">
                 {ANTHROPIC_AGENT_MODELS.map((model) => (
                   <option key={model.value} value={model.value}>
@@ -417,6 +545,28 @@ export function AgentPanel({
                   <option value={LITELLM_CUSTOM_SENTINEL}>Custom model…</option>
                 </optgroup>
               ) : null}
+              </> : <>
+                <optgroup label={hasOpenAiKey ? "OpenAI" : "OpenAI (requires API key)"}>
+                  {CODEX_OPENAI_AGENT_MODELS.map((model) => (
+                    <option key={model.value} value={model.value}>{model.label}</option>
+                  ))}
+                  {storedCustomCodexOpenAiModel ? (
+                    <option value={storedCustomCodexOpenAiModel}>{storedCustomCodexOpenAiModel.slice(CODEX_OPENAI_MODEL_PREFIX.length)}</option>
+                  ) : null}
+                  <option value={CODEX_OPENAI_CUSTOM_SENTINEL}>Custom OpenAI model…</option>
+                </optgroup>
+                {hasLiteLlmKey || codexModelIsLiteLlm ? (
+                  <optgroup label="LiteLLM (OpenAI Responses)">
+                    {CODEX_LITELLM_AGENT_MODELS.map((model) => (
+                      <option key={model.value} value={model.value}>{model.label}</option>
+                    ))}
+                    {storedCustomCodexLiteLlmModel ? (
+                      <option value={storedCustomCodexLiteLlmModel}>{storedCustomCodexLiteLlmModel.slice(CODEX_LITELLM_MODEL_PREFIX.length)}</option>
+                    ) : null}
+                    <option value={CODEX_LITELLM_CUSTOM_SENTINEL}>Custom LiteLLM model…</option>
+                  </optgroup>
+                ) : null}
+              </>}
             </select>
           </label>
           <label className="agent-config-field">
@@ -445,7 +595,8 @@ export function AgentPanel({
             <div className="agent-config-field agent-config-custom-model">
               <input
                 aria-label={
-                  customMode === "openrouter" ? "Custom OpenRouter model slug" : "Custom LiteLLM model name"
+                  customMode === "openrouter" ? "Custom OpenRouter model slug" :
+                  customMode === "codex-openai" ? "Custom OpenAI model name" : "Custom LiteLLM model name"
                 }
                 className="agent-config-custom-input"
                 onChange={(event) => setCustomDraft(event.target.value)}
@@ -455,7 +606,7 @@ export function AgentPanel({
                     commitCustomSlug();
                   }
                 }}
-                placeholder={customMode === "openrouter" ? "openai/gpt-5.2" : "anthropic/claude-opus-4-8"}
+                placeholder={customMode === "openrouter" ? "openai/gpt-5.2" : customMode === "codex-openai" ? "gpt-5.6-terra" : "anthropic/claude-opus-5"}
                 value={customDraft}
               />
               <button
@@ -469,13 +620,17 @@ export function AgentPanel({
               {customError ? <span className="agent-config-hint agent-config-error">{customError}</span> : null}
             </div>
           ) : null}
-          {modelIsAnthropic && anthropicFreeFallback ? (
+          {!isCodex && modelIsAnthropic && anthropicFreeFallback ? (
             <span className="agent-config-hint agent-config-error">
               No AI credential connected — agents run on the free local model
               {fallbackModelName ? ` ${fallbackModelName}` : ""} (very slow), not{" "}
               {ANTHROPIC_AGENT_MODELS.find((m) => m.value === normalizedModel)?.label ?? "Claude"}.
               Connect a credential under AI settings (topbar) to use Claude.
             </span>
+          ) : isCodex && codexModelIsLiteLlm && !hasLiteLlmKey ? (
+            <span className="agent-config-hint">Codex via LiteLLM needs LITELLM_API_KEY and an OpenAI-compatible Responses endpoint.</span>
+          ) : isCodex && !hasOpenAiKey ? (
+            <span className="agent-config-hint">Native Codex needs an OpenAI API key. Select a LiteLLM model to use your LiteLLM credential.</span>
           ) : modelIsOpenRouter && !hasOpenRouterKey ? (
             <span className="agent-config-hint">
               This model needs an OpenRouter key — add OPENROUTER_API_KEY in the Env menu or connect
@@ -586,6 +741,7 @@ export function AgentPanel({
               </header>
 
               <AgentTimeline
+                agentName={agentDisplayName(selectedConversation.latestRun.model)}
                 events={selectedConversation.events}
                 progress={selectedConversation.progress}
                 status={selectedConversation.status}
@@ -598,12 +754,17 @@ export function AgentPanel({
                   />
                 }
                 outro={
-                  <RunResultBlock
-                    documentId={documentId}
-                    key={`result-${selectedConversation.latestRun.id}`}
-                    run={selectedConversation.latestRun}
-                    shareToken={shareToken}
-                  />
+                  <div className="agent-run-artifact-list">
+                    {selectedConversation.runs.map((run) => (
+                      <RunResultBlock
+                        documentId={documentId}
+                        events={selectedConversation.events}
+                        key={`result-${run.id}`}
+                        run={run}
+                        shareToken={shareToken}
+                      />
+                    ))}
+                  </div>
                 }
               />
 

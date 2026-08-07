@@ -24,7 +24,7 @@ The app is built as a Next.js frontend/server app with Prisma + SQLite for persi
 - Prisma + SQLite
 - TipTap editor
 - Custom cookie auth with signed JWT sessions
-- Claude Agent SDK for document edits, comment replies, and repository work
+- Selectable Claude Code or Codex SDK harness for document edits, comment replies, and repository work
 
 ## Setup
 
