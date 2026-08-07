@@ -21,6 +21,7 @@ import {
 } from "./agent-config";
 import {
   agentEnvKeysForPrompt,
+  applyAgentConfigDirEnv,
   applyLongContextEnv,
   applyProviderEnv,
   buildAgentEnv,
@@ -207,6 +208,17 @@ export type ClaudeAgentRunOptions = {
    * runner bridges it as a "session" frame.
    */
   onSessionId?: (sessionId: string) => void | Promise<void>;
+  /**
+   * Native config/session root for the harness CLI ($CLAUDE_CONFIG_DIR /
+   * $CODEX_HOME): the per-conversation session dir on the host, or the
+   * container's mounted /agent-sessions. Every runner must supply this or
+   * accept the run-scoped temp fallback — the one thing that must NEVER happen
+   * is the CLI resolving the HOST's ~/.claude / ~/.codex session (see
+   * resolveAgentConfigDir).
+   */
+  sessionConfigDir?: string;
+  /** Stable key naming the temp config dir when sessionConfigDir is absent. */
+  runKey?: string;
   validateSubmission?: ClaudeAgentSubmissionValidator;
   /** Per-document model + thinking-effort selection (see lib/agent-config). */
   agentConfig?: DocumentAgentConfig;
@@ -1433,10 +1445,15 @@ async function runClaudeResearchAgentOnce(
   // beta would be ignored.
   const sdkBetas = applyLongContextEnv(agentProcessEnv, sdkConfig.provider);
   // Session transcripts: the SDK writes/reads them under
-  // $CLAUDE_CONFIG_DIR/projects/**. In the container runner CLAUDE_CONFIG_DIR
-  // is set on the container env (the bind-mounted per-conversation session
-  // dir) and buildAgentEnv passes it through here. Credentials are resolved
-  // separately and never sourced from the host's config directory.
+  // $CLAUDE_CONFIG_DIR/projects/**. Pinned to the caller's session dir (the
+  // container's mounted /agent-sessions, or the host per-conversation dir) —
+  // and never left to default to the host's ~/.claude, which the CLI would
+  // otherwise mine for a fallback credential.
+  applyAgentConfigDirEnv(agentProcessEnv, {
+    harness: "claude",
+    sessionConfigDir: options.sessionConfigDir,
+    runKey: options.runKey
+  });
   const promptEnvKeys = agentEnvKeysForPrompt(options.agentEnv ?? {}, agentProcessEnv);
   const envDisclosure =
     promptEnvKeys.length > 0

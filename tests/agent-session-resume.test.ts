@@ -7,6 +7,7 @@ import test from "node:test";
 import { db } from "../lib/db";
 import {
   findResumableSessionId,
+  codexSessionExists,
   getConversationSessionDir,
   planSessionResume,
   resolveConversationRootId,
@@ -89,6 +90,11 @@ test("planSessionResume resumes only when the transcript actually exists on disk
   });
   assert.equal(withoutFile.conversationKey, root.id, "conversation is keyed by the root run");
   assert.equal(withoutFile.resumeSessionId, null, "missing transcript must not be resumed");
+  assert.equal(
+    withoutFile.resumeUnavailableSessionId,
+    sessionId,
+    "a recorded-but-unresumable session must be reported so the context downgrade is not silent"
+  );
 
   // With the transcript in the conversation's session dir → resume.
   await writeTranscript(withoutFile.sessionDir, sessionId);
@@ -99,6 +105,7 @@ test("planSessionResume resumes only when the transcript actually exists on disk
     runnerMode: "container"
   });
   assert.equal(withFile.resumeSessionId, sessionId);
+  assert.equal(withFile.resumeUnavailableSessionId, null, "a resumable session is not a downgrade");
   assert.equal(withFile.sessionDir, getConversationSessionDir(doc.id, root.id));
   // The dir is created so the container mount always has a target.
   assert.ok((await fs.stat(withFile.sessionDir)).isDirectory());
@@ -112,29 +119,43 @@ test("planSessionResume resumes only when the transcript actually exists on disk
     runnerMode: "container"
   });
   assert.equal(freshPlan.resumeSessionId, null);
+  assert.equal(
+    freshPlan.resumeUnavailableSessionId,
+    null,
+    "a fresh conversation has no prior context to lose"
+  );
   assert.equal(freshPlan.conversationKey, fresh.id);
 
   await fs.rm(path.dirname(withFile.sessionDir), { recursive: true, force: true });
 });
 
-test("in-process runs look the transcript up in the host config dir, not the session dir", async () => {
+test("in-process runs resume from the conversation session dir, not the host config dir", async () => {
+  // The in-process runner hands that dir to agent-core as CLAUDE_CONFIG_DIR;
+  // the host's ~/.claude is never the CLI's config root (it would double as a
+  // host-credential source — see tests/agent-config-dir.test.ts).
   const doc = await makeDocument();
   const sessionId = crypto.randomUUID();
   const root = await makeRun(doc.id, { sdkSessionId: sessionId });
   const followUp = await makeRun(doc.id, { parentRunId: root.id, status: "RUNNING" });
 
-  const hostConfigDir = path.join(process.cwd(), ".research-workspaces", `test-host-cfg-${crypto.randomUUID()}`);
-  await writeTranscript(hostConfigDir, sessionId);
+  const missing = await planSessionResume({
+    documentId: doc.id,
+    aiRunId: followUp.id,
+    previousRunId: root.id,
+    runnerMode: "inprocess"
+  });
+  assert.equal(missing.resumeSessionId, null, "no transcript in the session dir yet");
+  assert.equal(missing.resumeUnavailableSessionId, sessionId);
+
+  await writeTranscript(missing.sessionDir, sessionId);
   const plan = await planSessionResume({
     documentId: doc.id,
     aiRunId: followUp.id,
     previousRunId: root.id,
-    runnerMode: "inprocess",
-    hostConfigDir
+    runnerMode: "inprocess"
   });
   assert.equal(plan.resumeSessionId, sessionId);
-  assert.equal(await sessionTranscriptExists(plan.sessionDir, sessionId), false);
-  await fs.rm(hostConfigDir, { recursive: true, force: true });
+  await fs.rm(path.dirname(plan.sessionDir), { recursive: true, force: true });
 });
 
 test("sessionTranscriptExists: empty files and missing dirs don't count", async () => {
@@ -147,6 +168,28 @@ test("sessionTranscriptExists: empty files and missing dirs don't count", async 
   await fs.writeFile(path.join(projectDir, "full.jsonl"), '{"type":"user"}\n');
   assert.equal(await sessionTranscriptExists(dir, "full"), true);
   await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("Codex resume uses its native rollout file and stores only the opaque thread id in the DB", async () => {
+  const doc = await makeDocument();
+  const sessionId = crypto.randomUUID();
+  const root = await makeRun(doc.id, { sdkSessionId: sessionId });
+  const followUp = await makeRun(doc.id, { parentRunId: root.id, status: "RUNNING" });
+  const sessionDir = getConversationSessionDir(doc.id, root.id);
+  const nativeDir = path.join(sessionDir, "sessions", "2026", "08", "04");
+  await fs.mkdir(nativeDir, { recursive: true });
+  await fs.writeFile(path.join(nativeDir, `rollout-2026-08-04T12-00-00-${sessionId}.jsonl`), '{"native":"codex"}\n');
+
+  assert.equal(await codexSessionExists(sessionDir, sessionId), true);
+  const plan = await planSessionResume({
+    documentId: doc.id,
+    aiRunId: followUp.id,
+    previousRunId: root.id,
+    runnerMode: "container",
+    agentModel: "codex/openai/gpt-5.6-terra"
+  });
+  assert.equal(plan.resumeSessionId, sessionId);
+  await fs.rm(path.dirname(sessionDir), { recursive: true, force: true });
 });
 
 test("withConversationLock serializes tasks on the same key", async () => {
@@ -226,5 +269,5 @@ test("a host CLAUDE_CONFIG_DIR never leaks into the container env", () => {
     {}
   );
   assert.equal(env.CLAUDE_CONFIG_DIR, undefined);
-  assert.equal(env.ANTHROPIC_API_KEY, "sk-1");
+  assert.equal(env.ANTHROPIC_API_KEY, undefined, "host credentials must not leak either");
 });

@@ -83,6 +83,10 @@ function isAllowlisted(name: string): boolean {
   return ALLOWLIST_EXACT.has(name);
 }
 
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import type { AgentModelProvider } from "./agent-config";
 
 export type DocumentEnv = Record<string, string>;
@@ -267,6 +271,58 @@ export function buildAgentEnv(
     result.CLAUDE_CODE_AUTO_COMPACT_WINDOW = DEFAULT_AUTO_COMPACT_WINDOW;
   }
   return result;
+}
+
+/**
+ * Pin the harness's native config/session root to a RUN-SCOPED directory.
+ *
+ * Why this is mandatory and not an optimization: `HOME` is allowlisted (the
+ * toolchain needs it), so without an explicit config dir the Claude CLI
+ * resolves `~/.claude` and the Codex CLI `~/.codex` — the HOST's logged-in
+ * sessions. The CLI then treats those stored credentials as a fallback and
+ * retries a 401 with them, which both violates the "no host credentials, ever"
+ * rule and breaks the credential broker: the broker only accepts its own
+ * per-run virtual token, so a host-token retry comes back as
+ * "Missing or malformed broker token." and fails the whole run.
+ *
+ * `sessionConfigDir` is the caller-provided root (per-conversation session dir,
+ * or the container's mounted /agent-sessions). Without one we still never fall
+ * back to the host: a per-run temp dir is used instead, so transcripts are
+ * ephemeral but credentials stay confined to the injected env.
+ */
+export function resolveAgentConfigDir(input: {
+  harness: "claude" | "codex";
+  sessionConfigDir?: string | null;
+  /** Run id (or any stable key) used to name the fallback temp dir. */
+  runKey?: string | null;
+  tmpDir?: string;
+}): string {
+  const explicit = input.sessionConfigDir?.trim();
+  if (explicit) return explicit;
+  const base = input.tmpDir?.trim() || os.tmpdir();
+  const key = (input.runKey ?? "").replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 80) || "run";
+  return path.join(base, "rdocs-agent-config", input.harness, key);
+}
+
+/**
+ * Apply {@link resolveAgentConfigDir} to a built agent env: sets the harness's
+ * config-dir variable and clears the other harness's, so neither CLI can walk
+ * back to a host session directory. Creates the directory.
+ */
+export function applyAgentConfigDirEnv(
+  env: Record<string, string>,
+  input: { harness: "claude" | "codex"; sessionConfigDir?: string | null; runKey?: string | null }
+): Record<string, string> {
+  const dir = resolveAgentConfigDir(input);
+  fs.mkdirSync(dir, { recursive: true });
+  if (input.harness === "codex") {
+    env.CODEX_HOME = dir;
+    delete env.CLAUDE_CONFIG_DIR;
+  } else {
+    env.CLAUDE_CONFIG_DIR = dir;
+    delete env.CODEX_HOME;
+  }
+  return env;
 }
 
 // Host-provided configuration (not credentials) worth disclosing to the agent

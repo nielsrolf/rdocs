@@ -1,5 +1,6 @@
 import {
   buildSubmissionValidator,
+  agentHarnessForModel,
   runClaudeResearchAgent,
   runMergeConflictResolver,
   type ClaudeResearchAgentInput,
@@ -34,14 +35,20 @@ export class InProcessRunner implements AgentRunner {
     const validateSubmission = options?.validation
       ? buildSubmissionValidator(options.validation, { workspacePath: input.workspacePath })
       : undefined;
-    const runPromise = runClaudeResearchAgent(input, {
+    const runOptions = {
       onProgress: options?.onProgress,
       onComment: options?.onComment,
       onSlackMessage: options?.onSlackMessage,
-      // Session transcripts go to the host's default CLAUDE_CONFIG_DIR here
-      // (redirecting it would break host credential lookup); resume finds them
-      // there via the SDK's cross-project search. options.sessionDirHostPath
-      // is container-only and deliberately ignored.
+      // Native session/config root. MUST be an app-managed dir: left to its
+      // default the harness CLI resolves the HOST's ~/.claude (or ~/.codex),
+      // finds the operator's logged-in session, and retries a rejected request
+      // with it — a host-credential leak that also fails every brokered run
+      // ("Credential broker: Missing or malformed broker token."). The
+      // per-conversation dir doubles as the transcript store, so in-process
+      // conversations get real session resume too; runs without one fall back
+      // to a run-scoped temp dir inside agent-core.
+      sessionConfigDir: options?.sessionDirHostPath,
+      runKey: options?.aiRunId,
       onSessionId: options?.onSessionId,
       agentConfig: options?.agentConfig,
       agentEnv: options?.agentEnv,
@@ -52,7 +59,12 @@ export class InProcessRunner implements AgentRunner {
       // Trusted host runs (Slack dev channel) opt out of the workspace guard
       // and kernel sandbox: the whole point is operating on the deployment.
       isolatedRuntime: options?.trustedHostRun === true
-    });
+    };
+    const runPromise = agentHarnessForModel(options?.agentConfig?.model) === "codex"
+      ? import("../../agent-core/codex-agent").then(({ runCodexResearchAgent }) =>
+          runCodexResearchAgent(input, runOptions)
+        )
+      : runClaudeResearchAgent(input, runOptions);
     const signal = options?.signal;
     if (!signal) {
       return runPromise;
@@ -81,12 +93,17 @@ export class InProcessRunner implements AgentRunner {
     });
   }
 
-  resolveMergeConflicts(job: MergeResolveJob): Promise<void> {
-    return runMergeConflictResolver({
+  async resolveMergeConflicts(job: MergeResolveJob): Promise<void> {
+    const input = {
       workspacePath: job.workspacePath,
       commitSha: job.commitSha,
       model: job.agentConfig?.model,
       agentEnv: job.agentEnv
-    });
+    };
+    if (agentHarnessForModel(job.agentConfig?.model) === "codex") {
+      const { runCodexMergeConflictResolver } = await import("../../agent-core/codex-agent");
+      return runCodexMergeConflictResolver(input);
+    }
+    return runMergeConflictResolver(input);
   }
 }

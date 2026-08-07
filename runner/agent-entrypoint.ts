@@ -14,6 +14,7 @@ import { execFileSync } from "node:child_process";
 
 import {
   buildSubmissionValidator,
+  agentHarnessForModel,
   runClaudeResearchAgent,
   runMergeConflictResolver,
   type ClaudeAgentProgressEvent
@@ -76,14 +77,26 @@ async function main() {
   try {
     if (job.kind === "merge_resolve") {
       // Resolve a git merge in the bind-mounted base checkout — IN-SANDBOX.
-      await runMergeConflictResolver({
+      const mergeInput = {
         workspacePath: CONTAINER_WORKSPACE,
         commitSha: job.commitSha,
         model: job.agentConfig?.model,
         agentEnv: job.agentEnv,
         // Inside the container: the mount namespace is the boundary.
-        isolatedRuntime: true
-      });
+        isolatedRuntime: true,
+        // Same reason as the agent turn below: keep the CLI's config root on
+        // the mounted store instead of letting it default under HOME.
+        sessionConfigDir:
+          (agentHarnessForModel(job.agentConfig?.model) === "codex"
+            ? process.env.CODEX_HOME
+            : process.env.CLAUDE_CONFIG_DIR)?.trim() || undefined
+      };
+      if (agentHarnessForModel(job.agentConfig?.model) === "codex") {
+        const { runCodexMergeConflictResolver } = await import("./agent-core/codex-agent");
+        await runCodexMergeConflictResolver(mergeInput);
+      } else {
+        await runMergeConflictResolver(mergeInput);
+      }
       emit({ type: "result", output: { kind: "merge_resolve", ok: true } });
       return;
     }
@@ -102,8 +115,9 @@ async function main() {
           `url.https://x-access-token:${githubToken}@github.com/.insteadOf`,
           "https://github.com/"
         ]);
-      } catch (error) {
-        process.stderr.write(`[agent-entrypoint] git auth config failed: ${(error as Error).message}\n`);
+      } catch {
+        // execFileSync errors include the full argv, which contains the token.
+        process.stderr.write("[agent-entrypoint] git auth config failed: git config exited unsuccessfully.\n");
       }
     }
 
@@ -112,7 +126,7 @@ async function main() {
     const validateSubmission = job.validation
       ? buildSubmissionValidator(job.validation, { workspacePath: CONTAINER_WORKSPACE })
       : undefined;
-    const output = await runClaudeResearchAgent(job.input as never, {
+    const runOptions = {
       onProgress: (event: ClaudeAgentProgressEvent) => emit({ type: "progress", event }),
       // Live mid-run comments cross the container boundary as their own frame;
       // the host persists them (or buffers them into the result if it has no
@@ -126,12 +140,24 @@ async function main() {
       onSessionId: (sessionId) => emit({ type: "session", sessionId }),
       agentConfig: job.agentConfig as never,
       agentEnv: job.agentEnv,
+      // The runner mounts the conversation's session store here and exports it
+      // on the CONTAINER env; buildAgentEnv scrubs unknown host vars, so it has
+      // to be forwarded explicitly or the CLI would write transcripts into the
+      // container's tmpfs HOME (losing session resume) and look there for
+      // credentials.
+      sessionConfigDir:
+        (agentHarnessForModel(job.agentConfig?.model) === "codex"
+          ? process.env.CODEX_HOME
+          : process.env.CLAUDE_CONFIG_DIR)?.trim() || undefined,
       validateSubmission,
       // We are inside the hardened container: its mount namespace is the
       // filesystem boundary, so skip the in-process workspace guard / kernel
       // sandbox that would otherwise block legitimate reads outside /workspace.
       isolatedRuntime: true
-    });
+    };
+    const output = agentHarnessForModel(job.agentConfig?.model) === "codex"
+      ? await (await import("./agent-core/codex-agent")).runCodexResearchAgent(job.input as never, runOptions)
+      : await runClaudeResearchAgent(job.input as never, runOptions);
     emit({ type: "result", output });
   } catch (error) {
     emit({ type: "error", message: error instanceof Error ? error.message : String(error) });

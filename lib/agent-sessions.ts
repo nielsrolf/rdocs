@@ -11,8 +11,11 @@
 //    .research-workspaces/<documentId>/sessions/<conversationKey>/, bind-mounted
 //    into the container as CLAUDE_CONFIG_DIR. Transcripts survive the container
 //    for free (its HOME is tmpfs and dies otherwise).
-//  - In-process runner: transcripts live in the host's default config dir
-//    (~/.claude or $CLAUDE_CONFIG_DIR); resume works the same way.
+//  - In-process runner: the same per-conversation dir is passed to agent-core
+//    as the CLI's config root. It must NEVER be the host's ~/.claude: the CLI
+//    treats a host session found there as a credential fallback, which leaks
+//    the operator's account and breaks brokered runs (see
+//    resolveAgentConfigDir in agent-core/agent-env.ts).
 //  - Self-hosted runner: out of scope — its disk is external; those runs fall
 //    back to the transcript replay.
 //
@@ -27,6 +30,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { db } from "@/lib/db";
+import { agentHarnessForModel } from "@/agent-core/agent-config";
 
 const WORKSPACE_ROOT = path.join(process.cwd(), ".research-workspaces");
 
@@ -103,6 +107,36 @@ export function defaultClaudeConfigDir(env: Record<string, string | undefined> =
   return env.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), ".claude");
 }
 
+export function defaultCodexConfigDir(env: Record<string, string | undefined> = process.env) {
+  return env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex");
+}
+
+/** Codex owns its native rollout layout; only check that an opaque thread id
+ * still has a non-empty native session file. Never deserialize it into app DB
+ * rows or reconstruct it from the UI event timeline. */
+export async function codexSessionExists(configDir: string, sessionId: string): Promise<boolean> {
+  const sessionsDir = path.join(configDir, "sessions");
+  async function scan(dir: string): Promise<boolean> {
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    for (const entry of entries) {
+      const child = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (await scan(child)) return true;
+      } else if (entry.name.includes(sessionId)) {
+        const stat = await fs.stat(child).catch(() => null);
+        if (stat?.isFile() && stat.size > 0) return true;
+      }
+    }
+    return false;
+  }
+  return scan(sessionsDir);
+}
+
 /**
  * Whether `configDir` holds a transcript for `sessionId` — i.e. resume can
  * work. Mirrors the SDK's own lookup: `<configDir>/projects/<any project
@@ -135,6 +169,15 @@ export type SessionResumePlan = {
   sessionDir: string;
   /** Session to resume — null means fall back to the transcript replay. */
   resumeSessionId: string | null;
+  /**
+   * Set when the chain HAS a recorded SDK session but it cannot be resumed
+   * (transcript GC'd, deleted, or never written). The run then continues on the
+   * lossy transcript replay — a real context downgrade, so callers must SAY SO
+   * in the run timeline instead of degrading silently. Null when there was no
+   * session to resume in the first place (fresh conversation, pre-feature
+   * chain, self-hosted runner), which is not a downgrade of anything.
+   */
+  resumeUnavailableSessionId: string | null;
 };
 
 /**
@@ -142,7 +185,8 @@ export type SessionResumePlan = {
  * key + session dir, and — when the chain has a recorded SDK session whose
  * transcript is actually still on disk — the session id to resume. A missing
  * or empty transcript (GC'd dir, pre-feature run, crashed before first write)
- * degrades to the transcript replay rather than failing the run.
+ * degrades to the transcript replay rather than failing the run, and reports
+ * that downgrade via `resumeUnavailableSessionId` so it can be surfaced.
  */
 export async function planSessionResume(input: {
   documentId: string;
@@ -150,6 +194,7 @@ export async function planSessionResume(input: {
   previousRunId: string | null;
   /** "container" | "inprocess" — decides where transcripts are looked up. */
   runnerMode: string;
+  agentModel?: string | null;
   hostConfigDir?: string;
 }): Promise<SessionResumePlan> {
   const rootRunId = await resolveConversationRootId(input.documentId, input.previousRunId);
@@ -158,19 +203,30 @@ export async function planSessionResume(input: {
   await fs.mkdir(sessionDir, { recursive: true });
 
   let resumeSessionId: string | null = null;
+  let resumeUnavailableSessionId: string | null = null;
   if (input.previousRunId) {
     const candidate = await findResumableSessionId(input.documentId, input.previousRunId);
     if (candidate) {
+      const harness = agentHarnessForModel(input.agentModel);
+      // Container AND in-process runs both write transcripts into the
+      // conversation's own session dir now (agent-core pins CLAUDE_CONFIG_DIR /
+      // CODEX_HOME to it), so the host's default config dir is only consulted
+      // when a caller explicitly points at one (tests, legacy inspection).
       const configDir =
-        input.runnerMode === "container"
-          ? sessionDir
-          : input.hostConfigDir ?? defaultClaudeConfigDir();
-      if (await sessionTranscriptExists(configDir, candidate)) {
+        input.runnerMode === "container" || input.runnerMode === "inprocess"
+          ? input.hostConfigDir ?? sessionDir
+          : input.hostConfigDir ?? (harness === "codex" ? defaultCodexConfigDir() : defaultClaudeConfigDir());
+      const exists = harness === "codex"
+        ? await codexSessionExists(configDir, candidate)
+        : await sessionTranscriptExists(configDir, candidate);
+      if (exists) {
         resumeSessionId = candidate;
+      } else {
+        resumeUnavailableSessionId = candidate;
       }
     }
   }
-  return { conversationKey, sessionDir, resumeSessionId };
+  return { conversationKey, sessionDir, resumeSessionId, resumeUnavailableSessionId };
 }
 
 export async function recordRunSessionId(aiRunId: string, sessionId: string) {

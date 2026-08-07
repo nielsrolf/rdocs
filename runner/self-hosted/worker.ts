@@ -237,6 +237,10 @@ async function runJob(job: ClaimedJob): Promise<void> {
       agentEnv: job.jobPayload.agentEnv,
       validateSubmission,
       signal: abort.signal,
+      // No session dir on this side: agent-core then keys a run-scoped config
+      // dir off this id. It must not be the worker operator's ~/.claude —
+      // credentials come from the job env only.
+      runKey: job.id,
       // Not a container: no kernel mount-namespace boundary exists here, so
       // keep the in-process workspace guard enabled (same choice InProcessRunner
       // makes for its own no-sandbox fallback).
