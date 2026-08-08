@@ -1,13 +1,12 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import {
   pullCollaborationPresence,
   removeCollaborationPresence,
   updateCollaborationPresence
 } from "@/lib/collaboration";
-import { resolveDocumentAccess } from "@/lib/permissions";
 
 const positionContextSchema = z.object({
   before: z.string().max(64),
@@ -46,21 +45,14 @@ const removePresenceSchema = z.object({
   shareToken: z.string().optional().nullable()
 });
 
-type RouteContext = {
-  params: Promise<{
-    id: string;
-  }>;
-};
-
-export async function GET(request: Request, { params }: RouteContext) {
+export async function GET(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
-  const shareToken = new URL(request.url).searchParams.get("share");
 
-  const access = await resolveDocumentAccess(id, user?.id, shareToken);
-  if (!access) {
-    return NextResponse.json({ error: "Document not found." }, { status: 404 });
+  const gate = await requireDocumentAccess(request, id, "VIEW");
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { access } = gate;
 
   const presence = pullCollaborationPresence({
     documentId: id,
@@ -71,9 +63,8 @@ export async function GET(request: Request, { params }: RouteContext) {
   return NextResponse.json({ presence });
 }
 
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
   const body = await request.json().catch(() => null);
   const parsed = presenceSchema.safeParse(body);
 
@@ -81,10 +72,13 @@ export async function POST(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Invalid presence payload." }, { status: 400 });
   }
 
-  const access = await resolveDocumentAccess(id, user?.id, parsed.data.shareToken ?? null);
-  if (!access) {
-    return NextResponse.json({ error: "Document not found." }, { status: 404 });
+  const gate = await requireDocumentAccess(request, id, "VIEW", {
+    shareToken: parsed.data.shareToken ?? null
+  });
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { user, access } = gate;
 
   const presence = updateCollaborationPresence({
     documentId: id,
@@ -104,9 +98,8 @@ export async function POST(request: Request, { params }: RouteContext) {
   return NextResponse.json({ presence });
 }
 
-export async function DELETE(request: Request, { params }: RouteContext) {
+export async function DELETE(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
   const body = await request.json().catch(() => null);
   const parsed = removePresenceSchema.safeParse(body);
 
@@ -114,10 +107,13 @@ export async function DELETE(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Invalid presence payload." }, { status: 400 });
   }
 
-  const access = await resolveDocumentAccess(id, user?.id, parsed.data.shareToken ?? null);
-  if (!access) {
-    return NextResponse.json({ error: "Document not found." }, { status: 404 });
+  const gate = await requireDocumentAccess(request, id, "VIEW", {
+    shareToken: parsed.data.shareToken ?? null
+  });
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { access } = gate;
 
   const presence = removeCollaborationPresence({
     documentId: id,

@@ -3,21 +3,14 @@ import path from "node:path";
 
 import { NextResponse } from "next/server";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { getDocumentMarkdown, parseDocumentContent } from "@/lib/content";
 import { collectDocumentImages, documentToLatex, type DocumentImageRef } from "@/lib/latex-export";
-import { resolveDocumentAccess } from "@/lib/permissions";
 import { ensureLinkedRepository } from "@/lib/research-workspace";
 import { db } from "@/lib/db";
 import { createZip, type ZipEntry } from "@/lib/zip";
 
 export const runtime = "nodejs";
-
-type RouteContext = {
-  params: Promise<{
-    id: string;
-  }>;
-};
 
 function slugify(title: string) {
   return (
@@ -172,17 +165,16 @@ function resolveImage(
 // Export the document. Read access is sufficient (anyone who can view the
 // document can export what they can already see). `?format=latex` returns an
 // Overleaf-ready .zip; otherwise Markdown.
-export async function GET(request: Request, { params }: RouteContext) {
+export async function GET(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
   const url = new URL(request.url);
-  const shareToken = url.searchParams.get("share");
   const format = (url.searchParams.get("format") ?? "markdown").toLowerCase();
 
-  const access = await resolveDocumentAccess(id, user?.id, shareToken);
-  if (!access) {
-    return NextResponse.json({ error: "Document not found." }, { status: 404 });
+  const gate = await requireDocumentAccess(request, id, "VIEW");
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { user, access } = gate;
 
   const content = parseDocumentContent(access.document.content);
   const title = access.document.title?.trim() || "Untitled document";

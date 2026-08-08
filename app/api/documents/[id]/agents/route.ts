@@ -4,10 +4,9 @@ import { z } from "zod";
 import { recordAiRunEvent, serializeAiRun } from "@/lib/ai-runs";
 import { runAgentConversationInBackground } from "@/lib/agent-conversation";
 import { resolveAgentConfigForUser } from "@/lib/agent-defaults";
-import { getCurrentUser } from "@/lib/auth";
+import { rateLimitAiRun, requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { db } from "@/lib/db";
-import { agentAccessModeForDocumentAccess, canComment, resolveDocumentAccess } from "@/lib/permissions";
-import { getClientIp, rateLimit } from "@/lib/rate-limit";
+import { agentAccessModeForDocumentAccess } from "@/lib/permissions";
 
 export const runtime = "nodejs";
 
@@ -17,21 +16,14 @@ const agentConversationSchema = z.object({
   previousRunId: z.string().optional().nullable()
 });
 
-type RouteContext = {
-  params: Promise<{
-    id: string;
-  }>;
-};
-
 // The document-level conversation agent runs off the request path: the HTTP
 // handler returns 202 immediately and the client tracks the run (progress, the
 // agent reply event, terminal status) via AiRun polling. This avoids the
 // Cloudflare ~100s origin timeout (524) on long synchronous conversations.
 // The actual background runner is shared with the Slack bot — see
 // lib/agent-conversation.ts.
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
 
   const body = await request.json().catch(() => null);
   const parsed = agentConversationSchema.safeParse(body);
@@ -39,19 +31,19 @@ export async function POST(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Invalid agent message payload." }, { status: 400 });
   }
 
-  const access = await resolveDocumentAccess(id, user?.id, parsed.data.shareToken ?? null);
-  if (!access || !canComment(access.permission)) {
-    return NextResponse.json({ error: "You do not have agent access." }, { status: 403 });
+  const gate = await requireDocumentAccess(request, id, "COMMENT", {
+    shareToken: parsed.data.shareToken ?? null,
+    forbiddenMessage: "You do not have agent access."
+  });
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { user, access } = gate;
 
   // Agent runs are expensive; cap how many a single user can kick off per minute.
-  const runLimitKey = user ? `ai-run:user:${user.id}` : `ai-run:ip:${getClientIp(request)}`;
-  const runLimit = rateLimit(runLimitKey, 10, 60_000);
-  if (!runLimit.allowed) {
-    return NextResponse.json(
-      { error: "You're messaging the agent too quickly. Try again shortly." },
-      { status: 429, headers: { "Retry-After": String(runLimit.retryAfterSeconds) } }
-    );
+  const limited = rateLimitAiRun(user, request, "You're messaging the agent too quickly. Try again shortly.");
+  if (limited) {
+    return limited;
   }
 
   const aiRun = await db.aiRun.create({

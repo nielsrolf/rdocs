@@ -1,11 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { normalizeThreadTags, serializeThread } from "@/lib/document-data";
 import { db } from "@/lib/db";
-import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 
 const updateThreadSchema = z.object({
   tags: z.array(z.string().min(1).max(48)).max(20).optional(),
@@ -14,23 +13,14 @@ const updateThreadSchema = z.object({
   shareToken: z.string().optional().nullable()
 });
 
-type RouteContext = {
-  params: Promise<{
-    threadId: string;
-  }>;
-};
-
-export async function PATCH(request: Request, { params }: RouteContext) {
+export async function PATCH(request: Request, { params }: RouteContext<{ threadId: string }>) {
   const startedAt = Date.now();
   const { threadId } = await params;
-  // Anonymous share-link visitors may resolve/tag threads too — access is
-  // resolved from the share token below, matching the create/reply routes.
-  const user = await getCurrentUser();
 
   const body = await request.json().catch(() => null);
   const parsed = updateThreadSchema.safeParse(body);
   if (!parsed.success) {
-    console.warn("[thread-update] invalid payload", { threadId, userId: user?.id ?? null, issues: parsed.error.issues.map((i) => i.path.join(".") + ":" + i.code) });
+    console.warn("[thread-update] invalid payload", { threadId, issues: parsed.error.issues.map((i) => i.path.join(".") + ":" + i.code) });
     return NextResponse.json({ error: "Invalid thread update payload." }, { status: 400 });
   }
 
@@ -42,19 +32,21 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   });
 
   if (!existing) {
-    console.warn("[thread-update] not found", { threadId, userId: user?.id ?? null });
+    console.warn("[thread-update] not found", { threadId });
     return NextResponse.json({ error: "Thread not found." }, { status: 404 });
   }
 
-  const access = await resolveDocumentAccess(existing.documentId, user?.id, parsed.data.shareToken ?? null);
-  if (!access || !canComment(access.permission)) {
-    if (!user && !parsed.data.shareToken) {
-      console.warn("[thread-update] unauthenticated", { threadId });
-      return NextResponse.json({ error: "You must be signed in to update comments." }, { status: 401 });
-    }
-    console.warn("[thread-update] forbidden", { threadId, documentId: existing.documentId, userId: user?.id ?? null, permission: access?.permission ?? null });
-    return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
+  // Anonymous share-link visitors may resolve/tag threads too — access is
+  // resolved from the share token, matching the create/reply routes.
+  const gate = await requireDocumentAccess(request, existing.documentId, "COMMENT", {
+    shareToken: parsed.data.shareToken ?? null,
+    forbiddenMessage: "You do not have comment access."
+  });
+  if (!gate.ok) {
+    console.warn("[thread-update] forbidden", { threadId, documentId: existing.documentId, status: gate.response.status });
+    return gate.response;
   }
+  const { user } = gate;
 
   const tags = normalizeThreadTags(parsed.data.tags ?? []);
   const hasResolvedTag = tags.some((tag) => tag.toLowerCase() === "resolved");

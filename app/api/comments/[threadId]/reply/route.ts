@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentUser } from "@/lib/auth";
+import { jsonError, requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { serializeComment } from "@/lib/document-data";
 import { db } from "@/lib/db";
 import { syncCommentMentions } from "@/lib/mention-data";
-import { canCommentOnDocument, resolveDocumentAccess } from "@/lib/permissions";
+import { canCommentOnDocument } from "@/lib/permissions";
 
 const createReplySchema = z.object({
   body: z.string().min(1).max(4000),
@@ -19,23 +19,14 @@ const createReplySchema = z.object({
   guestName: z.string().trim().min(1).max(80).optional().nullable()
 });
 
-type RouteContext = {
-  params: Promise<{
-    threadId: string;
-  }>;
-};
-
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<{ threadId: string }>) {
   const startedAt = Date.now();
   const { threadId } = await params;
-  // Anonymous share-link visitors may reply too — access is resolved from the
-  // share token below, mirroring the thread-create route.
-  const user = await getCurrentUser();
 
   const body = await request.json().catch(() => null);
   const parsed = createReplySchema.safeParse(body);
   if (!parsed.success) {
-    console.warn("[comment-reply] invalid payload", { threadId, userId: user?.id ?? null, issues: parsed.error.issues.map((i) => i.path.join(".") + ":" + i.code) });
+    console.warn("[comment-reply] invalid payload", { threadId, issues: parsed.error.issues.map((i) => i.path.join(".") + ":" + i.code) });
     return NextResponse.json({ error: "Invalid reply payload." }, { status: 400 });
   }
 
@@ -47,18 +38,23 @@ export async function POST(request: Request, { params }: RouteContext) {
   });
 
   if (!thread) {
-    console.warn("[comment-reply] thread not found", { threadId, userId: user?.id ?? null });
+    console.warn("[comment-reply] thread not found", { threadId });
     return NextResponse.json({ error: "Thread not found." }, { status: 404 });
   }
 
-  const access = await resolveDocumentAccess(thread.documentId, user?.id, parsed.data.shareToken ?? null);
-  if (!access || !canCommentOnDocument(access, Boolean(user))) {
-    if (!user && !parsed.data.shareToken) {
-      console.warn("[comment-reply] unauthenticated", { threadId });
-      return NextResponse.json({ error: "You must be signed in to reply." }, { status: 401 });
-    }
-    console.warn("[comment-reply] forbidden", { threadId, documentId: thread.documentId, userId: user?.id ?? null, permission: access?.permission ?? null });
-    return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
+  // Anonymous share-link visitors may reply too — access is resolved from the
+  // share token, mirroring the thread-create route.
+  const gate = await requireDocumentAccess(request, thread.documentId, "VIEW", {
+    shareToken: parsed.data.shareToken ?? null
+  });
+  if (!gate.ok) {
+    console.warn("[comment-reply] forbidden", { threadId, documentId: thread.documentId, status: gate.response.status });
+    return gate.response;
+  }
+  const { user, access } = gate;
+  if (!canCommentOnDocument(access, Boolean(user))) {
+    console.warn("[comment-reply] forbidden", { threadId, documentId: thread.documentId, userId: user?.id ?? null, permission: access.permission });
+    return jsonError(403, "You do not have comment access.");
   }
 
   // A nesting parent must be a comment of THIS thread; a bogus id degrades to

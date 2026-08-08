@@ -2,10 +2,9 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { recordAiRunEvent } from "@/lib/ai-runs";
-import { getCurrentUser } from "@/lib/auth";
+import { rateLimitAiRun, requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { db } from "@/lib/db";
-import { agentAccessModeForDocumentAccess, canComment, resolveDocumentAccess } from "@/lib/permissions";
-import { getClientIp, rateLimit } from "@/lib/rate-limit";
+import { agentAccessModeForDocumentAccess } from "@/lib/permissions";
 import { runAskAiInBackground } from "@/lib/ask-ai";
 
 export const runtime = "nodejs";
@@ -14,17 +13,8 @@ const askAiSchema = z.object({
   shareToken: z.string().optional().nullable()
 });
 
-type RouteContext = {
-  params: Promise<{
-    threadId: string;
-  }>;
-};
-
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<{ threadId: string }>) {
   const { threadId } = await params;
-  // Anonymous share-link visitors may ask AI too (they can already trigger AI
-  // edits); access is resolved from the share token below.
-  const user = await getCurrentUser();
 
   const body = await request.json().catch(() => null);
   const parsed = askAiSchema.safeParse(body);
@@ -71,28 +61,23 @@ export async function POST(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Thread not found." }, { status: 404 });
   }
 
-  const access = await resolveDocumentAccess(
-    thread.documentId,
-    user?.id,
-    parsed.data.shareToken ?? null
-  );
-  if (!access || !canComment(access.permission)) {
-    if (!user && !parsed.data.shareToken) {
-      return NextResponse.json({ error: "You must be signed in to ask AI." }, { status: 401 });
-    }
-    return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
+  // Anonymous share-link visitors may ask AI too (they can already trigger AI
+  // edits); access is resolved from the share token.
+  const gate = await requireDocumentAccess(request, thread.documentId, "COMMENT", {
+    shareToken: parsed.data.shareToken ?? null,
+    forbiddenMessage: "You do not have comment access."
+  });
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { user, access } = gate;
 
   // Agent runs are expensive; cap how many a single user can kick off per minute
   // to prevent cost-amplification / DoS. Anonymous visitors are keyed by IP,
   // matching the ai-edit route.
-  const runLimitKey = user ? `ai-run:user:${user.id}` : `ai-run:ip:${getClientIp(request)}`;
-  const runLimit = rateLimit(runLimitKey, 10, 60_000);
-  if (!runLimit.allowed) {
-    return NextResponse.json(
-      { error: "You're starting AI runs too quickly. Try again shortly." },
-      { status: 429, headers: { "Retry-After": String(runLimit.retryAfterSeconds) } }
-    );
+  const limited = rateLimitAiRun(user, request);
+  if (limited) {
+    return limited;
   }
 
   const aiRun = await db.aiRun.create({

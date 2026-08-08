@@ -3,19 +3,12 @@ import path from "node:path";
 
 import { NextResponse } from "next/server";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { db } from "@/lib/db";
-import { resolveDocumentAccess } from "@/lib/permissions";
 import { ensureLinkedRepository } from "@/lib/research-workspace";
 import { repairSvgMarkup } from "@/lib/svg-repair";
 
 export const runtime = "nodejs";
-
-type RouteContext = {
-  params: Promise<{
-    id: string;
-  }>;
-};
 
 const contentTypes: Record<string, string> = {
   ".gif": "image/gif",
@@ -36,18 +29,17 @@ async function readWorkspaceFile(workspace: string, filePath: string) {
   return fs.readFile(resolvedFile).catch(() => null);
 }
 
-export async function GET(request: Request, { params }: RouteContext) {
+export async function GET(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
   const url = new URL(request.url);
-  const shareToken = url.searchParams.get("share");
   const filePath = url.searchParams.get("path");
   const runId = url.searchParams.get("run");
 
-  const access = await resolveDocumentAccess(id, user?.id, shareToken);
-  if (!access) {
-    return NextResponse.json({ error: "Document not found." }, { status: 404 });
+  const gate = await requireDocumentAccess(request, id, "VIEW");
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { user } = gate;
 
   if (!filePath) {
     return NextResponse.json({ error: "Missing file path." }, { status: 400 });

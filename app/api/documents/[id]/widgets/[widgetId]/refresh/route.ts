@@ -3,19 +3,11 @@ import path from "node:path";
 
 import { NextResponse } from "next/server";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { db } from "@/lib/db";
-import { canManageDocumentAutomation, resolveDocumentAccess } from "@/lib/permissions";
 import { commitWorkspaceChanges, ensureLinkedRepository, runWidgetBuild } from "@/lib/research-workspace";
 
 export const runtime = "nodejs";
-
-type RouteContext = {
-  params: Promise<{
-    id: string;
-    widgetId: string;
-  }>;
-};
 
 async function workspaceHasFile(workspace: string | null, relPath: string) {
   if (!workspace) return false;
@@ -27,15 +19,20 @@ async function workspaceHasFile(workspace: string | null, relPath: string) {
   }
 }
 
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(
+  request: Request,
+  { params }: RouteContext<{ id: string; widgetId: string }>
+) {
   const { id, widgetId } = await params;
-  const user = await getCurrentUser();
-  const shareToken = new URL(request.url).searchParams.get("share");
-  const access = await resolveDocumentAccess(id, user?.id, shareToken);
-
-  if (!access || !canManageDocumentAutomation(access, user?.id)) {
-    return NextResponse.json({ error: "Sign in with edit access to refresh widgets." }, { status: 403 });
+  // canManageDocumentAutomation: edit access AND a signed-in account.
+  const gate = await requireDocumentAccess(request, id, "EDIT", {
+    requireUser: true,
+    forbiddenMessage: "Sign in with edit access to refresh widgets."
+  });
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { user } = gate;
 
   const widget = await db.embeddedWidget.findFirst({
     where: {

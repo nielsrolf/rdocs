@@ -1,28 +1,20 @@
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { subscribeToCollaboration } from "@/lib/collaboration";
-import { resolveDocumentAccess } from "@/lib/permissions";
 
-type RouteContext = {
-  params: Promise<{
-    id: string;
-  }>;
-};
-
-export async function GET(request: Request, { params }: RouteContext) {
+export async function GET(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
   const url = new URL(request.url);
-  const shareToken = url.searchParams.get("share");
   const clientId = url.searchParams.get("clientId") ?? "";
 
   if (!clientId) {
     return new Response("Missing clientId", { status: 400 });
   }
 
-  const access = await resolveDocumentAccess(id, user?.id, shareToken);
-  if (!access) {
-    return new Response("Document not found", { status: 404 });
+  const gate = await requireDocumentAccess(request, id, "VIEW");
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { access } = gate;
 
   const encoder = new TextEncoder();
   let keepAlive: ReturnType<typeof setInterval> | null = null;

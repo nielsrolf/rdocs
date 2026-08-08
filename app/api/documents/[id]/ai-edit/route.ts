@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
-import { getCurrentUser } from "@/lib/auth";
+import { jsonError, rateLimitAiRun, requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { buildConversationHistory, markAiRunSucceeded, recordAiRunEvent, startAiRunHeartbeat } from "@/lib/ai-runs";
 import {
   RUN_CANCELLED_MESSAGE,
@@ -22,11 +22,10 @@ import {
 import { db } from "@/lib/db";
 import { resolveAgentConfigForUser } from "@/lib/agent-defaults";
 import { loadAgentEnvWithFreeFallback, restrictAgentEnvForReadOnly } from "@/lib/user-credentials";
-import { agentAccessModeForDocumentAccess, canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import { agentAccessModeForDocumentAccess, canComment, canEdit } from "@/lib/permissions";
 import type { AgentAccessMode } from "@/agent-core";
 import { createLiveCommentRecorder } from "@/lib/agent-comments";
 import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
-import { getClientIp, rateLimit } from "@/lib/rate-limit";
 import {
   commitWorkspaceChanges,
   ensureLinkedRepositoryWorktree,
@@ -453,15 +452,8 @@ async function runAiEditInBackground(input: {
   }
 }
 
-type RouteContext = {
-  params: Promise<{
-    id: string;
-  }>;
-};
-
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
   const body = await request.json().catch(() => null);
   const parsed = aiEditSchema.safeParse(body);
 
@@ -469,25 +461,27 @@ export async function POST(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Invalid AI edit payload." }, { status: 400 });
   }
 
-  const access = await resolveDocumentAccess(id, user?.id, parsed.data.shareToken ?? null);
+  const gate = await requireDocumentAccess(request, id, "VIEW", {
+    shareToken: parsed.data.shareToken ?? null
+  });
+  if (!gate.ok) {
+    return gate.response;
+  }
+  const { user, access } = gate;
   // Editors may commit edits directly; comment-access users may run the agent
   // only in suggestion mode (suggest: true), where the result lands as tracked
   // changes they cannot commit on their own.
-  const editorAccess = Boolean(access) && canEdit(access!.permission);
-  const suggestAccess = Boolean(access) && parsed.data.suggest === true && canComment(access!.permission);
-  if (!access || (!editorAccess && !suggestAccess)) {
-    return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+  const editorAccess = canEdit(access.permission);
+  const suggestAccess = parsed.data.suggest === true && canComment(access.permission);
+  if (!editorAccess && !suggestAccess) {
+    return jsonError(403, "You do not have edit access.");
   }
   const suggestOnly = !editorAccess;
 
   // Agent runs are expensive; cap per-user (or per-IP for share-token editors).
-  const runLimitKey = user ? `ai-run:user:${user.id}` : `ai-run:ip:${getClientIp(request)}`;
-  const runLimit = rateLimit(runLimitKey, 10, 60_000);
-  if (!runLimit.allowed) {
-    return NextResponse.json(
-      { error: "You're starting AI edits too quickly. Try again shortly." },
-      { status: 429, headers: { "Retry-After": String(runLimit.retryAfterSeconds) } }
-    );
+  const limited = rateLimitAiRun(user, request, "You're starting AI edits too quickly. Try again shortly.");
+  if (limited) {
+    return limited;
   }
 
   // Continuations must thread under a run of the SAME document; a bad parent

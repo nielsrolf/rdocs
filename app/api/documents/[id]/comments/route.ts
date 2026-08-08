@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentUser } from "@/lib/auth";
+import { jsonError, requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { documentHasAnchorForThread, parseDocumentContent } from "@/lib/content";
 import { serializeThread } from "@/lib/document-data";
 import { db } from "@/lib/db";
 import { syncCommentMentions } from "@/lib/mention-data";
-import { canCommentOnDocument, resolveDocumentAccess } from "@/lib/permissions";
+import { canCommentOnDocument } from "@/lib/permissions";
 
 const createThreadSchema = z.object({
   threadId: z.string().min(1).max(100).optional(),
@@ -23,18 +23,9 @@ const createThreadSchema = z.object({
   guestName: z.string().trim().min(1).max(80).optional().nullable()
 });
 
-type RouteContext = {
-  params: Promise<{
-    id: string;
-  }>;
-};
-
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<{ id: string }>) {
   const startedAt = Date.now();
   const { id } = await params;
-  // Anonymous share-link visitors may comment too — access is resolved from the
-  // share token below, mirroring the collab and ai-edit routes.
-  const user = await getCurrentUser();
 
   const body = await request.json().catch(() => null);
   const parsed = createThreadSchema.safeParse(body);
@@ -44,18 +35,24 @@ export async function POST(request: Request, { params }: RouteContext) {
       code: issue.code,
       message: issue.message
     }));
-    console.warn("[comment-create] invalid payload", { documentId: id, userId: user?.id ?? null, issues });
+    console.warn("[comment-create] invalid payload", { documentId: id, issues });
     return NextResponse.json({ error: "Invalid comment payload.", issues }, { status: 400 });
   }
 
-  const access = await resolveDocumentAccess(id, user?.id, parsed.data.shareToken ?? null);
-  if (!access || !canCommentOnDocument(access, Boolean(user))) {
-    if (!user && !parsed.data.shareToken) {
-      console.warn("[comment-create] unauthenticated", { documentId: id });
-      return NextResponse.json({ error: "You must be signed in to comment." }, { status: 401 });
-    }
-    console.warn("[comment-create] forbidden", { documentId: id, userId: user?.id ?? null, hasAccess: !!access, permission: access?.permission ?? null });
-    return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
+  // Anonymous share-link visitors may comment too — access is resolved from
+  // the share token, mirroring the collab and ai-edit routes. Forum-public
+  // documents accept comments from any signed-in user (canCommentOnDocument).
+  const gate = await requireDocumentAccess(request, id, "VIEW", {
+    shareToken: parsed.data.shareToken ?? null
+  });
+  if (!gate.ok) {
+    console.warn("[comment-create] no access", { documentId: id, status: gate.response.status });
+    return gate.response;
+  }
+  const { user, access } = gate;
+  if (!canCommentOnDocument(access, Boolean(user))) {
+    console.warn("[comment-create] forbidden", { documentId: id, userId: user?.id ?? null, permission: access.permission });
+    return jsonError(403, "You do not have comment access.");
   }
 
   const guestName = user ? null : parsed.data.guestName?.trim() || "Guest";

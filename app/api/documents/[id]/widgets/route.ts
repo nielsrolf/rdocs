@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { db } from "@/lib/db";
-import { canManageDocumentAutomation, resolveDocumentAccess } from "@/lib/permissions";
 import { ensureLinkedRepository, runWidgetBuild } from "@/lib/research-workspace";
 
 export const runtime = "nodejs";
@@ -15,15 +14,8 @@ const widgetSchema = z.object({
   shareToken: z.string().optional().nullable()
 });
 
-type RouteContext = {
-  params: Promise<{
-    id: string;
-  }>;
-};
-
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
   const body = await request.json().catch(() => null);
   const parsed = widgetSchema.safeParse(body);
 
@@ -31,10 +23,16 @@ export async function POST(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Invalid widget payload." }, { status: 400 });
   }
 
-  const access = await resolveDocumentAccess(id, user?.id, parsed.data.shareToken ?? null);
-  if (!access || !canManageDocumentAutomation(access, user?.id)) {
-    return NextResponse.json({ error: "Sign in with edit access to build widgets." }, { status: 403 });
+  // canManageDocumentAutomation: edit access AND a signed-in account.
+  const gate = await requireDocumentAccess(request, id, "EDIT", {
+    shareToken: parsed.data.shareToken ?? null,
+    requireUser: true,
+    forbiddenMessage: "Sign in with edit access to build widgets."
+  });
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { user } = gate;
 
   const linkedRepo = await ensureLinkedRepository(id, { requireClean: false, runnerUserId: user?.id ?? null });
   let lastBuiltAt: Date | null = null;

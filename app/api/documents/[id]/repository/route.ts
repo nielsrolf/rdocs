@@ -1,11 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { db } from "@/lib/db";
 import { checkRepoAccess } from "@/lib/github-access";
 import { resolveGithubAuthForDocument } from "@/lib/github-auth";
-import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
 import { getWorkspacePath } from "@/lib/research-workspace";
 
 export const runtime = "nodejs";
@@ -27,15 +26,8 @@ const repositorySchema = z.object({
     .nullable()
 });
 
-type RouteContext = {
-  params: Promise<{
-    id: string;
-  }>;
-};
-
-export async function PATCH(request: Request, { params }: RouteContext) {
+export async function PATCH(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
   const body = await request.json().catch(() => null);
   const parsed = repositorySchema.safeParse(body);
 
@@ -43,10 +35,12 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Invalid repository payload." }, { status: 400 });
   }
 
-  const access = await resolveDocumentAccess(id, user?.id, null);
-  if (!access || !canEdit(access.permission)) {
-    return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+  // Share tokens deliberately don't grant repository changes.
+  const gate = await requireDocumentAccess(request, id, "EDIT", { shareToken: null });
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { user } = gate;
 
   const repoUrl = parsed.data.repoUrl?.trim() || null;
   const repoBranch = parsed.data.repoBranch?.trim() || null;

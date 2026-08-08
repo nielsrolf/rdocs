@@ -1,27 +1,24 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { db } from "@/lib/db";
-import { resolveDocumentAccess } from "@/lib/permissions";
 
 const voteSchema = z.object({
   // 1 = upvote, -1 = downvote, 0 = clear my vote.
   value: z.union([z.literal(1), z.literal(-1), z.literal(0)])
 });
 
-type RouteContext = { params: Promise<{ id: string }> };
-
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
-  if (!user) {
-    return NextResponse.json({ error: "Not signed in." }, { status: 401 });
+  const gate = await requireDocumentAccess(request, id, "VIEW", {
+    shareToken: null,
+    requireUser: true
+  });
+  if (!gate.ok) {
+    return gate.response;
   }
-  const access = await resolveDocumentAccess(id, user.id, null);
-  if (!access) {
-    return NextResponse.json({ error: "You do not have access." }, { status: 403 });
-  }
+  const user = gate.user;
   const parsed = voteSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {
     return NextResponse.json({ error: "Invalid vote payload." }, { status: 400 });

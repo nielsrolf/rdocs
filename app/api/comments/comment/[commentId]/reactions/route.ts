@@ -1,10 +1,9 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { db } from "@/lib/db";
-import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 import { aggregateReactions, isReactionEmoji, type RawReaction } from "@/lib/reactions";
 
 export const runtime = "nodejs";
@@ -15,19 +14,11 @@ const toggleSchema = z.object({
   shareToken: z.string().optional().nullable()
 });
 
-type RouteContext = {
-  params: Promise<{ commentId: string }>;
-};
-
 // Toggle an emoji reaction on a comment for the current user: adds it if absent,
 // removes it if already present. Anyone with comment access (COMMENT or EDIT)
 // may react; anonymous share visitors cannot (no user identity).
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<{ commentId: string }>) {
   const { commentId } = await params;
-  const user = await getCurrentUser();
-  if (!user) {
-    return NextResponse.json({ error: "You must be signed in to react." }, { status: 401 });
-  }
 
   const body = await request.json().catch(() => null);
   const parsed = toggleSchema.safeParse(body);
@@ -43,14 +34,15 @@ export async function POST(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Comment not found." }, { status: 404 });
   }
 
-  const access = await resolveDocumentAccess(
-    comment.thread.documentId,
-    user.id,
-    parsed.data.shareToken ?? null
-  );
-  if (!access || !canComment(access.permission)) {
-    return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
+  const gate = await requireDocumentAccess(request, comment.thread.documentId, "COMMENT", {
+    shareToken: parsed.data.shareToken ?? null,
+    requireUser: true,
+    forbiddenMessage: "You do not have comment access."
+  });
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { user } = gate;
 
   const emoji = parsed.data.emoji;
   const existing = await db.commentReaction.findUnique({

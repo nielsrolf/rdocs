@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { db } from "@/lib/db";
-import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
 
 const postSchema = z.object({
   posted: z.boolean().optional(),
@@ -11,20 +10,19 @@ const postSchema = z.object({
   isPublic: z.boolean().optional()
 });
 
-type RouteContext = { params: Promise<{ id: string }> };
-
 // Toggle the "posted to forum" flag. Posting does NOT widen access — the forum
 // shows a doc only to users who could already open it.
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
-  if (!user) {
-    return NextResponse.json({ error: "Not signed in." }, { status: 401 });
+  const gate = await requireDocumentAccess(request, id, "EDIT", {
+    shareToken: null,
+    requireUser: true,
+    forbiddenMessage: "You do not have edit access."
+  });
+  if (!gate.ok) {
+    return gate.response;
   }
-  const access = await resolveDocumentAccess(id, user.id, null);
-  if (!access || !canEdit(access.permission)) {
-    return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
-  }
+  const { user, access } = gate;
   const parsed = postSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {
     return NextResponse.json({ error: "Invalid forum payload." }, { status: 400 });

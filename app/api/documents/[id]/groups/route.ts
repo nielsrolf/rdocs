@@ -1,10 +1,9 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { permissionLevels } from "@/lib/contracts";
 import { db } from "@/lib/db";
-import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
 
 const grantSchema = z.object({
   groupId: z.string().min(1),
@@ -15,24 +14,22 @@ const revokeSchema = z.object({
   groupId: z.string().min(1)
 });
 
-type RouteContext = { params: Promise<{ id: string }> };
-
-async function requireEditor(documentId: string) {
-  const user = await getCurrentUser();
-  if (!user) {
-    return { error: NextResponse.json({ error: "Not signed in." }, { status: 401 }) };
+async function requireEditor(request: Request, documentId: string) {
+  const gate = await requireDocumentAccess(request, documentId, "EDIT", {
+    shareToken: null,
+    requireUser: true,
+    forbiddenMessage: "You do not have edit access."
+  });
+  if (!gate.ok) {
+    return { error: gate.response };
   }
-  const access = await resolveDocumentAccess(documentId, user.id, null);
-  if (!access || !canEdit(access.permission)) {
-    return { error: NextResponse.json({ error: "You do not have edit access." }, { status: 403 }) };
-  }
-  return { user, access };
+  return { user: gate.user, access: gate.access };
 }
 
 // List this document's group grants.
-export async function GET(_request: Request, { params }: RouteContext) {
+export async function GET(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const check = await requireEditor(id);
+  const check = await requireEditor(request, id);
   if ("error" in check) return check.error;
   const grants = await db.documentGroupAccess.findMany({
     where: { documentId: id },
@@ -54,9 +51,9 @@ export async function GET(_request: Request, { params }: RouteContext) {
 }
 
 // Grant (or update) a group's permission on this document.
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const check = await requireEditor(id);
+  const check = await requireEditor(request, id);
   if ("error" in check) return check.error;
   const parsed = grantSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {
@@ -88,9 +85,9 @@ export async function POST(request: Request, { params }: RouteContext) {
   return NextResponse.json({ ok: true });
 }
 
-export async function DELETE(request: Request, { params }: RouteContext) {
+export async function DELETE(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const check = await requireEditor(id);
+  const check = await requireEditor(request, id);
   if ("error" in check) return check.error;
   const parsed = revokeSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {

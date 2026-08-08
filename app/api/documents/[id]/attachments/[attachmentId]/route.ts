@@ -3,18 +3,10 @@ import fs from "node:fs/promises";
 import { NextResponse } from "next/server";
 
 import { getAttachmentStorePath } from "@/lib/attachments";
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { db } from "@/lib/db";
-import { resolveDocumentAccess } from "@/lib/permissions";
 
 export const runtime = "nodejs";
-
-type RouteContext = {
-  params: Promise<{
-    id: string;
-    attachmentId: string;
-  }>;
-};
 
 // RFC 5987 / 6266 filename encoding so non-ASCII names survive the header.
 function contentDisposition(fileName: string) {
@@ -23,14 +15,15 @@ function contentDisposition(fileName: string) {
   return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 
-export async function GET(request: Request, { params }: RouteContext) {
+export async function GET(
+  request: Request,
+  { params }: RouteContext<{ id: string; attachmentId: string }>
+) {
   const { id, attachmentId } = await params;
-  const user = await getCurrentUser();
-  const shareToken = new URL(request.url).searchParams.get("share");
 
-  const access = await resolveDocumentAccess(id, user?.id, shareToken);
-  if (!access) {
-    return NextResponse.json({ error: "Document not found." }, { status: 404 });
+  const gate = await requireDocumentAccess(request, id, "VIEW");
+  if (!gate.ok) {
+    return gate.response;
   }
 
   const attachment = await db.attachment.findFirst({

@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { serializeComment } from "@/lib/document-data";
 import { db } from "@/lib/db";
 import { syncCommentMentions } from "@/lib/mention-data";
-import { canComment, resolveDocumentAccess } from "@/lib/permissions";
+import { canComment } from "@/lib/permissions";
 
 export const runtime = "nodejs";
 
@@ -21,20 +21,10 @@ const editCommentSchema = z.object({
   shareToken: z.string().optional().nullable()
 });
 
-type RouteContext = {
-  params: Promise<{
-    commentId: string;
-  }>;
-};
-
 // Edit a comment's text. Only the comment's author may edit it (AI comments
 // have a null author and are not editable).
-export async function PATCH(request: Request, { params }: RouteContext) {
+export async function PATCH(request: Request, { params }: RouteContext<{ commentId: string }>) {
   const { commentId } = await params;
-  const user = await getCurrentUser();
-  if (!user) {
-    return NextResponse.json({ error: "You must be signed in to edit comments." }, { status: 401 });
-  }
 
   const body = await request.json().catch(() => null);
   const parsed = editCommentSchema.safeParse(body);
@@ -50,10 +40,15 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Comment not found." }, { status: 404 });
   }
 
-  const access = await resolveDocumentAccess(comment.thread.documentId, user.id, parsed.data.shareToken ?? null);
-  if (!access || !canComment(access.permission)) {
-    return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
+  const gate = await requireDocumentAccess(request, comment.thread.documentId, "COMMENT", {
+    shareToken: parsed.data.shareToken ?? null,
+    requireUser: true,
+    forbiddenMessage: "You do not have comment access."
+  });
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { user } = gate;
 
   if (comment.authorId !== user.id) {
     return NextResponse.json({ error: "You can only edit your own comments." }, { status: 403 });
@@ -93,19 +88,14 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   return NextResponse.json({ comment: serialized });
 }
 
-export async function DELETE(request: Request, { params }: RouteContext) {
+export async function DELETE(request: Request, { params }: RouteContext<{ commentId: string }>) {
   const startedAt = Date.now();
   const { commentId } = await params;
-  const user = await getCurrentUser();
-  if (!user) {
-    console.warn("[comment-delete] unauthenticated", { commentId });
-    return NextResponse.json({ error: "You must be signed in to delete comments." }, { status: 401 });
-  }
 
   const body = await request.json().catch(() => null);
   const parsed = deleteCommentSchema.safeParse(body);
   if (!parsed.success) {
-    console.warn("[comment-delete] invalid payload", { commentId, userId: user.id });
+    console.warn("[comment-delete] invalid payload", { commentId });
     return NextResponse.json({ error: "Invalid delete comment payload." }, { status: 400 });
   }
 
@@ -140,15 +130,20 @@ export async function DELETE(request: Request, { params }: RouteContext) {
   });
 
   if (!comment) {
-    console.warn("[comment-delete] not found", { commentId, userId: user.id });
+    console.warn("[comment-delete] not found", { commentId });
     return NextResponse.json({ error: "Comment not found." }, { status: 404 });
   }
 
-  const access = await resolveDocumentAccess(comment.thread.documentId, user.id, parsed.data.shareToken ?? null);
-  if (!access || !canComment(access.permission)) {
-    console.warn("[comment-delete] forbidden (no access)", { commentId, documentId: comment.thread.documentId, userId: user.id, permission: access?.permission ?? null });
-    return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
+  const gate = await requireDocumentAccess(request, comment.thread.documentId, "COMMENT", {
+    shareToken: parsed.data.shareToken ?? null,
+    requireUser: true,
+    forbiddenMessage: "You do not have comment access."
+  });
+  if (!gate.ok) {
+    console.warn("[comment-delete] forbidden (no access)", { commentId, documentId: comment.thread.documentId, status: gate.response.status });
+    return gate.response;
   }
+  const { user, access } = gate;
 
   const canDelete =
     comment.thread.document.ownerId === user.id ||

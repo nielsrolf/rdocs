@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { AGENT_EFFORTS, isStorableAgentModel } from "@/lib/agent-config";
+import { notSignedIn, requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { getCurrentUser } from "@/lib/auth";
 import { failAbandonedAiRuns, fetchDocumentAiRuns, serializeAiRun } from "@/lib/ai-runs";
 import { getCollaborationVersion } from "@/lib/collaboration";
@@ -9,7 +10,7 @@ import { listDocumentThreads, maybeCreateVersionSnapshot } from "@/lib/document-
 import { hasDocumentEnvKey } from "@/lib/document-env";
 import { parseDocumentContent, serializeDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
-import { canEdit, canManageDocumentAutomation, resolveDocumentAccess } from "@/lib/permissions";
+import { canManageDocumentAutomation } from "@/lib/permissions";
 import { hasUserCredential } from "@/lib/user-credentials";
 import { normalizeSourceLinks } from "@/lib/sources";
 
@@ -35,38 +36,29 @@ const updateDocumentSchema = z.object({
   runnerMode: z.enum(["managed", "selfHosted"]).optional()
 });
 
-type RouteContext = {
-  params: Promise<{
-    id: string;
-  }>;
-};
-
-export async function PATCH(request: Request, { params }: RouteContext) {
+export async function PATCH(request: Request, { params }: RouteContext<{ id: string }>) {
   const startedAt = Date.now();
   const { id } = await params;
-  const user = await getCurrentUser();
   const body = await request.json().catch(() => null);
   const parsed = updateDocumentSchema.safeParse(body);
 
   if (!parsed.success) {
     console.warn("[doc-patch] invalid payload", {
       documentId: id,
-      userId: user?.id ?? null,
       issues: parsed.error.issues.map((issue) => issue.path.join(".") + ":" + issue.code)
     });
     return NextResponse.json({ error: "Invalid document update payload." }, { status: 400 });
   }
 
-  const access = await resolveDocumentAccess(id, user?.id, parsed.data.shareToken ?? null);
-  if (!access || !canEdit(access.permission)) {
-    console.warn("[doc-patch] forbidden", {
-      documentId: id,
-      userId: user?.id ?? null,
-      hasAccess: !!access,
-      permission: access?.permission ?? null
-    });
-    return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+  const gate = await requireDocumentAccess(request, id, "EDIT", {
+    shareToken: parsed.data.shareToken ?? null,
+    forbiddenMessage: "You do not have edit access."
+  });
+  if (!gate.ok) {
+    console.warn("[doc-patch] forbidden", { documentId: id, status: gate.response.status });
+    return gate.response;
   }
+  const { user, access } = gate;
   if (
     (parsed.data.agentModel !== undefined || parsed.data.agentEffort !== undefined) &&
     !canManageDocumentAutomation(access, user?.id)
@@ -167,11 +159,11 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   }
 }
 
-export async function DELETE(_request: Request, { params }: RouteContext) {
+export async function DELETE(_request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
   const user = await getCurrentUser();
   if (!user) {
-    return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+    return notSignedIn();
   }
 
   const document = await db.document.findUnique({ where: { id }, select: { ownerId: true } });
@@ -189,15 +181,13 @@ export async function DELETE(_request: Request, { params }: RouteContext) {
   return NextResponse.json({ ok: true });
 }
 
-export async function GET(request: Request, { params }: RouteContext) {
+export async function GET(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
-  const shareToken = new URL(request.url).searchParams.get("share");
-  const access = await resolveDocumentAccess(id, user?.id, shareToken);
-
-  if (!access) {
-    return NextResponse.json({ error: "Document not found." }, { status: 404 });
+  const gate = await requireDocumentAccess(request, id, "VIEW");
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { user, access } = gate;
 
   const [threads, aiRuns] = await Promise.all([
     listDocumentThreads(id, user?.id ?? null),

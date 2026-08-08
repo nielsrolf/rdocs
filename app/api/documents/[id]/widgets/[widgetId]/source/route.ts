@@ -1,29 +1,22 @@
 import { NextResponse } from "next/server";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { db } from "@/lib/db";
-import { resolveDocumentAccess } from "@/lib/permissions";
 import { ensureLinkedRepository } from "@/lib/research-workspace";
 import { addWidgetIsolationBridge, readEmbedSourceFromCandidates } from "@/lib/widget-source";
 
 export const runtime = "nodejs";
 
-type RouteContext = {
-  params: Promise<{
-    id: string;
-    widgetId: string;
-  }>;
-};
-
-export async function GET(request: Request, { params }: RouteContext) {
+export async function GET(
+  request: Request,
+  { params }: RouteContext<{ id: string; widgetId: string }>
+) {
   const { id, widgetId } = await params;
-  const user = await getCurrentUser();
-  const shareToken = new URL(request.url).searchParams.get("share");
-  const access = await resolveDocumentAccess(id, user?.id, shareToken);
-
-  if (!access) {
-    return NextResponse.json({ error: "Document not found." }, { status: 404 });
+  const gate = await requireDocumentAccess(request, id, "VIEW");
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { user } = gate;
 
   const widget = await db.embeddedWidget.findFirst({
     where: {

@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentUser } from "@/lib/auth";
-import { canManageDocumentAutomation, resolveDocumentAccess } from "@/lib/permissions";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import {
   getWorkspaceLink,
   listConnectableSlackChannelDocuments,
@@ -11,12 +10,6 @@ import {
 } from "@/lib/workspace-link";
 
 export const runtime = "nodejs";
-
-type RouteContext = {
-  params: Promise<{
-    id: string;
-  }>;
-};
 
 const patchSchema = z.object({
   // The slack_channel document whose workspace this document should use;
@@ -27,36 +20,37 @@ const patchSchema = z.object({
 // Managing the workspace link is an automation change (it redirects where
 // every agent run reads/writes), so it needs a signed-in user with edit
 // access — same bar as env vars and skills.
-async function requireAutomationAccess(documentId: string) {
-  const user = await getCurrentUser();
-  const access = await resolveDocumentAccess(documentId, user?.id, null);
-  if (!user || !access || !canManageDocumentAutomation(access, user.id)) {
-    return null;
-  }
-  return { user, access };
+async function requireAutomationAccess(request: Request, documentId: string) {
+  return requireDocumentAccess(request, documentId, "EDIT", {
+    shareToken: null,
+    requireUser: true,
+    forbiddenMessage: "You do not have edit access."
+  });
 }
 
-export async function GET(_request: Request, { params }: RouteContext) {
+export async function GET(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const auth = await requireAutomationAccess(id);
-  if (!auth) {
-    return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+  const auth = await requireAutomationAccess(request, id);
+  if (!auth.ok) {
+    return auth.response;
   }
+  const user = auth.user;
 
   const [link, channels] = await Promise.all([
     getWorkspaceLink(id),
-    listConnectableSlackChannelDocuments(auth.user.id)
+    listConnectableSlackChannelDocuments(user.id)
   ]);
 
   return NextResponse.json({ link, channels });
 }
 
-export async function PATCH(request: Request, { params }: RouteContext) {
+export async function PATCH(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const auth = await requireAutomationAccess(id);
-  if (!auth) {
-    return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+  const auth = await requireAutomationAccess(request, id);
+  if (!auth.ok) {
+    return auth.response;
   }
+  const user = auth.user;
 
   const body = await request.json().catch(() => null);
   const parsed = patchSchema.safeParse(body);
@@ -68,13 +62,13 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     const link = await setWorkspaceLink({
       documentId: id,
       targetDocumentId: parsed.data.workspaceDocumentId,
-      userId: auth.user.id
+      userId: user.id
     });
     console.log(
       "[workspace-link]",
       JSON.stringify({
         documentId: id,
-        userId: auth.user.id,
+        userId: user.id,
         workspaceDocumentId: link?.id ?? null
       })
     );
