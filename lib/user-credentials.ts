@@ -304,22 +304,88 @@ export function providerKeyRequirementError(
   agentModel: string | null | undefined,
   env: Record<string, string | undefined> = process.env
 ): string | null {
+  return providerKeyRequirementFailure(agentEnv, agentModel, env)?.message ?? null;
+}
+
+/** providerKeyRequirementError, but typed (see AgentCredentialFailure). */
+export function providerKeyRequirementFailure(
+  agentEnv: DocumentEnv,
+  agentModel: string | null | undefined,
+  env: Record<string, string | undefined> = process.env
+): AgentCredentialFailure | null {
   const provider = agentModelProvider(agentModel);
   if (provider === "anthropic") return null;
   if (provider === "openai" && agentHarnessForModel(agentModel) !== "codex") return null;
   if (provider === "local") {
     if (agentEnv.LOCAL_MODEL_BASE_URL?.trim() || env.LOCAL_MODEL_BASE_URL?.trim()) return null;
-    return "Local model selected but LOCAL_MODEL_BASE_URL is not configured on this server.";
+    return {
+      code: "provider-key-missing",
+      provider,
+      envKey: "LOCAL_MODEL_BASE_URL",
+      message: "Local model selected but LOCAL_MODEL_BASE_URL is not configured on this server."
+    };
   }
   const keyVar = PROVIDER_ENV_KEY[provider];
   if (agentEnv[keyVar]?.trim()) return null;
   const label = provider === "openrouter" ? "OpenRouter" : provider === "litellm" ? "LiteLLM" : "OpenAI";
   const article = label === "LiteLLM" ? "a" : "an";
-  return `${label} model selected but no ${keyVar} is available. Add it in the document's Env menu, or connect ${article} ${label} key under Settings (topbar).`;
+  return {
+    code: "provider-key-missing",
+    provider,
+    envKey: keyVar,
+    message: `${label} model selected but no ${keyVar} is available. Add it in the document's Env menu, or connect ${article} ${label} key under Settings (topbar).`
+  };
 }
 
 export const CONNECT_CREDENTIAL_MESSAGE =
   "Connect an Anthropic credential in settings to run AI features.";
+
+// --- Typed credential failures --------------------------------------------
+//
+// Why a class and not a message match: two call sites downstream branch on
+// WHICH credential was missing (an Anthropic miss falls back to the free local
+// model; a native-Codex OpenAI miss re-routes through LiteLLM). They used to
+// classify with `error.message === CONNECT_CREDENTIAL_MESSAGE` and
+// `error.message.includes("OPENAI_API_KEY")` — so rewording a user-facing
+// string silently disabled a fallback, and ANY unrelated error that happened
+// to mention OPENAI_API_KEY (e.g. thrown by document-env loading) hijacked the
+// LiteLLM re-route. The code/provider pair is now the contract; the message is
+// only for humans.
+
+export type AgentCredentialErrorCode =
+  /** Anthropic model with no API key / OAuth token anywhere. */
+  | "anthropic-credential-missing"
+  /** Third-party provider (openai / openrouter / litellm / local) key or base URL missing. */
+  | "provider-key-missing";
+
+export type AgentCredentialFailure = {
+  code: AgentCredentialErrorCode;
+  provider: ReturnType<typeof agentModelProvider>;
+  /** The env var that would satisfy it, when there is exactly one. */
+  envKey: string | null;
+  message: string;
+};
+
+export class AgentCredentialError extends Error {
+  readonly code: AgentCredentialErrorCode;
+  readonly provider: AgentCredentialFailure["provider"];
+  readonly envKey: string | null;
+
+  constructor(failure: AgentCredentialFailure) {
+    super(failure.message);
+    this.name = "AgentCredentialError";
+    this.code = failure.code;
+    this.provider = failure.provider;
+    this.envKey = failure.envKey;
+  }
+}
+
+export function isAgentCredentialError(
+  error: unknown,
+  code?: AgentCredentialErrorCode
+): error is AgentCredentialError {
+  return error instanceof AgentCredentialError && (!code || error.code === code);
+}
 
 /**
  * Require an explicitly resolved account/document Anthropic credential.
@@ -332,9 +398,22 @@ export function credentialRequirementError(
   _accountEmail: string | null | undefined | Array<string | null | undefined> = null,
   _env: Record<string, string | undefined> = process.env
 ): string | null {
+  return credentialRequirementFailure(agentEnv, agentModel)?.message ?? null;
+}
+
+/** credentialRequirementError, but typed (see AgentCredentialFailure). */
+export function credentialRequirementFailure(
+  agentEnv: DocumentEnv,
+  agentModel: string | null | undefined
+): AgentCredentialFailure | null {
   if (agentModelProvider(agentModel) !== "anthropic") return null;
   if (hasAnthropicCredential(agentEnv)) return null;
-  return CONNECT_CREDENTIAL_MESSAGE;
+  return {
+    code: "anthropic-credential-missing",
+    provider: "anthropic",
+    envKey: null,
+    message: CONNECT_CREDENTIAL_MESSAGE
+  };
 }
 
 // --- GitHub auth resolution ------------------------------------------------
@@ -478,11 +557,10 @@ async function resolveModelCredentialEnv(
     })
   );
   const env = applyToolCredentialEnv(modelEnv, toolCredentials);
-  const requirementError =
-    credentialRequirementError(env, agentModel, [runner?.email, doc?.owner?.email]) ??
-    providerKeyRequirementError(env, agentModel);
-  if (requirementError) {
-    throw new Error(requirementError);
+  const requirementFailure =
+    credentialRequirementFailure(env, agentModel) ?? providerKeyRequirementFailure(env, agentModel);
+  if (requirementFailure) {
+    throw new AgentCredentialError(requirementFailure);
   }
   return env;
 }
@@ -503,7 +581,7 @@ export async function anthropicRunUsesFreeFallback(
     await resolveModelCredentialEnv(documentId, DEFAULT_AGENT_MODEL, runnerUserId);
     return false;
   } catch (error) {
-    return error instanceof Error && error.message === CONNECT_CREDENTIAL_MESSAGE;
+    return isAgentCredentialError(error, "anthropic-credential-missing");
   }
 }
 
@@ -570,7 +648,7 @@ export async function loadAgentEnvWithFreeFallback(
     } catch (error) {
       const litellmModel = codexLiteLlmFallbackModel(agentConfig.model);
       const isMissingOpenAi =
-        error instanceof Error && error.message.includes("OPENAI_API_KEY");
+        isAgentCredentialError(error, "provider-key-missing") && error.provider === "openai";
       if (litellmModel && isMissingOpenAi) {
         const fallbackConfig = { model: litellmModel, effort: agentConfig.effort };
         try {
@@ -587,8 +665,7 @@ export async function loadAgentEnvWithFreeFallback(
         }
       }
       const fallbackModel = freeLocalAgentModel();
-      const isCredentialMiss =
-        error instanceof Error && error.message === CONNECT_CREDENTIAL_MESSAGE;
+      const isCredentialMiss = isAgentCredentialError(error, "anthropic-credential-missing");
       if (!fallbackModel || !isCredentialMiss) {
         throw error;
       }

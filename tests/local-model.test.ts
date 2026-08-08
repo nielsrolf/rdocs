@@ -11,11 +11,15 @@ import { applyProviderEnv } from "../agent-core/agent-env";
 import { db } from "../lib/db";
 import {
   anthropicRunUsesFreeFallback,
+  credentialRequirementFailure,
   freeLocalAgentModel,
+  isAgentCredentialError,
   loadAgentEnvWithFreeFallback,
   normalizeCredentialInput,
   providerKeyRequirementError,
-  upsertUserCredential
+  providerKeyRequirementFailure,
+  upsertUserCredential,
+  type AgentCredentialError
 } from "../lib/user-credentials";
 
 process.env.CREDENTIAL_ENCRYPTION_KEY = crypto.randomBytes(32).toString("base64");
@@ -183,6 +187,52 @@ test("native Codex selection still fails clearly when neither OpenAI nor LiteLLM
     ),
     /OPENAI_API_KEY/
   );
+});
+
+// The fallback branches used to classify failures by matching the user-facing
+// message ("=== CONNECT_CREDENTIAL_MESSAGE", ".includes('OPENAI_API_KEY')").
+// The contract is now the typed code/provider pair, so rewording a message
+// cannot silently disable a fallback and an unrelated error that merely
+// mentions a key name cannot hijack one.
+test("credential misses throw a typed AgentCredentialError, not a message to match on", async () => {
+  const owner = await makeUser("typed-credential-error");
+  const doc = await makeDoc(owner.id);
+
+  const anthropicMiss = await loadAgentEnvWithFreeFallback(
+    doc.id,
+    { model: "claude-sonnet-5", effort: null },
+    owner.id
+  ).then(
+    () => null,
+    (error) => error
+  );
+  // With a local model configured this one falls back rather than throwing.
+  assert.equal(anthropicMiss, null);
+
+  const codexMiss = await loadAgentEnvWithFreeFallback(
+    doc.id,
+    { model: "codex/openai/gpt-5.6-terra", effort: null },
+    owner.id
+  ).then(
+    () => null,
+    (error) => error
+  );
+  assert.ok(isAgentCredentialError(codexMiss, "provider-key-missing"));
+  assert.equal((codexMiss as AgentCredentialError).provider, "openai");
+  assert.equal((codexMiss as AgentCredentialError).envKey, "OPENAI_API_KEY");
+
+  // A lookalike: same words, not a credential failure.
+  assert.equal(isAgentCredentialError(new Error("OPENAI_API_KEY rotation failed")), false);
+});
+
+test("requirement failures carry codes matching their messages", () => {
+  assert.equal(credentialRequirementFailure({}, "claude-sonnet-5")?.code, "anthropic-credential-missing");
+  assert.equal(credentialRequirementFailure({ ANTHROPIC_API_KEY: "sk-ant-x" }, "claude-sonnet-5"), null);
+  const openrouter = providerKeyRequirementFailure({}, "openrouter/openai/gpt-5.2");
+  assert.equal(openrouter?.code, "provider-key-missing");
+  assert.equal(openrouter?.provider, "openrouter");
+  assert.equal(openrouter?.envKey, "OPENROUTER_API_KEY");
+  assert.equal(openrouter?.message, providerKeyRequirementError({}, "openrouter/openai/gpt-5.2"));
 });
 
 test("anthropicRunUsesFreeFallback: true without a credential, false once one is connected", async () => {
