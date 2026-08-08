@@ -743,6 +743,7 @@ export function AgentPanel({
 
               <AgentTimeline
                 agentName={agentDisplayName(selectedConversation.latestRun.model)}
+                documentId={documentId}
                 events={selectedConversation.events}
                 progress={selectedConversation.progress}
                 status={selectedConversation.status}

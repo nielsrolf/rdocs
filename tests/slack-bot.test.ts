@@ -85,14 +85,19 @@ function mention(overrides: Partial<SlackMentionEvent> & { teamId: string }): Sl
   };
 }
 
-function depsWith(client: SlackClient, runs: ConversationRunInput[]) {
+function depsWith(
+  client: SlackClient,
+  runs: ConversationRunInput[],
+  extra?: { injectRunMessage?: (aiRunId: string, text: string) => boolean }
+) {
   return {
     slack: client,
     appUrl: APP_URL,
     botUserId: BOT_USER_ID,
     startRun: async (input: ConversationRunInput) => {
       runs.push(input);
-    }
+    },
+    ...extra
   };
 }
 
@@ -603,6 +608,49 @@ test("messages during an active run queue into one chained follow-up", async () 
   // The queued message's hourglass flips to eyes when its run starts.
   assert.ok(reactions.some((r) => r.op === "remove" && r.ts === "1002.000" && r.name === "hourglass_flowing_sand"));
   assert.ok(reactions.some((r) => r.op === "add" && r.ts === "1002.000" && r.name === "eyes"));
+});
+
+test("a message during a steerable run is injected into the live session, not queued", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-steer-alice");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const { client, reactions } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+  const injected: Array<{ aiRunId: string; text: string }> = [];
+  const deps = depsWith(client, runs, {
+    injectRunMessage: (aiRunId, text) => {
+      injected.push({ aiRunId, text });
+      return true;
+    }
+  });
+
+  const first = await handleSlackAppMention(mention({ teamId }), deps);
+  const firstRunId = (first as { aiRunId: string }).aiRunId;
+
+  const steered = await handleSlackAppMention(
+    mention({ teamId, ts: "1002.000", threadTs: "1000.000", text: `<@${BOT_USER_ID}> also add a plot` }),
+    deps
+  );
+  assert.equal("action" in steered && steered.action, "injected");
+  assert.equal(injected.length, 1);
+  assert.equal(injected[0].aiRunId, firstRunId);
+  assert.match(injected[0].text, /also add a plot/);
+  assert.match(injected[0].text, /steering/i);
+  assert.equal(runs.length, 1, "injection must not start a second run");
+  assert.ok(
+    !reactions.some((r) => r.ts === "1002.000" && r.name === "hourglass_flowing_sand"),
+    "an injected message is not queued, so it gets no hourglass"
+  );
+  assert.ok(reactions.some((r) => r.op === "add" && r.ts === "1002.000" && r.name === "eyes"));
+
+  // The steered message is part of the SAME run: no follow-up run is chained,
+  // and its anchor gets the run's completion reaction.
+  await db.aiRun.update({ where: { id: firstRunId }, data: { status: "SUCCEEDED" } });
+  await runs[0].onFinished?.({ status: "SUCCEEDED", reply: "Both done.", error: null });
+  assert.equal(runs.length, 1, "no chained follow-up for an injected message");
+  assert.ok(reactions.some((r) => r.op === "add" && r.ts === "1002.000" && r.name === "white_check_mark"));
 });
 
 test("cancelled runs post 'Stopped.' instead of a failure message", async () => {

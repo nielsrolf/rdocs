@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { lifecycleStepLabel, SUBMIT_STEP_LABEL } from "@/agent-core/lifecycle-messages";
 import { cn, truncate } from "@/lib/utils";
@@ -190,6 +190,23 @@ export function renderToolSummary(parsed: ParsedToolCall): ReactNode {
       </span>
     );
   }
+  // The Task* tool family (TaskCreate / TaskUpdate / TaskList / TaskGet) is the
+  // successor of TodoWrite; the plan rail folds these into the session outline.
+  if (name === "TaskCreate" && typeof args.subject === "string") {
+    return <code className="agent-tool-arg">{truncate(args.subject, 80)}</code>;
+  }
+  if ((name === "TaskUpdate" || name === "TaskGet") && typeof args.taskId === "string") {
+    const status = typeof args.status === "string" ? args.status : null;
+    return (
+      <span className="agent-tool-arg agent-tool-arg-muted">
+        #{args.taskId}
+        {status ? ` → ${status}` : ""}
+      </span>
+    );
+  }
+  if (name === "TaskList") {
+    return <span className="agent-tool-arg agent-tool-arg-muted">plan</span>;
+  }
   if (typeof args.glob === "string") {
     return <code className="agent-tool-arg">{truncate(args.glob, 80)}</code>;
   }
@@ -203,27 +220,59 @@ export function renderToolSummary(parsed: ParsedToolCall): ReactNode {
   return <code className="agent-tool-arg">{truncate(JSON.stringify(args), 80)}</code>;
 }
 
+/**
+ * Pull the human-readable payload out of a content-block tool result:
+ * `[{"tool_use_id":…,"type":"tool_result","content":"…"}]`. This is the shape
+ * emitted for tool calls that arrive on the content-block path (subagents, and
+ * the Task* tool family) — as opposed to the object-shaped `tool_use_result`.
+ * Returns null when the message is not that shape.
+ */
+export function unwrapToolResultText(message: string): string | null {
+  const trimmed = message.trim();
+  if (!trimmed.startsWith("[")) return null;
+  const stringOf = (value: unknown): string | null => {
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) {
+      const parts = value
+        .map((inner) =>
+          inner && typeof inner === "object" && typeof (inner as { text?: unknown }).text === "string"
+            ? (inner as { text: string }).text
+            : null
+        )
+        .filter((part): part is string => Boolean(part));
+      return parts.length ? parts.join("\n") : null;
+    }
+    return null;
+  };
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!Array.isArray(parsed)) return null;
+    const parts = parsed
+      .map((block) => {
+        if (!block || typeof block !== "object") return null;
+        const record = block as Record<string, unknown>;
+        return stringOf(record.text) ?? stringOf(record.content);
+      })
+      .filter((part): part is string => Boolean(part));
+    return parts.length ? parts.join("\n") : null;
+  } catch {
+    // Clipped at the event cap mid-JSON — recover what was stored.
+    return extractJsonStringField(trimmed, "content") ?? extractJsonStringField(trimmed, "text");
+  }
+}
+
 export function formatToolResult(message: string): string {
   const trimmed = message.trim();
   if (!trimmed) {
     return "";
   }
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    const unwrapped = unwrapToolResultText(trimmed);
+    if (unwrapped !== null) {
+      return unwrapped;
+    }
     try {
       const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) {
-        const textParts = parsed
-          .map((block) => {
-            if (block && typeof block === "object" && "text" in block && typeof (block as { text?: unknown }).text === "string") {
-              return (block as { text: string }).text;
-            }
-            return null;
-          })
-          .filter((part): part is string => Boolean(part));
-        if (textParts.length > 0) {
-          return textParts.join("\n");
-        }
-      }
       if (typeof parsed === "string") {
         return parsed;
       }
@@ -312,8 +361,49 @@ export type ToolResultData =
  * large — so this parses strictly first and falls back to lenient
  * field extraction on truncated payloads.
  */
+/**
+ * Strip Read's `   12\tsource` line-number gutter from a content-block payload
+ * so the file view can render its own numbers from the real start line.
+ */
+function stripReadLineNumbers(text: string): { content: string; startLine: number } {
+  const lines = text.split("\n");
+  const parsed = lines.map((line) => line.match(/^\s*(\d+)\t(.*)$/));
+  const numbered = parsed.filter(Boolean).length;
+  if (!numbered || numbered < lines.filter((line) => line.trim()).length) {
+    return { content: text, startLine: 1 };
+  }
+  const first = parsed.find(Boolean);
+  return {
+    content: parsed.map((match, i) => (match ? match[2] : lines[i])).join("\n"),
+    startLine: first ? Number(first[1]) : 1
+  };
+}
+
 export function parseToolResultData(toolName: string, message: string): ToolResultData | null {
   const trimmed = message.trim();
+  if (trimmed.startsWith("[")) {
+    // Content-block form — plain text, not the structured tool_use_result.
+    const text = unwrapToolResultText(trimmed);
+    if (text === null) return null;
+    let truncated = true;
+    try {
+      JSON.parse(trimmed);
+      truncated = false;
+    } catch {
+      truncated = true;
+    }
+    if (toolName === "Bash") {
+      return { kind: "bash", stdout: text, stderr: "", truncated };
+    }
+    if (toolName === "Read") {
+      const { content, startLine } = stripReadLineNumbers(text);
+      return { kind: "file", filePath: null, content, startLine, truncated };
+    }
+    if (toolName === "Grep" || toolName === "Glob") {
+      return { kind: "grep", content: text, numMatches: null };
+    }
+    return null;
+  }
   if (!trimmed.startsWith("{")) return null;
   let obj: Record<string, unknown> | null = null;
   try {
@@ -536,11 +626,68 @@ function imageMediaTypeFromPath(filePath: string | null): string {
   return IMAGE_MEDIA_TYPES[ext] ?? "image/png";
 }
 
+/**
+ * Map a path the agent read to a path the workspace file route can serve.
+ * Runs see the workspace mounted at /workspace, so strip that prefix; any other
+ * absolute path is outside the workspace and cannot be served.
+ */
+export function workspaceRelativePath(filePath: string | null): string | null {
+  if (!filePath) return null;
+  if (filePath.startsWith("/workspace/")) return filePath.slice("/workspace/".length);
+  if (filePath.startsWith("/")) return null;
+  return filePath;
+}
+
+/**
+ * Image reads: the base64 payload almost always overflows the event cap, so
+ * prefer serving the file itself out of the run workspace and fall back to the
+ * placeholder only when neither source works.
+ */
+function ReadImageView({
+  base64,
+  documentId,
+  filePath
+}: {
+  base64: string | null;
+  documentId?: string;
+  filePath: string | null;
+}) {
+  const [failed, setFailed] = useState(false);
+  const relative = workspaceRelativePath(filePath);
+  const src = base64
+    ? `data:${imageMediaTypeFromPath(filePath)};base64,${base64}`
+    : documentId && relative
+      ? `/api/documents/${documentId}/repo-files?path=${encodeURIComponent(relative)}`
+      : null;
+  return (
+    <>
+      {filePath ? (
+        <div className="agent-tool-desc">
+          <code>{filePath}</code>
+        </div>
+      ) : null}
+      {src && !failed ? (
+        <img
+          alt={filePath ? basename(filePath) : "image read by the agent"}
+          className="agent-tool-image"
+          onError={() => setFailed(true)}
+          src={src}
+        />
+      ) : (
+        <div className="agent-tool-image-placeholder">
+          <span aria-hidden>🖼</span> Image file — preview not stored in the timeline
+        </div>
+      )}
+    </>
+  );
+}
+
 /** Custom expanded body for the builtin tools; null falls back to Input/Output JSON. */
 function renderToolBody(
   parsed: ParsedToolCall | null,
   resultData: ToolResultData | null,
-  resultText: string
+  resultText: string,
+  documentId?: string
 ): ReactNode | null {
   if (!parsed?.args) return null;
   const args = parsed.args;
@@ -577,24 +724,7 @@ function renderToolBody(
   }
   if (parsed.name === "Read" && resultData?.kind === "image") {
     const filePath = typeof args.file_path === "string" ? args.file_path : null;
-    return (
-      <>
-        {filePath ? (
-          <div className="agent-tool-desc"><code>{filePath}</code></div>
-        ) : null}
-        {resultData.base64 ? (
-          <img
-            alt={filePath ? basename(filePath) : "image read by the agent"}
-            className="agent-tool-image"
-            src={`data:${imageMediaTypeFromPath(filePath)};base64,${resultData.base64}`}
-          />
-        ) : (
-          <div className="agent-tool-image-placeholder">
-            <span aria-hidden>🖼</span> Image file — preview not stored in the timeline
-          </div>
-        )}
-      </>
-    );
+    return <ReadImageView base64={resultData.base64} documentId={documentId} filePath={filePath} />;
   }
   if (parsed.name === "Read" && resultData?.kind === "file") {
     // A clipped payload loses its startLine field (it serializes after the
@@ -695,6 +825,16 @@ function renderToolBody(
   if (parsed.name === "TodoWrite" && Array.isArray(args.todos)) {
     return <TodoBody todos={args.todos as unknown[]} />;
   }
+  if (parsed.name === "TaskCreate" && typeof args.subject === "string") {
+    return (
+      <>
+        <div className="agent-tool-desc">{args.subject}</div>
+        {typeof args.description === "string" && args.description ? (
+          <pre className="agent-tool-pre">{args.description}</pre>
+        ) : null}
+      </>
+    );
+  }
   return null;
 }
 
@@ -707,10 +847,12 @@ function renderToolBody(
 const AgentToolBlock = memo(
   function AgentToolBlock({
     call,
+    documentId,
     result,
     running
   }: {
     call: AiRunEventView;
+    documentId?: string;
     result: AiRunEventView | null;
     running: boolean;
   }) {
@@ -726,7 +868,7 @@ const AgentToolBlock = memo(
     );
     const resultData = result && parsed ? parseToolResultData(parsed.name, result.message) : null;
     const resultText = result && !resultData ? formatToolResult(result.message) : "";
-    const customBody = renderToolBody(parsed, resultData, resultText);
+    const customBody = renderToolBody(parsed, resultData, resultText, documentId);
     const argsPretty = parsed?.args ? JSON.stringify(parsed.args, null, 2) : null;
     const hasDetails = Boolean(customBody || argsPretty || resultText);
     const meta = result
@@ -873,6 +1015,7 @@ export function agentDisplayName(model: string | null | undefined): string {
 
 export function AgentTimeline({
   agentName = "Claude",
+  documentId,
   events,
   progress,
   status,
@@ -880,6 +1023,8 @@ export function AgentTimeline({
   outro
 }: {
   agentName?: string;
+  /** Enables serving image Reads out of the run workspace. */
+  documentId?: string;
   events: AiRunEventView[];
   progress: string | null;
   status: string;
@@ -918,7 +1063,13 @@ export function AgentTimeline({
       {intro}
       {grouped.map((item, idx) => {
         if (item.kind === "tool") {
-          return <AgentToolBlock call={item.call} key={item.key} result={item.result} running={isRunning} />;
+          return <AgentToolBlock
+              call={item.call}
+              documentId={documentId}
+              key={item.key}
+              result={item.result}
+              running={isRunning}
+            />;
         }
         if (item.kind === "step") {
           const active = isRunning && idx === grouped.length - 1;

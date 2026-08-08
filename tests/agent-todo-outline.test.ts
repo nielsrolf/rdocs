@@ -92,6 +92,71 @@ test("buildTodoOutline follows the newest plan ordering and keeps dropped todos"
   assert.deepEqual(outline.items.filter((item) => item.current).map((item) => item.content), ["Gamma"]);
 });
 
+function taskCreate(subject: string, description = "why") {
+  return ev("tool", `TaskCreate: ${JSON.stringify({ subject, description })}`);
+}
+
+function taskResult(text: string) {
+  return ev(
+    "tool_result",
+    JSON.stringify([{ tool_use_id: "toolu_x", type: "tool_result", content: text }], null, 2)
+  );
+}
+
+test("buildTodoOutline folds the Task* tool family into the plan rail", () => {
+  const events = [
+    ev("tool", "Using TaskCreate."),
+    taskCreate("Reproduce the bug"),
+    taskResult("Task #1 created successfully: Reproduce the bug"),
+    taskCreate("Fix the parser"),
+    taskResult("Task #2 created successfully: Fix the parser"),
+    taskCreate("Run the suite"),
+    taskResult("Task #3 created successfully: Run the suite"),
+    ev("tool", 'TaskUpdate: {"taskId":"1","status":"in_progress"}'),
+    taskResult("Updated task #1 status"),
+    ev("tool", 'TaskUpdate: {"taskId":"1","status":"completed"}'),
+    taskResult("Updated task #1 status")
+  ];
+  const progress = ev("tool", 'TaskUpdate: {"taskId":"2","status":"in_progress"}');
+  const outline = buildTodoOutline([...events, progress]);
+
+  assert.deepEqual(
+    outline.items.map((item) => [item.content, item.status, item.current]),
+    [
+      ["Reproduce the bug", "completed", false],
+      ["Fix the parser", "in_progress", true],
+      ["Run the suite", "pending", false]
+    ]
+  );
+  assert.equal(outline.done, 1);
+  assert.ok(outline.snapshots > 0);
+  assert.equal(outline.items[1].anchorEventId, progress.id);
+});
+
+test("buildTodoOutline drops deleted tasks and tolerates updates without a create event", () => {
+  const created = [taskCreate("Keep me"), taskResult("Task #1 created successfully: Keep me")];
+  const outline = buildTodoOutline([
+    ...created,
+    taskCreate("Remove me"),
+    taskResult("Task #2 created successfully: Remove me"),
+    ev("tool", 'TaskUpdate: {"taskId":"2","status":"deleted"}'),
+    // Task #7 was created before the loaded event window started.
+    ev("tool", 'TaskUpdate: {"taskId":"7","status":"in_progress","subject":"Older task"}')
+  ]);
+  assert.deepEqual(
+    outline.items.map((item) => [item.content, item.status]),
+    [
+      ["Keep me", "pending"],
+      ["Older task", "in_progress"]
+    ]
+  );
+});
+
+test("buildTodoOutline shows a created task whose result event is missing", () => {
+  const outline = buildTodoOutline([taskCreate("Unbound task")]);
+  assert.deepEqual(outline.items.map((item) => [item.content, item.status]), [["Unbound task", "pending"]]);
+});
+
 test("buildTodoOutline returns an empty outline when the session has no todos", () => {
   const outline = buildTodoOutline([ev("agent", "hello"), ev("tool", 'Read: {"file_path":"a.ts"}')]);
   assert.deepEqual(outline.items, []);

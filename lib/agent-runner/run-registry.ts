@@ -52,6 +52,42 @@ export function activeRunCount(): number {
   return controllers.size;
 }
 
+// Steering: runs whose backend can deliver a user message INTO the live agent
+// session register an injector here for their duration (see the input channel
+// in agent-core). Same process-local scope as the abort controllers above: a
+// run owned by another process (or a backend without a steering channel —
+// http/selfHosted, and any Codex run) simply has no entry, and callers fall
+// back to queueing a follow-up run.
+const injectors = new Map<string, (text: string) => boolean>();
+
+export function registerRunMessageInjector(aiRunId: string, inject: (text: string) => boolean) {
+  injectors.set(aiRunId, inject);
+}
+
+export function deregisterRunMessageInjector(aiRunId: string) {
+  injectors.delete(aiRunId);
+}
+
+/**
+ * Deliver `text` to a running agent turn as an additional user message.
+ * Returns false when the run cannot accept it (unknown run, unsupported
+ * backend, or the turn already ended) — the caller MUST then fall back to
+ * queueing, so a message is never dropped.
+ */
+export function injectRunMessage(aiRunId: string, text: string): boolean {
+  const inject = injectors.get(aiRunId);
+  if (!inject) return false;
+  try {
+    return inject(text);
+  } catch {
+    return false;
+  }
+}
+
+export function isSteerableAiRun(aiRunId: string): boolean {
+  return injectors.has(aiRunId);
+}
+
 // A run's failure is a user cancellation when its signal was aborted —
 // regardless of what error actually surfaced (the killed container manifests
 // as "exited without a result", the SDK as an AbortError, etc.).

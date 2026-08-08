@@ -114,44 +114,137 @@ export function parseTodoSnapshot(message: string): TodoSnapshotItem[] | null {
 }
 
 /**
- * Fold every TodoWrite snapshot of a session into one ordered outline: each
- * todo appears once, with its status as of the newest snapshot that mentioned
- * it, and an anchor pointing at the snapshot where it reached that status.
+ * The Task tool family (TaskCreate / TaskUpdate / TaskList / TaskGet) replaced
+ * the single TodoWrite snapshot tool in newer Claude Code builds. Unlike
+ * TodoWrite, the plan is never sent as a whole: each event is an incremental
+ * mutation, and the task id a mutation refers to only ever appears in the
+ * tool_result text of the create call ("Task #3 created successfully: …").
+ */
+export type TaskToolEvent =
+  | { type: "create"; subject: string }
+  | { type: "update"; taskId: string; status: TodoStatus | "deleted" | null; subject: string | null };
+
+function jsonStringField(body: string, key: string): string | null {
+  const match = body.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`));
+  return match ? unescapeJsonString(match[1]) : null;
+}
+
+/** Parse a TaskCreate / TaskUpdate tool event, tolerating payloads clipped mid-JSON. */
+export function parseTaskToolEvent(message: string): TaskToolEvent | null {
+  const trimmed = message.trim();
+  if (trimmed.startsWith("TaskCreate:")) {
+    const body = trimmed.slice("TaskCreate:".length);
+    const subject = jsonStringField(body, "subject");
+    return subject && subject.trim() ? { type: "create", subject: subject.trim() } : null;
+  }
+  if (trimmed.startsWith("TaskUpdate:")) {
+    const body = trimmed.slice("TaskUpdate:".length);
+    const taskId = jsonStringField(body, "taskId") ?? body.match(/"taskId"\s*:\s*(\d+)/)?.[1] ?? null;
+    if (!taskId) return null;
+    const rawStatus = jsonStringField(body, "status");
+    const subject = jsonStringField(body, "subject");
+    return {
+      type: "update",
+      taskId,
+      status: rawStatus === "deleted" ? "deleted" : rawStatus === null ? null : normalizeStatus(rawStatus),
+      subject: subject && subject.trim() ? subject.trim() : null
+    };
+  }
+  return null;
+}
+
+/** Recover the task id a TaskCreate result announced ("Task #3 created successfully: …"). */
+export function parseCreatedTaskId(resultMessage: string): string | null {
+  return resultMessage.match(/Task #(\d+) created/)?.[1] ?? null;
+}
+
+/**
+ * Fold every plan mutation of a session into one ordered outline: each todo
+ * appears once, with its status as of the newest event that mentioned it, and
+ * an anchor pointing at the event where it reached that status. Handles both
+ * whole-plan TodoWrite/Codex snapshots and incremental Task* mutations.
  */
 export function buildTodoOutline(events: AiRunEventView[]): TodoOutline {
   const byKey = new Map<string, TodoOutlineItem>();
+  const order: string[] = [];
   let snapshots = 0;
   let lastOrder: string[] = [];
+
+  const upsert = (key: string, content: string, status: TodoStatus, eventId: string) => {
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, { key, content, status, anchorEventId: eventId, current: false });
+      order.push(key);
+      return;
+    }
+    if (existing.status !== status) {
+      existing.status = status;
+      existing.anchorEventId = eventId;
+    }
+    existing.content = content;
+  };
+
+  const rekey = (from: string, to: string) => {
+    const item = byKey.get(from);
+    if (!item || from === to) return;
+    byKey.delete(from);
+    item.key = to;
+    byKey.set(to, item);
+    const index = order.indexOf(from);
+    if (index >= 0) order[index] = to;
+  };
+
+  // A TaskCreate's id is only revealed by the tool_result that follows it.
+  let pendingCreateKey: string | null = null;
+
   for (const event of events) {
+    if (event.role === "tool_result") {
+      if (pendingCreateKey) {
+        const taskId = parseCreatedTaskId(event.message);
+        if (taskId) rekey(pendingCreateKey, `task:${taskId}`);
+        pendingCreateKey = null;
+      }
+      continue;
+    }
     if (event.role !== "tool") continue;
+
+    const taskEvent = parseTaskToolEvent(event.message);
+    if (taskEvent) {
+      snapshots += 1;
+      if (taskEvent.type === "create") {
+        const key = `task-pending:${event.id}`;
+        upsert(key, taskEvent.subject, "pending", event.id);
+        pendingCreateKey = key;
+        continue;
+      }
+      pendingCreateKey = null;
+      const key = `task:${taskEvent.taskId}`;
+      if (taskEvent.status === "deleted") {
+        byKey.delete(key);
+        const index = order.indexOf(key);
+        if (index >= 0) order.splice(index, 1);
+        continue;
+      }
+      const existing = byKey.get(key);
+      // A task created before the loaded event window still gets a rail entry.
+      const content = taskEvent.subject ?? existing?.content ?? `Task #${taskEvent.taskId}`;
+      upsert(key, content, taskEvent.status ?? existing?.status ?? "pending", event.id);
+      continue;
+    }
+
+    pendingCreateKey = null;
     const items = parseTodoSnapshot(event.message);
     if (!items) continue;
     snapshots += 1;
     lastOrder = items.map((item) => item.content.toLowerCase());
     for (const item of items) {
-      const key = item.content.toLowerCase();
-      const existing = byKey.get(key);
-      if (!existing) {
-        byKey.set(key, {
-          key,
-          content: item.content,
-          status: item.status,
-          anchorEventId: event.id,
-          current: false
-        });
-        continue;
-      }
-      if (existing.status !== item.status) {
-        existing.status = item.status;
-        existing.anchorEventId = event.id;
-      }
-      existing.content = item.content;
+      upsert(item.content.toLowerCase(), item.content, item.status, event.id);
     }
   }
 
   // Present the newest snapshot's ordering; todos dropped from the plan keep
   // their first-seen order after it.
-  const all = [...byKey.values()];
+  const all = order.map((key) => byKey.get(key)).filter((item): item is TodoOutlineItem => Boolean(item));
   const rank = new Map(lastOrder.map((key, index) => [key, index]));
   const items = [
     ...all.filter((item) => rank.has(item.key)).sort((a, b) => (rank.get(a.key) ?? 0) - (rank.get(b.key) ?? 0)),

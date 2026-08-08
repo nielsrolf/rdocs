@@ -7,6 +7,7 @@ export * from "./lifecycle-messages";
 export * from "./agent-config";
 export * from "./agent-env";
 export * from "./agent-sandbox";
+export * from "./input-channel";
 export * from "./ai-tools";
 export * from "./ai-asset-intent";
 export * from "./ai-edit-submission";

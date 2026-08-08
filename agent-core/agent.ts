@@ -35,6 +35,7 @@ import {
   type AgentSuggestion
 } from "./ai-edit-submission";
 import { evaluateToolPathAccess } from "./agent-sandbox";
+import type { AgentInputChannel } from "./input-channel";
 import { toolsForAgentAccess, type AgentAccessMode } from "./ai-tools";
 import {
   PREPARING_DOCUMENT_UPDATE,
@@ -213,6 +214,16 @@ export type ClaudeAgentRunOptions = {
    * runner bridges it as a "session" frame.
    */
   onSessionId?: (sessionId: string) => void | Promise<void>;
+  /**
+   * Steering channel: additional USER messages pushed into the turn while it
+   * is still running (see agent-core/input-channel.ts). The SDK is driven in
+   * streaming-input mode, so anything pushed here is delivered to the live
+   * session at the next turn boundary instead of becoming a separate follow-up
+   * run. agent-core closes the channel as soon as the response is submitted or
+   * the turn's result frame arrives, so the host can tell (push() === false)
+   * when a message arrived too late and must be queued instead.
+   */
+  inputChannel?: AgentInputChannel;
   /**
    * Native config/session root for the harness CLI ($CLAUDE_CONFIG_DIR /
    * $CODEX_HOME): the per-conversation session dir on the host, or the
@@ -944,20 +955,30 @@ function pastedImageContentBlocks(documentBlocks: AiDocumentBlock[] | undefined)
   return blocks;
 }
 
-function buildUserMessageStream(input: ClaudeResearchAgentInput): AsyncIterable<SDKUserMessage> {
+export function buildUserMessageStream(
+  input: ClaudeResearchAgentInput,
+  inputChannel?: AgentInputChannel
+): AsyncIterable<SDKUserMessage> {
   const textBlock = { type: "text" as const, text: buildUserPrompt(input) };
   const imageBlocks = pastedImageContentBlocks(input.documentBlocks);
   const content = imageBlocks.length > 0 ? [textBlock, ...imageBlocks] : [textBlock];
 
-  return (async function* () {
-    yield {
+  const userMessage = (blocks: typeof content) =>
+    ({
       type: "user",
-      message: {
-        role: "user",
-        content
-      },
+      message: { role: "user", content: blocks },
       parent_tool_use_id: null
-    } as SDKUserMessage;
+    }) as SDKUserMessage;
+
+  return (async function* () {
+    yield userMessage(content);
+    // Steering: stays open for the rest of the turn when the host supplied a
+    // channel, so mid-run messages reach THIS session. Without one the
+    // iterator ends immediately (historical single-shot behavior).
+    if (!inputChannel) return;
+    for await (const text of inputChannel) {
+      yield userMessage([{ type: "text" as const, text }]);
+    }
   })();
 }
 
@@ -1102,6 +1123,10 @@ async function runClaudeResearchAgentOnce(
       }
       lastSubmissionError = null;
       captured = normalized;
+      // The turn is over: stop accepting steering messages so anything that
+      // arrives from here on is rejected by push() and queued as a follow-up
+      // run by the host rather than silently lost.
+      options.inputChannel?.close();
       return {
         content: [
           {
@@ -1479,7 +1504,7 @@ async function runClaudeResearchAgentOnce(
       : `\n\nRun environment: no API keys or custom environment variables are configured for this run. Do not assume provider keys (e.g. OPENAI_API_KEY) exist; scripts that need one will fail until the user adds it via the document's Env menu.`;
 
   const agentQuery = query({
-    prompt: buildUserMessageStream(input),
+    prompt: buildUserMessageStream(input, options.inputChannel),
     options: {
       cwd,
       // Enable exactly the skills materialized into this workspace (none →
@@ -1596,6 +1621,13 @@ async function runClaudeResearchAgentOnce(
       if (message.type === "assistant") {
         handleAssistantMessage(message, onProgress);
       } else if (message.type === "result") {
+        // End of a turn. Close the steering channel unless messages are still
+        // queued for delivery — those get one more turn (the iterator drains
+        // before it ends), which is what "inject into the running session"
+        // means for a message that landed right at the boundary.
+        if (options.inputChannel && options.inputChannel.pendingCount() === 0) {
+          options.inputChannel.close();
+        }
         resultStopReason = message.stop_reason ?? null;
         if (!message.is_error && "result" in message && typeof message.result === "string") {
           resultText = message.result;
@@ -1619,6 +1651,7 @@ async function runClaudeResearchAgentOnce(
     throw error;
   } finally {
     options.signal?.removeEventListener("abort", onExternalAbort);
+    options.inputChannel?.close();
     agentQuery.close();
   }
 

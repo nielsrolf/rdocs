@@ -26,7 +26,7 @@ import {
 import { createSlackLinkToken, createSlackToolsToken } from "@/lib/slack/link-token";
 import { isHostDevRun } from "@/lib/slack/dev-mode";
 import { markdownToMrkdwn } from "@/lib/slack/mrkdwn";
-import { RUN_CANCELLED_MESSAGE, cancelAiRun } from "@/lib/agent-runner/run-registry";
+import { RUN_CANCELLED_MESSAGE, cancelAiRun, injectRunMessage } from "@/lib/agent-runner/run-registry";
 import type { SlackClient, SlackMessage } from "@/lib/slack/web";
 
 export type SlackIncomingMessage = {
@@ -53,6 +53,10 @@ export type SlackEventDeps = {
   botUserId: string;
   // Injectable so tests can observe run inputs without running an agent.
   startRun?: (input: ConversationRunInput) => Promise<void>;
+  // Injectable steering hook (defaults to the process-local run registry) so
+  // tests can drive both the "injected into the live run" and the
+  // "backend can't steer -> queued" paths.
+  injectRunMessage?: (aiRunId: string, text: string) => boolean;
   // Injectable voice transcription; default resolves the triggering user's
   // OpenAI/LiteLLM credential (lib/slack/transcribe.ts).
   transcribe?: (args: {
@@ -274,6 +278,25 @@ type QueuedFollowUp = {
 };
 const queuedFollowUps = new Map<string, QueuedFollowUp[]>();
 
+// Messages that were STEERED into a live run (rather than queued) still need
+// their ✅/❌ at the end of that run, so their Slack ts is appended here and
+// picked up by the run's onFinished. Same in-memory, single-process scope as
+// the queue above.
+const steeredRunAnchors = new Map<string, Array<{ ts: string }>>();
+
+/**
+ * Frames a mid-run Slack message for the agent that is already working. The
+ * harness delivers it as a normal user turn, so it needs to be self-describing:
+ * without the framing the model tends to read it as a fresh, unrelated request.
+ */
+export function buildSteeringMessage(senderName: string, text: string) {
+  return (
+    `New Slack message from ${senderName}, sent while you are still working on this thread. ` +
+    `Treat it as steering for the CURRENT task: adjust your plan if it changes what you should do, ` +
+    `and acknowledge it in your final reply.\n\n${text}`
+  );
+}
+
 type StartSlackRunArgs = {
   deps: SlackEventDeps;
   surface: "mention" | "dm";
@@ -381,7 +404,11 @@ export async function startSlackConversationRun(args: StartSlackRunArgs): Promis
     onFinished: async (outcome) => {
       const succeeded = outcome.status === "SUCCEEDED";
       const cancelled = !succeeded && outcome.error === RUN_CANCELLED_MESSAGE;
-      for (const anchor of args.reactionAnchors) {
+      // Trigger message(s) plus any message that was steered into this run
+      // while it was working — both get the run's terminal reaction.
+      const steeredAnchors = steeredRunAnchors.get(aiRun.id) ?? [];
+      steeredRunAnchors.delete(aiRun.id);
+      for (const anchor of [...args.reactionAnchors, ...steeredAnchors]) {
         await deps.slack.removeReaction({ channel, ts: anchor.ts, name: "eyes" }).catch(() => null);
         await deps.slack
           .addReaction({ channel, ts: anchor.ts, name: succeeded ? "white_check_mark" : "x" })
@@ -520,8 +547,30 @@ async function handleIncomingSlackMessage(
       }
       return { handled: true as const, action: "interrupted" as const, aiRunId: activeRun.id };
     }
-    // Not an interrupt: queue for a follow-up run when the active one ends.
     const senderName = (await deps.slack.userInfo(event.user))?.displayName ?? event.user;
+
+    // Preferred path: inject the message straight into the RUNNING agent
+    // session, so it steers the work in progress instead of becoming a
+    // separate run afterwards. Only backends that hold an open input channel
+    // for the run (in-process / container, Claude harness) accept this; every
+    // other case returns false and falls through to the queue below.
+    const inject = deps.injectRunMessage ?? injectRunMessage;
+    if (inject(activeRun.id, buildSteeringMessage(senderName, instructionBody))) {
+      await recordAiRunEvent({
+        aiRunId: activeRun.id,
+        role: "user",
+        message: instructionBody
+      }).catch(() => null);
+      const anchors = steeredRunAnchors.get(activeRun.id) ?? [];
+      anchors.push({ ts: event.ts });
+      steeredRunAnchors.set(activeRun.id, anchors);
+      await deps.slack
+        .addReaction({ channel: event.channel, ts: event.ts, name: "eyes" })
+        .catch(() => null);
+      return { handled: true as const, action: "injected" as const, aiRunId: activeRun.id };
+    }
+
+    // Fallback: queue for a follow-up run when the active one ends.
     const queue = queuedFollowUps.get(activeRun.id) ?? [];
     queue.push({
       userId: link.userId,

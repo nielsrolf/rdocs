@@ -21,7 +21,11 @@ import {
   resolveContainerCredentialEnv
 } from "./agent-credential";
 import { agentRunSemaphore } from "./concurrency";
-import { RunCancelledError } from "./run-registry";
+import {
+  RunCancelledError,
+  deregisterRunMessageInjector,
+  registerRunMessageInjector
+} from "./run-registry";
 
 // Transient container-level failures (spawn / exit-without-result) get one
 // bounded backoff retry here. In-agent-loop API errors (429/500/overloaded) are
@@ -100,7 +104,10 @@ export class ContainerRunner implements AgentRunner {
       onSlackMessage: options?.onSlackMessage,
       onSessionId: options?.onSessionId,
       signal: options?.signal,
-      containerName: options?.containerName
+      containerName: options?.containerName,
+      // Steering: lets the host push extra user messages into the live turn
+      // over the container's stdin (Claude harness only — see spawnContainer).
+      steerRunId: options?.aiRunId
     });
     return output as ClaudeResearchAgentOutput;
   }
@@ -133,6 +140,7 @@ export class ContainerRunner implements AgentRunner {
     onSessionId?: AgentRunOptions["onSessionId"];
     signal?: AbortSignal;
     containerName?: string;
+    steerRunId?: string;
   }): Promise<Record<string, unknown>> {
     const runtime = process.env.AGENT_CONTAINER_RUNTIME || "docker";
     const harness = agentHarnessForModel(opts.agentModel);
@@ -231,7 +239,8 @@ export class ContainerRunner implements AgentRunner {
           return await this.spawnContainer(runtime, args, opts.job, opts.onProgress, opts.onComment, opts.onSlackMessage, {
             signal: opts.signal,
             containerName: opts.containerName,
-            onSessionId: opts.onSessionId
+            onSessionId: opts.onSessionId,
+            steerRunId: harness === "codex" ? undefined : opts.steerRunId
           });
         } catch (error) {
           // A killed container manifests as "exited without a result" — never
@@ -272,7 +281,13 @@ export class ContainerRunner implements AgentRunner {
     onProgress?: AgentRunOptions["onProgress"],
     onComment?: AgentRunOptions["onComment"],
     onSlackMessage?: AgentRunOptions["onSlackMessage"],
-    cancel?: { signal?: AbortSignal; containerName?: string; onSessionId?: AgentRunOptions["onSessionId"] }
+    cancel?: {
+      signal?: AbortSignal;
+      containerName?: string;
+      onSessionId?: AgentRunOptions["onSessionId"];
+      /** AiRun id to register a live-steering injector for (Claude harness only). */
+      steerRunId?: string;
+    }
   ): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       const child = spawn(runtime, args, { stdio: ["pipe", "pipe", "pipe"] });
@@ -299,6 +314,16 @@ export class ContainerRunner implements AgentRunner {
         } else {
           cancel.signal.addEventListener("abort", onAbort, { once: true });
         }
+      }
+
+      // Live steering: a user message pushed while the turn is running is
+      // written into the container as a "user_message" frame. Returns false
+      // once stdin is gone (container exiting) so the caller queues instead.
+      if (cancel?.steerRunId) {
+        registerRunMessageInjector(cancel.steerRunId, (text) => {
+          if (!child.stdin.writable || child.stdin.destroyed) return false;
+          return child.stdin.write(JSON.stringify({ type: "user_message", text }) + "\n") || true;
+        });
       }
 
       let result: Record<string, unknown> | null = null;
@@ -385,6 +410,7 @@ export class ContainerRunner implements AgentRunner {
 
       child.on("close", async (code) => {
         cancel?.signal?.removeEventListener("abort", onAbort);
+        if (cancel?.steerRunId) deregisterRunMessageInjector(cancel.steerRunId);
         if (stdoutBuffer.trim()) handleFrame(stdoutBuffer);
         await Promise.all(pending);
         if (frameError) {
@@ -411,8 +437,12 @@ export class ContainerRunner implements AgentRunner {
         );
       });
 
-      child.stdin.write(JSON.stringify(job));
-      child.stdin.end();
+      // Job frame first. stdin then stays OPEN for the life of the container so
+      // steering messages can be written as further NDJSON frames; the
+      // entrypoint parses stdin line by line and exits on its own when the run
+      // finishes (it no longer waits for stdin to end).
+      child.stdin.on("error", () => {});
+      child.stdin.write(JSON.stringify(job) + "\n");
     });
   }
 }

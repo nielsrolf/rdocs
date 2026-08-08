@@ -1,7 +1,11 @@
 // Container entrypoint. Runs INSIDE the hardened agent container.
 //
 // Protocol (NDJSON over the process's stdio):
-//   stdin  : a single JSON AgentJob ({ input, agentConfig, agentEnv, validation })
+//   stdin  : newline-delimited frames. The FIRST line is the JSON AgentJob
+//            ({ input, agentConfig, agentEnv, validation }); every later line is
+//            a steering frame {type:"user_message",text} injected into the
+//            RUNNING agent turn (see agent-core/input-channel.ts). stdin stays
+//            open for the life of the run — we never wait for it to end.
 //   stdout : newline-delimited frames — {type:"progress",event} | {type:"result",output} | {type:"error",message}
 //   stderr : human logs only (never parsed by the host)
 //
@@ -14,9 +18,11 @@ import { execFileSync } from "node:child_process";
 
 import {
   buildSubmissionValidator,
+  createAgentInputChannel,
   agentHarnessForModel,
   runClaudeResearchAgent,
   runMergeConflictResolver,
+  type AgentInputChannel,
   type ClaudeAgentProgressEvent
 } from "./agent-core/index";
 
@@ -36,14 +42,49 @@ function emit(frame: Record<string, unknown>) {
   rawStdoutWrite(JSON.stringify(frame) + "\n");
 }
 
-function readStdin(): Promise<string> {
+// Reads the job (first line) and then keeps consuming stdin, routing steering
+// frames into `channel` for as long as the run lasts.
+function readJobAndSteer(channel: AgentInputChannel): Promise<string> {
   return new Promise((resolve, reject) => {
-    let data = "";
+    let buffer = "";
+    let job: string | null = null;
     process.stdin.setEncoding("utf8");
+    const handleLine = (line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      if (job === null) {
+        job = trimmed;
+        resolve(job);
+        return;
+      }
+      try {
+        const frame = JSON.parse(trimmed) as { type?: string; text?: unknown };
+        if (frame.type === "user_message" && typeof frame.text === "string") {
+          if (!channel.push(frame.text)) {
+            process.stderr.write("[agent-entrypoint] dropped steering message (turn already ended)\n");
+          }
+          return;
+        }
+      } catch {
+        // fall through
+      }
+      process.stderr.write("[agent-entrypoint] ignored unrecognized stdin frame\n");
+    };
     process.stdin.on("data", (chunk) => {
-      data += chunk;
+      buffer += chunk;
+      let nl: number;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        handleLine(buffer.slice(0, nl));
+        buffer = buffer.slice(nl + 1);
+      }
     });
-    process.stdin.on("end", () => resolve(data));
+    process.stdin.on("end", () => {
+      if (buffer.trim()) handleLine(buffer);
+      channel.close();
+      // Legacy hosts wrote the job without a trailing newline and closed
+      // stdin immediately; that job only surfaces here.
+      if (job === null) reject(new Error("stdin closed before a job frame arrived"));
+    });
     process.stdin.on("error", reject);
   });
 }
@@ -64,7 +105,8 @@ type EntrypointJob =
     };
 
 async function main() {
-  const raw = await readStdin();
+  const inputChannel = createAgentInputChannel();
+  const raw = await readJobAndSteer(inputChannel);
   let job: EntrypointJob;
   try {
     job = JSON.parse(raw);
@@ -150,6 +192,10 @@ async function main() {
           ? process.env.CODEX_HOME
           : process.env.CLAUDE_CONFIG_DIR)?.trim() || undefined,
       validateSubmission,
+      // Steering messages the host writes to stdin mid-run reach the live
+      // session through this channel (Claude harness; the Codex path ignores
+      // it and the host never registers an injector for those runs).
+      inputChannel,
       // We are inside the hardened container: its mount namespace is the
       // filesystem boundary, so skip the in-process workspace guard / kernel
       // sandbox that would otherwise block legitimate reads outside /workspace.
@@ -165,7 +211,14 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  emit({ type: "error", message: error instanceof Error ? error.message : String(error) });
-  process.exitCode = 1;
-});
+main()
+  .catch((error) => {
+    emit({ type: "error", message: error instanceof Error ? error.message : String(error) });
+    process.exitCode = 1;
+  })
+  // stdin is held open by the host for steering; release it so the process can
+  // exit as soon as the run is done.
+  .finally(() => {
+    process.stdin.pause();
+    process.stdin.destroy();
+  });

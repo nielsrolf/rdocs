@@ -6,6 +6,7 @@ import {
   extractJsonStringField,
   extractToolDiff,
   findFinalReplyIndex,
+  formatToolResult,
   groupAgentEvents,
   lifecycleStepLabel,
   parseToolMessage,
@@ -267,6 +268,40 @@ test("slackMessageField identifies message-payload MCP tools", () => {
 test("parseToolResultData ignores non-JSON results", () => {
   assert.equal(parseToolResultData("Edit", "Error: File has not been read yet."), null);
   assert.equal(parseToolResultData("Bash", "plain text output"), null);
+});
+
+// --- content-block ("array") tool results, as emitted for subagent tool calls ---
+
+function contentBlockResult(text: string): string {
+  return JSON.stringify([{ tool_use_id: "toolu_abc", type: "tool_result", content: text }], null, 2);
+}
+
+test("parseToolResultData reads Read results delivered as content blocks", () => {
+  const data = parseToolResultData(
+    "Read",
+    contentBlockResult("265\t// run) and become ONE follow-up run\n266\tconst x = 1;")
+  );
+  assert.equal(data?.kind, "file");
+  assert.equal(data && data.kind === "file" ? data.startLine : null, 265);
+  assert.equal(
+    data && data.kind === "file" ? data.content : null,
+    "// run) and become ONE follow-up run\nconst x = 1;"
+  );
+});
+
+test("parseToolResultData reads Bash and Grep content-block results", () => {
+  const bash = parseToolResultData("Bash", contentBlockResult("ok\ndone"));
+  assert.deepEqual(bash, { kind: "bash", stdout: "ok\ndone", stderr: "", truncated: false });
+  const grep = parseToolResultData("Grep", contentBlockResult("a.ts:1:hit\nb.ts:2:hit"));
+  assert.equal(grep?.kind, "grep");
+});
+
+test("formatToolResult unwraps content blocks instead of dumping JSON", () => {
+  assert.equal(formatToolResult(contentBlockResult("Task #1 created successfully: Do it")), "Task #1 created successfully: Do it");
+  assert.equal(
+    formatToolResult(JSON.stringify([{ type: "text", text: "legacy text block" }])),
+    "legacy text block"
+  );
 });
 
 // --- clipped-run timeline merging (long sessions must not lose their start) ---

@@ -1,5 +1,6 @@
 import {
   buildSubmissionValidator,
+  createAgentInputChannel,
   agentHarnessForModel,
   runClaudeResearchAgent,
   runMergeConflictResolver,
@@ -8,7 +9,11 @@ import {
 } from "@/agent-core";
 
 import type { AgentRunner, AgentRunOptions, MergeResolveJob } from "./index";
-import { RunCancelledError } from "./run-registry";
+import {
+  RunCancelledError,
+  deregisterRunMessageInjector,
+  registerRunMessageInjector
+} from "./run-registry";
 
 // Runs the agent loop IN THE SERVER PROCESS — today's behavior. This provides
 // NO OS-level sandbox: the agent's Bash/Read/Write tools run as subprocesses of
@@ -35,7 +40,15 @@ export class InProcessRunner implements AgentRunner {
     const validateSubmission = options?.validation
       ? buildSubmissionValidator(options.validation, { workspacePath: input.workspacePath })
       : undefined;
+    // Steering channel — Claude harness only (the Codex SDK path has no
+    // equivalent open input stream, so its runs stay queue-only).
+    const isClaudeHarness = agentHarnessForModel(options?.agentConfig?.model) !== "codex";
+    const inputChannel = options?.aiRunId && isClaudeHarness ? createAgentInputChannel() : undefined;
+    if (inputChannel && options?.aiRunId) {
+      registerRunMessageInjector(options.aiRunId, (text) => inputChannel.push(text));
+    }
     const runOptions = {
+      inputChannel,
       onProgress: options?.onProgress,
       onComment: options?.onComment,
       onSlackMessage: options?.onSlackMessage,
@@ -60,11 +73,17 @@ export class InProcessRunner implements AgentRunner {
       // and kernel sandbox: the whole point is operating on the deployment.
       isolatedRuntime: options?.trustedHostRun === true
     };
-    const runPromise = agentHarnessForModel(options?.agentConfig?.model) === "codex"
-      ? import("../../agent-core/codex-agent").then(({ runCodexResearchAgent }) =>
+    const rawPromise = isClaudeHarness
+      ? runClaudeResearchAgent(input, runOptions)
+      : import("../../agent-core/codex-agent").then(({ runCodexResearchAgent }) =>
           runCodexResearchAgent(input, runOptions)
-        )
-      : runClaudeResearchAgent(input, runOptions);
+        );
+    const runPromise = rawPromise.finally(() => {
+      inputChannel?.close();
+      if (inputChannel && options?.aiRunId) {
+        deregisterRunMessageInjector(options.aiRunId);
+      }
+    });
     const signal = options?.signal;
     if (!signal) {
       return runPromise;

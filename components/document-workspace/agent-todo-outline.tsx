@@ -10,7 +10,8 @@ import type { AiRunEventView } from "./types";
 /**
  * Session plan rail: every todo the agent wrote during the conversation, with
  * its status as of now and the step it is currently on. Clicking a todo scrolls
- * the timeline to the TodoWrite event where that status was reached.
+ * the timeline to the plan event (TodoWrite snapshot or TaskCreate/TaskUpdate
+ * mutation) where that status was reached.
  */
 export function AgentTodoOutline({ events }: { events: AiRunEventView[] }) {
   const outline = useMemo(() => buildTodoOutline(events), [events]);
