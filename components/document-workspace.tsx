@@ -55,6 +55,7 @@ import {
   upsertAiEditSelection
 } from "./document-workspace/ai-edit-selections";
 import { buildAiEditRemountTransaction } from "./document-workspace/ai-edit-remount";
+import { startAiEditRun } from "./document-workspace/ai-edit-kickoff";
 import { resolveSuggestionRange, type AgentSuggestionInput } from "./document-workspace/ai-suggestions";
 import { submitPendingReplyThenAskAi } from "./document-workspace/ask-ai-flow";
 import {
@@ -2448,46 +2449,39 @@ export function DocumentWorkspace({
     setSelection(null);
     setEditInstruction("");
 
-    const fetchStartedAt = Date.now();
-    const response = await fetch(`/api/documents/${documentId}/ai-edit`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
+    const kickoff = await startAiEditRun(
+      documentId,
+      {
         selectedText: editSelection.text,
         selectedMarkdown,
         selectedContext: editSelection.context,
         instruction,
         selectionId,
         shareToken
-      })
-    }).catch((error) => {
-      logClientEvent({
-        scope: "ai-edit",
-        level: "error",
-        message: "kickoff fetch threw",
-        data: {
-          documentId,
-          selectionId,
-          error: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-        }
-      });
-      return null;
-    });
+      },
+      {
+        onFetchError: (error) =>
+          logClientEvent({
+            scope: "ai-edit",
+            level: "error",
+            message: "kickoff fetch threw",
+            data: {
+              documentId,
+              selectionId,
+              error: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+            }
+          })
+      }
+    );
 
-    const data = await response?.json().catch(() => null);
-    const kickoffAiRunId =
-      data && typeof data.aiRunId === "string" ? (data.aiRunId as string) : null;
-
-    if (!response?.ok || !kickoffAiRunId) {
-      reportClientError(data?.error ?? "AI edit failed to start.", "ai-edit-kickoff", {
+    if (!kickoff.ok) {
+      reportClientError(kickoff.error, "ai-edit-kickoff", {
         documentId,
         selectionId,
-        status: response?.status ?? null,
-        ok: response?.ok ?? false,
-        serverError: typeof data?.error === "string" ? data.error : null,
-        elapsedMs: Date.now() - fetchStartedAt
+        status: kickoff.status,
+        ok: false,
+        serverError: kickoff.serverError,
+        elapsedMs: kickoff.elapsedMs
       });
       notifyAgentCompleted({
         id: `failed-selection-edit-${Date.now()}`,
@@ -2507,8 +2501,8 @@ export function DocumentWorkspace({
       data: {
         documentId,
         selectionId,
-        aiRunId: kickoffAiRunId,
-        elapsedMs: Date.now() - fetchStartedAt
+        aiRunId: kickoff.aiRunId,
+        elapsedMs: kickoff.elapsedMs
       }
     });
     // Polling effect (watching `aiRuns`) will pick up status changes and apply the
@@ -2618,42 +2612,38 @@ export function DocumentWorkspace({
       data: { documentId, selectionId, previousAiRunId: failed.aiRunId }
     });
 
-    const fetchStartedAt = Date.now();
-    const response = await fetch(`/api/documents/${documentId}/ai-edit`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const kickoff = await startAiEditRun(
+      documentId,
+      {
         selectedText,
         selectedMarkdown,
         selectedContext: getSelectionContextFromEditor(editor, range.from, range.to) || undefined,
         instruction,
         selectionId,
         shareToken
-      })
-    }).catch((error) => {
-      logClientEvent({
-        scope: "ai-edit-retry",
-        level: "error",
-        message: "retry kickoff fetch threw",
-        data: {
-          documentId,
-          selectionId,
-          error: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-        }
-      });
-      return null;
-    });
+      },
+      {
+        onFetchError: (error) =>
+          logClientEvent({
+            scope: "ai-edit-retry",
+            level: "error",
+            message: "retry kickoff fetch threw",
+            data: {
+              documentId,
+              selectionId,
+              error: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+            }
+          })
+      }
+    );
 
-    const data = await response?.json().catch(() => null);
-    const kickoffAiRunId = data && typeof data.aiRunId === "string" ? (data.aiRunId as string) : null;
-
-    if (!response?.ok || !kickoffAiRunId) {
-      reportClientError(data?.error ?? "AI edit failed to start.", "ai-edit-retry", {
+    if (!kickoff.ok) {
+      reportClientError(kickoff.error, "ai-edit-retry", {
         documentId,
         selectionId,
-        status: response?.status ?? null,
-        serverError: typeof data?.error === "string" ? data.error : null,
-        elapsedMs: Date.now() - fetchStartedAt
+        status: kickoff.status,
+        serverError: kickoff.serverError,
+        elapsedMs: kickoff.elapsedMs
       });
       // Re-arm the retry affordance so the user can try again (marker is intact).
       setActiveAiRun(null);
@@ -2661,7 +2651,7 @@ export function DocumentWorkspace({
         selectionId,
         aiRunId: failed.aiRunId,
         instruction,
-        error: typeof data?.error === "string" ? data.error : "AI edit failed to start."
+        error: kickoff.error
       });
       return;
     }
@@ -3241,25 +3231,24 @@ export function DocumentWorkspace({
     setComposeMode("selected");
     setSelectedConversationId(rootId);
 
-    const response = await fetch(`/api/documents/${documentId}/ai-edit`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const kickoff = await startAiEditRun(
+      documentId,
+      {
         selectedText,
         instruction: message,
         selectionId,
         parentRunId: latestRun.id,
         shareToken,
         suggest: canWriteDocument ? undefined : true
-      })
-    });
-    const data = await response.json().catch(() => null);
-    if (!response.ok || !data?.aiRunId) {
-      reportClientError(data?.error ?? "Agent follow-up failed to start.", "agent-edit-followup", {
+      },
+      { fallbackError: "Agent follow-up failed to start." }
+    );
+    if (!kickoff.ok) {
+      reportClientError(kickoff.error, "agent-edit-followup", {
         documentId,
         parentRunId: latestRun.id,
-        status: response.status,
-        serverError: typeof data?.error === "string" ? data.error : null
+        status: kickoff.status,
+        serverError: kickoff.serverError
       });
       syncAiRuns(aiRuns.filter((run) => run.id !== pendingRun.id));
       setAgentBusy(false);
@@ -3281,9 +3270,9 @@ export function DocumentWorkspace({
       scope: "ai-edit-kickoff",
       level: "info",
       message: "edit session follow-up accepted by server",
-      data: { documentId, selectionId, aiRunId: data.aiRunId, parentRunId: latestRun.id }
+      data: { documentId, selectionId, aiRunId: kickoff.aiRunId, parentRunId: latestRun.id }
     });
-    agentRunIdRef.current = data.aiRunId;
+    agentRunIdRef.current = kickoff.aiRunId;
   }
 
   async function handleStopAgentRun(runId: string) {
