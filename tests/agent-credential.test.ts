@@ -56,7 +56,7 @@ test("native Codex requires an explicitly resolved account or document OpenAI ke
     homeDir: "/host-home"
   });
   assert.deepEqual(missing.added, {});
-  assert.match(missing.error ?? "", /connect an OpenAI credential.*AI settings/i);
+  assert.match(missing.error ?? "", /connect an OpenAI credential.*Settings/i);
   assert.doesNotMatch(missing.error ?? "", /host|codex login/i);
 });
 

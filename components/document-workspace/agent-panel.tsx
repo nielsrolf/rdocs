@@ -27,6 +27,7 @@ import {
 import { cn, truncate } from "@/lib/utils";
 
 import { AgentTimeline, agentDisplayName } from "./agent-timeline";
+import { AgentTodoOutline } from "./agent-todo-outline";
 import type { AgentConversation } from "./conversations";
 import { MarkdownBody } from "./markdown";
 import {
@@ -625,7 +626,7 @@ export function AgentPanel({
               No AI credential connected — agents run on the free local model
               {fallbackModelName ? ` ${fallbackModelName}` : ""} (very slow), not{" "}
               {ANTHROPIC_AGENT_MODELS.find((m) => m.value === normalizedModel)?.label ?? "Claude"}.
-              Connect a credential under AI settings (topbar) to use Claude.
+              Connect a credential under Settings (topbar) to use Claude.
             </span>
           ) : isCodex && codexModelIsLiteLlm && !hasLiteLlmKey ? (
             <span className="agent-config-hint">Codex via LiteLLM needs LITELLM_API_KEY and an OpenAI-compatible Responses endpoint.</span>
@@ -634,12 +635,12 @@ export function AgentPanel({
           ) : modelIsOpenRouter && !hasOpenRouterKey ? (
             <span className="agent-config-hint">
               This model needs an OpenRouter key — add OPENROUTER_API_KEY in the Env menu or connect
-              one under AI settings.
+              one under Settings.
             </span>
           ) : modelIsLiteLlm && !hasLiteLlmKey ? (
             <span className="agent-config-hint">
               This model needs a LiteLLM key — add LITELLM_API_KEY in the Env menu or connect one
-              under AI settings.
+              under Settings.
             </span>
           ) : !hasOpenRouterKey && !hasLiteLlmKey ? (
             <span className="agent-config-hint">
@@ -767,6 +768,8 @@ export function AgentPanel({
                   </div>
                 }
               />
+
+              <AgentTodoOutline events={selectedConversation.events} />
 
               {canWriteComments ? (
                 (() => {

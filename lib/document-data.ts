@@ -289,7 +289,7 @@ export type AccessibleDocument = {
 // renders; extracted here so the cross-document comment view scopes to exactly
 // the same set (no leakage of docs the user cannot see).
 export async function listAccessibleDocumentsForUser(userId: string): Promise<AccessibleDocument[]> {
-  const [ownedDocuments, memberships] = await Promise.all([
+  const [ownedDocuments, memberships, groupGrants] = await Promise.all([
     db.document.findMany({
       where: { ownerId: userId },
       orderBy: { updatedAt: "desc" },
@@ -316,6 +316,21 @@ export async function listAccessibleDocumentsForUser(userId: string): Promise<Ac
           }
         }
       }
+    }),
+    db.documentGroupAccess.findMany({
+      where: { group: { members: { some: { userId } } } },
+      select: {
+        permission: true,
+        document: {
+          select: {
+            id: true,
+            title: true,
+            kind: true,
+            updatedAt: true,
+            owner: { select: { id: true, name: true } }
+          }
+        }
+      }
     })
   ]);
 
@@ -328,7 +343,10 @@ export async function listAccessibleDocumentsForUser(userId: string): Promise<Ac
     permission: "EDIT",
     owner: d.owner
   }));
-  const shared: AccessibleDocument[] = memberships.map(({ document, permission }) => ({
+  const toShared = ({ document, permission }: {
+    document: { id: string; title: string; kind: string; updatedAt: Date; owner: { id: string; name: string } };
+    permission: string;
+  }): AccessibleDocument => ({
     id: document.id,
     title: document.title,
     kind: document.kind,
@@ -336,9 +354,24 @@ export async function listAccessibleDocumentsForUser(userId: string): Promise<Ac
     isOwner: false,
     permission,
     owner: document.owner
-  }));
+  });
 
-  return [...owned, ...shared];
+  // Merge, deduped by document id, keeping the strongest permission (owner >
+  // direct membership > group grants — later entries only override when
+  // strictly stronger).
+  const rank: Record<string, number> = { VIEW: 1, COMMENT: 2, EDIT: 3 };
+  const byId = new Map<string, AccessibleDocument>();
+  for (const doc of [...owned, ...memberships.map(toShared), ...groupGrants.map(toShared)]) {
+    const existing = byId.get(doc.id);
+    if (!existing) {
+      byId.set(doc.id, doc);
+      continue;
+    }
+    if (!existing.isOwner && (rank[doc.permission] ?? 0) > (rank[existing.permission] ?? 0)) {
+      byId.set(doc.id, { ...doc, isOwner: existing.isOwner });
+    }
+  }
+  return [...byId.values()];
 }
 
 export type InboxThread = ReturnType<typeof serializeThread> & {

@@ -14,7 +14,7 @@ export function hasAnthropicCredential(env: Record<string, string | undefined>):
 export const CONNECT_ANTHROPIC_CREDENTIAL_MESSAGE =
   "Connect an Anthropic credential in settings to run this model.";
 export const CONNECT_OPENAI_CREDENTIAL_MESSAGE =
-  "Connect an OpenAI credential under AI settings to run this Codex model.";
+  "Connect an OpenAI credential under Settings to run this Codex model.";
 
 export function resolveAgentCredentialEnv(
   containerEnv: Record<string, string | undefined>,

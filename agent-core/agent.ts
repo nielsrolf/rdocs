@@ -471,6 +471,19 @@ function toolInputSummary(name: string, value: unknown) {
     if (name === "Write" && input.file_path) {
       return compactValue({ file_path: input.file_path, content: clipText(input.content, 600) });
     }
+    // The agent panel folds these snapshots into the session plan rail, so the
+    // JSON must stay parseable: clip per todo instead of letting compactValue
+    // cut a long list mid-object.
+    if (name === "TodoWrite" && Array.isArray(input.todos)) {
+      const todos = input.todos.slice(0, 40).map((todo) => {
+        const t = (todo && typeof todo === "object" ? todo : {}) as Record<string, unknown>;
+        return {
+          content: clipText(t.content, 120) ?? clipText(t.text, 120),
+          status: typeof t.status === "string" ? t.status : t.completed === true ? "completed" : "pending"
+        };
+      });
+      return compactValue({ todos });
+    }
     if (["Grep", "Glob"].includes(name)) {
       const summary: Record<string, unknown> = {};
       ["pattern", "path", "glob"].forEach((key) => {

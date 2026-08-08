@@ -229,7 +229,7 @@ test("no owner provider key leaves the env untouched", () => {
 test("providerKeyRequirementError: third-party model with no key anywhere → actionable error", () => {
   assert.match(
     providerKeyRequirementError({}, "openrouter/openai/gpt-5.2") ?? "",
-    /OPENROUTER_API_KEY.*Env menu.*AI settings/i
+    /OPENROUTER_API_KEY.*Env menu.*Settings/i
   );
   assert.match(
     providerKeyRequirementError({ LITELLM_API_KEY: "  " }, "litellm/openai/gpt-5") ?? "",
@@ -244,7 +244,7 @@ test("providerKeyRequirementError: native Codex needs OpenAI key; valid provider
   assert.equal(providerKeyRequirementError({}, null), null);
   assert.match(
     providerKeyRequirementError({}, "codex/openai/gpt-5.6-terra") ?? "",
-    /OPENAI_API_KEY.*AI settings/i
+    /OPENAI_API_KEY.*Settings/i
   );
   assert.equal(
     providerKeyRequirementError({ OPENAI_API_KEY: "sk-openai" }, "codex/openai/gpt-5.6-terra"),

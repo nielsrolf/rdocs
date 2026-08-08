@@ -17,6 +17,13 @@ model User {
   // (claude-sonnet-5, thinking off). Same storable values as Document.agentModel.
   defaultAgentModel  String?
   defaultAgentEffort String?
+  // Quicktake visibility: null = this user's quicktakes are public (readable
+  // by everyone, logged-out included); a Group id = all their quicktakes are
+  // visible to that group's members only. One setting for ALL quicktakes of a
+  // user — changing it retroactively updates every existing quicktake. Plain
+  // string (no relation): deleting the group cascades away the group grants,
+  // leaving those quicktakes owner-only rather than silently public.
+  quicktakeGroupId   String?
   createdAt         DateTime             @default(now())
   updatedAt         DateTime             @updatedAt
   ownedDocuments    Document[]           @relation("DocumentOwner")
@@ -34,6 +41,85 @@ model User {
   slackLinks        SlackAccountLink[]
   aiRuns            AiRun[]              @relation("AiRunCreator")
   scheduledTasks    ScheduledTask[]
+  ownedGroups       Group[]              @relation("GroupOwner")
+  groupMemberships  GroupMember[]
+  documentVotes     DocumentVote[]
+  commentVotes      CommentVote[]
+}
+
+// A named set of users (a team/company) that documents can be shared with.
+// Group access participates in resolveDocumentAccess with the same
+// VIEW/COMMENT/EDIT permission levels as direct memberships; a user's
+// effective permission is the strongest across owner/membership/groups.
+model Group {
+  id             String                @id @default(cuid())
+  name           String
+  ownerId        String
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+  owner          User                  @relation("GroupOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members        GroupMember[]
+  documentAccess DocumentGroupAccess[]
+}
+
+model GroupMember {
+  id        String   @id @default(cuid())
+  groupId   String
+  userId    String
+  // "owner" may manage members and delete the group; "member" gets access.
+  role      String   @default("member")
+  createdAt DateTime @default(now())
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, userId])
+  @@index([userId])
+}
+
+// Grants every member of `group` the given permission on `document`.
+model DocumentGroupAccess {
+  id         String   @id @default(cuid())
+  documentId String
+  groupId    String
+  permission String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  group      Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, groupId])
+  @@index([groupId])
+}
+
+// Forum up/down vote on a posted document. value is +1 or -1; removing a vote
+// deletes the row. Score is aggregated at read time (internal-scale traffic).
+model DocumentVote {
+  id         String   @id @default(cuid())
+  documentId String
+  userId     String
+  value      Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, userId])
+  @@index([documentId])
+}
+
+// Forum up/down vote on a comment. Same semantics as DocumentVote.
+model CommentVote {
+  id        String   @id @default(cuid())
+  commentId String
+  userId    String
+  value     Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  comment   Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([commentId, userId])
+  @@index([commentId])
 }
 
 // A reusable agent skill in a user's personal library (a directory with a
@@ -145,6 +231,19 @@ model Document {
   // trust decision the owner made by flipping this flag, analogous to the
   // existing GitHub-auth owner-credential fallback.
   runnerMode      String               @default("managed")
+  // When set, the document is "posted to the forum": it appears on the forum
+  // frontpage for every user who can access it (access management is shared
+  // with the studio view — posting never widens access by itself).
+  forumPostedAt   DateTime?
+  // Posted + public: the forum post is readable by EVERYONE, including
+  // logged-out visitors (resolveDocumentAccess grants anonymous VIEW).
+  // Meaningless without forumPostedAt; unposting clears it.
+  forumPublic     Boolean              @default(false)
+  // Raw markdown source of a quicktake (kind "quicktake"): a short
+  // twitter-like forum post backed by a document row so votes, nested
+  // comments, and group access all reuse the document machinery. Null for
+  // every other kind.
+  quicktakeBody   String?
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt
   owner           User                 @relation("DocumentOwner", fields: [ownerId], references: [id], onDelete: Cascade)
@@ -160,6 +259,8 @@ model Document {
   skills          DocumentSkill[]
   scheduledTasks  ScheduledTask[]
   selfHostedJobs  SelfHostedJob[]
+  groupAccess     DocumentGroupAccess[]
+  forumVotes      DocumentVote[]
 
   @@unique([slackTeamId, slackChannelId])
 }
@@ -292,6 +393,10 @@ model CommentThread {
   documentId    String
   // Null when the thread was started by an anonymous share-link visitor.
   createdById   String?
+  // "studio" threads are anchored to document text (anchorText required and
+  // enforced at creation). "forum" threads are top-level forum comments with
+  // no anchor — anchorText is "" and the anchor-saved guard is skipped.
+  origin        String    @default("studio")
   anchorText    String
   anchorContext String?
   status        String    @default("OPEN")
@@ -319,6 +424,9 @@ model CommentThreadRead {
 model Comment {
   id          String        @id @default(cuid())
   threadId    String
+  // Forum-view nesting: a reply to another comment in the same thread. Studio
+  // rendering stays flat (ignores this); the forum view renders the tree.
+  parentId    String?
   authorId    String?
   // Display name for anonymous share-link commenters (authorId null, no aiModel).
   guestName   String?
@@ -331,10 +439,13 @@ model Comment {
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
   thread      CommentThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  parent      Comment?      @relation("CommentReplies", fields: [parentId], references: [id], onDelete: SetNull)
+  replies     Comment[]     @relation("CommentReplies")
   author      User?         @relation(fields: [authorId], references: [id], onDelete: SetNull)
   aiRun       AiRun?        @relation(fields: [aiRunId], references: [id], onDelete: SetNull)
   reactions   CommentReaction[]
   mentions    CommentMention[]
+  votes       CommentVote[]
 }
 
 // Emoji reactions on a comment. One row per (comment, user, emoji); toggling a

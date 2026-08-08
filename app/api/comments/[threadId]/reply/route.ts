@@ -6,10 +6,13 @@ import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { serializeComment } from "@/lib/document-data";
 import { db } from "@/lib/db";
 import { syncCommentMentions } from "@/lib/mention-data";
-import { canComment, resolveDocumentAccess } from "@/lib/permissions";
+import { canCommentOnDocument, resolveDocumentAccess } from "@/lib/permissions";
 
 const createReplySchema = z.object({
   body: z.string().min(1).max(4000),
+  // Forum-view nesting: reply to a specific comment in this thread. Studio
+  // rendering stays flat and simply ignores it.
+  parentId: z.string().min(1).max(100).optional().nullable(),
   clientId: z.string().min(1).max(120).optional().nullable(),
   shareToken: z.string().optional().nullable(),
   // Display name for anonymous share-link commenters; ignored when signed in.
@@ -49,7 +52,7 @@ export async function POST(request: Request, { params }: RouteContext) {
   }
 
   const access = await resolveDocumentAccess(thread.documentId, user?.id, parsed.data.shareToken ?? null);
-  if (!access || !canComment(access.permission)) {
+  if (!access || !canCommentOnDocument(access, Boolean(user))) {
     if (!user && !parsed.data.shareToken) {
       console.warn("[comment-reply] unauthenticated", { threadId });
       return NextResponse.json({ error: "You must be signed in to reply." }, { status: 401 });
@@ -58,9 +61,23 @@ export async function POST(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
   }
 
+  // A nesting parent must be a comment of THIS thread; a bogus id degrades to
+  // a flat reply rather than failing the whole comment.
+  let parentId: string | null = null;
+  if (parsed.data.parentId) {
+    const parent = await db.comment.findUnique({
+      where: { id: parsed.data.parentId },
+      select: { threadId: true }
+    });
+    if (parent?.threadId === threadId) {
+      parentId = parsed.data.parentId;
+    }
+  }
+
   const comment = await db.comment.create({
     data: {
       threadId,
+      parentId,
       body: parsed.data.body,
       authorId: user?.id ?? null,
       guestName: user ? null : parsed.data.guestName?.trim() || "Guest"

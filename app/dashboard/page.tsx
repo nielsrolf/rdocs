@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import type { InboxThreadView } from "@/components/comment-inbox";
@@ -31,7 +32,11 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
         ? ("channels" as const)
         : ("documents" as const);
 
-  const accessibleDocuments = await listAccessibleDocumentsForUser(user.id);
+  // Quicktakes are documents in the backend but live on the forum only —
+  // never in the studio dashboard.
+  const accessibleDocuments = (await listAccessibleDocumentsForUser(user.id)).filter(
+    (d) => d.kind !== "quicktake"
+  );
   const docIds = accessibleDocuments.map((d) => d.id);
 
   // Aggregated in SQL rather than loading every comment for every document.
@@ -68,6 +73,12 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
           <p>Create new docs, open shared work, and manage collaboration from a single dashboard.</p>
         </div>
         <div className="dashboard-header-actions">
+          <Link className="ghost-button" href="/forum">
+            Forum
+          </Link>
+          <Link className="ghost-button" href="/groups">
+            Groups
+          </Link>
           <TourRestartButton />
           <NewDocumentButton />
         </div>

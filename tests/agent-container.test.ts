@@ -209,7 +209,7 @@ test("classifyContainerFailure never uses native host Codex auth", () => {
     transientAttempt: 0
   });
   assert.equal(final.action, "auth-fail");
-  assert.match(final.action === "auth-fail" ? final.message : "", /connect.*OpenAI.*AI settings/i);
+  assert.match(final.action === "auth-fail" ? final.message : "", /connect.*OpenAI.*Settings/i);
   assert.doesNotMatch(final.action === "auth-fail" ? final.message : "", /host|codex login/i);
 });
 

@@ -153,7 +153,7 @@ const STEPS: TourStep[] = [
     title: "Connect AI credentials — or skip",
     body: (
       <>
-        Open <strong>AI settings</strong> in the topbar — it opens the settings page — and paste an
+        Open <strong>Settings</strong> in the topbar — it opens the settings page — and paste an
         Anthropic API key or a <code>claude setup-token</code> subscription token — one field, the
         type is detected automatically. Then come back here; the tour continues where you left off.
         Or skip this step: AI runs fall back to the free local qwen model, which works but is{" "}
@@ -269,7 +269,7 @@ function starterContent() {
         bullet("AI edits: select any text and click Edit with AI."),
         bullet("Comments: select text, Add comment, then Ask AI to get an answer in the thread."),
         bullet(
-          "AI credentials and GitHub PAT: connect your own Anthropic, OpenRouter or LiteLLM key and a GitHub personal access token under AI settings in the topbar."
+          "AI credentials and GitHub PAT: connect your own Anthropic, OpenRouter or LiteLLM key and a GitHub personal access token under Settings in the topbar."
         ),
         bullet("Linked repos: connect a GitHub repository so agents work in a real checkout."),
         bullet("Agents: run Claude on the whole document from the Agents panel.")

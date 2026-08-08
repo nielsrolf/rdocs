@@ -58,7 +58,11 @@ const tabsPluginKey = new PluginKey<TabsPluginState>("tabs-visibility");
 
 const SET_ACTIVE_TAB_META = "tabs:set-active";
 
-export function createTabsVisibilityExtension(initialActiveTabId: string | null) {
+export function createTabsVisibilityExtension(
+  initialActiveTabId: string | null,
+  options?: { showAllTabs?: boolean }
+) {
+  const showAllTabs = options?.showAllTabs ?? false;
   return Extension.create({
     name: "tabsVisibility",
     addKeyboardShortcuts() {
@@ -98,6 +102,9 @@ export function createTabsVisibilityExtension(initialActiveTabId: string | null)
           },
           props: {
             decorations(state) {
+              // Forum (and other stacked read-only) views show every tab in
+              // sequence, with each tabBreak rendering as a section heading.
+              if (showAllTabs) return DecorationSet.empty;
               const tabs = listTabs(state.doc);
               if (tabs.length === 0) return DecorationSet.empty;
 

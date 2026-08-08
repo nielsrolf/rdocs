@@ -59,6 +59,11 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
     notFound();
   }
 
+  // Quicktakes never render in the studio — their home is the forum.
+  if (access.document.kind === "quicktake") {
+    redirect(`/forum/quicktakes/${id}`);
+  }
+
   // Opening a share link while signed in makes the doc appear on the user's
   // dashboard, as if they were added as a collaborator by email. Best-effort:
   // never block the page render on it.
@@ -222,9 +227,12 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         isAuthenticated={Boolean(user)}
         isOwner={user?.id === access.document.ownerId}
         shareToken={access.shareToken}
-        viaShareLink={access.viaShareLink}
+        viaShareLink={access.viaShareLink || access.viaForumPublic}
+        initialForumPostedAt={access.document.forumPostedAt?.toISOString() ?? null}
+        initialForumPublic={access.document.forumPublic}
       />
-      {access.permission !== "EDIT" && !(access.viaShareLink && access.permission === "VIEW") && (
+      {access.permission !== "EDIT" &&
+        !((access.viaShareLink || access.viaForumPublic) && access.permission === "VIEW") && (
         <div className="read-only-banner">
           {access.permission === "COMMENT"
             ? "You can comment, but not edit, in this document."

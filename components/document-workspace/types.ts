@@ -106,6 +106,15 @@ export type DocumentWorkspaceProps = {
   isOwner: boolean;
   shareToken: string | null;
   viaShareLink: boolean;
+  // Forum mode: render like the public share-link view (no chrome, no outline)
+  // with the editor read-only and the studio comment rail hidden — forum
+  // comments render below the workspace instead (app/forum/[id]).
+  forumView?: boolean;
+  // ISO timestamp when the document was posted to the forum (null = not
+  // posted). Seeds the share modal's forum toggle.
+  initialForumPostedAt?: string | null;
+  // Whether the forum post is public (readable by logged-out visitors).
+  initialForumPublic?: boolean;
 };
 
 export type VersionView = {

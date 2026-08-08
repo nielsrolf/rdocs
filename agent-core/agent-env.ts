@@ -216,14 +216,14 @@ export function applyProviderEnv(
     key = env.OPENROUTER_API_KEY?.trim();
     if (!key) {
       throw new Error(
-        "OpenRouter model selected but OPENROUTER_API_KEY is not set. Add it via the Env menu, or connect an OpenRouter key under AI settings (topbar)."
+        "OpenRouter model selected but OPENROUTER_API_KEY is not set. Add it via the Env menu, or connect an OpenRouter key under Settings (topbar)."
       );
     }
   } else {
     key = env.LITELLM_API_KEY?.trim();
     if (!key) {
       throw new Error(
-        "LiteLLM model selected but LITELLM_API_KEY is not set. Add it via the Env menu, or connect a LiteLLM key under AI settings (topbar)."
+        "LiteLLM model selected but LITELLM_API_KEY is not set. Add it via the Env menu, or connect a LiteLLM key under Settings (topbar)."
       );
     }
     const rawBase = env.LITELLM_BASE_URL?.trim();

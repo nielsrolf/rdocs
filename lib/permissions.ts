@@ -16,12 +16,37 @@ type AccessResult = {
     agentModel: string | null;
     agentEffort: string | null;
     runnerMode: string;
+    forumPostedAt: Date | null;
+    forumPublic: boolean;
     updatedAt: Date;
   };
   permission: PermissionLevelValue;
   viaShareLink: boolean;
+  // True when the ONLY reason the viewer can see this document is that it is
+  // a public forum post (forumPostedAt + forumPublic). Read-only public
+  // rendering; never persisted as a membership.
+  viaForumPublic: boolean;
   shareToken: string | null;
 };
+
+const PERMISSION_RANK: Record<PermissionLevelValue, number> = {
+  VIEW: 1,
+  COMMENT: 2,
+  EDIT: 3
+};
+
+export function strongestPermission(
+  permissions: PermissionLevelValue[]
+): PermissionLevelValue | null {
+  let best: PermissionLevelValue | null = null;
+  for (const permission of permissions) {
+    if (!PERMISSION_RANK[permission]) continue;
+    if (!best || PERMISSION_RANK[permission] > PERMISSION_RANK[best]) {
+      best = permission;
+    }
+  }
+  return best;
+}
 
 export async function resolveDocumentAccess(
   documentId: string,
@@ -43,6 +68,8 @@ export async function resolveDocumentAccess(
       agentModel: true,
       agentEffort: true,
       runnerMode: true,
+      forumPostedAt: true,
+      forumPublic: true,
       updatedAt: true
     }
   });
@@ -56,28 +83,47 @@ export async function resolveDocumentAccess(
       document,
       permission: "EDIT",
       viaShareLink: false,
+      viaForumPublic: false,
       shareToken: null
     };
   }
 
   if (userId) {
-    const membership = await db.documentMembership.findUnique({
-      where: {
-        documentId_userId: {
-          documentId,
-          userId
+    const [membership, groupGrants] = await Promise.all([
+      db.documentMembership.findUnique({
+        where: {
+          documentId_userId: {
+            documentId,
+            userId
+          }
+        },
+        select: {
+          permission: true
         }
-      },
-      select: {
-        permission: true
-      }
-    });
+      }),
+      db.documentGroupAccess.findMany({
+        where: {
+          documentId,
+          group: { members: { some: { userId } } }
+        },
+        select: { permission: true }
+      })
+    ]);
 
-    if (membership) {
+    // Effective permission is the STRONGEST across the direct membership and
+    // every group the user belongs to that was granted access.
+    const candidates = [
+      ...(membership ? [membership.permission] : []),
+      ...groupGrants.map((grant) => grant.permission)
+    ] as PermissionLevelValue[];
+    const permission = strongestPermission(candidates);
+
+    if (permission) {
       return {
         document,
-        permission: membership.permission as PermissionLevelValue,
+        permission,
         viaShareLink: false,
+        viaForumPublic: false,
         shareToken: null
       };
     }
@@ -101,9 +147,23 @@ export async function resolveDocumentAccess(
         document,
         permission: link.permission as PermissionLevelValue,
         viaShareLink: true,
+        viaForumPublic: false,
         shareToken: link.token
       };
     }
+  }
+
+  // Public forum posts are readable by everyone — including logged-out
+  // visitors. VIEW only; commenting/voting still require an account (their
+  // routes check sign-in separately).
+  if (document.forumPostedAt && document.forumPublic) {
+    return {
+      document,
+      permission: "VIEW",
+      viaShareLink: false,
+      viaForumPublic: true,
+      shareToken: null
+    };
   }
 
   return null;
@@ -141,6 +201,17 @@ export async function ensureShareLinkMembership(
 
 export function canComment(permission: PermissionLevelValue) {
   return permission === "COMMENT" || permission === "EDIT";
+}
+
+// Forum-public documents (public posts and quicktakes) accept comments from
+// ANY signed-in user — that's the point of posting publicly — while
+// logged-out visitors stay read-only. Everything else keeps the normal
+// COMMENT/EDIT gate.
+export function canCommentOnDocument(
+  access: Pick<AccessResult, "permission" | "viaForumPublic">,
+  isSignedIn: boolean
+) {
+  return canComment(access.permission) || (isSignedIn && access.viaForumPublic);
 }
 
 export function canEdit(permission: PermissionLevelValue) {

@@ -319,7 +319,7 @@ export function providerKeyRequirementError(
   if (agentEnv[keyVar]?.trim()) return null;
   const label = provider === "openrouter" ? "OpenRouter" : provider === "litellm" ? "LiteLLM" : "OpenAI";
   const article = label === "LiteLLM" ? "a" : "an";
-  return `${label} model selected but no ${keyVar} is available. Add it in the document's Env menu, or connect ${article} ${label} key under AI settings (topbar).`;
+  return `${label} model selected but no ${keyVar} is available. Add it in the document's Env menu, or connect ${article} ${label} key under Settings (topbar).`;
 }
 
 export const CONNECT_CREDENTIAL_MESSAGE =

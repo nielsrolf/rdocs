@@ -3,6 +3,7 @@ import { memo, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { cn, truncate } from "@/lib/utils";
 
 import { MarkdownBody } from "./markdown";
+import { normalizeTodoItem, todoStatusMark } from "./todo-outline";
 import type { AiRunEventView } from "./types";
 import { basename, formatRelativeTime } from "./utils";
 
@@ -183,8 +184,8 @@ export function renderToolSummary(parsed: ParsedToolCall): ReactNode {
     return <code className="agent-tool-arg">{truncate(args.description, 80)}</code>;
   }
   if (name === "TodoWrite" && Array.isArray(args.todos)) {
-    const todos = args.todos as Array<{ content?: unknown; status?: unknown }>;
-    const done = todos.filter((t) => t && t.status === "completed").length;
+    const todos = (args.todos as unknown[]).map(normalizeTodoItem).filter(Boolean);
+    const done = todos.filter((t) => t!.status === "completed").length;
     return (
       <span className="agent-tool-arg agent-tool-arg-muted">
         {done}/{todos.length} done
@@ -474,21 +475,18 @@ function DiffBlock({ diff }: { diff: ToolDiff }) {
   );
 }
 
-function TodoBody({ todos }: { todos: Array<{ content?: unknown; status?: unknown }> }) {
+function TodoBody({ todos }: { todos: unknown[] }) {
+  const items = todos.map(normalizeTodoItem).filter((item) => Boolean(item));
   return (
     <ul className="agent-todo-list">
-      {todos.map((todo, i) => {
-        const status = typeof todo?.status === "string" ? todo.status : "pending";
-        const content = typeof todo?.content === "string" ? todo.content : typeof (todo as { subject?: unknown })?.subject === "string" ? String((todo as { subject?: unknown }).subject) : "";
-        return (
-          <li className={cn("agent-todo-item", `agent-todo-${status}`)} key={i}>
-            <span className="agent-todo-mark" aria-hidden>
-              {status === "completed" ? "✓" : status === "in_progress" ? "◐" : "○"}
-            </span>
-            {content}
-          </li>
-        );
-      })}
+      {items.map((item, i) => (
+        <li className={cn("agent-todo-item", `agent-todo-${item!.status}`)} key={i}>
+          <span className="agent-todo-mark" aria-hidden>
+            {todoStatusMark(item!.status)}
+          </span>
+          {item!.content}
+        </li>
+      ))}
     </ul>
   );
 }
@@ -697,7 +695,7 @@ function renderToolBody(
     );
   }
   if (parsed.name === "TodoWrite" && Array.isArray(args.todos)) {
-    return <TodoBody todos={args.todos as Array<{ content?: unknown; status?: unknown }>} />;
+    return <TodoBody todos={args.todos as unknown[]} />;
   }
   return null;
 }
@@ -745,7 +743,7 @@ const AgentToolBlock = memo(
         : null;
 
     return (
-      <details className={cn("agent-tool", !hasDetails && "agent-tool-empty")}>
+      <details className={cn("agent-tool", !hasDetails && "agent-tool-empty")} data-agent-event-id={call.id}>
         <summary
           className="agent-tool-header"
           onClick={(event) => {

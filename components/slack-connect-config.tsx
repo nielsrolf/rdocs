@@ -106,11 +106,11 @@ const PROVIDER_CREDENTIAL: Record<string, CredentialProvider | null> = {
   local: null
 };
 
-// The full-page "AI settings" screen, used in two places:
+// The full-page "Settings" screen, used in two places:
 // - variant "slack": post-Slack-connect landing (app/slack/connected/page.tsx)
 //   with a "Slack account connected" banner.
 // - variant "settings": the same screen reachable anytime from the topbar
-//   "AI settings" link (app/settings/agent/page.tsx), with a neutral heading.
+//   "Settings" link (app/settings/agent/page.tsx), with a neutral heading.
 // Sections: banner, AI credentials (full management — one credential per
 // provider, write-only, masked), default agent model, MCP bridge tokens,
 // personal skill library, and the self-hosted worker alternative. This
@@ -396,7 +396,7 @@ export function SlackConnectConfig({
         </section>
       ) : (
         <section className="credentials-section slack-connect-success">
-          <strong className="credentials-section-title">AI settings</strong>
+          <strong className="credentials-section-title">AI &amp; credentials</strong>
           <p>
             Signed in as <strong>{email}</strong>. Agent runs you trigger — AI edits, comment
             replies, Slack mentions of <strong>@claudex</strong>, and documents without a pinned
@@ -754,7 +754,7 @@ export function SlackConnectConfig({
       {variant === "slack" ? (
         <p className="env-note">
           All set — head back to Slack and mention <strong>@claudex</strong>. You can change all of
-          this anytime under <strong>AI settings</strong> in the app topbar.
+          this anytime under <strong>Settings</strong> in the app topbar.
         </p>
       ) : null}
     </div>

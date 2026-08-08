@@ -246,9 +246,12 @@ export function DocumentWorkspace({
   isAuthenticated,
   isOwner,
   shareToken,
-  viaShareLink
+  viaShareLink,
+  forumView = false,
+  initialForumPostedAt = null,
+  initialForumPublic = false
 }: DocumentWorkspaceProps) {
-  const isPublicView = viaShareLink && initialPermission === "VIEW";
+  const isPublicView = forumView || (viaShareLink && initialPermission === "VIEW");
   const [title, setTitle] = useState(initialTitle);
   const [members, setMembers] = useState<MemberView[]>(initialMembers);
   const [threads, setThreads] = useState<ThreadView[]>(initialThreads);
@@ -322,7 +325,7 @@ export function DocumentWorkspace({
     freeFallbackNoticeShownRef.current = true;
     const localName = localAgentModel ? localAgentModel.slice(LOCAL_MODEL_PREFIX.length) : "the local model";
     setFreeFallbackNotice(
-      `No AI credential connected — this run uses the free local model ${localName}, which is very slow. To use Claude, add a credential under AI settings (topbar).`
+      `No AI credential connected — this run uses the free local model ${localName}, which is very slow. To use Claude, add a credential under Settings (topbar).`
     );
   }, [anthropicFreeFallback, agentModel, localAgentModel]);
   // Optimistic progress line for a just-started run — must not claim "Claude"
@@ -496,8 +499,9 @@ export function DocumentWorkspace({
   } = useAgentNotifications();
   // Anonymous visitors holding a COMMENT/EDIT share link can comment too — the
   // server resolves their access from the token, like collab pushes and AI edits.
-  const canWriteComments = (isAuthenticated || Boolean(shareToken)) && initialPermission !== "VIEW";
-  const canWriteDocument = initialPermission === "EDIT";
+  const canWriteComments =
+    !forumView && (isAuthenticated || Boolean(shareToken)) && initialPermission !== "VIEW";
+  const canWriteDocument = initialPermission === "EDIT" && !forumView;
   // Mirrors canManageDocumentAutomation server-side: signed-in edit access,
   // including edit gained via a share link.
   const canManageAutomation = canWriteDocument && isAuthenticated;
@@ -572,8 +576,9 @@ export function DocumentWorkspace({
     []
   );
   const tabsVisibilityExtension = useMemo(
-    () => createTabsVisibilityExtension(null),
-    []
+    // Forum view stacks all tabs vertically instead of one-at-a-time.
+    () => createTabsVisibilityExtension(null, { showAllTabs: forumView }),
+    [forumView]
   );
   const handleCreateTabRef = useRef<(() => void) | null>(null);
   const slashTabExtension = useMemo(
@@ -4712,7 +4717,7 @@ export function DocumentWorkspace({
                     <p>
                       No GitHub credential is connected for this document. If the repository is
                       private (or you want the AI to push to it), connect a GitHub personal access
-                      token with access to it under <em>AI settings</em> in the topbar, then
+                      token with access to it under <em>Settings</em> in the topbar, then
                       press Save again. Public repositories work read-only without a token — so
                       also check the URL for typos.
                     </p>
@@ -4825,7 +4830,7 @@ export function DocumentWorkspace({
         data-outline-collapsed={outlineCollapsed ? "true" : "false"}
         data-comments-collapsed={commentsCollapsed ? "true" : "false"}
         data-public-view={isPublicView ? "true" : "false"}
-        data-comments-hidden={isPublicView && !hasUnresolvedThreads ? "true" : "false"}
+        data-comments-hidden={forumView || (isPublicView && !hasUnresolvedThreads) ? "true" : "false"}
         style={{ "--outline-width": `${isPublicView ? 0 : outlineCollapsed ? 36 : Math.round(outlineWidth)}px` } as React.CSSProperties}
       >
         {isPublicView ? null : (
@@ -4846,7 +4851,7 @@ export function DocumentWorkspace({
           />
         )}
         <div className="editor-page-shell">
-          {tabs.length > 1 ? (
+          {tabs.length > 1 && !forumView ? (
             <nav className="mobile-tab-strip" aria-label="Document tabs">
               {tabs.map((tab) => (
                 <button
@@ -4949,7 +4954,7 @@ export function DocumentWorkspace({
           </div>
         </div>
 
-        {isPublicView && !hasUnresolvedThreads ? null : (
+        {forumView || (isPublicView && !hasUnresolvedThreads) ? null : (
         <CommentRail
           collapsed={commentsCollapsed}
           onToggleCollapsed={() => setCommentsCollapsed((value) => !value)}
@@ -5074,6 +5079,9 @@ export function DocumentWorkspace({
 
       {shareModalOpen ? (
         <ShareModal
+          documentId={documentId}
+          initialForumPostedAt={initialForumPostedAt}
+          initialForumPublic={initialForumPublic}
           members={members}
           shareLinks={shareLinks}
           inviteEmail={inviteEmail}
