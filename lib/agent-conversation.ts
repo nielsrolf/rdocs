@@ -9,30 +9,17 @@
 import {
   buildConversationHistory,
   markAiRunSucceeded,
-  recordAiRunEvent,
-  startAiRunHeartbeat
+  recordAiRunEvent
 } from "@/lib/ai-runs";
-import {
-  RUN_CANCELLED_MESSAGE,
-  deregisterRunAbortController,
-  isRunCancellation,
-  registerRunAbortController
-} from "@/lib/agent-runner/run-registry";
-import { createAgentRunner, getAgentRunner, getSelfHostedRunner } from "@/lib/agent-runner";
+import { withAgentRunLifecycle } from "@/lib/agent-run-lifecycle";
 import { planSessionResume, recordRunSessionId, withConversationLock } from "@/lib/agent-sessions";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
-import { loadAgentEnvWithFreeFallback, restrictAgentEnvForReadOnly } from "@/lib/user-credentials";
 import type { AgentAccessMode, ClaudeResearchAgentInput } from "@/agent-core";
 import { normalizeAgentImages } from "@/lib/ai-edit-submission";
 import { createLiveCommentRecorder } from "@/lib/agent-comments";
 import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
-import {
-  commitWorkspaceChanges,
-  ensureLinkedRepositoryWorktree,
-  getWorkspaceOverview,
-  removeRunWorktree
-} from "@/lib/research-workspace";
+import { getWorkspaceOverview } from "@/lib/research-workspace";
 
 export type ConversationRunOutcome = {
   status: "SUCCEEDED" | "FAILED";
@@ -52,8 +39,8 @@ export type ConversationRunInput = {
   agentConfig: { model: string | null; effort: string | null };
   agentAccessMode: AgentAccessMode;
   // Document.runnerMode ("managed" | "selfHosted"). selfHosted documents never
-  // get a worktree managed by this app — see the isSelfHosted branch below,
-  // mirroring app/api/documents/[id]/ai-edit/route.ts.
+  // get a worktree managed by this app — see the lifecycle wrapper's
+  // selfHosted gating, mirroring the other agent entry points.
   runnerMode: string;
   // Host dev mode: run unsandboxed in the live deployment directory
   // (allowlisted Slack dev channel only — see lib/slack/dev-mode.ts).
@@ -87,309 +74,195 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
     onSlackMessage,
     onFinished
   } = input;
-  // Host dev mode and selfHosted are mutually exclusive in practice (host dev
-  // runs are an allowlisted internal debugging path); host dev wins if both
-  // are somehow set, since it explicitly wants the deployment's own checkout.
-  const isSelfHosted = !hostDevRun && runnerMode === "selfHosted";
-  let linkedRepo: Awaited<ReturnType<typeof ensureLinkedRepositoryWorktree>> = null;
-  const stopHeartbeat = startAiRunHeartbeat(aiRunId);
-  const abort = registerRunAbortController(aiRunId);
-  let outcome: ConversationRunOutcome | null = null;
 
-  try {
-    const runner = hostDevRun
-      ? createAgentRunner("inprocess")
-      : isSelfHosted
-        ? getSelfHostedRunner()
-        : getAgentRunner();
-
-    // Real session resume: when the follow-up chain has a recorded SDK session
-    // whose transcript is still on disk, the run resumes it — the model sees
-    // all its prior messages AND tool calls, uncapped. The plain-text
-    // transcript replay (buildConversationHistory) remains the fallback for
-    // pre-feature runs, GC'd sessions, and the self-hosted/http runners.
-    const sessionsSupported = runner.mode === "container" || runner.mode === "inprocess";
-    const sessionPlan = sessionsSupported
-      ? await planSessionResume({
-          documentId,
-          aiRunId,
-          previousRunId,
-          runnerMode: runner.mode,
-          agentModel: agentConfig.model
-        }).catch(
-          (error) => {
-            console.warn("[agent-conversation] session resume planning failed; falling back to transcript replay", {
-              aiRunId,
-              error: error instanceof Error ? error.message : error
-            });
-            return null;
-          }
-        )
-      : null;
-    const resumeSessionId = sessionPlan?.resumeSessionId ?? null;
-    const { history: conversationHistory } = resumeSessionId
-      ? { history: [] as Array<{ role: string; message: string }> }
-      : await buildConversationHistory(documentId, previousRunId);
-    if (resumeSessionId) {
-      await recordAiRunEvent({
-        aiRunId,
-        role: "system",
-        message: "Resuming the previous agent session — the model sees its full prior context (messages and tool calls)."
-      });
-    } else if (sessionPlan?.resumeUnavailableSessionId) {
-      // Never degrade silently: the model is about to lose every tool call of
-      // the conversation and all but the last few chat messages. Say it in the
-      // timeline so a confused-looking follow-up has a visible cause.
-      console.warn("[agent-conversation] session transcript unavailable; degraded to transcript replay", {
-        aiRunId,
-        sessionId: sessionPlan.resumeUnavailableSessionId
-      });
-      await recordAiRunEvent({
-        aiRunId,
-        role: "system",
-        message:
-          "The previous session transcript is no longer available, so this run continues from a condensed chat transcript only — earlier tool calls and file reads are NOT in context."
-      });
-    }
-
-    // Host dev runs operate directly on the deployment checkout — no worktree,
-    // no end-of-run commit/cleanup. selfHosted runs never get a worktree from
-    // this app either — the owner's external worker clones and works in its
-    // own checkout.
-    linkedRepo = hostDevRun || isSelfHosted
-      ? null
-      : await ensureLinkedRepositoryWorktree(documentId, aiRunId, createdById);
-    if (hostDevRun) {
-      await db.aiRun.update({
-        where: { id: aiRunId },
-        data: { workspacePath: process.cwd() }
-      });
-      await recordAiRunEvent({
-        aiRunId,
-        role: "system",
-        message: `⚠ HOST DEV RUN: executing unsandboxed in the live deployment directory (${process.cwd()}).`
-      });
-    }
-    if (linkedRepo) {
-      await db.aiRun.update({
-        where: { id: aiRunId },
-        data: {
-          workspacePath: linkedRepo.workspace,
-          branchName: linkedRepo.branchName
-        }
-      });
-      await recordAiRunEvent({
-        aiRunId,
-        role: "system",
-        message: `Using isolated worktree ${linkedRepo.workspace} on branch ${linkedRepo.branchName}.`
-      });
-    }
-
-    const parsedContent = parseDocumentContent(documentContent);
-    const documentText = getDocumentPlainText(parsedContent);
-    const suggestionAnchorText = flattenDocumentTextNodes(parsedContent);
-    const documentBlocks = getDocumentAiBlocks(parsedContent);
-    const unresolvedThreads = await db.commentThread.findMany({
-      where: {
-        documentId,
-        status: "OPEN"
-      },
-      orderBy: {
-        updatedAt: "desc"
-      },
-      select: {
-        id: true,
-        anchorText: true,
-        anchorContext: true,
-        comments: {
-          orderBy: { createdAt: "asc" },
-          select: {
-            body: true,
-            author: { select: { name: true } },
-            aiModel: true
-          }
-        }
-      }
-    });
-    const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, documentId);
-    const {
-      agentEnv,
-      agentConfig: effectiveAgentConfig,
-      usedFreeFallback,
-      usedProviderFallback
-    } = await loadAgentEnvWithFreeFallback(documentId, agentConfig, createdById, {
+  const lifecycleResult = await withAgentRunLifecycle(
+    {
       aiRunId,
-      runnerMode: runner.mode
-    });
-    if (usedFreeFallback) {
-      await recordAiRunEvent({
-        aiRunId,
-        role: "system",
-        message: `No AI credential connected — running on the free local model (${effectiveAgentConfig.model}). It is much slower than Claude (first output can take a few minutes). Connect a credential under Settings in the topbar to use Claude.`
-      });
-    }
-    if (usedProviderFallback) {
-      await recordAiRunEvent({
-        aiRunId,
-        role: "system",
-        message: `No OpenAI credential connected — routing Codex through LiteLLM as ${effectiveAgentConfig.model}.`
-      });
-    }
-    if (agentAccessMode === "read_only") {
-      await recordAiRunEvent({
-        aiRunId,
-        role: "system",
-        message: "Share-link agent is read-only: repository writes, commands, document secrets, commits, and pushes are disabled."
-      });
-    }
-    // Comments the agent leaves via add_comment are created (and broadcast)
-    // the moment they arrive, so collaborators see review feedback mid-run.
-    const commentRecorder = createLiveCommentRecorder({
       documentId,
-      aiRunId,
       createdById,
-      model: effectiveAgentConfig.model ?? null,
-      documentText
-    });
-
-    const result = await withConversationLock(
-      sessionPlan?.conversationKey ?? aiRunId,
-      () => runner.run({
-      mode: "conversation",
+      agentAccessMode,
+      runnerMode,
+      // Host dev mode and selfHosted are mutually exclusive in practice (host
+      // dev runs are an allowlisted internal debugging path); host dev wins if
+      // both are somehow set, since it explicitly wants the deployment's own
+      // checkout.
       hostDevRun,
-      githubAuthAvailable: Boolean(agentEnv.GITHUB_TOKEN?.trim() || agentEnv.GH_TOKEN?.trim()),
-      accessMode: agentAccessMode,
-      documentTitle,
-      documentText,
-      documentBlocks,
-      unresolvedThreads: unresolvedThreads.map((thread) => ({
-        id: thread.id,
-        anchorText: thread.anchorText,
-        anchorContext: thread.anchorContext,
-        comments: thread.comments.map((comment) => ({
-          author: comment.author?.name ?? comment.aiModel ?? "Claude",
-          body: comment.body
-        }))
-      })),
-      workspacePath: hostDevRun ? process.cwd() : linkedRepo?.workspace ?? null,
-      workspaceOverview,
-      instruction: message,
-      conversationHistory,
-      resumeSessionId,
-      slackContext,
-      slackTools
-    }, {
-      agentConfig: effectiveAgentConfig,
-      agentEnv: agentAccessMode === "read_only" ? restrictAgentEnvForReadOnly(agentEnv) : agentEnv,
-      signal: abort.signal,
-      containerName: `gdocs-run-${aiRunId}`,
-      documentId,
-      aiRunId,
-      validation: { kind: "conversation", documentText: suggestionAnchorText },
-      onComment: commentRecorder.onComment,
-      onSlackMessage,
-      // Persist the run's SDK session id (recorded at init, so failed and
-      // cancelled runs stay resumable) and, for the container runner, mount
-      // the conversation's session dir as CLAUDE_CONFIG_DIR.
-      onSessionId: sessionsSupported ? (sessionId) => recordRunSessionId(aiRunId, sessionId) : undefined,
-      sessionDirHostPath: sessionPlan?.sessionDir,
-      trustedHostRun: hostDevRun,
-      onProgress: async (event) => {
-        await Promise.all([
-          db.aiRun.update({
-            where: { id: aiRunId },
-            data: { progress: event.message }
-          }),
-          recordAiRunEvent({
+      failureCommitMessage: "Save failed AI conversation changes",
+      defaultFailureMessage: "Agent conversation failed."
+    },
+    async (ctx) => {
+      // Real session resume: when the follow-up chain has a recorded SDK session
+      // whose transcript is still on disk, the run resumes it — the model sees
+      // all its prior messages AND tool calls, uncapped. The plain-text
+      // transcript replay (buildConversationHistory) remains the fallback for
+      // pre-feature runs, GC'd sessions, and the self-hosted/http runners.
+      const sessionsSupported = ctx.runner.mode === "container" || ctx.runner.mode === "inprocess";
+      const sessionPlan = sessionsSupported
+        ? await planSessionResume({
+            documentId,
             aiRunId,
-            role: event.role ?? "agent",
-            message: event.message
-          })
-        ]).catch(() => null);
+            previousRunId,
+            runnerMode: ctx.runner.mode,
+            agentModel: agentConfig.model
+          }).catch(
+            (error) => {
+              console.warn("[agent-conversation] session resume planning failed; falling back to transcript replay", {
+                aiRunId,
+                error: error instanceof Error ? error.message : error
+              });
+              return null;
+            }
+          )
+        : null;
+      const resumeSessionId = sessionPlan?.resumeSessionId ?? null;
+      const { history: conversationHistory } = resumeSessionId
+        ? { history: [] as Array<{ role: string; message: string }> }
+        : await buildConversationHistory(documentId, previousRunId);
+      if (resumeSessionId) {
+        await recordAiRunEvent({
+          aiRunId,
+          role: "system",
+          message: "Resuming the previous agent session — the model sees its full prior context (messages and tool calls)."
+        });
+      } else if (sessionPlan?.resumeUnavailableSessionId) {
+        // Never degrade silently: the model is about to lose every tool call of
+        // the conversation and all but the last few chat messages. Say it in the
+        // timeline so a confused-looking follow-up has a visible cause.
+        console.warn("[agent-conversation] session transcript unavailable; degraded to transcript replay", {
+          aiRunId,
+          sessionId: sessionPlan.resumeUnavailableSessionId
+        });
+        await recordAiRunEvent({
+          aiRunId,
+          role: "system",
+          message:
+            "The previous session transcript is no longer available, so this run continues from a condensed chat transcript only — earlier tool calls and file reads are NOT in context."
+        });
       }
-    })
-    );
 
-    const commit = linkedRepo && agentAccessMode === "workspace"
-      ? await commitWorkspaceChanges({
-          workspace: linkedRepo.workspace,
-          baseWorkspace: linkedRepo.baseWorkspace,
-          repoUrl: linkedRepo.url,
-          message: "AI research conversation changes",
-          push: true
-        })
-      : { commitSha: null, commitUrl: null, pushed: false, pushError: null as string | null };
-    if (commit.pushError) {
+      // Host dev runs operate directly on the deployment checkout — no worktree,
+      // no end-of-run commit/cleanup. selfHosted runs never get a worktree from
+      // this app either — the owner's external worker clones and works in its
+      // own checkout. Both branches live in ctx.setupWorkspace.
+      const linkedRepo = await ctx.setupWorkspace();
+
+      const parsedContent = parseDocumentContent(documentContent);
+      const documentText = getDocumentPlainText(parsedContent);
+      const suggestionAnchorText = flattenDocumentTextNodes(parsedContent);
+      const documentBlocks = getDocumentAiBlocks(parsedContent);
+      const unresolvedThreads = await db.commentThread.findMany({
+        where: {
+          documentId,
+          status: "OPEN"
+        },
+        orderBy: {
+          updatedAt: "desc"
+        },
+        select: {
+          id: true,
+          anchorText: true,
+          anchorContext: true,
+          comments: {
+            orderBy: { createdAt: "asc" },
+            select: {
+              body: true,
+              author: { select: { name: true } },
+              aiModel: true
+            }
+          }
+        }
+      });
+      const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, documentId);
+      const { agentEnv, runAgentEnv, effectiveAgentConfig } = await ctx.loadEnv(agentConfig);
+      // Comments the agent leaves via add_comment are created (and broadcast)
+      // the moment they arrive, so collaborators see review feedback mid-run.
+      const commentRecorder = createLiveCommentRecorder({
+        documentId,
+        aiRunId,
+        createdById,
+        model: effectiveAgentConfig.model ?? null,
+        documentText
+      });
+
+      const result = await withConversationLock(
+        sessionPlan?.conversationKey ?? aiRunId,
+        () => ctx.runner.run({
+        mode: "conversation",
+        hostDevRun,
+        githubAuthAvailable: Boolean(agentEnv.GITHUB_TOKEN?.trim() || agentEnv.GH_TOKEN?.trim()),
+        accessMode: agentAccessMode,
+        documentTitle,
+        documentText,
+        documentBlocks,
+        unresolvedThreads: unresolvedThreads.map((thread) => ({
+          id: thread.id,
+          anchorText: thread.anchorText,
+          anchorContext: thread.anchorContext,
+          comments: thread.comments.map((comment) => ({
+            author: comment.author?.name ?? comment.aiModel ?? "Claude",
+            body: comment.body
+          }))
+        })),
+        workspacePath: hostDevRun ? process.cwd() : linkedRepo?.workspace ?? null,
+        workspaceOverview,
+        instruction: message,
+        conversationHistory,
+        resumeSessionId,
+        slackContext,
+        slackTools
+      }, {
+        agentConfig: effectiveAgentConfig,
+        agentEnv: runAgentEnv,
+        signal: ctx.abortSignal,
+        containerName: `gdocs-run-${aiRunId}`,
+        documentId,
+        aiRunId,
+        validation: { kind: "conversation", documentText: suggestionAnchorText },
+        onComment: commentRecorder.onComment,
+        onSlackMessage,
+        // Persist the run's SDK session id (recorded at init, so failed and
+        // cancelled runs stay resumable) and, for the container runner, mount
+        // the conversation's session dir as CLAUDE_CONFIG_DIR.
+        onSessionId: sessionsSupported ? (sessionId) => recordRunSessionId(aiRunId, sessionId) : undefined,
+        sessionDirHostPath: sessionPlan?.sessionDir,
+        trustedHostRun: hostDevRun,
+        onProgress: ctx.onProgress
+      })
+      );
+
+      const commit = await ctx.commitRunChanges("AI research conversation changes");
+
+      const reply = result.reply ?? result.summary ?? "Finished agent conversation.";
       await recordAiRunEvent({
         aiRunId,
-        role: "error",
-        message: `Changes were committed locally but could not be pushed to the linked repository: ${commit.pushError}`
-      }).catch(() => null);
+        role: "agent",
+        message: reply
+      });
+
+      const agentComments = await commentRecorder.finalize(
+        Array.isArray(result.comments) ? result.comments : [],
+        result.model
+      );
+
+      await markAiRunSucceeded(aiRunId, {
+        progress: result.summary ?? "Finished.",
+        model: result.model,
+        commitSha: commit.commitSha,
+        commitUrl: commit.commitUrl,
+        suggestions: JSON.stringify(Array.isArray(result.suggestions) ? result.suggestions : []),
+        agentComments: JSON.stringify(agentComments),
+        replacementImages: JSON.stringify(normalizeAgentImages(result.images, documentId, null, aiRunId))
+      });
+      return reply;
     }
+  );
 
-    const reply = result.reply ?? result.summary ?? "Finished agent conversation.";
-    await recordAiRunEvent({
-      aiRunId,
-      role: "agent",
-      message: reply
-    });
+  const outcome: ConversationRunOutcome =
+    lifecycleResult.status === "SUCCEEDED"
+      ? { status: "SUCCEEDED", reply: lifecycleResult.value, error: null }
+      : { status: "FAILED", reply: null, error: lifecycleResult.error };
 
-    const agentComments = await commentRecorder.finalize(
-      Array.isArray(result.comments) ? result.comments : [],
-      result.model
-    );
-
-    await markAiRunSucceeded(aiRunId, {
-      progress: result.summary ?? "Finished.",
-      model: result.model,
-      commitSha: commit.commitSha,
-      commitUrl: commit.commitUrl,
-      suggestions: JSON.stringify(Array.isArray(result.suggestions) ? result.suggestions : []),
-      agentComments: JSON.stringify(agentComments),
-      replacementImages: JSON.stringify(normalizeAgentImages(result.images, documentId, null, aiRunId))
-    });
-    outcome = { status: "SUCCEEDED", reply, error: null };
-  } catch (error) {
-    if (linkedRepo && agentAccessMode === "workspace") {
-      await commitWorkspaceChanges({
-        workspace: linkedRepo.workspace,
-        baseWorkspace: linkedRepo.baseWorkspace,
-        repoUrl: linkedRepo.url,
-        message: "Save failed AI conversation changes",
-        push: true
-      }).catch(() => null);
-    }
-
-    const failureMessage = isRunCancellation(error, abort.signal)
-      ? RUN_CANCELLED_MESSAGE
-      : error instanceof Error
-        ? error.message
-        : "Agent conversation failed.";
-    await recordAiRunEvent({
-      aiRunId,
-      role: "error",
-      message: failureMessage
-    }).catch(() => null);
-    await db.aiRun
-      .update({
-        where: { id: aiRunId },
-        data: {
-          status: "FAILED",
-          error: failureMessage,
-          finishedAt: new Date()
-        }
-      })
-      .catch(() => null);
-    outcome = { status: "FAILED", reply: null, error: failureMessage };
-  } finally {
-    deregisterRunAbortController(aiRunId);
-    stopHeartbeat();
-    if (linkedRepo && linkedRepo.baseWorkspace !== linkedRepo.worktree) {
-      await removeRunWorktree(linkedRepo).catch(() => null);
-    }
-  }
-
-  if (outcome && onFinished) {
+  if (onFinished) {
     await Promise.resolve(onFinished(outcome)).catch((error) => {
       console.error("[agent-conversation] onFinished hook failed", {
         aiRunId,
