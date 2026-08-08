@@ -5,6 +5,7 @@ import { recordAiRunEvent, serializeAiRun } from "@/lib/ai-runs";
 import { runAgentConversationInBackground } from "@/lib/agent-conversation";
 import { resolveAgentConfigForUser } from "@/lib/agent-defaults";
 import { rateLimitAiRun, requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
+import { RUN_STARTED_CLAUDE } from "@/agent-core/lifecycle-messages";
 import { db } from "@/lib/db";
 import { agentAccessModeForDocumentAccess } from "@/lib/permissions";
 
@@ -53,7 +54,7 @@ export async function POST(request: Request, { params }: RouteContext<{ id: stri
       createdById: user?.id ?? null,
       parentRunId: parsed.data.previousRunId ?? null,
       instruction: parsed.data.message.trim(),
-      progress: "Starting Claude research agent.",
+      progress: RUN_STARTED_CLAUDE,
       // Conversation runs only ever propose suggestions, never commit content.
       suggestOnly: true
     }

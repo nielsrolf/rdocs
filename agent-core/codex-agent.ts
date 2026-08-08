@@ -1,3 +1,8 @@
+import {
+  PREPARING_DOCUMENT_UPDATE,
+  SUBMITTING_FINAL_RESPONSE,
+  submissionRejectedMessage
+} from "./lifecycle-messages";
 import type { Thread, ThreadItem } from "@openai/codex-sdk";
 import { z } from "zod";
 
@@ -285,10 +290,10 @@ export async function runCodexResearchAgent(
     runTurn: (prompt) => runCodexTurn(thread, prompt, options),
     validateSubmission: options.validateSubmission,
     onRejected: (error) =>
-      emit(options.onProgress, { role: "system", message: `Submission rejected: ${error}` })
+      emit(options.onProgress, { role: "system", message: submissionRejectedMessage(error) })
   });
-  emit(options.onProgress, { role: "system", message: "Submitting final response." });
-  emit(options.onProgress, { role: "system", message: "Preparing document update." });
+  emit(options.onProgress, { role: "system", message: SUBMITTING_FINAL_RESPONSE });
+  emit(options.onProgress, { role: "system", message: PREPARING_DOCUMENT_UPDATE });
   return {
     ...parsed,
     images: parsed.images ?? [],

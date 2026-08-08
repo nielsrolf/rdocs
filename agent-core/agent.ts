@@ -36,6 +36,11 @@ import {
 } from "./ai-edit-submission";
 import { evaluateToolPathAccess } from "./agent-sandbox";
 import { toolsForAgentAccess, type AgentAccessMode } from "./ai-tools";
+import {
+  PREPARING_DOCUMENT_UPDATE,
+  RUN_STARTED_CLAUDE,
+  SUBMITTING_FINAL_RESPONSE
+} from "./lifecycle-messages";
 import type { AiDocumentBlock } from "./types";
 
 const MAX_PROGRESS_MESSAGE_LENGTH = 1400;
@@ -832,7 +837,7 @@ function handleAssistantMessage(
       const toolBlock = block as { name?: unknown; input?: unknown };
       const name = typeof toolBlock.name === "string" ? toolBlock.name : "Tool";
       if (name === SUBMIT_TOOL_NAME) {
-        emitProgress(onProgress, { role: "system", message: "Submitting final response." });
+        emitProgress(onProgress, { role: "system", message: SUBMITTING_FINAL_RESPONSE });
       } else {
         emitProgress(onProgress, { role: "tool", message: `${name}: ${toolInputSummary(name, toolBlock.input)}` });
       }
@@ -1571,7 +1576,7 @@ async function runClaudeResearchAgentOnce(
     }
   });
 
-  emitProgress(onProgress, { role: "system", message: "Starting Claude research agent." });
+  emitProgress(onProgress, { role: "system", message: RUN_STARTED_CLAUDE });
 
   let resultText = "";
   let resultStopReason: string | null = null;
@@ -1643,7 +1648,7 @@ async function runClaudeResearchAgentOnce(
     );
   }
 
-  emitProgress(onProgress, { role: "system", message: "Preparing document update." });
+  emitProgress(onProgress, { role: "system", message: PREPARING_DOCUMENT_UPDATE });
   const captureValue = captured as Partial<ClaudeResearchAgentOutput> | null;
   const fallback: Partial<ClaudeResearchAgentOutput> = captureValue
     ? captureValue

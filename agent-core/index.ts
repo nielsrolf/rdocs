@@ -3,6 +3,7 @@
 // from the app, Prisma, or the `@/` alias.
 
 export * from "./types";
+export * from "./lifecycle-messages";
 export * from "./agent-config";
 export * from "./agent-env";
 export * from "./agent-sandbox";

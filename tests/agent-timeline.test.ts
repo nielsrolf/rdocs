@@ -15,6 +15,16 @@ import {
 } from "../components/document-workspace/agent-timeline";
 import { mergeRunEventTimelines } from "../components/document-workspace/conversations";
 import type { AiRunEventView } from "../components/document-workspace/types";
+import {
+  PREPARING_DOCUMENT_UPDATE,
+  RUN_RETRYING,
+  RUN_STARTED_CLAUDE,
+  RUN_STARTED_CODEX,
+  RUN_STARTED_LOCAL_FALLBACK,
+  RUN_STARTED_SLACK,
+  SUBMIT_STEP_LABEL,
+  SUBMITTING_FINAL_RESPONSE
+} from "../agent-core/lifecycle-messages";
 
 let seq = 0;
 function ev(role: string, message: string): AiRunEventView {
@@ -60,6 +70,24 @@ test("extractToolDiff reads Edit / MultiEdit / Write payloads", () => {
   const legacy = parseToolMessage('Edit: {"file_path":"a.ts"}');
   assert.ok(legacy);
   assert.equal(extractToolDiff(legacy!), null);
+});
+
+test("every emitted lifecycle message is recognised by the step matcher", () => {
+  // Guards the producer/consumer contract: agent-core emits these strings and
+  // the agent panel must render each as a quiet step row. Adding a producer
+  // constant without teaching lifecycleStepLabel about it fails here.
+  for (const message of [
+    RUN_STARTED_CLAUDE,
+    RUN_STARTED_CODEX,
+    RUN_STARTED_LOCAL_FALLBACK,
+    RUN_STARTED_SLACK,
+    RUN_RETRYING,
+    SUBMITTING_FINAL_RESPONSE,
+    PREPARING_DOCUMENT_UPDATE
+  ]) {
+    assert.ok(lifecycleStepLabel(message), `no step label for ${message}`);
+  }
+  assert.equal(lifecycleStepLabel(SUBMITTING_FINAL_RESPONSE), SUBMIT_STEP_LABEL);
 });
 
 test("lifecycle plumbing becomes step rows, not prose", () => {

@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { recordAiRunEvent } from "@/lib/ai-runs";
 import { rateLimitAiRun, requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
+import { RUN_STARTED_CLAUDE } from "@/agent-core/lifecycle-messages";
 import { db } from "@/lib/db";
 import { agentAccessModeForDocumentAccess } from "@/lib/permissions";
 import { runAskAiInBackground } from "@/lib/ask-ai";
@@ -87,7 +88,7 @@ export async function POST(request: Request, { params }: RouteContext<{ threadId
       createdById: user?.id ?? null,
       triggerId: thread.id,
       instruction: "Write the next assistant reply for this comment thread.",
-      progress: "Starting Claude research agent.",
+      progress: RUN_STARTED_CLAUDE,
       // Comment-reply runs never commit content; any document edits they make are
       // tracked-change suggestions, so a comment-access user may mark them applied.
       suggestOnly: true

@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, type ReactNode } from "react";
 
+import { lifecycleStepLabel, SUBMIT_STEP_LABEL } from "@/agent-core/lifecycle-messages";
 import { cn, truncate } from "@/lib/utils";
 
 import { MarkdownBody } from "./markdown";
@@ -100,15 +101,12 @@ export function extractToolDiff(parsed: ParsedToolCall): ToolDiff | null {
 /**
  * Known lifecycle plumbing emitted by agent-core as `system` events. These are
  * progress markers, not agent prose — render them as quiet step rows instead
- * of italic notes so they don't read like part of the conversation.
+ * of italic notes so they don't read like part of the conversation. The
+ * producer strings and this recogniser live together in
+ * agent-core/lifecycle-messages.ts; re-exported here so existing importers
+ * (and tests) keep their entry point.
  */
-export function lifecycleStepLabel(message: string): string | null {
-  const t = message.trim();
-  if (/^Starting (?:Claude|Codex) research agent\.?$/.test(t)) return "Run started";
-  if (/^Submitting final response\.?$/.test(t)) return "Submitting final response";
-  if (/^Preparing document update\.?$/.test(t)) return "Finishing up";
-  return null;
-}
+export { lifecycleStepLabel };
 
 /**
  * Interim Slack activity ("Posted to Slack: hi", "Shared plot.png to Slack")
@@ -861,7 +859,7 @@ export function findFinalReplyIndex(grouped: GroupedAgentEvent[], isRunning: boo
   let lastAgent = -1;
   for (let i = 0; i < grouped.length; i++) {
     const item = grouped[i];
-    if (item.kind === "step" && item.label === "Submitting final response") lastSubmit = i;
+    if (item.kind === "step" && item.label === SUBMIT_STEP_LABEL) lastSubmit = i;
     if (item.kind === "message" && item.role === "user") lastUser = i;
     if (item.kind === "message" && item.role === "agent") lastAgent = i;
   }

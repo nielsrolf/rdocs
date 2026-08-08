@@ -4,6 +4,7 @@ import { z } from "zod";
 import { jsonError, rateLimitAiRun, requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { recordAiRunEvent } from "@/lib/ai-runs";
 import { runAiEditInBackground } from "@/lib/ai-edit-run";
+import { RUN_STARTED_CLAUDE } from "@/agent-core/lifecycle-messages";
 import { db } from "@/lib/db";
 import { resolveAgentConfigForUser } from "@/lib/agent-defaults";
 import { agentAccessModeForDocumentAccess, canComment, canEdit } from "@/lib/permissions";
@@ -92,7 +93,7 @@ export async function POST(request: Request, { params }: RouteContext<{ id: stri
       selectedText: parsed.data.selectedText.trim().slice(0, 1500) || null,
       parentRunId,
       instruction: parsed.data.instruction.trim(),
-      progress: "Starting Claude research agent.",
+      progress: RUN_STARTED_CLAUDE,
       suggestOnly
     }
   });

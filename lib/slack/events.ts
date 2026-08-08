@@ -13,6 +13,7 @@
 // Progress UX: the bot reacts to the triggering message — 👀 while working,
 // ✅ / ❌ when the run finishes — and posts the agent's reply as a message.
 
+import { RUN_STARTED_SLACK } from "@/agent-core/lifecycle-messages";
 import { db } from "@/lib/db";
 import { resolveAgentConfigForUser } from "@/lib/agent-defaults";
 import { saveAttachmentToStore } from "@/lib/attachments";
@@ -316,7 +317,7 @@ export async function startSlackConversationRun(args: StartSlackRunArgs): Promis
       triggerId,
       parentRunId: args.parentRunId,
       instruction: args.instruction,
-      progress: "Starting Claude research agent from Slack.",
+      progress: RUN_STARTED_SLACK,
       suggestOnly: true
     }
   });

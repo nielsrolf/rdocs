@@ -1,5 +1,11 @@
 "use client";
 
+import {
+  RUN_RETRYING,
+  RUN_STARTED_CLAUDE,
+  RUN_STARTED_CODEX,
+  RUN_STARTED_LOCAL_FALLBACK
+} from "@/agent-core/lifecycle-messages";
 import ImageExtension from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
@@ -330,10 +336,10 @@ export function DocumentWorkspace({
   // Optimistic progress line for a just-started run — must not claim "Claude"
   // when the credential-less free fallback will do the work.
   const startingProgress = agentHarnessForModel(agentModel) === "codex"
-    ? "Starting Codex research agent."
+    ? RUN_STARTED_CODEX
     : anthropicFreeFallback
-      ? "Starting free local model agent (no credential connected — this is slow)."
-      : "Starting Claude research agent.";
+      ? RUN_STARTED_LOCAL_FALLBACK
+      : RUN_STARTED_CLAUDE;
   const reportClientError = useCallback(
     (message: string, scope: string, data?: unknown) => {
       setGlobalError(message);
@@ -2591,7 +2597,7 @@ export function DocumentWorkspace({
         id: selectionId,
         from: range.from,
         to: range.to,
-        progress: "Retrying Claude research agent."
+        progress: RUN_RETRYING
       })
     );
     setActiveAiRun({
@@ -2601,7 +2607,7 @@ export function DocumentWorkspace({
       selectionId,
       instruction,
       status: "RUNNING",
-      progress: "Retrying Claude research agent.",
+      progress: RUN_RETRYING,
       startedAt: new Date().toISOString()
     });
 
