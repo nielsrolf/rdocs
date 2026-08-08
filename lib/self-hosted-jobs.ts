@@ -9,8 +9,6 @@ import { decryptSecret, encryptSecret, isEncryptedSecret } from "@/lib/secret-cr
 // (the app never manages a worktree for these documents), and reports back
 // via `completeSelfHostedJob` / `failSelfHostedJob`.
 
-export type SelfHostedJobStatus = "pending" | "claimed" | "succeeded" | "failed" | "cancelled";
-
 /** Enqueue a job for a selfHosted document's run. Called by SelfHostedPullRunner.run(). */
 export async function enqueueSelfHostedJob(input: {
   documentId: string;

@@ -185,19 +185,6 @@ export type AgentToast = {
   body: string;
 };
 
-export type ActiveAiTarget =
-  | {
-      type: "selection-edit";
-      top: number;
-      left: number;
-      width: number;
-      height: number;
-    }
-  | {
-      type: "comment-thread";
-      threadId: string;
-    };
-
 export type SelectionState = {
   text: string;
   from: number;

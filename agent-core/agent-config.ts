@@ -106,10 +106,6 @@ const LEGACY_MODEL_ALIASES: Record<string, string> = {
   "claude-opus-4-8": "claude-opus-5"
 };
 
-// Kept for existing consumers (UI dropdown, route enums historically derived
-// from it). The Anthropic list is the always-available portion of the menu.
-export const AGENT_MODELS = ANTHROPIC_AGENT_MODELS;
-
 export type AgentModel = string;
 
 // "off" maps to disabled extended thinking (the historical behaviour); the rest

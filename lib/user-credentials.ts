@@ -49,10 +49,6 @@ export const CREDENTIAL_PROVIDERS: readonly CredentialProvider[] = [
   "github"
 ];
 
-export function isCredentialProvider(value: unknown): value is CredentialProvider {
-  return typeof value === "string" && (CREDENTIAL_PROVIDERS as string[]).includes(value);
-}
-
 export type MaskedUserCredential = {
   provider: CredentialProvider;
   kind: CredentialKind;

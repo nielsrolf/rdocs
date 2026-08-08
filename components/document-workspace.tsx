@@ -152,7 +152,6 @@ import { WidgetDialog } from "./document-workspace/widget-dialog";
 import {
   DEFAULT_COMMENT_TAGS,
   type ActiveAiRunView,
-  type ActiveAiTarget,
   type AiEditImage,
   type AiRunEventView,
   type AiEditWidget,
@@ -383,7 +382,6 @@ export function DocumentWorkspace({
   const askAiRunIdRef = useRef<string | null>(null);
   const agentRunIdRef = useRef<string | null>(null);
   const mountedAtRef = useRef<number>(Date.now());
-  const [, setActiveAiTarget] = useState<ActiveAiTarget | null>(null);
   // Slack-channel documents exist FOR the agent: land on the agent panel
   // (config + run history) instead of the mostly-empty notebook body.
   const [agentPanelOpen, setAgentPanelOpen] = useState(documentKind === "slack_channel");
@@ -1226,29 +1224,6 @@ export function DocumentWorkspace({
     setThreads(snapshot.threads);
     syncAiRuns(snapshot.aiRuns ?? snapshot.activeAiRuns ?? (snapshot.activeAiRun ? [snapshot.activeAiRun] : []));
     setAiRunsLoaded(true);
-    setActiveAiTarget((currentTarget) => {
-      const visibleRun = snapshot.activeAiRun ?? snapshot.activeAiRuns?.[0] ?? null;
-      if (!visibleRun) {
-        return null;
-      }
-
-      if (visibleRun.triggerType === "COMMENT_THREAD" && visibleRun.triggerId) {
-        return {
-          type: "comment-thread",
-          threadId: visibleRun.triggerId
-        };
-      }
-
-      if (visibleRun.triggerType === "SELECTION_EDIT" && editor) {
-        const selectionId = parseAiRunSelectionId(visibleRun.triggerId);
-        const range = selectionId ? getAiEditSelectionRange(editor.state, selectionId) : null;
-        if (range) {
-          return getRangeEditTarget(range.from, range.to);
-        }
-      }
-
-      return currentTarget?.type === "selection-edit" ? currentTarget : null;
-    });
     setActiveThreadId((currentThreadId) =>
       currentThreadId && snapshot.threads.some((thread) => thread.id === currentThreadId)
         ? currentThreadId
@@ -2431,31 +2406,6 @@ export function DocumentWorkspace({
     setCommentBusy(false);
   }
 
-  function getRangeEditTarget(from: number, to: number): ActiveAiTarget | null {
-    if (!editor || !editorPageRef.current) {
-      return null;
-    }
-
-    const boundedFrom = Math.max(0, Math.min(from, editor.state.doc.content.size));
-    const boundedTo = Math.max(boundedFrom, Math.min(to, editor.state.doc.content.size));
-    const start = editor.view.coordsAtPos(boundedFrom);
-    const end = editor.view.coordsAtPos(boundedTo);
-    const pageRect = editorPageRef.current.getBoundingClientRect();
-    const isMultiline = end.bottom - start.top > 32 || end.left < start.left;
-    const left = isMultiline ? 0 : Math.max(18, start.left - pageRect.left);
-    const availableWidth = Math.max(220, pageRect.width - left - 24);
-    const selectedWidth = Math.abs(end.right - start.left);
-    const selectedHeight = Math.max(76, end.bottom - start.top + 24);
-
-    return {
-      type: "selection-edit",
-      left,
-      top: Math.max(24, start.top - pageRect.top - 8),
-      width: isMultiline ? pageRect.width : Math.min(Math.max(selectedWidth, 260), availableWidth),
-      height: Math.min(selectedHeight, Math.max(160, pageRect.height - (start.top - pageRect.top) + 16))
-    };
-  }
-
   async function handleAiEdit() {
     if (!selection || !editInstruction.trim() || !editor) {
       return;
@@ -2540,7 +2490,6 @@ export function DocumentWorkspace({
         status: "FAILED"
       });
       setActiveAiRun(null);
-      setActiveAiTarget(null);
       editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
       return;
     }
@@ -2857,7 +2806,6 @@ export function DocumentWorkspace({
         status: "FAILED"
       });
       setActiveAiRun(null);
-      setActiveAiTarget(null);
       editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
       return;
     }
@@ -2888,7 +2836,6 @@ export function DocumentWorkspace({
     }
 
     setActiveAiRun(null);
-    setActiveAiTarget(null);
     notifyAgentCompleted({
       id: aiRunId,
       triggerType: "SELECTION_EDIT",
@@ -3142,10 +3089,6 @@ export function DocumentWorkspace({
     setAiBusyThreadId(threadId);
     setGlobalError(null);
     await ensureAgentNotificationPermission();
-    setActiveAiTarget({
-      type: "comment-thread",
-      threadId
-    });
     setActiveAiRun({
       id: "pending-comment-reply",
       triggerType: "COMMENT_THREAD",
@@ -3183,7 +3126,6 @@ export function DocumentWorkspace({
         status: "FAILED"
       });
       setActiveAiRun(null);
-      setActiveAiTarget(null);
       setAiBusyThreadId(null);
       return;
     }
@@ -4084,7 +4026,6 @@ export function DocumentWorkspace({
             body: JSON.stringify({ action: "markApplied", shareToken })
           }).catch(() => null);
           setActiveAiRun(null);
-          setActiveAiTarget(null);
           aiEditRunStateRef.current.set(run.id, "applied");
           return;
         }
@@ -4208,9 +4149,6 @@ export function DocumentWorkspace({
       if (run && run.status !== "RUNNING") {
         askAiRunIdRef.current = null;
         setAiBusyThreadId(null);
-        setActiveAiTarget((current) =>
-          current?.type === "comment-thread" && current.threadId === run.triggerId ? null : current
-        );
       }
     }
 

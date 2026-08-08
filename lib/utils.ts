@@ -24,14 +24,6 @@ export function permissionLabel(permission: PermissionLevelValue | string) {
   }
 }
 
-export function isCommentCapable(permission: PermissionLevelValue | string) {
-  return permission === "EDIT" || permission === "COMMENT";
-}
-
-export function isEditCapable(permission: PermissionLevelValue | string) {
-  return permission === "EDIT";
-}
-
 export function truncate(value: string, length = 140) {
   if (value.length <= length) {
     return value;

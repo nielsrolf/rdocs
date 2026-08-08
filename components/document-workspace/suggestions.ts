@@ -229,29 +229,6 @@ export function collectSuggestionRanges(doc: PMNode): SuggestionSummary[] {
   return Array.from(byId.values()).sort((a, b) => a.from - b.from);
 }
 
-export function hasPendingSuggestions(doc: PMNode): boolean {
-  let found = false;
-  doc.descendants((node) => {
-    if (found) return false;
-    if (node.isText) {
-      if (node.marks.some((m) => m.type.name === SUGGESTED_INSERTION_MARK || m.type.name === SUGGESTED_DELETION_MARK)) {
-        found = true;
-      }
-      return;
-    }
-    if (ATOM_NODE_TYPES.has(node.type.name)) {
-      if (
-        nodeRecords(node, SUGGESTION_INSERT_RECORDS_ATTR).length > 0 ||
-        nodeRecords(node, SUGGESTION_DELETE_RECORDS_ATTR).length > 0
-      ) {
-        found = true;
-      }
-    }
-    return undefined;
-  });
-  return found;
-}
-
 // --- Insertion interception (appendTransaction) -----------------------------
 
 // Inserted content ranges, expressed in the coordinate space of the document

@@ -390,10 +390,6 @@ export function describeAiEditSelectionPresence(state: EditorState, id: string) 
   };
 }
 
-export function getAiEditSelectionMetadata(state: EditorState, id: string) {
-  return aiEditSelectionPluginKey.getState(state)?.metadata.get(id)?.metadata ?? null;
-}
-
 function findAiEditRangeMark(state: EditorState, selectionId: string) {
   const markType = state.schema.marks.aiEditRange;
   if (!markType) return null;

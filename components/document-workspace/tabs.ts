@@ -14,8 +14,6 @@ export type TabSummary = {
   contentTo: number;
 };
 
-export const IMPLICIT_TAB_ID = "__implicit__";
-
 export function listTabs(doc: ProseMirrorNode): TabSummary[] {
   const tabs: TabSummary[] = [];
   const docSize = doc.content.size;
@@ -41,13 +39,6 @@ export function listTabs(doc: ProseMirrorNode): TabSummary[] {
 
   if (current) tabs.push(current);
   return tabs;
-}
-
-export function findTabByPosition(tabs: TabSummary[], pos: number): TabSummary | null {
-  for (const tab of tabs) {
-    if (pos >= tab.contentFrom && pos <= tab.contentTo) return tab;
-  }
-  return tabs[tabs.length - 1] ?? null;
 }
 
 type TabsPluginState = {

@@ -273,10 +273,6 @@ type QueuedFollowUp = {
 };
 const queuedFollowUps = new Map<string, QueuedFollowUp[]>();
 
-export function queuedFollowUpCount(aiRunId: string) {
-  return queuedFollowUps.get(aiRunId)?.length ?? 0;
-}
-
 type StartSlackRunArgs = {
   deps: SlackEventDeps;
   surface: "mention" | "dm";
