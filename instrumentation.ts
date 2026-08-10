@@ -49,6 +49,33 @@ export async function register() {
     });
   };
 
+  // Detached session containers survive the process that started them, so BEFORE
+  // the silence reaper runs, re-attach to every orphaned container that still
+  // answers. An adopted run heartbeats again immediately, so the sweep below
+  // cannot mistake it for abandoned. Never blocks boot.
+  try {
+    const { detachedContainersEnabled } = await import("@/lib/agent-runner/session-store");
+    if (detachedContainersEnabled(process.env)) {
+      const { adoptOrphanedSessions } = await import("@/lib/agent-runner/session-adoption");
+      const adoption = await adoptOrphanedSessions();
+      if (adoption.adopted.length > 0) {
+        console.log(
+          `[agent-session] adopted ${adoption.adopted.length} orphaned detached agent run(s) at startup.`
+        );
+      }
+      // The drive-to-completion promise is deliberately not awaited.
+      void adoption.settled.catch((error) => {
+        console.error("[agent-session] adopted run failed", {
+          error: error instanceof Error ? error.message : error
+        });
+      });
+    }
+  } catch (error) {
+    console.error("[agent-session] startup adoption failed", {
+      error: error instanceof Error ? error.message : error
+    });
+  }
+
   try {
     await runSweep("startup");
   } catch (error) {

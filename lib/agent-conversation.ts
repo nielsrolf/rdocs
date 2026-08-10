@@ -16,6 +16,7 @@ import { planSessionResume, recordRunSessionId, withConversationLock } from "@/l
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
 import type { AgentAccessMode, ClaudeResearchAgentInput } from "@/agent-core";
+import type { AgentComment } from "@/agent-core/ai-edit-submission";
 import { normalizeAgentImages } from "@/lib/ai-edit-submission";
 import { createLiveCommentRecorder } from "@/lib/agent-comments";
 import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
@@ -55,6 +56,66 @@ export type ConversationRunInput = {
   // persisted). Used by the Slack bot to deliver the reply to the thread.
   onFinished?: (outcome: ConversationRunOutcome) => Promise<void> | void;
 };
+
+// The agent output fields a conversation run's terminal bookkeeping consumes.
+// Loosely typed on purpose: the same tail now runs for a live in-process result
+// (ClaudeResearchAgentOutput) AND for a result recovered from a detached session
+// container across a restart, which arrives as a plain JSON object.
+export type ConversationFinalizeResult = {
+  reply?: string | null;
+  summary?: string | null;
+  model?: string | null;
+  comments?: unknown;
+  suggestions?: unknown;
+  images?: unknown;
+};
+
+export type ConversationCommentFinalizer = {
+  finalize: (
+    submitted: AgentComment[] | undefined,
+    model?: string | null
+  ) => Promise<Array<{ threadId: string; findText: string }>>;
+};
+
+/**
+ * Terminal bookkeeping of a SUCCEEDED conversation run: the reply event, the
+ * agent's comment threads, and the AiRun row. Extracted from the live path so
+ * boot adoption of a detached container (lib/agent-runner/session-adoption.ts)
+ * finalizes a run in exactly the same shape — same event strings, same order,
+ * same fields — instead of a second, drifting implementation.
+ */
+export async function finalizeConversationRun(input: {
+  aiRunId: string;
+  documentId: string;
+  result: ConversationFinalizeResult;
+  commit: { commitSha: string | null; commitUrl: string | null };
+  commentRecorder: ConversationCommentFinalizer;
+}): Promise<string> {
+  const { aiRunId, documentId, result, commit, commentRecorder } = input;
+
+  const reply = result.reply ?? result.summary ?? "Finished agent conversation.";
+  await recordAiRunEvent({
+    aiRunId,
+    role: "agent",
+    message: reply
+  });
+
+  const agentComments = await commentRecorder.finalize(
+    Array.isArray(result.comments) ? (result.comments as AgentComment[]) : [],
+    result.model
+  );
+
+  await markAiRunSucceeded(aiRunId, {
+    progress: result.summary ?? "Finished.",
+    model: result.model,
+    commitSha: commit.commitSha,
+    commitUrl: commit.commitUrl,
+    suggestions: JSON.stringify(Array.isArray(result.suggestions) ? result.suggestions : []),
+    agentComments: JSON.stringify(agentComments),
+    replacementImages: JSON.stringify(normalizeAgentImages(result.images, documentId, null, aiRunId))
+  });
+  return reply;
+}
 
 export async function runAgentConversationInBackground(input: ConversationRunInput) {
   const {
@@ -240,28 +301,13 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
 
       const commit = await ctx.commitRunChanges("AI research conversation changes");
 
-      const reply = result.reply ?? result.summary ?? "Finished agent conversation.";
-      await recordAiRunEvent({
+      return await finalizeConversationRun({
         aiRunId,
-        role: "agent",
-        message: reply
+        documentId,
+        result,
+        commit,
+        commentRecorder
       });
-
-      const agentComments = await commentRecorder.finalize(
-        Array.isArray(result.comments) ? result.comments : [],
-        result.model
-      );
-
-      await markAiRunSucceeded(aiRunId, {
-        progress: result.summary ?? "Finished.",
-        model: result.model,
-        commitSha: commit.commitSha,
-        commitUrl: commit.commitUrl,
-        suggestions: JSON.stringify(Array.isArray(result.suggestions) ? result.suggestions : []),
-        agentComments: JSON.stringify(agentComments),
-        replacementImages: JSON.stringify(normalizeAgentImages(result.images, documentId, null, aiRunId))
-      });
-      return reply;
     }
   );
 
