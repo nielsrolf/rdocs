@@ -11,6 +11,7 @@ export const runtime = "nodejs";
 const toolRequestSchema = z.object({
   tool: z.enum([
     "post_slack_message",
+    "message_thread",
     "list_slack_channels",
     "read_slack_channel",
     "read_slack_thread",

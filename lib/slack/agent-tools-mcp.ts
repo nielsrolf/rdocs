@@ -44,6 +44,14 @@ const SLACK_MCP_TOOLS: ToolDefinition[] = [
     inputSchema: objectSchema({ channel_id: string, thread_ts: string, limit }, ["channel_id", "thread_ts"])
   },
   {
+    name: "message_thread",
+    description:
+      "Send a message into ANOTHER Slack thread, where it is treated exactly like a message from a person: it steers the " +
+      "agent already working in that thread, or starts a new agent run there. Use it to supervise, unblock or redirect " +
+      "another agent. Omit thread_ts to start a new top-level thread in that channel. Not for your own conversation.",
+    inputSchema: objectSchema({ channel_id: string, thread_ts: string, text: string }, ["channel_id", "text"])
+  },
+  {
     name: "recent_activity",
     description: "Show recent agent activity across rdocs projects visible to the triggering user.",
     inputSchema: objectSchema({ project: string, limit })

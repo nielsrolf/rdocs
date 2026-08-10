@@ -340,6 +340,79 @@ export async function steerActiveThreadRun(args: {
   return { activeRunIds, steeredRunId };
 }
 
+/**
+ * Deliver a message into a Slack thread that ALREADY has active runs, exactly as
+ * an incoming Slack message is delivered: steer the live session when a backend
+ * holds an open input channel for one of the thread's runs, otherwise ⏳-queue it
+ * so it becomes one follow-up run when the active run ends.
+ *
+ * Returns null only in the race where the queued-behind run turned out to be
+ * terminal already and nothing else drained the queue — the caller must then
+ * start a fresh run itself (that is what handleIncomingSlackMessage does by
+ * falling through).
+ */
+async function steerOrQueueThreadMessage(args: {
+  deps: SlackEventDeps;
+  channel: string;
+  /** Slack ts of the message carrying the text — the reaction anchor. */
+  anchorTs: string;
+  senderName: string;
+  /** Active runs of the thread, newest first. */
+  activeRunIds: string[];
+  text: string;
+  userId: string;
+  slackUserId: string;
+}): Promise<{ action: "injected" | "queued"; aiRunId: string } | null> {
+  const { deps, channel, anchorTs, senderName, activeRunIds, text } = args;
+  // Preferred path: inject the message straight into the RUNNING agent
+  // session, so it steers the work in progress instead of becoming a
+  // separate run afterwards. Only backends that hold an open input channel
+  // for the run (in-process / container, Claude harness) accept this; every
+  // other case returns false and falls through to the queue below.
+  const inject = deps.injectRunMessage ?? injectRunMessage;
+  const steeringText = buildSteeringMessage(senderName, text);
+  const steeredRunId = activeRunIds.find((id) => inject(id, steeringText)) ?? null;
+  if (steeredRunId) {
+    await recordAiRunEvent({
+      aiRunId: steeredRunId,
+      role: "user",
+      message: text
+    }).catch(() => null);
+    const anchors = steeredRunAnchors.get(steeredRunId) ?? [];
+    anchors.push({ ts: anchorTs });
+    steeredRunAnchors.set(steeredRunId, anchors);
+    await deps.slack.addReaction({ channel, ts: anchorTs, name: "eyes" }).catch(() => null);
+    return { action: "injected", aiRunId: steeredRunId };
+  }
+
+  // Fallback: queue for a follow-up run when the active one ends.
+  const primaryRunId = activeRunIds[0];
+  const queue = queuedFollowUps.get(primaryRunId) ?? [];
+  queue.push({
+    userId: args.userId,
+    slackUserId: args.slackUserId,
+    senderName,
+    text,
+    ts: anchorTs
+  });
+  queuedFollowUps.set(primaryRunId, queue);
+  await deps.slack
+    .addReaction({ channel, ts: anchorTs, name: "hourglass_flowing_sand" })
+    .catch(() => null);
+  // Race guard: if the run finished while we were queueing, its onFinished
+  // may have already drained — re-check and drain-start ourselves if the run
+  // is terminal and our message is still queued.
+  const nowTerminal = await db.aiRun.findFirst({
+    where: { id: primaryRunId, status: { in: ["SUCCEEDED", "FAILED"] } },
+    select: { id: true }
+  });
+  if (!nowTerminal || queuedFollowUps.get(primaryRunId) !== queue) {
+    return { action: "queued", aiRunId: primaryRunId };
+  }
+  queuedFollowUps.delete(primaryRunId);
+  return null;
+}
+
 type StartSlackRunArgs = {
   deps: SlackEventDeps;
   surface: "mention" | "dm";
@@ -508,6 +581,114 @@ export async function startSlackConversationRun(args: StartSlackRunArgs): Promis
   return aiRun.id;
 }
 
+export type SlackThreadDelivery = {
+  /** "steered" = injected into a live run, "queued" = ⏳ follow-up, "started" = new run. */
+  outcome: "steered" | "queued" | "started";
+  aiRunId: string;
+  documentId: string;
+  /** The conversation key of the target thread ("<channel>:<threadTs>" without the channel). */
+  threadTs: string;
+};
+
+/**
+ * Deliver a message into ANY Slack thread as if a user had sent it there.
+ *
+ * This is the path behind the agent's `message_thread` tool (the "supervisor"
+ * capability): the caller has already posted the message to Slack for humans to
+ * see, and this routes it exactly like an incoming user message — steer the live
+ * run of that thread, ⏳-queue behind an unsteerable one, or start a new
+ * conversation run. Authorization is the CALLER's job (see assertReadable in
+ * lib/slack/agent-tools.ts); this function only routes.
+ */
+export async function deliverSlackThreadMessage(args: {
+  deps: SlackEventDeps;
+  teamId: string;
+  channel: string;
+  /** Root ts of the target thread. Omit to start a new conversation there. */
+  threadTs?: string;
+  /** ts of the Slack message carrying this text (reaction anchor / new thread key). */
+  anchorTs?: string;
+  /** Who the message is from, as shown to the target agent. */
+  senderName: string;
+  /** Message body (steering framing is added by buildSteeringMessage). */
+  text: string;
+  /** Instruction for a fresh run; defaults to `text`. */
+  instruction?: string;
+  /** rdocs user the run executes as (its credentials are used). */
+  userId: string;
+  slackUserId: string;
+}): Promise<SlackThreadDelivery> {
+  const { deps, channel } = args;
+  const conversationKey = args.threadTs ?? args.anchorTs;
+  if (!conversationKey) {
+    throw new Error("deliverSlackThreadMessage needs threadTs or anchorTs");
+  }
+  const surface = channel.startsWith("D") ? "dm" : "mention";
+  const channelName = surface === "dm" ? null : (await deps.slack.channelInfo(channel))?.name ?? null;
+  const user = await db.user.findUnique({ where: { id: args.userId }, select: { email: true } });
+  const document = await ensureSlackChannelDocument({
+    slackTeamId: args.teamId,
+    slackChannelId: channel,
+    channelName,
+    userId: args.userId,
+    surface: surface === "dm" ? "dm" : "channel"
+  });
+  const triggerId = `${channel}:${conversationKey}`;
+
+  // One thread = one agent session: an existing session is steered, never raced.
+  if (args.anchorTs) {
+    const activeRuns = await db.aiRun.findMany({
+      where: { documentId: document.id, status: { in: ["RUNNING", "PENDING"] }, triggerId },
+      orderBy: { startedAt: "desc" },
+      select: { id: true }
+    });
+    if (activeRuns.length > 0) {
+      const delivered = await steerOrQueueThreadMessage({
+        deps,
+        channel,
+        anchorTs: args.anchorTs,
+        senderName: args.senderName,
+        activeRunIds: activeRuns.map((run) => run.id),
+        text: args.text,
+        userId: args.userId,
+        slackUserId: args.slackUserId
+      });
+      if (delivered) {
+        return {
+          outcome: delivered.action === "injected" ? "steered" : "queued",
+          aiRunId: delivered.aiRunId,
+          documentId: document.id,
+          threadTs: conversationKey
+        };
+      }
+    }
+  }
+
+  const previousRun = await db.aiRun.findFirst({
+    where: { documentId: document.id, triggerId, status: { in: ["SUCCEEDED", "FAILED"] } },
+    orderBy: { startedAt: "desc" },
+    select: { id: true }
+  });
+  const aiRunId = await startSlackConversationRun({
+    deps,
+    surface,
+    document,
+    channel,
+    channelName,
+    teamId: args.teamId,
+    triggerId,
+    replyThreadTs: conversationKey,
+    reactionAnchors: args.anchorTs ? [{ ts: args.anchorTs }] : [],
+    instruction: (args.instruction ?? args.text).slice(0, MAX_INSTRUCTION_LENGTH),
+    userId: args.userId,
+    slackUserId: args.slackUserId,
+    parentRunId: previousRun?.id ?? null,
+    channelContext: null,
+    hostDevRun: isHostDevRun(channel, user?.email ?? "")
+  });
+  return { outcome: "started", aiRunId, documentId: document.id, threadTs: conversationKey };
+}
+
 async function handleIncomingSlackMessage(
   event: SlackIncomingMessage,
   deps: SlackEventDeps,
@@ -601,53 +782,19 @@ async function handleIncomingSlackMessage(
     }
     const senderName = (await deps.slack.userInfo(event.user))?.displayName ?? event.user;
 
-    // Preferred path: inject the message straight into the RUNNING agent
-    // session, so it steers the work in progress instead of becoming a
-    // separate run afterwards. Only backends that hold an open input channel
-    // for the run (in-process / container, Claude harness) accept this; every
-    // other case returns false and falls through to the queue below.
-    const inject = deps.injectRunMessage ?? injectRunMessage;
-    const steeringText = buildSteeringMessage(senderName, instructionBody);
-    const steeredRunId = activeRuns.map((run) => run.id).find((id) => inject(id, steeringText)) ?? null;
-    if (steeredRunId) {
-      await recordAiRunEvent({
-        aiRunId: steeredRunId,
-        role: "user",
-        message: instructionBody
-      }).catch(() => null);
-      const anchors = steeredRunAnchors.get(steeredRunId) ?? [];
-      anchors.push({ ts: event.ts });
-      steeredRunAnchors.set(steeredRunId, anchors);
-      await deps.slack
-        .addReaction({ channel: event.channel, ts: event.ts, name: "eyes" })
-        .catch(() => null);
-      return { handled: true as const, action: "injected" as const, aiRunId: steeredRunId };
-    }
-
-    // Fallback: queue for a follow-up run when the active one ends.
-    const queue = queuedFollowUps.get(activeRun.id) ?? [];
-    queue.push({
-      userId: link.userId,
-      slackUserId: event.user,
+    const delivered = await steerOrQueueThreadMessage({
+      deps,
+      channel: event.channel,
+      anchorTs: event.ts,
       senderName,
+      activeRunIds: activeRuns.map((run) => run.id),
       text: instructionBody,
-      ts: event.ts
+      userId: link.userId,
+      slackUserId: event.user
     });
-    queuedFollowUps.set(activeRun.id, queue);
-    await deps.slack
-      .addReaction({ channel: event.channel, ts: event.ts, name: "hourglass_flowing_sand" })
-      .catch(() => null);
-    // Race guard: if the run finished while we were queueing, its onFinished
-    // may have already drained — re-check and drain-start ourselves if the run
-    // is terminal and our message is still queued.
-    const nowTerminal = await db.aiRun.findFirst({
-      where: { id: activeRun.id, status: { in: ["SUCCEEDED", "FAILED"] } },
-      select: { id: true }
-    });
-    if (!nowTerminal || queuedFollowUps.get(activeRun.id) !== queue) {
-      return { handled: true as const, action: "queued" as const, aiRunId: activeRun.id };
+    if (delivered) {
+      return { handled: true as const, action: delivered.action, aiRunId: delivered.aiRunId };
     }
-    queuedFollowUps.delete(activeRun.id);
   }
 
   const previousRun = await db.aiRun.findFirst({

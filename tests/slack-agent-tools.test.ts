@@ -13,9 +13,12 @@ const BOT = "UBOT";
 const uploads: Array<{ channel: string; threadTs?: string; filename: string; size: number }> = [];
 const postedMessages: Array<{ channel: string; threadTs?: string; text: string }> = [];
 
+let postedCounter = 0;
+
 function makeSlack(): SlackClient {
   const membership: Record<string, string[]> = {
     C_BOTH: [BOT, "UALICE", "UBOB"],
+    C_OTHER: [BOT, "UALICE", "UBOB"],
     C_ALICE: [BOT, "UALICE"],
     C_NOBOT: ["UALICE"]
   };
@@ -26,7 +29,8 @@ function makeSlack(): SlackClient {
   return {
     async postMessage(args) {
       postedMessages.push(args);
-      return { ts: null };
+      postedCounter += 1;
+      return { ts: `90${postedCounter}.0` };
     },
     async postEphemeral() {},
     async addReaction() {},
@@ -383,4 +387,196 @@ test("post_slack_message posts only into the run's own thread", async () => {
     threadTs: "1.0",
     text: "*Update*: checking another thread"
   });
+});
+
+// message_thread is the supervisor capability: the agent in one thread drives the
+// agent working in ANOTHER thread by delivering a message that is treated exactly
+// like a human Slack message there (steer the live run, else start a new one).
+// It must not weaken the read-tool membership rule, and must not be usable to
+// talk to itself (that is what submit_response / post_slack_message are for).
+async function messageThreadFixture(prefix: string) {
+  const crypto = await import("node:crypto");
+  const { db } = await import("../lib/db");
+  const teamId = `T-${crypto.randomUUID()}`;
+  const user = await db.user.create({
+    data: { email: `${prefix}-${crypto.randomUUID()}@example.com`, name: prefix, passwordHash: "x" }
+  });
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UBOB", userId: user.id }
+  });
+  const channelDoc = await db.document.create({
+    data: {
+      ownerId: user.id,
+      kind: "slack_channel",
+      slackTeamId: teamId,
+      slackChannelId: "C_BOTH",
+      title: "#both",
+      content: "{}"
+    }
+  });
+  const callerRun = await db.aiRun.create({
+    data: {
+      documentId: channelDoc.id,
+      triggerType: "SLACK_MENTION",
+      triggerId: "C_BOTH:1.0",
+      instruction: "supervise",
+      status: "SUCCEEDED"
+    }
+  });
+  return {
+    db,
+    teamId,
+    user,
+    channelDoc,
+    callerRun,
+    claims: { slackTeamId: teamId, slackUserId: "UBOB", aiRunId: callerRun.id }
+  };
+}
+
+test("message_thread refuses empty text, its own thread, and unreadable channels", async () => {
+  const { claims } = await messageThreadFixture("mt-deny");
+  const slack = makeSlack();
+  const before = postedMessages.length;
+
+  const empty = await handleSlackAgentToolCall(
+    { tool: "message_thread", args: { channel_id: "C_BOTH", thread_ts: "9.9", text: "   " } },
+    { claims, slack, botUserId: BOT }
+  );
+  assert.equal(empty.ok, false);
+  assert.match(empty.text, /text is required/);
+
+  const own = await handleSlackAgentToolCall(
+    { tool: "message_thread", args: { channel_id: "C_BOTH", thread_ts: "1.0", text: "hello me" } },
+    { claims, slack, botUserId: BOT }
+  );
+  assert.equal(own.ok, false);
+  assert.match(own.text, /own conversation/i);
+
+  // Same channel, no thread_ts: also the caller's own conversation surface.
+  const ownChannel = await handleSlackAgentToolCall(
+    { tool: "message_thread", args: { channel_id: "C_BOTH", text: "hello me" } },
+    { claims, slack, botUserId: BOT }
+  );
+  assert.equal(ownChannel.ok, false);
+
+  // Bob is not in Alice's private channel — same rule as the read tools.
+  const denied = await handleSlackAgentToolCall(
+    { tool: "message_thread", args: { channel_id: "C_ALICE", thread_ts: "2.0", text: "do my bidding" } },
+    { claims, slack, botUserId: BOT }
+  );
+  assert.equal(denied.ok, false);
+  assert.match(denied.text, /not a member/);
+
+  assert.equal(postedMessages.length, before, "a refused message_thread must not post anything to Slack");
+});
+
+test("message_thread steers a live run in the target thread", async () => {
+  const { db, channelDoc, claims } = await messageThreadFixture("mt-steer");
+  const targetRun = await db.aiRun.create({
+    data: {
+      documentId: channelDoc.id,
+      triggerType: "SLACK_MENTION",
+      triggerId: "C_BOTH:9.9",
+      instruction: "work on the migration",
+      status: "RUNNING"
+    }
+  });
+  const injected: Array<{ aiRunId: string; text: string }> = [];
+  const slack = makeSlack();
+  const before = postedMessages.length;
+
+  const result = await handleSlackAgentToolCall(
+    { tool: "message_thread", args: { channel_id: "C_BOTH", thread_ts: "9.9", text: "the build is fixed, retry it" } },
+    {
+      claims,
+      slack,
+      botUserId: BOT,
+      startRun: async () => {
+        throw new Error("must steer the live run instead of starting a new one");
+      },
+      injectRunMessage: (aiRunId, text) => {
+        injected.push({ aiRunId, text });
+        return true;
+      }
+    }
+  );
+  assert.ok(result.ok, result.text);
+  assert.match(result.text, /steer/i);
+  assert.deepEqual(
+    injected.map((i) => i.aiRunId),
+    [targetRun.id]
+  );
+  assert.match(injected[0].text, /still working/i, "delivered with the steering framing");
+  assert.match(injected[0].text, /the build is fixed, retry it/);
+
+  // Visible in Slack, attributed to the originating conversation.
+  assert.equal(postedMessages.length, before + 1);
+  const posted = postedMessages.at(-1)!;
+  assert.equal(posted.channel, "C_BOTH");
+  assert.equal(posted.threadTs, "9.9");
+  assert.match(posted.text, /the build is fixed, retry it/);
+  assert.match(posted.text, /#x|C_BOTH/, "names where the message came from");
+
+  const events = await db.aiRunEvent.findMany({ where: { aiRunId: targetRun.id } });
+  assert.ok(
+    events.some((event) => event.message.includes("the build is fixed, retry it")),
+    "the steered run's timeline records the incoming message"
+  );
+
+  await db.aiRun.update({ where: { id: targetRun.id }, data: { status: "FAILED", error: "test cleanup" } });
+});
+
+test("message_thread starts a new run when the target thread is idle", async () => {
+  const { db, channelDoc, claims } = await messageThreadFixture("mt-start");
+  const started: Array<{ documentId: string; aiRunId: string; message: string }> = [];
+  const slack = makeSlack();
+
+  const inThread = await handleSlackAgentToolCall(
+    { tool: "message_thread", args: { channel_id: "C_BOTH", thread_ts: "7.7", text: "please review PR 12" } },
+    {
+      claims,
+      slack,
+      botUserId: BOT,
+      startRun: async (input) => {
+        started.push({ documentId: input.documentId, aiRunId: input.aiRunId, message: input.message });
+      },
+      injectRunMessage: () => false
+    }
+  );
+  assert.ok(inThread.ok, inThread.text);
+  assert.match(inThread.text, /started/i);
+  assert.equal(started.length, 1);
+  assert.equal(started[0].documentId, channelDoc.id);
+  assert.match(started[0].message, /please review PR 12/);
+  const threadRun = await db.aiRun.findUnique({ where: { id: started[0].aiRunId } });
+  assert.equal(threadRun?.triggerId, "C_BOTH:7.7");
+  assert.equal(threadRun?.triggerType, "SLACK_MENTION");
+  assert.equal(postedMessages.at(-1)?.threadTs, "7.7");
+
+  // No thread_ts: a fresh top-level message in another channel becomes the thread.
+  const topLevel = await handleSlackAgentToolCall(
+    { tool: "message_thread", args: { channel_id: "C_OTHER", text: "kick off the nightly eval" } },
+    {
+      claims,
+      slack,
+      botUserId: BOT,
+      startRun: async (input) => {
+        started.push({ documentId: input.documentId, aiRunId: input.aiRunId, message: input.message });
+      },
+      injectRunMessage: () => false
+    }
+  );
+  assert.ok(topLevel.ok, topLevel.text);
+  assert.match(topLevel.text, /started/i);
+  assert.equal(started.length, 2);
+  const postedTop = postedMessages.at(-1)!;
+  assert.equal(postedTop.channel, "C_OTHER");
+  assert.equal(postedTop.threadTs, undefined, "a new conversation is a top-level message");
+  const topRun = await db.aiRun.findUnique({ where: { id: started[1].aiRunId } });
+  assert.match(topRun!.triggerId!, /^C_OTHER:9\d+\.0$/, "the posted message's ts becomes the conversation key");
+  assert.notEqual(topRun?.documentId, channelDoc.id, "another channel gets its own channel document");
+
+  for (const entry of started) {
+    await db.aiRun.update({ where: { id: entry.aiRunId }, data: { status: "FAILED", error: "test cleanup" } });
+  }
 });

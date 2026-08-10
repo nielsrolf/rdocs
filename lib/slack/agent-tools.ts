@@ -10,6 +10,7 @@
 // Slack per call, so leaving a channel takes effect immediately.
 
 import { db } from "@/lib/db";
+import type { SlackEventDeps } from "@/lib/slack/events";
 import type { SlackToolsClaims } from "@/lib/slack/link-token";
 import { markdownToMrkdwn } from "@/lib/slack/mrkdwn";
 import type { SlackClient, SlackMessage } from "@/lib/slack/web";
@@ -17,6 +18,7 @@ import type { SlackClient, SlackMessage } from "@/lib/slack/web";
 export type SlackAgentToolRequest = {
   tool:
     | "post_slack_message"
+    | "message_thread"
     | "list_slack_channels"
     | "read_slack_channel"
     | "read_slack_thread"
@@ -87,7 +89,16 @@ function clampLimit(value: unknown, fallback: number) {
 
 export async function handleSlackAgentToolCall(
   request: SlackAgentToolRequest,
-  context: { claims: SlackToolsClaims; slack: SlackClient; botUserId: string }
+  context: {
+    claims: SlackToolsClaims;
+    slack: SlackClient;
+    botUserId: string;
+    /** Base URL handed to runs started by message_thread (defaults to APP_URL). */
+    appUrl?: string;
+    /** Injectable run starter / steering hook, for tests (see SlackEventDeps). */
+    startRun?: SlackEventDeps["startRun"];
+    injectRunMessage?: SlackEventDeps["injectRunMessage"];
+  }
 ): Promise<SlackAgentToolResult> {
   const { claims, slack, botUserId } = context;
 
@@ -108,6 +119,113 @@ export async function handleSlackAgentToolCall(
       text: markdownToMrkdwn(text.slice(0, 2000))
     });
     return { ok: true, text: "Posted. Do not repeat this update in the final reply." };
+  }
+
+  // message_thread: the supervisor capability. The agent working in one thread
+  // sends a message into ANOTHER thread, where it is treated exactly like a
+  // human Slack message — it steers that thread's live agent session, or starts
+  // a new run there. Two things must hold:
+  //  - Access is the SAME rule as the read tools (assertReadable): bot AND the
+  //    triggering user are members of the target channel. Anything weaker would
+  //    make the bot a confused deputy that can drive work in channels the
+  //    requesting user cannot even see.
+  //  - It is always visible in Slack first, prefixed with where it came from, so
+  //    humans in the target thread see who is driving their agent.
+  if (request.tool === "message_thread") {
+    const run = await db.aiRun.findUnique({
+      where: { id: claims.aiRunId },
+      select: { triggerId: true }
+    });
+    if (!run?.triggerId) {
+      return { ok: false, text: "This run has no Slack conversation, so it cannot message other threads." };
+    }
+    const [runChannel, runThreadTs] = run.triggerId.split(":", 2);
+    const channelId = typeof request.args.channel_id === "string" ? request.args.channel_id.trim() : "";
+    const threadTs = typeof request.args.thread_ts === "string" ? request.args.thread_ts.trim() : "";
+    const text = typeof request.args.text === "string" ? request.args.text.trim() : "";
+    if (!channelId) return { ok: false, text: "channel_id is required." };
+    if (!text) return { ok: false, text: "text is required." };
+    // Loop guard: messaging your own conversation would make you steer (or
+    // re-trigger) yourself. Omitting thread_ts in your own channel is the same
+    // trap one level up, so both are refused.
+    if (channelId === runChannel && (!threadTs || threadTs === runThreadTs)) {
+      return {
+        ok: false,
+        text:
+          "That is your own conversation — message_thread is only for OTHER threads. " +
+          "Reply normally with submit_response, or post an interim update with post_slack_message."
+      };
+    }
+    const denied = await assertReadable(slack, botUserId, claims, channelId);
+    if (denied) return { ok: false, text: denied };
+    const link = await db.slackAccountLink.findUnique({
+      where: {
+        slackTeamId_slackUserId: { slackTeamId: claims.slackTeamId, slackUserId: claims.slackUserId }
+      }
+    });
+    if (!link) {
+      return { ok: false, text: "This Slack account is not linked to an rdocs account." };
+    }
+
+    const originName = (await slack.channelInfo(runChannel))?.name ?? null;
+    const originLabel = originName ? `#${originName.replace(/^#/, "")}` : runChannel;
+    const senderName = `the claudex agent working in ${originLabel}`;
+    const body = text.slice(0, 2000);
+    const posted = await slack.postMessage({
+      channel: channelId,
+      ...(threadTs ? { threadTs } : {}),
+      text: `:robot_face: Message from ${senderName} (on behalf of <@${claims.slackUserId}>):\n${markdownToMrkdwn(body)}`
+    });
+    const anchorTs = posted.ts ?? undefined;
+    if (!threadTs && !anchorTs) {
+      return {
+        ok: false,
+        text: "Slack did not return a timestamp for the posted message, so no agent run could be started there."
+      };
+    }
+
+    const { deliverSlackThreadMessage } = await import("@/lib/slack/events");
+    const delivery = await deliverSlackThreadMessage({
+      deps: {
+        slack,
+        botUserId,
+        appUrl: context.appUrl ?? process.env.APP_URL?.trim() ?? "http://localhost:14141",
+        startRun: context.startRun,
+        injectRunMessage: context.injectRunMessage
+      },
+      teamId: claims.slackTeamId,
+      channel: channelId,
+      threadTs: threadTs || undefined,
+      anchorTs,
+      senderName,
+      text: body,
+      instruction: `Message from ${senderName}:\n\n${body}`,
+      userId: link.userId,
+      slackUserId: claims.slackUserId
+    });
+    const where = `${originLabel === channelId ? channelId : channelId} thread ${delivery.threadTs}`;
+    if (delivery.outcome === "steered") {
+      return {
+        ok: true,
+        text:
+          `Delivered: it steered the agent run already working in ${where} (run ${delivery.aiRunId}). ` +
+          `That agent replies in ITS thread, not to you — read it later with read_slack_thread if you need the answer.`
+      };
+    }
+    if (delivery.outcome === "queued") {
+      return {
+        ok: true,
+        text:
+          `Posted, and queued for ${where}: a run there is busy and could not be steered, so your message ` +
+          `becomes a follow-up run as soon as it finishes (run ${delivery.aiRunId}).`
+      };
+    }
+    return {
+      ok: true,
+      text:
+        `Posted, and started a new agent run in ${where} (run ${delivery.aiRunId}). ` +
+        `It replies in that thread — read it later with read_slack_thread if you need the answer.`
+    };
   }
 
   if (request.tool === "recent_activity") {
