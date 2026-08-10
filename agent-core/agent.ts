@@ -36,7 +36,20 @@ import {
 } from "./ai-edit-submission";
 import { evaluateToolPathAccess } from "./agent-sandbox";
 import type { AgentInputChannel } from "./input-channel";
-import { createTurnPark, MAX_KEEP_ALIVE_MINUTES, PARK_TIMEOUT_NUDGE } from "./turn-park";
+import {
+  buildBackgroundWorkQuestion,
+  createTurnPark,
+  KEEP_ALIVE_EXPIRED_NUDGE,
+  KEEP_ALIVE_RECHECK_MS,
+  KEEP_ALIVE_RECHECK_NUDGE,
+  MAX_KEEP_ALIVE_MINUTES,
+  PARK_TIMEOUT_NUDGE
+} from "./turn-park";
+import {
+  createBackgroundTaskTracker,
+  describeBackgroundWork,
+  scanContainerBackgroundProcesses
+} from "./background-work";
 import { toolsForAgentAccess, type AgentAccessMode } from "./ai-tools";
 import {
   PREPARING_DOCUMENT_UPDATE,
@@ -268,6 +281,7 @@ const RECENT_ACTIVITY_TOOL_NAME = "mcp__gdocs__recent_activity";
 const SCHEDULE_TOOL_NAMES = [
   "mcp__gdocs__schedule_task",
   "mcp__gdocs__check_back_later",
+  "mcp__gdocs__keep_alive_after_turn",
   "mcp__gdocs__list_scheduled_tasks",
   "mcp__gdocs__cancel_scheduled_task"
 ];
@@ -703,7 +717,7 @@ function buildUserPromptRaw(input: ClaudeResearchAgentInput) {
         }). Your submit_response reply is posted to the Slack thread — write it as a chat message: concise Markdown, no long report unless asked (it is converted to Slack formatting for you).
 While you work you may post short interim updates to the thread with the post_slack_message tool (e.g. what you found so far, or that a step will take a while). Default to ONE message per round of conversation: every unnecessary interim message fragments the thread. Never use post_slack_message for the final answer, which always goes through submit_response. Everything you post goes to the CURRENT thread only — never attempt to reach other channels or threads via shell/curl; use only the provided tools.${
           input.slackTools
-            ? "\nYou can also inspect other Slack content with list_slack_channels / read_slack_channel / read_slack_thread. Access is enforced server-side: only channels that both you (the bot) and the requesting user are members of are readable.\nYou can also SUPERVISE agents working in other threads with message_thread(channel_id, thread_ts?, text): the message is posted to that thread (labelled as coming from you) and treated exactly like a message from a person there — it steers the agent already working in that thread, or starts a new agent run there. Omit thread_ts to open a NEW top-level thread in that channel. Use it to unblock, redirect or delegate to another agent; the answer comes back in THAT thread, so read it later with read_slack_thread. Same membership rule as the read tools, and never for your own conversation.\nYou can schedule (recurring) work with schedule_task / list_scheduled_tasks / cancel_scheduled_task — each firing runs as a fresh agent run in this conversation with the scheduling user's credentials. Only schedule when explicitly asked; always confirm the schedule you set in your reply.\nFor work that takes longer than a couple of minutes (training runs, builds, long scripts, waiting on someone else), do NOT sit in a sleep/poll loop — waiting burns your context window. Instead: (1) start the work in the background (e.g. `nohup <cmd> > /tmp/job.log 2>&1 &`), (2) call check_back_later with a delay (up to " + MAX_KEEP_ALIVE_MINUTES + " minutes keeps THIS session, its container and your background processes alive; longer delays end the session and wake you in a fresh run with a clean workspace) and a self-contained note to your future self (what you started, where the logs are, how to tell whether it finished, what to do next), (3) if the user should know what is running, post ONE short post_slack_message, and then END your turn WITHOUT calling submit_response — submitting ends the run and kills the background work. When the alarm fires you get your note as a message in this thread and continue right where you were: if the work is still running, check_back_later again; if it is done, report the result with submit_response. Prefer a few longer waits over many short ones.\nThe rdocs MCP server (tools starting with mcp__rdocs__) gives you the requesting user's rdocs documents: list, read, edit, comment — you act with exactly their document access.\nFiles the user attaches in Slack appear in your workspace under attachments/; share files back into the thread with send_slack_file."
+            ? "\nYou can also inspect other Slack content with list_slack_channels / read_slack_channel / read_slack_thread. Access is enforced server-side: only channels that both you (the bot) and the requesting user are members of are readable.\nYou can also SUPERVISE agents working in other threads with message_thread(channel_id, thread_ts?, text): the message is posted to that thread (labelled as coming from you) and treated exactly like a message from a person there — it steers the agent already working in that thread, or starts a new agent run there. Omit thread_ts to open a NEW top-level thread in that channel. Use it to unblock, redirect or delegate to another agent; the answer comes back in THAT thread, so read it later with read_slack_thread. Same membership rule as the read tools, and never for your own conversation.\nYou can schedule (recurring) work with schedule_task / list_scheduled_tasks / cancel_scheduled_task — each firing runs as a fresh agent run in this conversation with the scheduling user's credentials. Only schedule when explicitly asked; always confirm the schedule you set in your reply.\nFor work that takes longer than a couple of minutes (training runs, builds, long scripts, waiting on someone else), do NOT sit in a sleep/poll loop — waiting burns your context window. Instead: (1) start the work in the background (e.g. `nohup <cmd> > /tmp/job.log 2>&1 &`), (2) call check_back_later with a delay (up to " + MAX_KEEP_ALIVE_MINUTES + " minutes keeps THIS session, its container and your background processes alive; longer delays end the session and wake you in a fresh run with a clean workspace) and a self-contained note to your future self (what you started, where the logs are, how to tell whether it finished, what to do next), (3) if the user should know what is running, post ONE short post_slack_message, and then END your turn WITHOUT calling submit_response — submitting ends the run and kills the background work. When the alarm fires you get your note as a message in this thread and continue right where you were: if the work is still running, check_back_later again; if it is done, report the result with submit_response. Prefer a few longer waits over many short ones.\nWhen the timing of background work is OPEN-ENDED (you cannot say when to check back) or you want the session to stay alive regardless of messages arriving in between, call keep_alive_after_turn with enabled=true instead: the session then survives every turn end — including turns where you reply to a user message mid-wait — until you call it with enabled=false and submit. The host checks in with you periodically while it is on. Answering a user's question mid-wait does NOT protect your background work by itself: only a pending check_back_later or keep-alive on does.\nThe rdocs MCP server (tools starting with mcp__rdocs__) gives you the requesting user's rdocs documents: list, read, edit, comment — you act with exactly their document access.\nFiles the user attaches in Slack appear in your workspace under attachments/; share files back into the thread with send_slack_file."
             : ""
         }
 ${
@@ -1095,16 +1109,23 @@ async function runClaudeResearchAgentOnce(
     `Submit the final response for this turn. After it is accepted, end your turn. If it is rejected or its arguments are malformed, fix the reported issue and call submit_response again (up to ${MAX_SUBMISSION_ATTEMPTS} total attempts).`,
     submitResponseSchema,
     async (args) => {
-      // Submitting while a wake-up is pending would end the run — and with it the
-      // container holding the agent's background job. Warn once; a second submit
-      // is honored so the agent can still get out (e.g. after cancelling).
-      if (turnPark.isArmed() && !parkSubmitOverride) {
+      // Submitting while a wake-up is pending (or keep-alive is on) would end
+      // the run — and with it the container holding the agent's background job.
+      // Warn once; a second submit is honored so the agent can still get out
+      // (e.g. after cancelling / turning keep-alive off).
+      if ((turnPark.isArmed() || turnPark.keepAliveEnabled()) && !parkSubmitOverride) {
         parkSubmitOverride = true;
+        const reason = turnPark.isArmed()
+          ? "A check_back_later wake-up is pending and this session stays alive until it arrives"
+          : "keep_alive_after_turn is ON, so this session is being kept alive for your background work";
+        const wayOut = turnPark.isArmed()
+          ? "cancel the pending wake-up with cancel_scheduled_task"
+          : "call keep_alive_after_turn with enabled=false";
         return {
           content: [
             {
               type: "text" as const,
-              text: "Not submitted. A check_back_later wake-up is pending and this session stays alive until it arrives; submit_response would end the run now and kill the background work you started. End your turn WITHOUT submitting — if the user needs a status, post it with post_slack_message first. If you are genuinely finished, cancel the pending wake-up with cancel_scheduled_task and then call submit_response again."
+              text: `Not submitted. ${reason}; submit_response would end the run now and kill the background work you started. End your turn WITHOUT submitting — if the user needs a status, post it with post_slack_message first. If you are genuinely finished, ${wayOut} and then call submit_response again.`
             }
           ],
           isError: true
@@ -1429,6 +1450,70 @@ async function runClaudeResearchAgentOnce(
       return { content: [{ type: "text" as const, text: `${serverText}${note}` }] };
     }
   );
+  // State-based sibling of check_back_later: instead of an alarm (event), the
+  // agent declares "this session has background work worth keeping alive". The
+  // flag survives message delivery and turn boundaries — the failure mode this
+  // fixes is a user message landing mid-park, the agent replying without
+  // re-arming, and the run ending killed its own background job.
+  const keepAliveTool = tool(
+    "keep_alive_after_turn",
+    `Control whether this agent session stays alive when your turn ends. Call with enabled=true when you have background work (detached processes, background Bash tasks, a server under test) whose lifetime is open-ended: the session, its container, files and processes then survive across turns until you call this with enabled=false and submit — the host will check in with you every ${Math.round(
+      KEEP_ALIVE_RECHECK_MS / 60_000
+    )} minutes. Unlike check_back_later (which you should still prefer when you KNOW when to check back), this state persists even when messages are delivered mid-wait. Call with enabled=false once the background work is done or disposable, then submit your final response. While enabled, do NOT call submit_response — end your turn without it.`,
+    {
+      enabled: z.boolean().describe("true: keep the session alive after this turn ends; false: allow it to end normally."),
+      note: z
+        .string()
+        .max(2000)
+        .optional()
+        .describe("Optional note about WHAT is running and how to check on it (shown in the run timeline).")
+    },
+    async (args) => {
+      const enabled = Boolean((args as { enabled?: unknown }).enabled);
+      const note = typeof (args as { note?: unknown }).note === "string" ? ((args as { note?: string }).note as string) : "";
+      if (enabled && captured) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "Not enabled: you already submitted your final response, so this run is finishing and cannot be kept alive. Background work must be started and kept alive BEFORE submitting."
+            }
+          ],
+          isError: true
+        };
+      }
+      if (enabled && !options.inputChannel) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "KEEP-ALIVE UNAVAILABLE: this run has no live steering channel, so the session cannot idle after the turn ends. Persist your background work's state (commit files, note log locations) and schedule a wake-up with check_back_later or schedule_task instead — the follow-up run starts fresh."
+            }
+          ],
+          isError: true
+        };
+      }
+      turnPark.setKeepAlive(enabled);
+      emitProgress(onProgress, {
+        role: "system",
+        message: enabled
+          ? `Keep-alive enabled: the session stays alive after each turn for background work.${note ? ` Note: ${note}` : ""}`
+          : "Keep-alive disabled: the session ends normally when the turn finishes."
+      });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: enabled
+              ? `KEEP-ALIVE ON: this session, its container, files and background processes now survive turn ends until you disable it. The host checks in every ${Math.round(
+                  KEEP_ALIVE_RECHECK_MS / 60_000
+                )} minutes; you can also still set a precise wake-up with check_back_later. Do NOT call submit_response while it is on — post a short status with post_slack_message if the user should know, then end your turn.`
+              : "KEEP-ALIVE OFF: the session ends normally when this turn finishes. If background work is still running it will be killed with the container — make sure that is intended, then submit your final response."
+          }
+        ]
+      };
+    }
+  );
   const listScheduledTasksTool = tool(
     "list_scheduled_tasks",
     "List the active scheduled tasks of this Slack channel/conversation.",
@@ -1515,6 +1600,7 @@ async function runClaudeResearchAgentOnce(
             sendSlackFileTool,
             scheduleTaskTool,
             checkBackLaterTool,
+            keepAliveTool,
             listScheduledTasksTool,
             cancelScheduledTaskTool
           ]
@@ -1607,8 +1693,11 @@ async function runClaudeResearchAgentOnce(
       ? `\n\nRun environment: these environment variables are set for this run and available in Bash and any subprocess (values hidden): ${promptEnvKeys.join(", ")}. Use them to decide which services/providers you can call — e.g. use a provider's API directly only when its key is present (OPENAI_API_KEY → OpenAI directly; LITELLM_API_KEY + LITELLM_BASE_URL → an OpenAI-compatible LiteLLM proxy serving many models; GITHUB_TOKEN → authenticated gh/git). Never print or commit their values.`
       : `\n\nRun environment: no API keys or custom environment variables are configured for this run. Do not assume provider keys (e.g. OPENAI_API_KEY) exist; scripts that need one will fail until the user adds it via the document's Env menu.`;
 
-  // A delivered message ends the park: the wake-up (or a user follow-up) arrived,
-  // so the next turn decides on its own whether to park again or submit.
+  // A delivered message ends the ALARM park: the wake-up (or a user follow-up)
+  // arrived, so the next turn decides on its own whether to park again or
+  // submit. Keep-alive deliberately survives delivery — a mid-park user message
+  // ("how is it going?") must not cause the reply turn to end the run and kill
+  // the agent's background work (the 2026-08-10 incident).
   const steeringChannel: AgentInputChannel | undefined = options.inputChannel
     ? {
         ...options.inputChannel,
@@ -1634,7 +1723,11 @@ async function runClaudeResearchAgentOnce(
     });
     parkTimer = setTimeout(() => {
       parkTimer = null;
+      // Delivery already cleared the deadline → the wake-up DID arrive; with
+      // keep-alive the channel may still be open, so don't push a stale nudge.
+      const stillWaiting = turnPark.deadlineMs() != null;
       turnPark.disarm();
+      if (!stillWaiting) return;
       const channel = options.inputChannel;
       if (!channel || channel.isClosed()) return;
       // Push, don't close: the nudge gets one more turn, and the result frame of
@@ -1642,6 +1735,51 @@ async function runClaudeResearchAgentOnce(
       if (!channel.push(PARK_TIMEOUT_NUDGE)) channel.close();
     }, turnPark.remainingMs());
     parkTimer.unref?.();
+  }
+
+  // Keep-alive parking (state-based, agent-controlled): while enabled the
+  // channel stays open at every result frame and the host periodically checks
+  // in with the agent, so a forgotten daemon cannot pin the container silently
+  // forever. The recheck is a pushed message, so it gets a full agent turn.
+  let keepAliveTimer: ReturnType<typeof setTimeout> | null = null;
+  function armKeepAliveTimer() {
+    if (keepAliveTimer) clearTimeout(keepAliveTimer);
+    emitProgress(onProgress, {
+      role: "system",
+      message: `Session parked with keep-alive on (container and background jobs stay alive; next check-in in ${Math.round(
+        KEEP_ALIVE_RECHECK_MS / 60_000
+      )} min).`
+    });
+    keepAliveTimer = setTimeout(() => {
+      keepAliveTimer = null;
+      const channel = options.inputChannel;
+      if (!channel || channel.isClosed()) return;
+      if (turnPark.keepAliveExpired()) {
+        // TTL reached: force keep-alive off so the wrap-up turn's result frame
+        // actually ends the run, and tell the agent this is the last turn.
+        turnPark.setKeepAlive(false);
+        if (!channel.push(KEEP_ALIVE_EXPIRED_NUDGE)) channel.close();
+        return;
+      }
+      if (!turnPark.keepAliveEnabled()) return;
+      if (!channel.push(KEEP_ALIVE_RECHECK_NUDGE)) channel.close();
+    }, KEEP_ALIVE_RECHECK_MS);
+    keepAliveTimer.unref?.();
+  }
+
+  // Advisory background-work detection for the turn boundary: tracked
+  // background Bash tasks from the SDK stream plus (inside a container, where
+  // agent-core is PID 1) a scan for live non-infra processes. Used only to ASK
+  // the agent once when it ends a turn without deciding — never to keep a
+  // session alive on its own.
+  const backgroundTracker = createBackgroundTaskTracker();
+  let backgroundQuestionAsked = false;
+  function detectBackgroundWork(): string[] {
+    try {
+      return describeBackgroundWork(backgroundTracker, scanContainerBackgroundProcesses());
+    } catch {
+      return backgroundTracker.pending();
+    }
   }
 
   const agentQuery = query({
@@ -1759,6 +1897,9 @@ async function runClaudeResearchAgentOnce(
           void Promise.resolve(options.onSessionId(message.session_id)).catch(() => null);
         }
       }
+      // Track background Bash launches/completions for the turn-boundary
+      // background-work question (advisory only; see background-work.ts).
+      backgroundTracker.observe(message);
       if (message.type === "assistant") {
         handleAssistantMessage(message, onProgress);
       } else if (message.type === "result") {
@@ -1768,11 +1909,31 @@ async function runClaudeResearchAgentOnce(
         // means for a message that landed right at the boundary.
         // A parked turn keeps the channel open instead: the run idles here until
         // the check_back_later wake-up is injected (or the park deadline passes).
-        if (options.inputChannel && options.inputChannel.pendingCount() === 0) {
+        // Decision ladder at the boundary:
+        //   1. alarm park (check_back_later pending) → wait for the wake-up
+        //   2. keep-alive on → stay open, periodic check-in nudges
+        //   3. undecided + live background work observed → ask the agent ONCE
+        //      (the question is a pushed message, so it gets one more turn)
+        //   4. otherwise → close, the run finalizes
+        if (options.inputChannel && !options.inputChannel.isClosed() && options.inputChannel.pendingCount() === 0) {
           if (turnPark.isArmed()) {
             armParkTimer();
+          } else if (turnPark.keepAliveEnabled()) {
+            armKeepAliveTimer();
           } else {
-            options.inputChannel.close();
+            let asked = false;
+            if (!captured && !backgroundQuestionAsked && input.slackTools && turnPark.keepAliveState() === "unset") {
+              const work = detectBackgroundWork();
+              if (work.length > 0) {
+                backgroundQuestionAsked = true;
+                emitProgress(onProgress, {
+                  role: "system",
+                  message: `Turn ended with background work still running (${work.length}); asking the agent whether to keep the session alive.`
+                });
+                asked = options.inputChannel.push(buildBackgroundWorkQuestion(work));
+              }
+            }
+            if (!asked) options.inputChannel.close();
           }
         }
         resultStopReason = message.stop_reason ?? null;
@@ -1799,7 +1960,9 @@ async function runClaudeResearchAgentOnce(
   } finally {
     options.signal?.removeEventListener("abort", onExternalAbort);
     if (parkTimer) clearTimeout(parkTimer);
+    if (keepAliveTimer) clearTimeout(keepAliveTimer);
     turnPark.disarm();
+    turnPark.setKeepAlive(false);
     options.inputChannel?.close();
     agentQuery.close();
   }

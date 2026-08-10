@@ -3,7 +3,11 @@ import test from "node:test";
 
 import { createAgentInputChannel } from "../agent-core/input-channel";
 import {
+  buildBackgroundWorkQuestion,
   createTurnPark,
+  KEEP_ALIVE_MAX_TOTAL_MS,
+  KEEP_ALIVE_RECHECK_MS,
+  KEEP_ALIVE_RECHECK_NUDGE,
   MAX_KEEP_ALIVE_MINUTES,
   PARK_GRACE_MS,
   PARK_TIMEOUT_NUDGE
@@ -103,4 +107,84 @@ test("if the wake-up never arrives the agent is nudged instead of idling forever
 test("keep-alive bounds stay sane", () => {
   assert.ok(MAX_KEEP_ALIVE_MINUTES > 0 && MAX_KEEP_ALIVE_MINUTES <= 1440);
   assert.ok(PARK_GRACE_MS > 0);
+  assert.ok(KEEP_ALIVE_RECHECK_MS >= 5 * 60_000, "rechecks must not spam the session");
+  assert.ok(KEEP_ALIVE_MAX_TOTAL_MS > KEEP_ALIVE_RECHECK_MS, "TTL must allow at least one recheck");
+});
+
+// --- keep_alive_after_turn: state-based session lifetime ---
+
+test("keep-alive survives message delivery (the 2026-08-10 regression)", async () => {
+  // Incident shape: agent parks with an alarm, user asks "how is it going?",
+  // delivery disarms the alarm, the agent replies WITHOUT re-arming, and the
+  // reply turn's result frame ends the run — killing the background sweep.
+  // With keep-alive ON the channel must stay open through that exact sequence.
+  const channel = createAgentInputChannel();
+  const park = createTurnPark();
+
+  const delivered: string[] = [];
+  const consumer = (async () => {
+    for await (const text of channel) {
+      park.disarm(); // what the steering wrapper does — alarm only
+      delivered.push(text);
+    }
+  })();
+
+  park.setKeepAlive(true);
+  assert.equal(park.arm(6), true);
+
+  // Mid-park user message: alarm gone after delivery, keep-alive NOT.
+  channel.push("How is it going?");
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(park.isArmed(), false, "delivery disarms the alarm");
+  assert.equal(park.keepAliveEnabled(), true, "delivery must not clear keep-alive");
+
+  // Result frame of the reply turn: keep-alive still holds the channel open.
+  assert.equal(park.holdsOpen(), true);
+  if (!park.holdsOpen()) channel.close();
+  assert.equal(channel.isClosed(), false, "the reply turn must not end a kept-alive session");
+
+  // Only the agent's explicit decision releases it.
+  park.setKeepAlive(false);
+  assert.equal(park.holdsOpen(), false);
+  channel.close();
+  await consumer;
+});
+
+test("keep-alive is tri-state so the host asks about background work at most once", () => {
+  const park = createTurnPark();
+  assert.equal(park.keepAliveState(), "unset");
+  park.setKeepAlive(false);
+  assert.equal(park.keepAliveState(), "off", "an explicit no is remembered — never re-ask");
+  park.setKeepAlive(true);
+  assert.equal(park.keepAliveState(), "on");
+  assert.equal(park.keepAliveEnabled(), true);
+});
+
+test("keep-alive expires at the absolute TTL", () => {
+  let now = 0;
+  const park = createTurnPark({ now: () => now, keepAliveMaxTotalMs: 60_000 });
+  park.setKeepAlive(true);
+  assert.equal(park.keepAliveExpired(), false);
+  now += 59_999;
+  assert.equal(park.keepAliveExpired(), false);
+  now += 1;
+  assert.equal(park.keepAliveExpired(), true);
+  // Toggling off and on resets the clock — a fresh decision earns fresh time.
+  park.setKeepAlive(false);
+  park.setKeepAlive(true);
+  assert.equal(park.keepAliveExpired(), false);
+});
+
+test("the recheck nudge asks the agent to confirm, not to submit blindly", () => {
+  assert.match(KEEP_ALIVE_RECHECK_NUDGE, /keep_alive_after_turn/);
+  assert.match(KEEP_ALIVE_RECHECK_NUDGE, /enabled=false/);
+});
+
+test("the background-work question lists the work and all three ways out", () => {
+  const question = buildBackgroundWorkQuestion(["background Bash: python train.py", "process 42: node server.js"]);
+  assert.match(question, /python train\.py/);
+  assert.match(question, /node server\.js/);
+  assert.match(question, /check_back_later/);
+  assert.match(question, /keep_alive_after_turn/);
+  assert.match(question, /enabled=false/);
 });
