@@ -3,7 +3,13 @@ import crypto from "node:crypto";
 import test from "node:test";
 
 import { db } from "../lib/db";
-import { computeNextRunAt, fireScheduledTask, schedulerTick, MIN_RECURRENCE_MS } from "../lib/scheduler";
+import {
+  computeNextRunAt,
+  fireScheduledTask,
+  schedulerTick,
+  MAX_BEAT_DEFER_MS,
+  MIN_RECURRENCE_MS
+} from "../lib/scheduler";
 import { handleSlackAgentToolCall } from "../lib/slack/agent-tools";
 import type { ConversationRunInput } from "../lib/agent-conversation";
 import type { SlackEventDeps } from "../lib/slack/events";
@@ -187,6 +193,147 @@ test("schedulerTick claims due tasks atomically and fires runs as the creator", 
   await db.scheduledTask.updateMany({ where: { documentId: doc.id }, data: { disabledAt: new Date() } });
   const cleaned = await db.scheduledTask.findFirst({ where: { documentId: doc.id, disabledAt: null } });
   assert.equal(cleaned, null, "scheduler test must not leak enabled tasks into the shared DB");
+});
+
+test("a thread-context firing injects into the thread's live run instead of stacking a run", async () => {
+  // Real failure (2026-08-10): a 2-hourly task fired into a DM thread that
+  // already had a RUNNING run. Each firing started ANOTHER run, all parked on
+  // the per-conversation session lock. Never more than one active session per
+  // Slack thread: a firing during an active run is steering, not a new run.
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeLinkedUser(teamId, "UALICE", "sched-inject");
+  const channel = `D-${teamId}`;
+  const doc = await db.document.create({
+    data: {
+      ownerId: alice.id,
+      title: "dm",
+      kind: "slack_channel",
+      content: "{}",
+      slackTeamId: teamId,
+      slackChannelId: channel
+    }
+  });
+  const threadTs = "5000.000";
+  const active = await db.aiRun.create({
+    data: {
+      documentId: doc.id,
+      triggerType: "SLACK_MENTION",
+      triggerId: `${channel}:${threadTs}`,
+      createdById: alice.id,
+      instruction: "long running work"
+    }
+  });
+
+  const runs: ConversationRunInput[] = [];
+  const { deps } = makeDeps(runs);
+  const injected: Array<{ aiRunId: string; text: string }> = [];
+  const task = {
+    id: `fake-${crypto.randomUUID()}`,
+    documentId: doc.id,
+    createdById: alice.id,
+    instruction: "resume the eval sweep",
+    contextType: "slack_thread",
+    slackTeamId: teamId,
+    slackChannelId: channel,
+    slackThreadTs: threadTs,
+    cron: null,
+    timezone: null,
+    nextRunAt: new Date()
+  };
+
+  const fired = await fireScheduledTask(task, {
+    ...deps,
+    injectRunMessage: (aiRunId, text) => {
+      injected.push({ aiRunId, text });
+      return true;
+    }
+  });
+  assert.equal(fired, active.id, "firing reports the run it steered");
+  assert.equal(runs.length, 0, "no stacked run while one is active in the thread");
+  assert.equal(injected.length, 1);
+  assert.equal(injected[0].aiRunId, active.id);
+  assert.match(injected[0].text, /resume the eval sweep/);
+
+  // When the live run cannot accept it, the beat is skipped — still no stack.
+  const skipped = await fireScheduledTask(task, { ...deps, injectRunMessage: () => false });
+  assert.equal(skipped, null);
+  assert.equal(runs.length, 0, "an unsteerable active run skips the beat rather than stacking");
+
+  await db.aiRun.update({ where: { id: active.id }, data: { status: "FAILED" } });
+});
+
+test("a beat that cannot be delivered is deferred, not lost", async () => {
+  // Real failure (2026-08-10): a check_back_later wake-up fired into a thread
+  // whose active run could not be steered (other process after a deploy, Codex
+  // run, or an uncollected zombie). The claim had already disabled the one-shot,
+  // so returning early lost the alarm FOREVER and the agent was never woken.
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeLinkedUser(teamId, "UALICE", "sched-defer");
+  const channel = `D-${teamId}`;
+  const doc = await db.document.create({
+    data: {
+      ownerId: alice.id,
+      title: "dm",
+      kind: "slack_channel",
+      content: "{}",
+      slackTeamId: teamId,
+      slackChannelId: channel
+    }
+  });
+  const threadTs = "6000.000";
+  const active = await db.aiRun.create({
+    data: {
+      documentId: doc.id,
+      triggerType: "SLACK_MENTION",
+      triggerId: `${channel}:${threadTs}`,
+      createdById: alice.id,
+      instruction: "parked on a check_back_later"
+    }
+  });
+  const wakeUp = await db.scheduledTask.create({
+    data: {
+      documentId: doc.id,
+      createdById: alice.id,
+      instruction: "check whether the training run finished",
+      contextType: "slack_thread",
+      slackTeamId: teamId,
+      slackChannelId: channel,
+      slackThreadTs: threadTs,
+      nextRunAt: new Date(Date.now() - 1000)
+    }
+  });
+
+  const runs: ConversationRunInput[] = [];
+  const { deps } = makeDeps(runs);
+  // schedulerTick claims (and, for a one-shot, disables) the task before firing.
+  const fired = await schedulerTick(new Date(), { ...deps, injectRunMessage: () => false });
+  assert.equal(fired, 1);
+  assert.equal(runs.length, 0, "still no stacked run in a thread with an active session");
+
+  const deferred = await db.scheduledTask.findUnique({ where: { id: wakeUp.id } });
+  assert.equal(deferred!.disabledAt, null, "the undeliverable one-shot is re-armed, not left disabled");
+  assert.ok(deferred!.nextRunAt.getTime() > Date.now(), "and it retries in the future");
+  assert.ok(
+    deferred!.nextRunAt.getTime() < Date.now() + 10 * 60_000,
+    "retry must be soon — the blocking run finishes or gets reaped within STALE_AI_RUN_MS"
+  );
+
+  // Give-up bound: a beat that has been overdue for longer than
+  // MAX_BEAT_DEFER_MS stops retrying instead of looping forever.
+  await db.scheduledTask.update({
+    where: { id: wakeUp.id },
+    data: { nextRunAt: new Date(Date.now() - (MAX_BEAT_DEFER_MS + 60_000)), disabledAt: null }
+  });
+  const staleFired = await schedulerTick(new Date(), { ...deps, injectRunMessage: () => false });
+  assert.equal(staleFired, 1);
+  const abandoned = await db.scheduledTask.findUnique({ where: { id: wakeUp.id } });
+  assert.ok(abandoned!.disabledAt, "a hopelessly overdue beat gives up rather than retrying forever");
+  assert.equal(runs.length, 0);
+
+  await db.scheduledTask.updateMany({ where: { documentId: doc.id }, data: { disabledAt: new Date() } });
+  const leaked = await db.scheduledTask.findFirst({ where: { documentId: doc.id, disabledAt: null } });
+  assert.equal(leaked, null, "scheduler test must not leak enabled tasks into the shared DB");
+  await db.aiRun.update({ where: { id: active.id }, data: { status: "FAILED" } });
 });
 
 test("one-shot tasks disable after firing; unlinked creators disable the task", async () => {

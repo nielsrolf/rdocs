@@ -16,6 +16,7 @@ const toolRequestSchema = z.object({
     "read_slack_thread",
     "recent_activity",
     "schedule_task",
+    "check_back_later",
     "list_scheduled_tasks",
     "cancel_scheduled_task",
     "send_file"

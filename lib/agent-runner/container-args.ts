@@ -1,4 +1,5 @@
 import { buildAgentEnv, type DocumentEnv } from "@/agent-core";
+import { AGENT_SESSION_PORT_ENV } from "@/agent-core/session-protocol";
 
 // Pure helpers for spawning the agent container — kept separate from the runner
 // so the hardening profile and env scrubbing are unit-testable without Docker.
@@ -36,6 +37,24 @@ export type ContainerRunSpec = {
   // a stronger boundary for untrusted code). Unset → the engine default (runc).
   // Linux-only; register the runtime with the engine before using it.
   ociRuntime?: string;
+  /**
+   * Detached session container (`docker run -d`): its lifetime is NOT tied to
+   * the app process that started it, so a deploy/crash no longer kills the run.
+   * Requires sessionPort — without a published port there is no way to reach it.
+   */
+  detached?: boolean;
+  /**
+   * In-container port of the session HTTP API (agent-core/session-server.ts).
+   * Published as an EPHEMERAL host port bound to 127.0.0.1; the host discovers
+   * the mapping with `docker port`. Also exported as AGENT_SESSION_PORT, which
+   * is what puts the entrypoint into session mode.
+   */
+  sessionPort?: number;
+  /**
+   * Per-container Bearer secret for the session API. Deliberately NOT part of
+   * the argv (visible via `ps`) — the caller must put it in the env file.
+   */
+  sessionSecret?: string;
 };
 
 export function resolveContainerUser(
@@ -118,7 +137,16 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
   const home = spec.homeDir ?? "/home/agent";
   const readOnly = spec.readOnly ?? true;
 
-  const args = ["run", "--rm", "-i"];
+  // Detached: no stdin pipe (there is no parent holding the other end) and the
+  // session HTTP API replaces it for job delivery, steering and cancellation.
+  // Piped: stdin IS the protocol, and the container dies with its parent.
+  const args = spec.detached ? ["run", "--rm", "-d"] : ["run", "--rm", "-i"];
+
+  if (spec.detached && spec.sessionPort) {
+    // Ephemeral host port on loopback only. Off-host reachability would make the
+    // Bearer secret the ONLY gate; here it is the second of two.
+    args.push("-p", `127.0.0.1::${spec.sessionPort}`);
+  }
 
   if (spec.name) {
     args.push("--name", spec.name);
@@ -158,6 +186,11 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
   // Secrets/tokens (host-read env-file), plus container-appropriate HOME/TMPDIR.
   args.push("--env-file", spec.envFileHostPath);
   args.push("-e", `HOME=${home}`, "-e", "TMPDIR=/tmp", "-e", `AGENT_WORKSPACE=${workspace}`);
+  if (spec.detached && spec.sessionPort) {
+    // The entrypoint selects session mode on the presence of this variable.
+    // The matching secret goes in the env file, never here.
+    args.push("-e", `${AGENT_SESSION_PORT_ENV}=${spec.sessionPort}`);
+  }
   if (spec.agentHarness === "claude-code") {
     // Docker Desktop must run as container root so its root-owned bind mounts
     // remain writable. Claude Code normally rejects bypassPermissions as root,

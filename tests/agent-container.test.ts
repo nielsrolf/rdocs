@@ -267,3 +267,52 @@ test("serializeEnvFile emits VAR=VALUE lines and skips multiline values", () => 
   assert.ok(lines.includes("B=two words"));
   assert.ok(!lines.some((l) => l.startsWith("BAD=")));
 });
+
+// --- detached session containers ------------------------------------------
+// A detached container outlives the app process that started it, so its run
+// args differ in three ways that all matter: no stdin pipe to a dead parent,
+// a published loopback port to reach it over, and the env marker that puts the
+// entrypoint into session mode.
+
+test("a detached container is started with -d and no stdin pipe", () => {
+  const a = args({ detached: true, sessionPort: 8787 });
+  assert.ok(a.includes("-d"), "must be detached or it dies with the app process");
+  assert.ok(!a.includes("-i"), "nobody is holding the other end of stdin");
+  // Still auto-removed: the container is the durable holder of the RUN, not of
+  // any state we need after it exits.
+  assert.ok(a.includes("--rm"));
+});
+
+test("a detached container publishes its session port on loopback only", () => {
+  const a = args({ detached: true, sessionPort: 8787 });
+  const pIndex = a.indexOf("-p");
+  assert.notEqual(pIndex, -1, "the host reaches the session over HTTP, so the port must be published");
+  // Ephemeral host port (discovered with `docker port`), bound to 127.0.0.1 so
+  // the session API is not reachable from off-host. The Bearer secret is the
+  // second, independent gate.
+  assert.equal(a[pIndex + 1], "127.0.0.1::8787");
+  assert.ok(!a.some((arg) => arg === "0.0.0.0::8787"));
+});
+
+test("session mode is selected by AGENT_SESSION_PORT in the container env", () => {
+  const a = args({ detached: true, sessionPort: 8787 });
+  const envIndex = a.findIndex((arg) => arg === "AGENT_SESSION_PORT=8787");
+  assert.notEqual(envIndex, -1);
+  assert.equal(a[envIndex - 1], "-e");
+});
+
+test("the piped path is unchanged when detached mode is off", () => {
+  const a = args();
+  assert.ok(a.includes("-i"));
+  assert.ok(!a.includes("-d"));
+  assert.ok(!a.includes("-p"));
+  assert.ok(!a.some((arg) => arg.startsWith("AGENT_SESSION_PORT=")));
+});
+
+test("the session secret never appears in the docker argv", () => {
+  // It travels in the --env-file instead: argv is visible to every user via
+  // `ps`, an env-file is not.
+  const a = args({ detached: true, sessionPort: 8787, sessionSecret: "s3cret-value" });
+  assert.ok(!a.some((arg) => arg.includes("s3cret-value")));
+  assert.ok(a.includes("--env-file"));
+});

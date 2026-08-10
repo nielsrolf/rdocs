@@ -545,6 +545,22 @@ model AiRun {
   // same conversation resume this session — the model then sees all its prior
   // messages AND tool calls, not a replayed plain-text transcript.
   sdkSessionId  String?
+  // --- detached session container (lib/agent-runner/container-session.ts) ---
+  // A detached run lives in a container that outlives the app process which
+  // started it, so these four fields are the ONLY thing a newer deployment needs
+  // in order to take the run over: where to reach it, how to authenticate, and
+  // how far its frame log has already been persisted into AiRunEvent.
+  // Null on in-process runs and on the legacy piped-container path.
+  containerId     String?
+  // "http://127.0.0.1:<ephemeral host port>" — the published loopback mapping of
+  // the container's session port, discovered with `docker port` at spawn.
+  sessionEndpoint String?
+  // Per-container Bearer secret. Not a user credential: it authorizes talking to
+  // this one container, and dies with it.
+  sessionSecret   String?
+  // Last frame sequence number already replayed into AiRunEvent. Advanced as
+  // frames are persisted, so a re-attach resumes without duplicating events.
+  frameCursor     Int               @default(0)
   selectionId        String?
   // The document text that was selected when a SELECTION_EDIT run started
   // (truncated). The live marker can vanish long before anyone reads the run

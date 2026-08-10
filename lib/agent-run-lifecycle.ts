@@ -18,7 +18,7 @@
 // these strings verbatim; keep them byte-identical).
 
 import type { AgentAccessMode, ClaudeAgentProgressEvent } from "@/agent-core";
-import { recordAiRunEvent, startAiRunHeartbeat } from "@/lib/ai-runs";
+import { createDeferredHeartbeat, recordAiRunEvent } from "@/lib/ai-runs";
 import {
   RUN_CANCELLED_MESSAGE,
   deregisterRunAbortController,
@@ -94,12 +94,19 @@ export type AgentRunLifecycleOptions = {
   onRunError?: (error: unknown) => void;
   // Terminal AiRun.error fallback when the thrown value is not an Error.
   defaultFailureMessage: string;
+  // Start the liveness heartbeat only when `fn` calls ctx.beginHeartbeat()
+  // instead of at run start. Set by runs that begin with a blocking wait (the
+  // conversation session lock) so a parked run goes silent and is reaped.
+  deferHeartbeat?: boolean;
 };
 
 export type AgentRunLifecycleContext = {
   runner: AgentRunner;
   isSelfHosted: boolean;
   abortSignal: AbortSignal;
+  // Starts the liveness heartbeat (idempotent). Only meaningful with
+  // `deferHeartbeat`; call it as soon as the run really begins working.
+  beginHeartbeat(): void;
   // The identical progress double-write every runner passes to runner.run():
   // AiRun.progress update + AiRunEvent append, failures swallowed.
   onProgress: (event: ClaudeAgentProgressEvent) => Promise<void>;
@@ -147,13 +154,18 @@ export async function withAgentRunLifecycle<T>(
   // inside a closure, which TS control-flow analysis cannot see, so a plain
   // `let` narrows to `null` at the catch/finally use sites below.
   const state: { linkedRepo: LinkedRepositoryWorktree | null } = { linkedRepo: null };
-  const stopHeartbeat = startAiRunHeartbeat(aiRunId);
+  // Conversation runs pass deferHeartbeat and call ctx.beginHeartbeat() once
+  // they hold the per-conversation session lock: a run still queued on that
+  // lock must look silent, so the reaper can clear it instead of it posing as
+  // a live-but-unsteerable run in its Slack thread (see createDeferredHeartbeat).
+  const heartbeat = createDeferredHeartbeat(aiRunId, { deferred: opts.deferHeartbeat });
   const abort = registerRunAbortController(aiRunId);
 
   const ctx: AgentRunLifecycleContext = {
     runner,
     isSelfHosted,
     abortSignal: abort.signal,
+    beginHeartbeat: () => heartbeat.begin(),
     onProgress: async (event) => {
       await Promise.all([
         db.aiRun.update({
@@ -303,7 +315,7 @@ export async function withAgentRunLifecycle<T>(
     return { status: "FAILED", error: failureMessage };
   } finally {
     deregisterRunAbortController(aiRunId);
-    stopHeartbeat();
+    heartbeat.stop();
     if (state.linkedRepo && state.linkedRepo.baseWorkspace !== state.linkedRepo.worktree) {
       await removeRunWorktree(state.linkedRepo).catch(() => null);
     }

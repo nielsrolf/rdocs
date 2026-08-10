@@ -22,6 +22,7 @@ export type SlackAgentToolRequest = {
     | "read_slack_thread"
     | "recent_activity"
     | "schedule_task"
+    | "check_back_later"
     | "list_scheduled_tasks"
     | "cancel_scheduled_task"
     | "send_file";
@@ -34,6 +35,9 @@ export type SlackAgentToolResult = {
 };
 
 const MAX_MESSAGES = 100;
+// Upper bound for a check_back_later self-alarm. Longer waits are a standing
+// job, not "I'm waiting for this run to finish" — use schedule_task for those.
+const MAX_CHECK_BACK_MINUTES = 24 * 60;
 
 async function assertReadable(
   slack: SlackClient,
@@ -202,6 +206,7 @@ export async function handleSlackAgentToolCall(
 
   if (
     request.tool === "schedule_task" ||
+    request.tool === "check_back_later" ||
     request.tool === "list_scheduled_tasks" ||
     request.tool === "cancel_scheduled_task"
   ) {
@@ -279,6 +284,78 @@ export async function handleSlackAgentToolCall(
       return {
         ok: true,
         text: `Scheduled (id ${task.id}). Next firing: ${nextRunAt.toISOString()}${cron ? `, recurring ${cron}` : ", one-shot"}.`
+      };
+    }
+
+    // check_back_later: the agent's own alarm clock. It is a schedule_task
+    // one-shot in the run's own thread, with two deliberate differences:
+    //  - no consent announcement. The wake-up lands in a conversation the same
+    //    people are already watching, and nothing keeps running afterwards, so
+    //    the "⏰ Scheduled task created … anyone can cancel it" notice would be
+    //    pure noise. (schedule_task keeps it: that one installs a standing job.)
+    //  - the result text tells the agent to END ITS TURN. That is the whole
+    //    point: instead of babysitting a long job with sleep/poll loops (which
+    //    burns the context window and dies with the run), the agent detaches the
+    //    work, sets the alarm, and stops. The wake-up arrives as a normal
+    //    message in this thread — and because a firing reminder is injected into
+    //    a live session when one exists, one thread still means one session.
+    //    Ending the TURN is not the same as ending the RUN: for waits within the
+    //    keep-alive limit the harness parks the session with its steering channel
+    //    open (agent-core/turn-park.ts), so the container, the worktree and the
+    //    agent's background processes are still there when the wake-up injects.
+    if (request.tool === "check_back_later") {
+      const instruction = typeof request.args.instruction === "string" ? request.args.instruction.trim() : "";
+      if (!instruction) {
+        return {
+          ok: false,
+          text:
+            "instruction is required: write the self-contained note your future self needs " +
+            "(what was started, where its logs/artifacts are, how to tell whether it finished, what to do next)."
+        };
+      }
+      const rawMinutes =
+        typeof request.args.after_minutes === "number"
+          ? request.args.after_minutes
+          : Number(request.args.after_minutes);
+      if (!Number.isFinite(rawMinutes) || rawMinutes < 1 || rawMinutes > MAX_CHECK_BACK_MINUTES) {
+        return {
+          ok: false,
+          text: `after_minutes must be a number between 1 and ${MAX_CHECK_BACK_MINUTES} (24h).`
+        };
+      }
+      const minutes = Math.round(rawMinutes);
+      const active = await db.scheduledTask.count({
+        where: { documentId: run.documentId, disabledAt: null }
+      });
+      if (active >= MAX_ACTIVE_TASKS_PER_DOCUMENT) {
+        return { ok: false, text: `This channel already has ${active} active scheduled tasks — cancel some first.` };
+      }
+      const nextRunAt = new Date(Date.now() + minutes * 60_000);
+      const task = await db.scheduledTask.create({
+        data: {
+          documentId: run.documentId,
+          createdById: link.userId,
+          createdByRunId: claims.aiRunId,
+          // Framed as the agent's own note so the firing reads as "you asked to
+          // be woken up", not as a standing job someone configured.
+          instruction:
+            `[check_back_later wake-up — the note you left for yourself]\n${instruction}\n\n` +
+            `(If the background work is still running, call check_back_later again rather than waiting for it.)`,
+          contextType: "slack_thread",
+          slackTeamId: claims.slackTeamId,
+          slackChannelId: runChannel,
+          slackThreadTs: runThreadTs ?? null,
+          cron: null,
+          timezone: null,
+          nextRunAt
+        }
+      });
+      return {
+        ok: true,
+        text:
+          `Wake-up set for ${nextRunAt.toISOString()} (in ${minutes} min, id ${task.id}). ` +
+          `END YOUR TURN NOW. Do not sleep, poll, or otherwise wait for the background work — ` +
+          `the wake-up reaches you in this thread either way, carrying your instruction back to you.`
       };
     }
 

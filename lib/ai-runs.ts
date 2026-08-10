@@ -35,6 +35,39 @@ export function startAiRunHeartbeat(aiRunId: string): () => void {
   return () => clearInterval(timer);
 }
 
+// A heartbeat whose start can be postponed past a blocking wait.
+//
+// Conversation runs first queue on the per-conversation session mutex
+// (withConversationLock). A run parked there is doing NOTHING — but while it
+// heartbeat-ticked from the moment the background function started, it looked
+// perfectly alive: RUNNING with a fresh heartbeat, so the reaper spared it
+// forever, while it had no steering channel and no container. In a Slack thread
+// that is the worst possible state — the thread has an "active" run that can
+// neither be steered nor finish, so follow-ups queue behind a ghost. Deferring
+// the heartbeat until the run actually holds the lock makes such a parked run
+// go silent and get reaped like any other dead run.
+//
+// begin() is idempotent; stop() is safe before begin() and after it.
+export function createDeferredHeartbeat(
+  aiRunId: string,
+  opts: { deferred?: boolean; start?: (aiRunId: string) => () => void } = {}
+): { begin: () => void; stop: () => void } {
+  const start = opts.start ?? startAiRunHeartbeat;
+  let stopFn: (() => void) | null = null;
+  let stopped = false;
+  const begin = () => {
+    if (stopFn || stopped) return;
+    stopFn = start(aiRunId);
+  };
+  const stop = () => {
+    stopped = true;
+    stopFn?.();
+    stopFn = null;
+  };
+  if (!opts.deferred) begin();
+  return { begin, stop };
+}
+
 export type AbandonedRunResult = {
   failedIds: Set<string>;
   error: string;
@@ -55,10 +88,20 @@ const REAPABLE_STATUSES = new Set(["RUNNING", "PENDING"]);
 // With blue/green deploys two server processes overlap: a freshly booted
 // process must not kill runs the draining old process is still working on.
 // Their heartbeats are fresh, so the silence rule spares them.
+export type SessionProbeCandidate = {
+  id: string;
+  sessionEndpoint: string | null;
+  sessionSecret: string | null;
+};
+
 export async function failAbandonedAiRuns(
   runs: Array<{ id: string; status: string; startedAt: Date }>,
   now = Date.now(),
-  deps: { containerCleanup?: ContainerCleanupOptions } = {}
+  deps: {
+    containerCleanup?: ContainerCleanupOptions;
+    /** Injected in tests; defaults to a real `GET /status` on the handle. */
+    sessionProbe?: (candidate: SessionProbeCandidate) => Promise<boolean>;
+  } = {}
 ): Promise<AbandonedRunResult | null> {
   // Runs younger than the threshold cannot have been silent longer than it, so
   // this pre-filter also avoids the event lookup on every poll of a fresh run.
@@ -78,12 +121,12 @@ export async function failAbandonedAiRuns(
     // after the caller's query still counts.
     db.aiRun.findMany({
       where: { id: { in: candidates.map((run) => run.id) } },
-      select: { id: true, heartbeatAt: true }
+      select: { id: true, heartbeatAt: true, sessionEndpoint: true, sessionSecret: true }
     })
   ]);
   const lastEventAt = new Map(lastEvents.map((e) => [e.aiRunId, e._max.createdAt?.getTime() ?? 0]));
   const heartbeatAt = new Map(heartbeats.map((r) => [r.id, r.heartbeatAt?.getTime() ?? 0]));
-  const abandonedIds = candidates
+  const silentIds = candidates
     .filter((run) => {
       const lastActivity = Math.max(
         run.startedAt.getTime(),
@@ -93,6 +136,42 @@ export async function failAbandonedAiRuns(
       return now - lastActivity > STALE_AI_RUN_MS;
     })
     .map((run) => run.id);
+  if (silentIds.length === 0) {
+    return null;
+  }
+
+  // Silence proves a dead *process*, which used to prove a dead *run* — the
+  // container was that process's child. A detached session container is nobody's
+  // child (lib/agent-runner/container-session.ts): it survives deploys and is
+  // adopted by whichever process attaches next. So before reaping, ask any
+  // advertised session whether it is still there; if it answers, the run is
+  // alive and the probe itself becomes its heartbeat.
+  const advertised = heartbeats.filter(
+    (run) => silentIds.includes(run.id) && run.sessionEndpoint && run.sessionSecret
+  );
+  const aliveIds = new Set<string>();
+  if (advertised.length > 0) {
+    const probe =
+      deps.sessionProbe ??
+      (async (candidate: SessionProbeCandidate) => {
+        const { probeAgentSession } = await import("@/lib/agent-runner/session-client");
+        return probeAgentSession(candidate.sessionEndpoint!, candidate.sessionSecret!);
+      });
+    await Promise.all(
+      advertised.map(async (run) => {
+        const alive = await probe(run).catch(() => false);
+        if (alive) aliveIds.add(run.id);
+      })
+    );
+    if (aliveIds.size > 0) {
+      // Note what is deliberately NOT done here: the run's heartbeat is left
+      // stale. Sparing must stay conditional on the container answering EVERY
+      // sweep, so an orphan nobody adopts is reaped as soon as its own
+      // no-contact TTL takes it down (the probe does not reset that TTL).
+      console.log(`[agent-session] sparing ${aliveIds.size} silent run(s) whose detached container still answers`);
+    }
+  }
+  const abandonedIds = silentIds.filter((id) => !aliveIds.has(id));
   if (abandonedIds.length === 0) {
     return null;
   }

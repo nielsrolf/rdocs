@@ -87,6 +87,11 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       // both are somehow set, since it explicitly wants the deployment's own
       // checkout.
       hostDevRun,
+      // The heartbeat starts once this run holds the session lock (below), not
+      // when the background function starts: a run queued behind another run of
+      // the same conversation is doing nothing, and must look silent so the
+      // reaper can clear it rather than it posing as a live-but-unsteerable run.
+      deferHeartbeat: true,
       failureCommitMessage: "Save failed AI conversation changes",
       defaultFailureMessage: "Agent conversation failed."
     },
@@ -186,7 +191,9 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
 
       const result = await withConversationLock(
         sessionPlan?.conversationKey ?? aiRunId,
-        () => ctx.runner.run({
+        () => {
+          ctx.beginHeartbeat();
+          return ctx.runner.run({
         mode: "conversation",
         hostDevRun,
         githubAuthAvailable: Boolean(agentEnv.GITHUB_TOKEN?.trim() || agentEnv.GH_TOKEN?.trim()),
@@ -227,7 +234,8 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
         sessionDirHostPath: sessionPlan?.sessionDir,
         trustedHostRun: hostDevRun,
         onProgress: ctx.onProgress
-      })
+      });
+        }
       );
 
       const commit = await ctx.commitRunChanges("AI research conversation changes");

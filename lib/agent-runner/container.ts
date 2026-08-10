@@ -26,6 +26,15 @@ import {
   deregisterRunMessageInjector,
   registerRunMessageInjector
 } from "./run-registry";
+import { AGENT_SESSION_PORT } from "@/agent-core/session-protocol";
+import {
+  createDockerOps,
+  generateSessionSecret,
+  runDetachedSession,
+  sessionSecretEnv,
+  SessionAbortedError
+} from "./container-session";
+import { createAiRunSessionStore, detachedContainersEnabled } from "./session-store";
 
 // Transient container-level failures (spawn / exit-without-result) get one
 // bounded backoff retry here. In-agent-loop API errors (429/500/overloaded) are
@@ -107,7 +116,10 @@ export class ContainerRunner implements AgentRunner {
       containerName: options?.containerName,
       // Steering: lets the host push extra user messages into the live turn
       // over the container's stdin (Claude harness only — see spawnContainer).
-      steerRunId: options?.aiRunId
+      steerRunId: options?.aiRunId,
+      // Detached runs record their container handle on this row, which is the
+      // whole handover surface between deployments.
+      aiRunId: options?.aiRunId
     });
     return output as ClaudeResearchAgentOutput;
   }
@@ -141,6 +153,7 @@ export class ContainerRunner implements AgentRunner {
     signal?: AbortSignal;
     containerName?: string;
     steerRunId?: string;
+    aiRunId?: string;
   }): Promise<Record<string, unknown>> {
     const runtime = process.env.AGENT_CONTAINER_RUNTIME || "docker";
     const harness = agentHarnessForModel(opts.agentModel);
@@ -188,6 +201,10 @@ export class ContainerRunner implements AgentRunner {
     const sessionDirHostPath = harness === "codex"
       ? opts.sessionDirHostPath ?? path.join(tmpDir, "codex-home")
       : opts.sessionDirHostPath;
+    // Detached session transport: the container outlives this process (see
+    // container-session.ts). The secret rides the env file, never the argv.
+    const detached = detachedContainersEnabled(process.env);
+    const sessionSecret = detached ? generateSessionSecret() : undefined;
     try {
       if (harness === "codex") {
         await mkdir(sessionDirHostPath!, { recursive: true });
@@ -207,6 +224,7 @@ export class ContainerRunner implements AgentRunner {
           throw new Error(`[agent-runner] ${error}`);
         }
         Object.assign(containerEnv, added);
+        if (sessionSecret) Object.assign(containerEnv, sessionSecretEnv(sessionSecret));
         if (warning) console.warn(`[agent-runner] ${warning}`);
         await writeFile(envFile, serializeEnvFile(containerEnv), { mode: 0o600 });
       };
@@ -225,7 +243,10 @@ export class ContainerRunner implements AgentRunner {
         pidsLimit: 512,
         readOnly,
         // e.g. AGENT_CONTAINER_OCI_RUNTIME=runsc to run under gVisor (Linux).
-        ociRuntime: process.env.AGENT_CONTAINER_OCI_RUNTIME || undefined
+        ociRuntime: process.env.AGENT_CONTAINER_OCI_RUNTIME || undefined,
+        detached,
+        sessionPort: detached ? AGENT_SESSION_PORT : undefined,
+        sessionSecret
       });
 
       let authRetried = false;
@@ -236,6 +257,26 @@ export class ContainerRunner implements AgentRunner {
         }
         await prepareEnv();
         try {
+          if (detached && sessionSecret) {
+            // The container is nobody's child: it is recorded, then driven over
+            // HTTP, and it holds its result until we have persisted it.
+            return await runDetachedSession({
+              docker: createDockerOps(runtime),
+              args,
+              containerPort: AGENT_SESSION_PORT,
+              secret: sessionSecret,
+              job: opts.job,
+              signal: opts.signal,
+              steerRunId: harness === "codex" ? undefined : opts.steerRunId,
+              store: createAiRunSessionStore(opts.aiRunId),
+              sink: {
+                onProgress: opts.onProgress,
+                onComment: opts.onComment,
+                onSlackMessage: opts.onSlackMessage,
+                onSessionId: opts.onSessionId
+              }
+            });
+          }
           return await this.spawnContainer(runtime, args, opts.job, opts.onProgress, opts.onComment, opts.onSlackMessage, {
             signal: opts.signal,
             containerName: opts.containerName,
@@ -243,6 +284,11 @@ export class ContainerRunner implements AgentRunner {
             steerRunId: harness === "codex" ? undefined : opts.steerRunId
           });
         } catch (error) {
+          // A cancelled session reports itself; the loop below must not treat it
+          // as a transient container failure and start a second container.
+          if (error instanceof SessionAbortedError) {
+            throw new RunCancelledError();
+          }
           // A killed container manifests as "exited without a result" — never
           // classify a cancellation as transient and retry it.
           if (opts.signal?.aborted) {
@@ -263,6 +309,12 @@ export class ContainerRunner implements AgentRunner {
                 decision.delayMs / 1000
               )}s: ${error instanceof Error ? error.message : String(error)}`
             );
+            if (detached && opts.containerName) {
+              // `--name` is single-use: a still-exiting predecessor would make
+              // the retry fail with "name already in use", which is NOT
+              // retryable and would surface as an opaque run failure.
+              await createDockerOps(runtime).remove(opts.containerName).catch(() => {});
+            }
             await sleep(decision.delayMs);
             continue;
           }

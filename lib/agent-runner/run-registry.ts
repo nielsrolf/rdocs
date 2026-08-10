@@ -4,8 +4,34 @@
 // runs owned by the CURRENT server process — which is exactly the case that
 // used to force a whole-service restart. Runs orphaned by a restart are already
 // handled by the boot sweep (instrumentation.ts) and the silence reaper.
+//
+// "Process-wide" must be taken literally, and a module-local Map is NOT that:
+// Next.js evaluates `instrumentation.ts` (which owns the Slack socket and the
+// scheduler, and therefore starts every Slack-triggered run) in a different
+// module context than the App Router route handlers. With per-module Maps, a
+// Slack run was invisible to the cancel route (409 "not owned by the current
+// server process"), to `/api/health` (`activeRuns: 0`), and hence to the
+// blue/green drain — which then exited after its grace period and killed
+// in-flight Slack runs. The maps therefore live on a globalThis slot that every
+// module instance in the process resolves to.
 
-const controllers = new Map<string, AbortController>();
+export const RUN_REGISTRY_GLOBAL_KEY = "__rdocsAgentRunRegistry__";
+
+type RunRegistry = {
+  controllers: Map<string, AbortController>;
+  injectors: Map<string, (text: string) => boolean>;
+};
+
+const registryHost = globalThis as typeof globalThis & {
+  [RUN_REGISTRY_GLOBAL_KEY]?: RunRegistry;
+};
+
+const registry: RunRegistry = (registryHost[RUN_REGISTRY_GLOBAL_KEY] ??= {
+  controllers: new Map<string, AbortController>(),
+  injectors: new Map<string, (text: string) => boolean>()
+});
+
+const controllers = registry.controllers;
 
 export const RUN_CANCELLED_MESSAGE = "Cancelled by user.";
 
@@ -58,7 +84,8 @@ export function activeRunCount(): number {
 // run owned by another process (or a backend without a steering channel —
 // http/selfHosted, and any Codex run) simply has no entry, and callers fall
 // back to queueing a follow-up run.
-const injectors = new Map<string, (text: string) => boolean>();
+// Shared across module instances for the same reason as the controllers above.
+const injectors = registry.injectors;
 
 export function registerRunMessageInjector(aiRunId: string, inject: (text: string) => boolean) {
   injectors.set(aiRunId, inject);

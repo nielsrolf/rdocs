@@ -11,7 +11,12 @@
 import { CronExpressionParser } from "cron-parser";
 
 import { db } from "@/lib/db";
-import { startSlackConversationRun, type SlackEventDeps } from "@/lib/slack/events";
+import {
+  buildSteeringMessage,
+  startSlackConversationRun,
+  steerActiveThreadRun,
+  type SlackEventDeps
+} from "@/lib/slack/events";
 import { createSlackWebClient, slackAuthTest } from "@/lib/slack/web";
 
 export const MIN_RECURRENCE_MS = 5 * 60 * 1000;
@@ -64,6 +69,34 @@ type ScheduledTaskRow = {
   nextRunAt: Date;
 };
 
+export const BEAT_DEFER_MS = 2 * 60_000;
+export const MAX_BEAT_DEFER_MS = 30 * 60_000;
+
+// Put a claimed-but-undeliverable beat back on the queue instead of dropping it.
+// `task` is the PRE-claim snapshot, so task.nextRunAt is the occurrence's original
+// due time — that is what bounds how long we keep retrying.
+async function deferBeat(task: ScheduledTaskRow): Promise<Date | null> {
+  const overdueMs = Date.now() - task.nextRunAt.getTime();
+  if (overdueMs > MAX_BEAT_DEFER_MS) {
+    console.error("[scheduler] giving up on beat: the thread stayed busy too long", {
+      taskId: task.id,
+      overdueMs
+    });
+    return null;
+  }
+  const retryAt = new Date(Date.now() + BEAT_DEFER_MS);
+  // A one-shot was disabled by its own claim, so reviving it means clearing
+  // disabledAt. (Narrow race: a cancel landing inside the retry window is undone;
+  // the next attempt is at most BEAT_DEFER_MS away and cancel works again then.)
+  const updated = await db.scheduledTask
+    .updateMany({
+      where: { id: task.id },
+      data: { nextRunAt: retryAt, ...(task.cron ? {} : { disabledAt: null }) }
+    })
+    .catch(() => null);
+  return updated?.count === 1 ? retryAt : null;
+}
+
 // Fire one claimed task. deps injectable for tests; production builds real
 // Slack deps from the environment.
 export async function fireScheduledTask(task: ScheduledTaskRow, deps?: SlackEventDeps) {
@@ -107,6 +140,46 @@ export async function fireScheduledTask(task: ScheduledTaskRow, deps?: SlackEven
   const threadRoot = isThreadContext ? task.slackThreadTs ?? undefined : kickoff.ts ?? undefined;
   const triggerId = threadRoot ? `${task.slackChannelId}:${threadRoot}` : `${task.slackChannelId}:scheduled`;
 
+  // One active agent session per Slack thread. If the thread this task fires
+  // into is already working, the firing is STEERING for that session, not a
+  // second run: stacked runs all park on the per-conversation session lock, so
+  // they look hung, never reply, and make follow-up messages unsteerable.
+  const instruction = `[Scheduled task firing — set up earlier in this conversation]\n${task.instruction}`;
+  const live = await steerActiveThreadRun({
+    documentId: document.id,
+    triggerId,
+    text: buildSteeringMessage("the task scheduler", instruction),
+    timelineMessage: instruction,
+    inject: resolvedDeps.injectRunMessage
+  });
+  if (live.steeredRunId) {
+    console.log("[scheduler] firing injected into the thread's live run", {
+      taskId: task.id,
+      aiRunId: live.steeredRunId
+    });
+    await db.scheduledTask.update({
+      where: { id: task.id },
+      data: { lastRunId: live.steeredRunId }
+    }).catch(() => null);
+    return live.steeredRunId;
+  }
+  if (live.activeRunIds.length > 0) {
+    // The thread has an active run we cannot steer (another server process after
+    // a deploy, a Codex run, or a zombie the reaper has not collected yet).
+    // Starting a second run would stack on the per-conversation session lock, so
+    // DEFER the beat instead of dropping it: the claim above already advanced
+    // (and, for a one-shot, disabled) this task, so returning here used to lose a
+    // check_back_later wake-up forever. Retry shortly — the blocking run either
+    // finishes or gets reaped within STALE_AI_RUN_MS.
+    const deferred = await deferBeat(task);
+    console.warn("[scheduler] deferring beat: thread has an active run that cannot be steered", {
+      taskId: task.id,
+      activeRunIds: live.activeRunIds,
+      retryAt: deferred?.toISOString() ?? null
+    });
+    return null;
+  }
+
   const previousRun = await db.aiRun.findFirst({
     where: { documentId: document.id, triggerId, status: { in: ["SUCCEEDED", "FAILED"] } },
     orderBy: { startedAt: "desc" },
@@ -125,7 +198,7 @@ export async function fireScheduledTask(task: ScheduledTaskRow, deps?: SlackEven
     triggerId,
     replyThreadTs: threadRoot,
     reactionAnchors: kickoff.ts ? [{ ts: kickoff.ts }] : [],
-    instruction: `[Scheduled task firing — set up earlier in this conversation]\n${task.instruction}`,
+    instruction,
     userId: task.createdById,
     slackUserId: link.slackUserId,
     parentRunId: previousRun?.id ?? null,

@@ -653,6 +653,99 @@ test("a message during a steerable run is injected into the live session, not qu
   assert.ok(reactions.some((r) => r.op === "add" && r.ts === "1002.000" && r.name === "white_check_mark"));
 });
 
+test("a stuck newer run in the thread does not block steering an older, steerable run", async () => {
+  // Real failure (2026-08-10): scheduled firings stacked several RUNNING rows
+  // on one DM thread. All but the first were parked on the conversation lock,
+  // so they had no open input channel. The handler looked ONLY at the newest
+  // active run, injection failed, and the follow-up got ⏳ behind a run that
+  // could never progress. Steering must consider every active run in the
+  // thread and use the first one that accepts the message.
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-stuck-alice");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const { client, reactions } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+  const injected: Array<{ aiRunId: string; text: string }> = [];
+
+  const first = await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
+  const firstRunId = (first as { aiRunId: string }).aiRunId;
+  const firstRun = await db.aiRun.findUnique({ where: { id: firstRunId } });
+
+  // A newer RUNNING row in the same thread that cannot accept a message.
+  const stuck = await db.aiRun.create({
+    data: {
+      documentId: firstRun!.documentId,
+      triggerType: "SLACK_MENTION",
+      triggerId: firstRun!.triggerId,
+      createdById: alice.id,
+      instruction: "scheduled firing parked on the conversation lock",
+      startedAt: new Date(Date.now() + 1000)
+    }
+  });
+
+  const deps = depsWith(client, runs, {
+    injectRunMessage: (aiRunId, text) => {
+      if (aiRunId !== firstRunId) return false;
+      injected.push({ aiRunId, text });
+      return true;
+    }
+  });
+  const steered = await handleSlackAppMention(
+    mention({ teamId, ts: "1002.000", threadTs: "1000.000", text: `<@${BOT_USER_ID}> also add a plot` }),
+    deps
+  );
+
+  assert.equal("action" in steered && steered.action, "injected");
+  assert.equal(injected.length, 1);
+  assert.equal(injected[0].aiRunId, firstRunId, "must fall through to the run that can accept the message");
+  assert.ok(
+    !reactions.some((r) => r.ts === "1002.000" && r.name === "hourglass_flowing_sand"),
+    "no hourglass when some run in the thread accepted the message"
+  );
+  assert.ok(reactions.some((r) => r.op === "add" && r.ts === "1002.000" && r.name === "eyes"));
+  assert.equal(runs.length, 1);
+
+  await db.aiRun.update({ where: { id: stuck.id }, data: { status: "FAILED" } });
+});
+
+test("interrupting a thread cancels every active run in it", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-multi-stop");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const { client, reactions } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+  const first = await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
+  const firstRunId = (first as { aiRunId: string }).aiRunId;
+  const firstRun = await db.aiRun.findUnique({ where: { id: firstRunId } });
+  const extra = await db.aiRun.create({
+    data: {
+      documentId: firstRun!.documentId,
+      triggerType: "SLACK_MENTION",
+      triggerId: firstRun!.triggerId,
+      createdById: alice.id,
+      instruction: "stacked run",
+      startedAt: new Date(Date.now() + 1000)
+    }
+  });
+  const abortFirst = registerRunAbortController(firstRunId);
+  const abortExtra = registerRunAbortController(extra.id);
+
+  const interrupt = await handleSlackAppMention(
+    mention({ teamId, ts: "1003.000", threadTs: "1000.000", text: `<@${BOT_USER_ID}> stop` }),
+    depsWith(client, runs)
+  );
+  assert.equal("action" in interrupt && interrupt.action, "interrupted");
+  assert.ok(abortFirst.signal.aborted, "older active run aborted");
+  assert.ok(abortExtra.signal.aborted, "newer active run aborted too");
+  assert.deepEqual(reactions.at(-1), { op: "add", ts: "1003.000", name: "octagonal_sign" });
+
+  await db.aiRun.update({ where: { id: extra.id }, data: { status: "FAILED" } });
+});
+
 test("cancelled runs post 'Stopped.' instead of a failure message", async () => {
   const teamId = `T-${crypto.randomUUID()}`;
   const alice = await makeUser("slack-c-alice");

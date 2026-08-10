@@ -1,6 +1,20 @@
 // Container entrypoint. Runs INSIDE the hardened agent container.
 //
-// Protocol (NDJSON over the process's stdio):
+// TWO TRANSPORTS
+// --------------
+// 1. SESSION mode (default for app-managed runs; selected by AGENT_SESSION_PORT):
+//    the container is started detached and serves the session HTTP API from
+//    agent-core/session-server.ts. Its lifetime is NOT tied to the app process
+//    that started it — any process can attach, replay the frame log from a
+//    cursor, steer, cancel, and collect the result. See
+//    agent-core/session-protocol.ts for the reasoning.
+// 2. STDIO mode (legacy fallback, AGENT_DETACHED_CONTAINERS=false): the original
+//    piped protocol below, kept because it is the only path that works without
+//    a published port.
+//
+// Both modes run the SAME job execution; only frame delivery differs.
+//
+// Legacy stdio protocol (NDJSON over the process's stdio):
 //   stdin  : newline-delimited frames. The FIRST line is the JSON AgentJob
 //            ({ input, agentConfig, agentEnv, validation }); every later line is
 //            a steering frame {type:"user_message",text} injected into the
@@ -25,6 +39,14 @@ import {
   type AgentInputChannel,
   type ClaudeAgentProgressEvent
 } from "./agent-core/index";
+import {
+  AGENT_SESSION_PORT,
+  AGENT_SESSION_PORT_ENV,
+  AGENT_SESSION_SECRET_ENV,
+  createAgentSessionState,
+  type AgentSessionFrameBody
+} from "./agent-core/session-protocol";
+import { createAgentSessionServer } from "./agent-core/session-server";
 
 const CONTAINER_WORKSPACE = process.env.AGENT_WORKSPACE ?? "/workspace";
 
@@ -104,18 +126,15 @@ type EntrypointJob =
       agentEnv?: Record<string, string>;
     };
 
-async function main() {
-  const inputChannel = createAgentInputChannel();
-  const raw = await readJobAndSteer(inputChannel);
-  let job: EntrypointJob;
-  try {
-    job = JSON.parse(raw);
-  } catch (error) {
-    emit({ type: "error", message: `Failed to parse job JSON from stdin: ${(error as Error).message}` });
-    process.exitCode = 1;
-    return;
-  }
-
+// Runs one job and emits its frames through `emit`. Transport-agnostic: the
+// stdio and session modes differ only in what `emit` does and where the job and
+// the steering messages came from.
+async function executeJob(
+  job: EntrypointJob,
+  emit: (frame: AgentSessionFrameBody) => void,
+  inputChannel: AgentInputChannel,
+  signal?: AbortSignal
+) {
   try {
     if (job.kind === "merge_resolve") {
       // Resolve a git merge in the bind-mounted base checkout — IN-SANDBOX.
@@ -173,13 +192,13 @@ async function main() {
       // Live mid-run comments cross the container boundary as their own frame;
       // the host persists them (or buffers them into the result if it has no
       // handler).
-      onComment: (comment) => emit({ type: "comment", comment }),
+      onComment: (comment: unknown) => emit({ type: "comment", comment }),
       // Interim Slack updates cross the boundary the same way; the host posts
       // them to the thread.
-      onSlackMessage: (text) => emit({ type: "slack_message", text }),
+      onSlackMessage: (text: string) => emit({ type: "slack_message", text }),
       // The SDK session id crosses as its own frame so the host can persist it
       // (AiRun.sdkSessionId) for follow-up session resume.
-      onSessionId: (sessionId) => emit({ type: "session", sessionId }),
+      onSessionId: (sessionId: string) => emit({ type: "session", sessionId }),
       agentConfig: job.agentConfig as never,
       agentEnv: job.agentEnv,
       // The runner mounts the conversation's session store here and exports it
@@ -196,6 +215,10 @@ async function main() {
       // session through this channel (Claude harness; the Codex path ignores
       // it and the host never registers an injector for those runs).
       inputChannel,
+      // Session mode cancels IN-PROCESS (POST /cancel) instead of relying on the
+      // host to kill the container: a detached container has no parent to signal
+      // it, and an aborted SDK loop still gets to emit its terminal frame.
+      signal,
       // We are inside the hardened container: its mount namespace is the
       // filesystem boundary, so skip the in-process workspace guard / kernel
       // sandbox that would otherwise block legitimate reads outside /workspace.
@@ -211,14 +234,130 @@ async function main() {
   }
 }
 
+function parseJob(raw: string): EntrypointJob | null {
+  try {
+    return JSON.parse(raw) as EntrypointJob;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------- stdio mode
+async function stdioMain() {
+  const inputChannel = createAgentInputChannel();
+  const raw = await readJobAndSteer(inputChannel);
+  const job = parseJob(raw);
+  if (!job) {
+    emit({ type: "error", message: "Failed to parse job JSON from stdin." });
+    process.exitCode = 1;
+    return;
+  }
+  await executeJob(job, emit, inputChannel);
+}
+
+// -------------------------------------------------------------- session mode
+// How long we wait for the host to post a job before concluding it is never
+// coming (the app crashed between `docker run -d` and POST /job).
+const JOB_WAIT_MS = 10 * 60_000;
+
+async function sessionMain(port: number) {
+  const secret = process.env[AGENT_SESSION_SECRET_ENV]?.trim();
+  if (!secret) {
+    process.stderr.write(`[agent-session] ${AGENT_SESSION_SECRET_ENV} is required in session mode\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const inputChannel = createAgentInputChannel();
+  const abort = new AbortController();
+  const state = createAgentSessionState({
+    noContactTtlMs: numberEnv("AGENT_SESSION_NO_CONTACT_MS"),
+    terminalHoldMs: numberEnv("AGENT_SESSION_TERMINAL_HOLD_MS"),
+    maxLifetimeMs: numberEnv("AGENT_SESSION_MAX_LIFETIME_MS")
+  });
+
+  let resolveJob: ((job: unknown) => void) | null = null;
+  const jobArrived = new Promise<unknown>((resolve) => {
+    resolveJob = resolve;
+  });
+  let exit: ((reason: string) => void) | null = null;
+  const exited = new Promise<string>((resolve) => {
+    exit = resolve;
+  });
+
+  const server = createAgentSessionServer({
+    state,
+    secret,
+    handlers: {
+      onJob: (job) => resolveJob?.(job),
+      onMessage: (text) => {
+        const delivered = inputChannel.push(text);
+        if (!delivered) {
+          process.stderr.write("[agent-session] steering message rejected (turn already ended)\n");
+        }
+        return delivered;
+      },
+      onCancel: () => {
+        process.stderr.write("[agent-session] cancel requested by host\n");
+        abort.abort(new Error("Cancelled by user."));
+        inputChannel.close();
+      },
+      onExit: (reason) => exit?.(reason)
+    }
+  });
+
+  await server.listen(port);
+  process.stderr.write(`[agent-session] listening on ${port}\n`);
+
+  const raw = await Promise.race([
+    jobArrived,
+    exited.then(() => null),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), JOB_WAIT_MS).unref?.())
+  ]);
+  if (raw == null) {
+    process.stderr.write("[agent-session] no job arrived; exiting\n");
+    await server.close();
+    return;
+  }
+
+  const job = typeof raw === "string" ? parseJob(raw) : (raw as EntrypointJob);
+  if (!job) {
+    server.emit({ type: "error", message: "Failed to parse job JSON." });
+  } else {
+    await executeJob(job, (frame) => server.emit(frame), inputChannel, abort.signal);
+  }
+
+  // The terminal frame is in the log; the container now stays alive until the
+  // host has persisted it and calls POST /release (or a TTL fires). THIS is what
+  // makes a result survive the process that started the run.
+  const reason = await exited;
+  process.stderr.write(`[agent-session] exiting (${reason})\n`);
+  await server.close();
+}
+
+function numberEnv(key: string): number | undefined {
+  const raw = process.env[key]?.trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+// Session mode is selected by the host exporting AGENT_SESSION_PORT in the
+// container env file; the value is normally the protocol default (the host side
+// maps a random 127.0.0.1 port onto it), but it stays overridable.
+const sessionPortEnv = process.env[AGENT_SESSION_PORT_ENV]?.trim();
+const main = sessionPortEnv
+  ? () => sessionMain(numberEnv(AGENT_SESSION_PORT_ENV) ?? AGENT_SESSION_PORT)
+  : stdioMain;
+
 main()
   .catch((error) => {
     emit({ type: "error", message: error instanceof Error ? error.message : String(error) });
     process.exitCode = 1;
   })
-  // stdin is held open by the host for steering; release it so the process can
-  // exit as soon as the run is done.
   .finally(() => {
+    // stdio mode holds stdin open for steering; release it so the process can
+    // exit as soon as the run is done. (Session mode never reads stdin.)
     process.stdin.pause();
     process.stdin.destroy();
   });

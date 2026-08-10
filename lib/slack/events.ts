@@ -297,6 +297,49 @@ export function buildSteeringMessage(senderName: string, text: string) {
   );
 }
 
+/**
+ * Try to deliver `text` into a live agent session of one Slack thread.
+ *
+ * INVARIANT: at most one active agent session per Slack thread. Anything that
+ * wants to say something into a thread that is already working (a Slack
+ * message, a scheduled-task firing) steers the running session instead of
+ * starting a second run — stacked runs all park on the per-conversation
+ * session lock and look hung.
+ *
+ * Returns the ids of the thread's active runs and which one (if any) accepted
+ * the message. `steeredRunId === null` with a non-empty `activeRunIds` means
+ * the thread is busy but not steerable — the caller must queue or skip, never
+ * start a parallel run.
+ */
+export async function steerActiveThreadRun(args: {
+  documentId: string;
+  triggerId: string;
+  text: string;
+  /** Timeline message to record on the steered run (defaults to `text`). */
+  timelineMessage?: string;
+  inject?: (aiRunId: string, text: string) => boolean;
+}): Promise<{ activeRunIds: string[]; steeredRunId: string | null }> {
+  const activeRuns = await db.aiRun.findMany({
+    where: { documentId: args.documentId, status: { in: ["RUNNING", "PENDING"] }, triggerId: args.triggerId },
+    orderBy: { startedAt: "desc" },
+    select: { id: true }
+  });
+  const activeRunIds = activeRuns.map((run) => run.id);
+  if (activeRunIds.length === 0) {
+    return { activeRunIds, steeredRunId: null };
+  }
+  const inject = args.inject ?? injectRunMessage;
+  const steeredRunId = activeRunIds.find((id) => inject(id, args.text)) ?? null;
+  if (steeredRunId) {
+    await recordAiRunEvent({
+      aiRunId: steeredRunId,
+      role: "user",
+      message: args.timelineMessage ?? args.text
+    }).catch(() => null);
+  }
+  return { activeRunIds, steeredRunId };
+}
+
 type StartSlackRunArgs = {
   deps: SlackEventDeps;
   surface: "mention" | "dm";
@@ -521,7 +564,13 @@ async function handleIncomingSlackMessage(
   // one Slack thread = one agent session, and sessions in different threads
   // run in parallel without interfering. Only a message inside a session's own
   // thread can interrupt ("wait") or queue behind it.
-  const activeRun = await db.aiRun.findFirst({
+  // ALL active runs of the thread, newest first — not just the newest one. A
+  // thread can transiently hold more than one active row (a scheduled firing,
+  // a chained follow-up), and all but one of them are typically parked on the
+  // per-conversation session lock with no open input channel. Considering only
+  // the newest meant a follow-up got ⏳-queued behind a run that could not
+  // progress, even though another run in the same thread was steerable.
+  const activeRuns = await db.aiRun.findMany({
     where: {
       documentId: document.id,
       status: { in: ["RUNNING", "PENDING"] },
@@ -530,9 +579,12 @@ async function handleIncomingSlackMessage(
     orderBy: { startedAt: "desc" },
     select: { id: true }
   });
+  const activeRun = activeRuns[0];
   if (activeRun) {
     if (isInterruptMessage(instructionBody)) {
-      const cancelled = cancelAiRun(activeRun.id);
+      // "wait"/"stop" means the whole thread stops, so cancel every active run
+      // in it — leaving a stacked sibling alive would keep working invisibly.
+      const cancelled = activeRuns.map((run) => cancelAiRun(run.id)).some(Boolean);
       await deps.slack
         .addReaction({ channel: event.channel, ts: event.ts, name: cancelled ? "octagonal_sign" : "shrug" })
         .catch(() => null);
@@ -555,19 +607,21 @@ async function handleIncomingSlackMessage(
     // for the run (in-process / container, Claude harness) accept this; every
     // other case returns false and falls through to the queue below.
     const inject = deps.injectRunMessage ?? injectRunMessage;
-    if (inject(activeRun.id, buildSteeringMessage(senderName, instructionBody))) {
+    const steeringText = buildSteeringMessage(senderName, instructionBody);
+    const steeredRunId = activeRuns.map((run) => run.id).find((id) => inject(id, steeringText)) ?? null;
+    if (steeredRunId) {
       await recordAiRunEvent({
-        aiRunId: activeRun.id,
+        aiRunId: steeredRunId,
         role: "user",
         message: instructionBody
       }).catch(() => null);
-      const anchors = steeredRunAnchors.get(activeRun.id) ?? [];
+      const anchors = steeredRunAnchors.get(steeredRunId) ?? [];
       anchors.push({ ts: event.ts });
-      steeredRunAnchors.set(activeRun.id, anchors);
+      steeredRunAnchors.set(steeredRunId, anchors);
       await deps.slack
         .addReaction({ channel: event.channel, ts: event.ts, name: "eyes" })
         .catch(() => null);
-      return { handled: true as const, action: "injected" as const, aiRunId: activeRun.id };
+      return { handled: true as const, action: "injected" as const, aiRunId: steeredRunId };
     }
 
     // Fallback: queue for a follow-up run when the active one ends.

@@ -15,6 +15,7 @@ test("Slack MCP exposes the cross-thread tools available in the Claude harness",
     "read_slack_thread",
     "send_slack_file",
     "schedule_task",
+    "check_back_later",
     "list_scheduled_tasks",
     "cancel_scheduled_task"
   ]) {

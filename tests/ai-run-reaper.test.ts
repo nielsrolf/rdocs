@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import test from "node:test";
 
 import {
+  createDeferredHeartbeat,
   failAbandonedAiRuns,
   markAiRunSucceeded,
   startAiRunHeartbeat,
@@ -216,6 +217,40 @@ test("startAiRunHeartbeat ticks heartbeatAt immediately and stops cleanly", asyn
   } finally {
     await cleanup(document.id, user.id);
   }
+});
+
+// A conversation run queued on the per-conversation session mutex is doing
+// nothing, but it used to heartbeat from the moment the background function
+// started — so it stayed RUNNING-with-fresh-heartbeat forever, unreapable,
+// unsteerable, and (in a Slack thread) blocking every follow-up behind a ghost.
+// The heartbeat must not start until the run actually holds the lock.
+test("a deferred heartbeat stays silent until the run starts working", async () => {
+  const started: string[] = [];
+  const stopped: string[] = [];
+  const fakeStart = (aiRunId: string) => {
+    started.push(aiRunId);
+    return () => stopped.push(aiRunId);
+  };
+
+  const deferred = createDeferredHeartbeat("run-parked", { deferred: true, start: fakeStart });
+  assert.deepEqual(started, [], "no heartbeat while parked on the lock");
+  deferred.begin();
+  deferred.begin();
+  assert.deepEqual(started, ["run-parked"], "begin is idempotent");
+  deferred.stop();
+  assert.deepEqual(stopped, ["run-parked"]);
+
+  // Stopping before ever beginning must not leak a later start (the lifecycle
+  // finally can run while the run is still parked, e.g. on cancellation).
+  const abandoned = createDeferredHeartbeat("run-cancelled", { deferred: true, start: fakeStart });
+  abandoned.stop();
+  abandoned.begin();
+  assert.deepEqual(started, ["run-parked"], "a stopped deferred heartbeat never starts");
+
+  // Non-conversation runs keep the old eager behaviour.
+  const eager = createDeferredHeartbeat("run-eager", { start: fakeStart });
+  assert.deepEqual(started, ["run-parked", "run-eager"]);
+  eager.stop();
 });
 
 // Regression: the reaper only flips the DB row — it cannot kill the process.

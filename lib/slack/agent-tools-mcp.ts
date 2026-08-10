@@ -60,6 +60,20 @@ const SLACK_MCP_TOOLS: ToolDefinition[] = [
     }, ["instruction"])
   },
   {
+    name: "check_back_later",
+    description:
+      "Park the current turn and be woken up in this thread later. Use for long background work (training runs, builds, " +
+      "long-running scripts): start the work detached, call this with the delay and a self-contained note to your future " +
+      "self, then END your turn — never sleep or poll while waiting.",
+    inputSchema: objectSchema(
+      {
+        after_minutes: { type: "integer", minimum: 1, maximum: 1440 },
+        instruction: string
+      },
+      ["after_minutes", "instruction"]
+    )
+  },
+  {
     name: "list_scheduled_tasks",
     description: "List active scheduled tasks for the current Slack conversation.",
     inputSchema: objectSchema({})

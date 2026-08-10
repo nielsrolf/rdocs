@@ -295,6 +295,68 @@ test("send_file uploads into the run's own thread after a membership check", asy
   assert.equal(denied.ok, false);
 });
 
+// The alternative to check_back_later is an agent that babysits a long job with
+// sleep/poll loops — it burns context, and the turn dies with the run. This tool
+// must create a one-shot wake-up in the SAME thread, without the "⏰ Scheduled
+// task created" consent announcement (it is a self-alarm inside a conversation
+// everyone in the thread already sees, not a new standing job).
+test("check_back_later schedules a silent one-shot wake-up in the run's own thread", async () => {
+  const crypto = await import("node:crypto");
+  const { db } = await import("../lib/db");
+  const teamId = `T-${crypto.randomUUID()}`;
+  const user = await db.user.create({
+    data: { email: `cbl-${crypto.randomUUID()}@example.com`, name: "cbl", passwordHash: "x" }
+  });
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: user.id }
+  });
+  const doc = await db.document.create({ data: { ownerId: user.id, title: "cbl doc", content: "{}" } });
+  const run = await db.aiRun.create({
+    data: { documentId: doc.id, triggerType: "SLACK_MENTION", triggerId: "C_BOTH:1.0", instruction: "x" }
+  });
+  const claims = { slackTeamId: teamId, slackUserId: "UALICE", aiRunId: run.id };
+  const slack = makeSlack();
+
+  const before = postedMessages.length;
+  const result = await handleSlackAgentToolCall(
+    {
+      tool: "check_back_later",
+      args: { after_minutes: 20, instruction: "Check tail -50 /tmp/train.log; if done, report the eval numbers." }
+    },
+    { claims, slack, botUserId: BOT }
+  );
+  assert.ok(result.ok, result.text);
+  assert.match(result.text, /end your turn/i, "the result tells the agent to stop working now");
+  assert.equal(postedMessages.length, before, "no consent announcement for a self-alarm");
+
+  const tasks = await db.scheduledTask.findMany({ where: { documentId: doc.id, disabledAt: null } });
+  assert.equal(tasks.length, 1);
+  const task = tasks[0];
+  assert.equal(task.cron, null, "one-shot, not recurring");
+  assert.equal(task.contextType, "slack_thread");
+  assert.equal(task.slackChannelId, "C_BOTH");
+  assert.equal(task.slackThreadTs, "1.0", "wakes up in the same thread");
+  assert.equal(task.createdByRunId, run.id);
+  assert.match(task.instruction, /train\.log/);
+  const deltaMinutes = (task.nextRunAt.getTime() - Date.now()) / 60000;
+  assert.ok(deltaMinutes > 18 && deltaMinutes < 22, `fires in ~20 minutes (got ${deltaMinutes})`);
+
+  // Both arguments are required, and the delay is clamped to a sane window.
+  const noInstruction = await handleSlackAgentToolCall(
+    { tool: "check_back_later", args: { after_minutes: 5 } },
+    { claims, slack, botUserId: BOT }
+  );
+  assert.equal(noInstruction.ok, false);
+  assert.match(noInstruction.text, /instruction/);
+
+  const tooLong = await handleSlackAgentToolCall(
+    { tool: "check_back_later", args: { after_minutes: 99999, instruction: "check" } },
+    { claims, slack, botUserId: BOT }
+  );
+  assert.equal(tooLong.ok, false);
+  assert.match(tooLong.text, /after_minutes/);
+});
+
 test("post_slack_message posts only into the run's own thread", async () => {
   const crypto = await import("node:crypto");
   const { db } = await import("../lib/db");
