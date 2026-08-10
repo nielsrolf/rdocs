@@ -13,6 +13,7 @@ import {
   stripBotMention,
   type SlackMentionEvent
 } from "../lib/slack/events";
+import { SLACK_THREAD_STATE_GLOBAL_KEY } from "../lib/slack/thread-state";
 import { isCancellableAiRun, registerRunAbortController } from "../lib/agent-runner/run-registry";
 import type { ConversationRunInput } from "../lib/agent-conversation";
 import { buildUserPrompt } from "../agent-core/agent";
@@ -969,4 +970,42 @@ test("the same message arriving as app_mention and message event is processed on
   );
   assert.equal(viaMessage.handled, false);
   assert.equal("reason" in viaMessage && viaMessage.reason, "duplicate");
+});
+
+test("mid-run thread bookkeeping lives on globalThis, not per module instance", async () => {
+  // Real failure (2026-08-10): a DM follow-up was correctly INJECTED into the
+  // live run but kept its 👀 forever. `injectRunMessage` reaches across module
+  // contexts (its registry is on globalThis), while `steeredRunAnchors` and
+  // `queuedFollowUps` were module-local Maps — and Next evaluates
+  // instrumentation.ts (Slack socket) in a different module context than the
+  // App Router routes (agent `message_thread` tool). The run had been started
+  // from the route context, so the socket context recorded the steered anchor
+  // in a copy of the map that the run's onFinished never read: no ✅ swap.
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-global-alice");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const { client } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+  const deps = depsWith(client, runs, { injectRunMessage: () => true });
+
+  const first = await handleSlackAppMention(mention({ teamId }), deps);
+  const firstRunId = (first as { aiRunId: string }).aiRunId;
+  await handleSlackAppMention(
+    mention({ teamId, ts: "1002.000", threadTs: "1000.000", text: `<@${BOT_USER_ID}> also add a plot` }),
+    deps
+  );
+
+  // Any other module instance in this process must see the same state.
+  const shared = (globalThis as Record<string, unknown>)[SLACK_THREAD_STATE_GLOBAL_KEY] as
+    | { steeredRunAnchors: Map<string, Array<{ ts: string }>>; queuedFollowUps: Map<string, unknown[]> }
+    | undefined;
+  assert.ok(shared, "slack thread state must be published on globalThis");
+  assert.deepEqual(
+    shared!.steeredRunAnchors.get(firstRunId)?.map((a) => a.ts),
+    ["1002.000"],
+    "the steered anchor must be visible to every module instance, so onFinished can swap 👀 → ✅"
+  );
+  assert.ok(shared!.queuedFollowUps instanceof Map);
 });

@@ -26,6 +26,7 @@ import {
 import { createSlackLinkToken, createSlackToolsToken } from "@/lib/slack/link-token";
 import { isHostDevRun } from "@/lib/slack/dev-mode";
 import { markdownToMrkdwn } from "@/lib/slack/mrkdwn";
+import { queuedFollowUps, steeredRunAnchors } from "@/lib/slack/thread-state";
 import { RUN_CANCELLED_MESSAGE, cancelAiRun, injectRunMessage } from "@/lib/agent-runner/run-registry";
 import type { SlackClient, SlackMessage } from "@/lib/slack/web";
 
@@ -268,21 +269,13 @@ export function isInterruptMessage(text: string) {
 
 // Messages that arrive while a run is still working are queued (per active
 // run) and become ONE follow-up run the moment it finishes — nothing is
-// dropped, nothing races the active run. In-memory, single-process deploy.
-type QueuedFollowUp = {
-  userId: string;
-  slackUserId: string;
-  senderName: string;
-  text: string;
-  ts: string;
-};
-const queuedFollowUps = new Map<string, QueuedFollowUp[]>();
-
-// Messages that were STEERED into a live run (rather than queued) still need
-// their ✅/❌ at the end of that run, so their Slack ts is appended here and
-// picked up by the run's onFinished. Same in-memory, single-process scope as
-// the queue above.
-const steeredRunAnchors = new Map<string, Array<{ ts: string }>>();
+// dropped, nothing races the active run. Messages that were STEERED into a live
+// run instead still owe their ✅/❌ at the end of that run, so their Slack ts is
+// appended to `steeredRunAnchors` and picked up by the run's onFinished.
+//
+// Both maps are in-memory but PROCESS-wide (globalThis-backed in
+// ./thread-state), because the Slack socket and the App Router routes are
+// separate module contexts — see the comment there.
 
 /**
  * Frames a mid-run Slack message for the agent that is already working. The
