@@ -19,6 +19,7 @@ import {
   type DetachedDockerOps,
   type DetachedSessionHandle
 } from "../lib/agent-runner/container-session";
+import { createAgentSessionClient } from "../lib/agent-runner/session-client";
 import { injectRunMessage, isSteerableAiRun } from "../lib/agent-runner/run-registry";
 
 const SECRET = "container-secret";
@@ -381,4 +382,83 @@ test("the per-container secret is long, random and unique", () => {
   assert.notEqual(a, b);
   assert.ok(a.length >= 40, a);
   assert.match(a, /^[A-Za-z0-9_-]+$/, "must be safe in an env-file line");
+});
+
+test("a container that is not yet accepting connections is waited for, not failed", async () => {
+  // Docker publishes the port the moment `run -d` returns, but the in-container
+  // HTTP server needs a second or two to bind. Attaching straight away used to
+  // die with "fetch failed" and kill an otherwise healthy run.
+  const docker = fakeDocker({
+    onJob: (container) => container.emit({ type: "result", output: { replacementText: "late but fine" } })
+  });
+  let readyAfter = 3;
+  const clientFactory = (baseUrl: string, secret: string) => {
+    const real = createAgentSessionClient({ baseUrl, secret });
+    const refuse = () => {
+      throw new TypeError("fetch failed");
+    };
+    return {
+      ...real,
+      status: async (probeOnly?: boolean) => {
+        if (readyAfter-- > 0) refuse();
+        return real.status(probeOnly);
+      },
+      attach: async () => {
+        if (readyAfter > 0) refuse();
+        return real.attach();
+      }
+    };
+  };
+  try {
+    const output = await runDetachedSession({
+      docker: docker.ops,
+      args: ["run", "-d", "image"],
+      containerPort: PORT,
+      secret: SECRET,
+      job: {},
+      waitMs: 500,
+      readyTimeoutMs: 10_000,
+      readyPollMs: 20,
+      clientFactory
+    });
+    assert.equal(output.replacementText, "late but fine");
+    assert.deepEqual(docker.removed, [], "a container that just needed a moment must not be discarded");
+  } finally {
+    await docker.closeAll();
+  }
+});
+
+test("a container that never answers is given up on after the readiness deadline", async () => {
+  const docker = fakeDocker();
+  const clientFactory = (baseUrl: string, secret: string) => {
+    const real = createAgentSessionClient({ baseUrl, secret });
+    return {
+      ...real,
+      status: async () => {
+        throw new TypeError("fetch failed");
+      },
+      attach: async () => {
+        throw new TypeError("fetch failed");
+      }
+    };
+  };
+  try {
+    await assert.rejects(
+      () =>
+        runDetachedSession({
+          docker: docker.ops,
+          args: ["run", "-d", "image"],
+          containerPort: PORT,
+          secret: SECRET,
+          job: {},
+          waitMs: 200,
+          readyTimeoutMs: 120,
+          readyPollMs: 20,
+          clientFactory
+        }),
+      /fetch failed/
+    );
+  } finally {
+    await docker.closeAll();
+  }
 });

@@ -187,6 +187,9 @@ export type DetachedSessionOptions = {
   /** AiRun id to register a cross-process steering injector for. */
   steerRunId?: string;
   waitMs?: number;
+  /** How long to wait for the in-container HTTP server to bind (0 = no wait). */
+  readyTimeoutMs?: number;
+  readyPollMs?: number;
   clientFactory?: (baseUrl: string, secret: string) => AgentSessionClient;
 };
 
@@ -224,8 +227,46 @@ export async function runDetachedSession(
     signal: options.signal,
     steerRunId: options.steerRunId,
     waitMs: options.waitMs,
+    // A freshly started container has published its port but may not have bound
+    // its HTTP server yet; attaching immediately used to fail the whole run with
+    // "fetch failed" while the container was perfectly healthy.
+    readyTimeoutMs: options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS,
+    readyPollMs: options.readyPollMs,
     clientFactory: options.clientFactory
   });
+}
+
+/** Fresh containers pull an image layer cache, mount the workspace, boot Node. */
+export const DEFAULT_READY_TIMEOUT_MS = 120_000;
+const DEFAULT_READY_POLL_MS = 500;
+
+/**
+ * Poll `/status` until the container answers. Startup errors are expected and
+ * retried; only the deadline (or an abort) gives up. Uses the probe form so a
+ * container we are about to drive is not credited with contact it did not have.
+ */
+async function waitForSessionReady(
+  client: AgentSessionClient,
+  timeoutMs: number,
+  pollMs: number,
+  signal?: AbortSignal
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown = null;
+  for (;;) {
+    if (signal?.aborted) return;
+    try {
+      await client.status(true);
+      return;
+    } catch (error) {
+      if (error instanceof AttachSupersededError) throw error;
+      lastError = error;
+    }
+    if (Date.now() >= deadline) {
+      throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, pollMs));
+  }
 }
 
 export type AttachDetachedOptions = {
@@ -240,6 +281,13 @@ export type AttachDetachedOptions = {
   signal?: AbortSignal;
   steerRunId?: string;
   waitMs?: number;
+  /**
+   * Wait this long for the container to answer before attaching. Only the
+   * fresh-start path sets it: adoption must NOT block on an unreachable
+   * container — an unreachable one is the reaper's business.
+   */
+  readyTimeoutMs?: number;
+  readyPollMs?: number;
   clientFactory?: (baseUrl: string, secret: string) => AgentSessionClient;
 };
 
@@ -256,6 +304,15 @@ export async function attachDetachedSession(
   const client = (options.clientFactory ?? defaultClientFactory)(handle.endpoint, handle.secret);
   const applier = createFrameApplier(options.sink ?? {});
   let released = false;
+
+  if ((options.readyTimeoutMs ?? 0) > 0) {
+    await waitForSessionReady(
+      client,
+      options.readyTimeoutMs as number,
+      options.readyPollMs ?? DEFAULT_READY_POLL_MS,
+      options.signal
+    );
+  }
 
   // Taking the attach token invalidates any other process's — the container
   // itself arbitrates ownership, so there is no lease to go stale in the DB and
