@@ -484,7 +484,7 @@ export function SlackConnectConfig({
                     {provider === "openrouter"
                       ? "an OpenRouter"
                       : provider === "openai"
-                        ? "an OpenAI (unless this server has a Codex subscription login)"
+                        ? "an OpenAI (or paste ~/.codex/auth.json to use your ChatGPT subscription)"
                         : "a LiteLLM"} API key.
                   </>
                 )}{" "}
@@ -521,9 +521,17 @@ export function SlackConnectConfig({
         <div className="env-add-row credentials-add-row">
           <input
             aria-label="Credential"
+            autoComplete="off"
+            className="secret-input"
+            data-1p-ignore="true"
+            data-lpignore="true"
+            data-bwignore="true"
+            data-form-type="other"
+            name="credential-paste"
             onChange={(event) => setValueDraft(event.target.value)}
-            placeholder="Paste any credential: sk-ant-…, sk-or-…, github_pat_…, LiteLLM key"
-            type="password"
+            placeholder="Paste any credential: sk-ant-…, sk-or-…, github_pat_…, LiteLLM key, ~/.codex/auth.json"
+            spellCheck={false}
+            type="text"
             value={valueDraft}
           />
           <button
@@ -571,6 +579,10 @@ export function SlackConnectConfig({
             subscription tokens (<code>sk-ant-oat…</code>, from <code>claude setup-token</code>),
             OpenRouter keys (<code>sk-or-…</code>), GitHub tokens (<code>github_pat_…</code> /{" "}
             <code>ghp_…</code>) and LiteLLM keys — the type is detected as you paste.
+            Subscriptions work too: run <code>claude setup-token</code> (Claude) or{" "}
+            <code>codex login</code> (ChatGPT) on your own machine and paste the token — for
+            Codex, paste the whole contents of <code>~/.codex/auth.json</code>. That unlocks the
+            &quot;ChatGPT subscription&quot; models in the Codex model picker below.
           </p>
         )}
       </section>
