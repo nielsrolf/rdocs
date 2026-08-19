@@ -102,7 +102,11 @@ test("slack run falls back to the triggering user's default agent config when th
   assert.equal(document.agentModel, null, "fresh slack channel doc must not pin a model");
 
   const run = await startRunFor({ userId: alice.id, document });
-  assert.deepEqual(run.agentConfig, { model: "claude-opus-4-8", effort: "high" });
+  assert.deepEqual(run.agentConfig, {
+    model: "claude-opus-4-8",
+    effort: "high",
+    userInstructions: null
+  });
 });
 
 test("explicit document agent config wins over the user default", async () => {
@@ -119,7 +123,11 @@ test("explicit document agent config wins over the user default", async () => {
   });
 
   const run = await startRunFor({ userId: alice.id, document: pinned });
-  assert.deepEqual(run.agentConfig, { model: "claude-fable-5", effort: "low" });
+  assert.deepEqual(run.agentConfig, {
+    model: "claude-fable-5",
+    effort: "low",
+    userInstructions: null
+  });
 });
 
 test("no user default keeps the null config (app default)", async () => {
@@ -132,5 +140,5 @@ test("no user default keeps the null config (app default)", async () => {
   });
 
   const run = await startRunFor({ userId: alice.id, document });
-  assert.deepEqual(run.agentConfig, { model: null, effort: null });
+  assert.deepEqual(run.agentConfig, { model: null, effort: null, userInstructions: null });
 });

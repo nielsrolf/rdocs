@@ -14,7 +14,13 @@ import { agentHarnessForModel, agentModelProvider, isAuthFailure, isRetryableAge
 
 import type { AgentRunner, AgentRunOptions, MergeResolveJob } from "./index";
 import { toAgentJob } from "./index";
-import { buildContainerEnv, buildContainerRunArgs, resolveContainerUser, serializeEnvFile } from "./container-args";
+import {
+  buildContainerEnv,
+  buildContainerRunArgs,
+  resolveContainerPidsLimit,
+  resolveContainerUser,
+  serializeEnvFile
+} from "./container-args";
 import {
   CONNECT_ANTHROPIC_CREDENTIAL_MESSAGE,
   CONNECT_OPENAI_CREDENTIAL_MESSAGE,
@@ -205,6 +211,9 @@ export class ContainerRunner implements AgentRunner {
     // container-session.ts). The secret rides the env file, never the argv.
     const detached = detachedContainersEnabled(process.env);
     const sessionSecret = detached ? generateSessionSecret() : undefined;
+    // Both harnesses deliver a message INTO the live turn: Claude via streaming
+    // input, Codex via the app-server's turn/steer.
+    const steerRunId = opts.steerRunId;
     try {
       if (harness === "codex") {
         await mkdir(sessionDirHostPath!, { recursive: true });
@@ -240,7 +249,7 @@ export class ContainerRunner implements AgentRunner {
         ...containerUser,
         memory: process.env.AGENT_CONTAINER_MEMORY || "4g",
         cpus: process.env.AGENT_CONTAINER_CPUS || undefined,
-        pidsLimit: 512,
+        pidsLimit: resolveContainerPidsLimit(process.env),
         readOnly,
         // e.g. AGENT_CONTAINER_OCI_RUNTIME=runsc to run under gVisor (Linux).
         ociRuntime: process.env.AGENT_CONTAINER_OCI_RUNTIME || undefined,
@@ -267,7 +276,7 @@ export class ContainerRunner implements AgentRunner {
               secret: sessionSecret,
               job: opts.job,
               signal: opts.signal,
-              steerRunId: harness === "codex" ? undefined : opts.steerRunId,
+              steerRunId: steerRunId,
               store: createAiRunSessionStore(opts.aiRunId),
               sink: {
                 onProgress: opts.onProgress,
@@ -281,7 +290,7 @@ export class ContainerRunner implements AgentRunner {
             signal: opts.signal,
             containerName: opts.containerName,
             onSessionId: opts.onSessionId,
-            steerRunId: harness === "codex" ? undefined : opts.steerRunId
+            steerRunId: steerRunId
           });
         } catch (error) {
           // A cancelled session reports itself; the loop below must not treat it

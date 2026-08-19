@@ -89,6 +89,16 @@ export function createAgentSessionClient(options: {
         body: init?.body === undefined ? undefined : JSON.stringify(init.body),
         signal: controller.signal
       });
+    } catch (error) {
+      // undici reports every transport failure as the bare "fetch failed",
+      // which tells nobody which call to which container broke. Name both.
+      const cause = error instanceof Error ? (error.cause as Error | undefined) : undefined;
+      const detail = [error instanceof Error ? error.message : String(error), cause?.message]
+        .filter(Boolean)
+        .join(": ");
+      throw new Error(`agent session ${method} ${options.baseUrl}${path} transport error: ${detail}`, {
+        cause: error
+      });
     } finally {
       if (timer) clearTimeout(timer);
       init?.signal?.removeEventListener("abort", onOuterAbort);
@@ -97,7 +107,13 @@ export function createAgentSessionClient(options: {
       throw new AttachSupersededError();
     }
     if (!response.ok) {
-      throw new SessionGoneError(`agent session ${method} ${path} failed with HTTP ${response.status}`);
+      // Include the server's own explanation — a 413 from /job must say WHAT
+      // was too large, not just that something failed.
+      const detail = await response.text().catch(() => "");
+      const clipped = detail.trim().slice(0, 300);
+      throw new SessionGoneError(
+        `agent session ${method} ${path} failed with HTTP ${response.status}${clipped ? `: ${clipped}` : ""}`
+      );
     }
     return await response.json();
   };

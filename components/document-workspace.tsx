@@ -16,6 +16,7 @@ import TableRow from "@tiptap/extension-table-row";
 import TaskList from "@tiptap/extension-task-list";
 import Underline from "@tiptap/extension-underline";
 import { getVersion, receiveTransaction, sendableSteps } from "@tiptap/pm/collab";
+import { Fragment } from "@tiptap/pm/model";
 import { NodeSelection } from "@tiptap/pm/state";
 import { Step } from "@tiptap/pm/transform";
 import { EditorContent, JSONContent, useEditor, type Editor } from "@tiptap/react";
@@ -1691,31 +1692,35 @@ export function DocumentWorkspace({
   }
 
   function handleReorderTab(tabId: string, direction: "up" | "down") {
+    const idx = tabs.findIndex((tab) => tab.id === tabId);
+    if (idx === -1) return;
+    handleMoveTab(tabId, direction === "up" ? idx - 1 : idx + 1);
+  }
+
+  // Move a tab (its tabBreak + content slice) to `targetIndex` in the tab
+  // order. Rebuilds the whole tabbed region in the new order with a single
+  // replaceWith, so it works for any distance, not just adjacent swaps.
+  function handleMoveTab(tabId: string, targetIndex: number) {
     if (!editor || !canWriteDocument) return;
     const idx = tabs.findIndex((tab) => tab.id === tabId);
     if (idx === -1) return;
-    const swapIdx = direction === "up" ? idx - 1 : idx + 1;
-    if (swapIdx < 0 || swapIdx >= tabs.length) return;
-
-    const a = tabs[idx];
-    const b = tabs[swapIdx];
-    // a.contentFrom..a.contentTo and b.contentFrom..b.contentTo are adjacent (separated
-    // by the next tabBreak). We move whichever tab comes first to where the second was,
-    // by swapping the two slices including their leading tabBreak nodes.
-    const first = direction === "up" ? b : a;
-    const second = direction === "up" ? a : b;
-    const firstFrom = first.breakPos;
-    const firstTo = first.contentTo;
-    const secondFrom = second.breakPos;
-    const secondTo = second.contentTo;
-    if (firstTo !== secondFrom) return; // sanity check: adjacency
-    const firstSlice = editor.state.doc.slice(firstFrom, firstTo);
-    const secondSlice = editor.state.doc.slice(secondFrom, secondTo);
-    const tr = editor.state.tr.replaceWith(
-      firstFrom,
-      secondTo,
-      secondSlice.content.append(firstSlice.content)
-    );
+    const clamped = Math.max(0, Math.min(tabs.length - 1, targetIndex));
+    if (clamped === idx) return;
+    // Sanity check: tabs must be contiguous slices (each tab's content ends
+    // where the next tab's break begins) so re-concatenation is lossless.
+    for (let i = 0; i < tabs.length - 1; i += 1) {
+      if (tabs[i].contentTo !== tabs[i + 1].breakPos) return;
+    }
+    const order = [...tabs];
+    const [moved] = order.splice(idx, 1);
+    order.splice(clamped, 0, moved);
+    const from = tabs[0].breakPos;
+    const to = tabs[tabs.length - 1].contentTo;
+    let content = Fragment.empty;
+    for (const tab of order) {
+      content = content.append(editor.state.doc.slice(tab.breakPos, tab.contentTo).content);
+    }
+    const tr = editor.state.tr.replaceWith(from, to, content);
     editor.view.dispatch(tr);
   }
 
@@ -4781,6 +4786,7 @@ export function DocumentWorkspace({
             onRenameTab={handleRenameTab}
             onDeleteTab={handleDeleteTab}
             onReorderTab={handleReorderTab}
+            onMoveTab={handleMoveTab}
           />
         )}
         <div className="editor-page-shell">

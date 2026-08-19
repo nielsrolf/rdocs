@@ -7,7 +7,6 @@ import {
   type ClaudeResearchAgentInput,
   type ClaudeResearchAgentOutput
 } from "@/agent-core";
-
 import type { AgentRunner, AgentRunOptions, MergeResolveJob } from "./index";
 import {
   RunCancelledError,
@@ -40,10 +39,10 @@ export class InProcessRunner implements AgentRunner {
     const validateSubmission = options?.validation
       ? buildSubmissionValidator(options.validation, { workspacePath: input.workspacePath })
       : undefined;
-    // Steering channel — Claude harness only (the Codex SDK path has no
-    // equivalent open input stream, so its runs stay queue-only).
-    const isClaudeHarness = agentHarnessForModel(options?.agentConfig?.model) !== "codex";
-    const inputChannel = options?.aiRunId && isClaudeHarness ? createAgentInputChannel() : undefined;
+    // Steering channel. Both harnesses deliver a message INTO the running turn:
+    // Claude via streaming input, Codex via the app-server's turn/steer.
+    const harness = agentHarnessForModel(options?.agentConfig?.model);
+    const inputChannel = options?.aiRunId ? createAgentInputChannel() : undefined;
     if (inputChannel && options?.aiRunId) {
       registerRunMessageInjector(options.aiRunId, (text) => inputChannel.push(text));
     }
@@ -73,7 +72,7 @@ export class InProcessRunner implements AgentRunner {
       // and kernel sandbox: the whole point is operating on the deployment.
       isolatedRuntime: options?.trustedHostRun === true
     };
-    const rawPromise = isClaudeHarness
+    const rawPromise = harness !== "codex"
       ? runClaudeResearchAgent(input, runOptions)
       : import("../../agent-core/codex-agent").then(({ runCodexResearchAgent }) =>
           runCodexResearchAgent(input, runOptions)

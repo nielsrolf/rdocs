@@ -11,7 +11,14 @@ export type SlackMessage = {
 };
 
 export type SlackClient = {
-  postMessage(args: { channel: string; text: string; threadTs?: string }): Promise<{ ts: string | null }>;
+  // `channel` is the RESOLVED channel id from chat.postMessage — when posting a
+  // DM by user id (U…), this is the underlying IM channel (D…), which is what
+  // inbound message events carry. Optional so test fakes stay minimal.
+  postMessage(args: {
+    channel: string;
+    text: string;
+    threadTs?: string;
+  }): Promise<{ ts: string | null; channel?: string | null }>;
   postEphemeral(args: { channel: string; user: string; text: string; threadTs?: string }): Promise<void>;
   addReaction(args: { channel: string; ts: string; name: string }): Promise<void>;
   removeReaction(args: { channel: string; ts: string; name: string }): Promise<void>;
@@ -91,7 +98,10 @@ export function createSlackWebClient(botToken: string): SlackClient {
         text,
         ...(threadTs ? { thread_ts: threadTs } : {})
       });
-      return { ts: typeof result.ts === "string" ? result.ts : null };
+      return {
+        ts: typeof result.ts === "string" ? result.ts : null,
+        channel: typeof result.channel === "string" ? result.channel : null
+      };
     },
     async postEphemeral({ channel, user, text, threadTs }) {
       await slackApi(botToken, "chat.postEphemeral", {

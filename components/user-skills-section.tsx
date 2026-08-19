@@ -140,7 +140,7 @@ export function UserSkillsSection({
   }
 
   return (
-    <section className="credentials-section">
+    <section className="credentials-section" id="skills">
       <strong className="credentials-section-title">Agent skills</strong>
       <p>
         Reusable skills (folders with a <code>SKILL.md</code>) for the agents working on your

@@ -26,6 +26,7 @@ import {
   registerRunAbortController
 } from "@/lib/agent-runner/run-registry";
 import { createAgentRunner, getAgentRunner, getSelfHostedRunner, type AgentRunner } from "@/lib/agent-runner";
+import { AttachSupersededError } from "@/lib/agent-runner/session-client";
 import { db } from "@/lib/db";
 import {
   loadAgentEnvWithFreeFallback,
@@ -65,6 +66,21 @@ export const READ_ONLY_AGENT_NOTICE =
 export function pushFailureNotice(pushError: string): string {
   return `Changes were committed locally but could not be pushed to the linked repository: ${pushError}`;
 }
+
+/**
+ * Recognized by name as well as identity: the error can cross module-instance
+ * boundaries (instrumentation context vs. route context), where `instanceof`
+ * against a second copy of the class silently fails.
+ */
+function isAttachSuperseded(error: unknown): boolean {
+  return (
+    error instanceof AttachSupersededError ||
+    (error instanceof Error && error.name === "AttachSupersededError")
+  );
+}
+
+export const SESSION_HANDED_OFF_MESSAGE =
+  "Another server process took over this run's agent container — it continues there, driven by another server process. This reader stepped aside.";
 
 export function hostDevRunNotice(cwd: string): string {
   return `⚠ HOST DEV RUN: executing unsandboxed in the live deployment directory (${cwd}).`;
@@ -137,6 +153,11 @@ export type AgentRunLifecycleContext = {
 
 export type AgentRunLifecycleResult<T> =
   | { status: "SUCCEEDED"; value: T }
+  // The run's detached session container was taken over by another server
+  // process (single-attach arbitration). It is NOT finished and NOT failed: the
+  // process that attached is the reader now and owns the terminal bookkeeping,
+  // so this one records a note and touches nothing else.
+  | { status: "HANDED_OFF" }
   | { status: "FAILED"; error: string };
 
 export async function withAgentRunLifecycle<T>(
@@ -153,7 +174,10 @@ export async function withAgentRunLifecycle<T>(
   // Held in an object rather than a `let`: setupWorkspace assigns it from
   // inside a closure, which TS control-flow analysis cannot see, so a plain
   // `let` narrows to `null` at the catch/finally use sites below.
-  const state: { linkedRepo: LinkedRepositoryWorktree | null } = { linkedRepo: null };
+  const state: { linkedRepo: LinkedRepositoryWorktree | null; handedOff: boolean } = {
+    linkedRepo: null,
+    handedOff: false
+  };
   // Conversation runs pass deferHeartbeat and call ctx.beginHeartbeat() once
   // they hold the per-conversation session lock: a run still queued on that
   // lock must look silent, so the reaper can clear it instead of it posing as
@@ -277,6 +301,19 @@ export async function withAgentRunLifecycle<T>(
     const value = await fn(ctx);
     return { status: "SUCCEEDED", value };
   } catch (error) {
+    if (isAttachSuperseded(error)) {
+      state.handedOff = true;
+      // Handover, not failure. Do not commit (the other reader's container is
+      // still writing that worktree), do not mark FAILED (that would revoke the
+      // still-working agent's broker credentials and post a failure to Slack),
+      // do not record an error event.
+      await recordAiRunEvent({
+        aiRunId,
+        role: "system",
+        message: SESSION_HANDED_OFF_MESSAGE
+      }).catch(() => null);
+      return { status: "HANDED_OFF" };
+    }
     if (state.linkedRepo && agentAccessMode === "workspace") {
       await commitWorkspaceChanges({
         workspace: state.linkedRepo.workspace,
@@ -316,7 +353,10 @@ export async function withAgentRunLifecycle<T>(
   } finally {
     deregisterRunAbortController(aiRunId);
     heartbeat.stop();
-    if (state.linkedRepo && state.linkedRepo.baseWorkspace !== state.linkedRepo.worktree) {
+    // A handed-off run's container is STILL WORKING in that worktree (it is a
+    // bind mount, not a copy) — deleting it here would corrupt the run the other
+    // process is now driving.
+    if (!state.handedOff && state.linkedRepo && state.linkedRepo.baseWorkspace !== state.linkedRepo.worktree) {
       await removeRunWorktree(state.linkedRepo).catch(() => null);
     }
   }

@@ -82,8 +82,9 @@ export function activeRunCount(): number {
 // session register an injector here for their duration (see the input channel
 // in agent-core). Same process-local scope as the abort controllers above: a
 // run owned by another process (or a backend without a steering channel —
-// http/selfHosted, and any Codex run) simply has no entry, and callers fall
-// back to queueing a follow-up run.
+// http/selfHosted) simply has no entry, and callers fall back to queueing a
+// follow-up run. Both harnesses steer: Claude via streaming input, Codex via
+// the app-server's turn/steer.
 // Shared across module instances for the same reason as the controllers above.
 const injectors = registry.injectors;
 

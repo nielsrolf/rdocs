@@ -141,6 +141,12 @@ export function SlackConnectConfig({
   const [savedConfig, setSavedConfig] = useState<{ model: string; effort: string } | null>(null);
   const [configBusy, setConfigBusy] = useState(false);
 
+  // Personal custom instructions, injected into the system prompt of every
+  // run this user triggers (all modes, both harnesses).
+  const [instructions, setInstructions] = useState("");
+  const [savedInstructions, setSavedInstructions] = useState("");
+  const [instructionsBusy, setInstructionsBusy] = useState(false);
+
   // MCP bridge tokens. The plaintext command is only available right after
   // creating a token.
   const [mcpTokens, setMcpTokens] = useState<McpToken[]>([]);
@@ -179,6 +185,9 @@ export function SlackConnectConfig({
           setModel(savedModel);
           setEffort(savedEffort);
           setSavedConfig({ model: savedModel, effort: savedEffort });
+          const savedText = defaultsData.defaults.instructions ?? "";
+          setInstructions(savedText);
+          setSavedInstructions(savedText);
         }
         if (tokenRes.ok) setMcpTokens(tokenData?.tokens ?? []);
         if (skillsRes.ok) setSkills(skillsData?.skills ?? []);
@@ -287,6 +296,32 @@ export function SlackConnectConfig({
       setError("Failed to save the default model.");
     } finally {
       setConfigBusy(false);
+    }
+  }
+
+  async function handleSaveInstructions() {
+    if (instructionsBusy) return;
+    setInstructionsBusy(true);
+    setError(null);
+    try {
+      const trimmed = instructions.trim();
+      const response = await fetch("/api/user/agent-defaults", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instructions: trimmed || null })
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        setError(data?.error ?? "Failed to save custom instructions.");
+        return;
+      }
+      const saved = data?.defaults?.instructions ?? "";
+      setInstructions(saved);
+      setSavedInstructions(saved);
+    } catch {
+      setError("Failed to save custom instructions.");
+    } finally {
+      setInstructionsBusy(false);
     }
   }
 
@@ -405,7 +440,7 @@ export function SlackConnectConfig({
         </section>
       )}
 
-      <section className="credentials-section">
+      <section className="credentials-section" id="credentials">
         <strong className="credentials-section-title">AI credentials</strong>
         <p>
           One credential per provider, used for AI edits and replies on every document you own.
@@ -528,7 +563,7 @@ export function SlackConnectConfig({
         )}
       </section>
 
-      <section className="credentials-section">
+      <section className="credentials-section" id="default-model">
         <strong className="credentials-section-title">Default model</strong>
         <p>
           Used whenever an agent runs for you and the document or channel hasn&apos;t pinned a
@@ -648,7 +683,42 @@ export function SlackConnectConfig({
         </div>
       </section>
 
-      <section className="credentials-section">
+      <section className="credentials-section" id="custom-instructions">
+        <strong className="credentials-section-title">Custom instructions</strong>
+        <p>
+          Injected into the system prompt of <strong>every agent run you trigger</strong> — AI
+          edits, comment replies, document conversations, and Slack mentions, on both harnesses.
+          Use it for tone, language, and personal defaults; it can&apos;t override app rules.
+        </p>
+        <textarea
+          aria-label="Custom instructions"
+          className="agent-instructions-input"
+          maxLength={8000}
+          onChange={(event) => setInstructions(event.target.value)}
+          placeholder={"e.g. Always answer in German. Prefer concise replies. When writing code, add tests."}
+          rows={5}
+          value={instructions}
+        />
+        <div className="credentials-actions">
+          <button
+            className="ghost-button"
+            disabled={!loaded || instructionsBusy || instructions.trim() === savedInstructions.trim()}
+            onClick={handleSaveInstructions}
+            type="button"
+          >
+            {instructionsBusy
+              ? "Saving…"
+              : instructions.trim() === savedInstructions.trim()
+                ? "Saved ✓"
+                : "Save instructions"}
+          </button>
+          <span className="env-note agent-instructions-count">
+            {instructions.length} / 8000
+          </span>
+        </div>
+      </section>
+
+      <section className="credentials-section" id="mcp">
         <strong className="credentials-section-title">Connect via MCP</strong>
         <p>
           Let a local Claude Code (or any MCP client) read and edit your documents as you.
@@ -701,7 +771,7 @@ export function SlackConnectConfig({
 
       <UserSkillsSection onSkillsChanged={setSkills} skills={skills} />
 
-      <section className="credentials-section">
+      <section className="credentials-section" id="self-hosted">
         <strong className="credentials-section-title">Self-hosted worker</strong>
         <p>
           Prefer not to store credentials here at all? Documents can run their agents on{" "}

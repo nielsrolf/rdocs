@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createAgentSessionState } from "../agent-core/session-protocol";
-import { createAgentSessionServer } from "../agent-core/session-server";
+import { createAgentSessionServer, MAX_SESSION_BODY_BYTES } from "../agent-core/session-server";
 import {
   AttachSupersededError,
   consumeAgentSession,
@@ -284,6 +284,45 @@ test("a liveness probe reads status without resetting the no-contact TTL", async
     await new Promise((resolve) => setTimeout(resolve, 5));
     const touched = await session.client.status();
     assert.ok(touched.lastContactAtMs > before, "a plain status read is still contact");
+  } finally {
+    await session.server.close();
+  }
+});
+
+// A document with pasted images ships its image blocks (data URLs) inside the
+// job, so a perfectly ordinary selection edit can post several megabytes. The
+// original 4 MiB cap rejected the body by DESTROYING the socket mid-upload, so
+// undici reported the opaque "fetch failed" and the run died with a message
+// that pointed at nothing (2026-08-12: two selection edits on a 6 MB document).
+test("a multi-megabyte job (document with pasted images) is accepted", async () => {
+  const session = await startSession();
+  try {
+    await session.client.attach();
+    const bigImage = "data:image/png;base64," + "A".repeat(6 * 1024 * 1024);
+    const job = { input: { instruction: "fix the latex", documentBlocks: [{ type: "image", src: bigImage }] } };
+    assert.equal(await session.client.postJob(job), true);
+    assert.equal(session.jobs.length, 1);
+    assert.deepEqual(session.jobs[0], job);
+  } finally {
+    await session.server.close();
+  }
+});
+
+test("an over-limit job body fails with an actionable HTTP error, not a destroyed socket", async () => {
+  const session = await startSession();
+  try {
+    await session.client.attach();
+    const oversize = "x".repeat(MAX_SESSION_BODY_BYTES + 1024);
+    await assert.rejects(
+      () => session.client.postJob({ input: { instruction: oversize } }),
+      (error: Error) => {
+        assert.ok(
+          /413/.test(error.message),
+          `expected an HTTP 413, got: ${error.message}`
+        );
+        return true;
+      }
+    );
   } finally {
     await session.server.close();
   }

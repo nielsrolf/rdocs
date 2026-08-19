@@ -37,7 +37,7 @@ export type ConversationRunInput = {
   documentTitle: string;
   documentContent: string;
   createdById: string | null;
-  agentConfig: { model: string | null; effort: string | null };
+  agentConfig: { model: string | null; effort: string | null; userInstructions?: string | null };
   agentAccessMode: AgentAccessMode;
   // Document.runnerMode ("managed" | "selfHosted"). selfHosted documents never
   // get a worktree managed by this app — see the lifecycle wrapper's
@@ -274,6 +274,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
         workspacePath: hostDevRun ? process.cwd() : linkedRepo?.workspace ?? null,
         workspaceOverview,
         instruction: message,
+        userInstructions: agentConfig.userInstructions ?? null,
         conversationHistory,
         resumeSessionId,
         slackContext,
@@ -310,6 +311,16 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       });
     }
   );
+
+  if (lifecycleResult.status === "HANDED_OFF") {
+    // Another server process attached to this run's detached container and is now
+    // its reader. The run is neither done nor failed here, so there is nothing to
+    // report: firing onFinished would post a bogus Slack failure (and clear the
+    // 👀) for a run that is still working. The adopting process finalizes it and
+    // delivers the reply (lib/agent-runner/session-adoption.ts).
+    console.log(`[agent-session] run ${aiRunId} handed off to another server process; not finalizing here.`);
+    return;
+  }
 
   const outcome: ConversationRunOutcome =
     lifecycleResult.status === "SUCCEEDED"

@@ -41,7 +41,30 @@ export type AgentSessionServer = {
 
 const DEFAULT_POLL_WAIT_MS = 25_000;
 const MAX_POLL_WAIT_MS = 60_000;
-const MAX_BODY_BYTES = 4 * 1024 * 1024;
+// Job bodies legitimately carry the document's image blocks as base64 data
+// URLs, so a single ordinary selection edit on a screenshot-heavy document is
+// several MB. The old 4 MiB ceiling turned that into a hard run failure, and it
+// failed in the worst possible way: the socket was destroyed mid-upload, so the
+// host's undici fetch surfaced the opaque "fetch failed" (2026-08-12 incident).
+const DEFAULT_MAX_BODY_BYTES = 128 * 1024 * 1024;
+const MIN_MAX_BODY_BYTES = 4 * 1024 * 1024;
+
+export function resolveMaxSessionBodyBytes(
+  env: Record<string, string | undefined> = process.env
+): number {
+  const raw = Number(env.AGENT_SESSION_MAX_BODY_BYTES);
+  if (Number.isFinite(raw) && raw > 0) return Math.max(MIN_MAX_BODY_BYTES, Math.floor(raw));
+  return DEFAULT_MAX_BODY_BYTES;
+}
+
+export const MAX_SESSION_BODY_BYTES = resolveMaxSessionBodyBytes();
+
+export class SessionBodyTooLargeError extends Error {
+  constructor(limitBytes: number) {
+    super(`request body exceeds ${limitBytes} bytes (AGENT_SESSION_MAX_BODY_BYTES)`);
+    this.name = "SessionBodyTooLargeError";
+  }
+}
 
 export function createAgentSessionServer(options: {
   state: AgentSessionState;
@@ -78,15 +101,24 @@ export function createAgentSessionServer(options: {
   const readBody = (req: IncomingMessage) =>
     new Promise<unknown>((resolve, reject) => {
       let raw = "";
+      let oversize = false;
       req.setEncoding("utf8");
       req.on("data", (chunk: string) => {
+        if (oversize) return;
         raw += chunk;
-        if (raw.length > MAX_BODY_BYTES) {
-          reject(new Error("request body too large"));
-          req.destroy();
+        if (raw.length > MAX_SESSION_BODY_BYTES) {
+          // Never destroy the socket here: the caller would see a transport
+          // error with no status and no reason. Drop what we buffered, drain
+          // the rest, and answer with a real 413 once the upload finishes.
+          oversize = true;
+          raw = "";
         }
       });
       req.on("end", () => {
+        if (oversize) {
+          reject(new SessionBodyTooLargeError(MAX_SESSION_BODY_BYTES));
+          return;
+        }
         if (!raw.trim()) {
           resolve({});
           return;
@@ -140,7 +172,8 @@ export function createAgentSessionServer(options: {
       try {
         body = await readBody(req);
       } catch (error) {
-        json(res, 400, { error: `invalid job body: ${(error as Error).message}` });
+        const status = error instanceof SessionBodyTooLargeError ? 413 : 400;
+        json(res, status, { error: `invalid job body: ${(error as Error).message}` });
         return;
       }
       const job = (body as { job?: unknown })?.job ?? body;
@@ -169,7 +202,8 @@ export function createAgentSessionServer(options: {
       try {
         body = await readBody(req);
       } catch (error) {
-        json(res, 400, { error: `invalid message body: ${(error as Error).message}` });
+        const status = error instanceof SessionBodyTooLargeError ? 413 : 400;
+        json(res, status, { error: `invalid message body: ${(error as Error).message}` });
         return;
       }
       const text = (body as { text?: unknown })?.text;

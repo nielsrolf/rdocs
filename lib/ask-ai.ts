@@ -5,6 +5,7 @@
 // and so tests can exercise the selfHosted-vs-managed worktree/runner branch
 // directly.
 
+import { RUN_STARTED_CLAUDE } from "@/agent-core/lifecycle-messages";
 import { markAiRunSucceeded, recordAiRunEvent } from "@/lib/ai-runs";
 import { withAgentRunLifecycle } from "@/lib/agent-run-lifecycle";
 import { broadcastDocumentEvent } from "@/lib/collaboration";
@@ -20,6 +21,7 @@ import { resolveAgentConfigForUser } from "@/lib/agent-defaults";
 import type { AgentAccessMode } from "@/agent-core";
 import { normalizeAgentImages } from "@/lib/ai-edit-submission";
 import { createLiveCommentRecorder } from "@/lib/agent-comments";
+import { notifyCommentPosted } from "@/lib/comment-notifications";
 import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
 import { normalizeSourceLinks, serializeSourceLinks } from "@/lib/sources";
 import { getWorkspaceOverview } from "@/lib/research-workspace";
@@ -40,6 +42,73 @@ export type ThreadForReply = {
   };
   comments: Array<{ body: string; author: { name: string } | null; aiModel: string | null }>;
 };
+
+// Kick off a comment-thread Ask-AI run outside the HTTP route — used when a
+// Slack DM reply to a comment notification mentions the bot (lib/slack/events.ts).
+// Mirrors app/api/comments/[threadId]/ask-ai/route.ts: creates the AiRun row
+// and fires runAskAiInBackground; the AI's reply lands as a comment and flows
+// back out through the normal comment-created broadcast + notifications.
+// Caller must have verified comment access already.
+export async function startAskAiRunForThread(input: {
+  threadId: string;
+  userId: string;
+  agentAccessMode: AgentAccessMode;
+}): Promise<string | null> {
+  const thread = await db.commentThread.findUnique({
+    where: { id: input.threadId },
+    select: {
+      id: true,
+      anchorText: true,
+      anchorContext: true,
+      documentId: true,
+      document: {
+        select: {
+          id: true,
+          title: true,
+          content: true,
+          repoUrl: true,
+          agentModel: true,
+          agentEffort: true,
+          runnerMode: true
+        }
+      },
+      comments: {
+        orderBy: { createdAt: "asc" },
+        select: { body: true, author: { select: { name: true } }, aiModel: true }
+      }
+    }
+  });
+  if (!thread) return null;
+  const aiRun = await db.aiRun.create({
+    data: {
+      documentId: thread.documentId,
+      triggerType: "COMMENT_THREAD",
+      createdById: input.userId,
+      triggerId: thread.id,
+      instruction: "Write the next assistant reply for this comment thread.",
+      progress: RUN_STARTED_CLAUDE,
+      suggestOnly: true
+    }
+  });
+  await recordAiRunEvent({
+    aiRunId: aiRun.id,
+    role: "user",
+    message: "Write the next assistant reply for this comment thread."
+  });
+  void runAskAiInBackground({
+    aiRunId: aiRun.id,
+    thread,
+    createdById: input.userId,
+    agentAccessMode: input.agentAccessMode
+  }).catch((error) => {
+    console.error("[ask-ai] background run threw", {
+      threadId: thread.id,
+      aiRunId: aiRun.id,
+      error: error instanceof Error ? error.message : error
+    });
+  });
+  return aiRun.id;
+}
 
 // Runs the comment-reply agent off the request path. The HTTP handler returns
 // 202 immediately; the client tracks completion via AiRun polling and receives
@@ -115,10 +184,9 @@ export async function runAskAiInBackground(input: {
       });
       const linkedRepo = await ctx.setupWorkspace();
       const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, thread.documentId);
-      const { runAgentEnv, effectiveAgentConfig } = await ctx.loadEnv(
-        // Doc agent-panel config -> triggering user's default -> app default.
-        await resolveAgentConfigForUser(thread.document, createdById)
-      );
+      // Doc agent-panel config -> triggering user's default -> app default.
+      const resolvedConfig = await resolveAgentConfigForUser(thread.document, createdById);
+      const { runAgentEnv, effectiveAgentConfig } = await ctx.loadEnv(resolvedConfig);
 
       // Comments the agent leaves via add_comment are created (and broadcast)
       // the moment they arrive, so collaborators see review feedback mid-run.
@@ -148,6 +216,7 @@ export async function runAskAiInBackground(input: {
         workspacePath: linkedRepo?.workspace ?? null,
         workspaceOverview,
         instruction: "Write the next assistant reply for this comment thread.",
+        userInstructions: resolvedConfig.userInstructions,
         anchorText: thread.anchorText,
         anchorContext: derivedAnchorContext,
         comments: thread.comments.map((comment) => ({
@@ -240,6 +309,15 @@ export async function runAskAiInBackground(input: {
       broadcastDocumentEvent(thread.documentId, "comment-created", {
         threadId: thread.id,
         comment: serialized
+      });
+      // Slack DMs for everyone watching the doc — including the user who asked:
+      // when the ask came from a DM reply (@claudex in a notification thread),
+      // this is exactly how the answer gets back into their Slack thread.
+      void notifyCommentPosted({
+        threadId: thread.id,
+        documentId: thread.documentId,
+        commentBody: comment.body,
+        authorLabel: aiReply.model ?? "Claude"
       });
     }
   );

@@ -189,17 +189,23 @@ export function CommentRail({
   const [editDraft, setEditDraft] = useState("");
 
   if (collapsed) {
+    // Unread threads (new comments/replies since the viewer's last read marker)
+    // take over the count badge with a distinct style so the collapsed rail
+    // works as a notification indicator.
+    const unreadCount = threads.filter((thread) => isThreadUnread(thread, currentUserId)).length;
     return (
       <aside className="comment-rail comment-rail-collapsed" aria-label="Comments" data-tour="comment-rail">
         <button
-          aria-label="Show comments"
+          aria-label={unreadCount > 0 ? `Show comments (${unreadCount} unread)` : "Show comments"}
           className="comment-rail-toggle"
           onClick={onToggleCollapsed}
-          title="Show comments"
+          title={unreadCount > 0 ? `Show comments (${unreadCount} unread)` : "Show comments"}
           type="button"
         >
           <CommentsIcon />
-          {threads.length > 0 ? (
+          {unreadCount > 0 ? (
+            <span className="comment-rail-count comment-rail-count-unread">{unreadCount}</span>
+          ) : threads.length > 0 ? (
             <span className="comment-rail-count">{threads.length}</span>
           ) : null}
         </button>

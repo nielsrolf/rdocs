@@ -42,7 +42,8 @@ export function DocOutline({
   onRenameTab,
   onCreateTab,
   onDeleteTab,
-  onReorderTab
+  onReorderTab,
+  onMoveTab
 }: {
   editor: Editor | null;
   collapsed: boolean;
@@ -57,6 +58,7 @@ export function DocOutline({
   onCreateTab?: () => void;
   onDeleteTab?: (tabId: string) => void;
   onReorderTab?: (tabId: string, direction: TabReorderDirection) => void;
+  onMoveTab?: (tabId: string, targetIndex: number) => void;
 }) {
   const dragStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -226,6 +228,11 @@ export function DocOutline({
 
   const [copiedSlug, setCopiedSlug] = useState<string | null>(null);
 
+  // Drag-and-drop tab reordering: track the dragged tab and the insertion
+  // index the pointer is hovering over (0..tabs.length, between-row slots).
+  const [dragTabId, setDragTabId] = useState<string | null>(null);
+  const [dropSlot, setDropSlot] = useState<number | null>(null);
+
   async function copyLinkForSlug(slug: string, promptLabel: string) {
     if (typeof window === "undefined") return;
     const url = `${window.location.origin}${window.location.pathname}${window.location.search}#${slug}`;
@@ -328,6 +335,24 @@ export function DocOutline({
 
   const hasTabs = tabs.length > 0;
 
+  function slotFromPointer(event: React.DragEvent<HTMLElement>, index: number): number {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const before = event.clientY < rect.top + rect.height / 2;
+    return before ? index : index + 1;
+  }
+
+  function handleTabDrop(slot: number) {
+    if (!dragTabId) return;
+    const fromIndex = tabs.findIndex((tab) => tab.id === dragTabId);
+    if (fromIndex !== -1) {
+      // Convert the insertion slot to a final index after removal.
+      const targetIndex = slot > fromIndex ? slot - 1 : slot;
+      if (targetIndex !== fromIndex) onMoveTab?.(dragTabId, targetIndex);
+    }
+    setDragTabId(null);
+    setDropSlot(null);
+  }
+
   function renderHeadingItem(entry: OutlineEntry, indentLevel: number) {
     return (
       <li
@@ -378,14 +403,39 @@ export function DocOutline({
         {hasTabs ? (
           <ul className="doc-outline-list doc-outline-list-tabbed">
             {tabs.map((tab, index) => {
-              const tabHeadings = entries.filter((entry) => entry.tabId === tab.id);
+              const isActive = tab.id === activeTabId;
+              // Only the active tab expands its heading outline; inactive tabs
+              // stay as compact rows.
+              const tabHeadings = isActive
+                ? entries.filter((entry) => entry.tabId === tab.id)
+                : [];
+              const dropClass =
+                dragTabId && dropSlot === index
+                  ? " doc-outline-tab-group-drop-before"
+                  : dragTabId && dropSlot === index + 1
+                    ? " doc-outline-tab-group-drop-after"
+                    : "";
               return (
-                <li key={tab.id} className="doc-outline-tab-group">
+                <li
+                  key={tab.id}
+                  className={`doc-outline-tab-group${dropClass}${dragTabId === tab.id ? " doc-outline-tab-group-dragging" : ""}`}
+                  onDragOver={(event) => {
+                    if (!dragTabId) return;
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                    setDropSlot(slotFromPointer(event, index));
+                  }}
+                  onDrop={(event) => {
+                    if (!dragTabId) return;
+                    event.preventDefault();
+                    handleTabDrop(slotFromPointer(event, index));
+                  }}
+                >
                   <TabRow
                     tab={tab}
                     index={index}
                     totalTabs={tabs.length}
-                    isActive={tab.id === activeTabId}
+                    isActive={isActive}
                     canEdit={canEditTabs}
                     copied={copiedSlug === tabHashSlug(tab.id)}
                     onSelect={() => scrollToTab(tab)}
@@ -393,6 +443,17 @@ export function DocOutline({
                     onRename={onRenameTab}
                     onDelete={onDeleteTab}
                     onReorder={onReorderTab}
+                    draggable={canEditTabs && Boolean(onMoveTab)}
+                    onDragStart={(event) => {
+                      event.dataTransfer.effectAllowed = "move";
+                      // Some browsers require data for a drag to start.
+                      event.dataTransfer.setData("text/plain", tab.id);
+                      setDragTabId(tab.id);
+                    }}
+                    onDragEnd={() => {
+                      setDragTabId(null);
+                      setDropSlot(null);
+                    }}
                   />
                   {tabHeadings.length > 0 ? (
                     <ul className="doc-outline-tab-headings">
@@ -448,7 +509,10 @@ function TabRow({
   onCopyLink,
   onRename,
   onDelete,
-  onReorder
+  onReorder,
+  draggable = false,
+  onDragStart,
+  onDragEnd
 }: {
   tab: TabSummary;
   index: number;
@@ -461,6 +525,9 @@ function TabRow({
   onRename?: (tabId: string, title: string) => void;
   onDelete?: (tabId: string) => void;
   onReorder?: (tabId: string, direction: TabReorderDirection) => void;
+  draggable?: boolean;
+  onDragStart?: (event: React.DragEvent<HTMLDivElement>) => void;
+  onDragEnd?: (event: React.DragEvent<HTMLDivElement>) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(tab.title);
@@ -477,7 +544,12 @@ function TabRow({
   }
 
   return (
-    <div className={`doc-tab-row ${isActive ? "doc-tab-row-active" : ""}`}>
+    <div
+      className={`doc-tab-row ${isActive ? "doc-tab-row-active" : ""}`}
+      draggable={draggable && !editing}
+      onDragEnd={onDragEnd}
+      onDragStart={onDragStart}
+    >
       {editing ? (
         <input
           autoFocus

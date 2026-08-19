@@ -212,8 +212,8 @@ async function executeJob(
           : process.env.CLAUDE_CONFIG_DIR)?.trim() || undefined,
       validateSubmission,
       // Steering messages the host writes to stdin mid-run reach the live
-      // session through this channel (Claude harness; the Codex path ignores
-      // it and the host never registers an injector for those runs).
+      // session through this channel: Claude consumes it as streaming input,
+      // Codex pumps it into the app-server's turn/steer.
       inputChannel,
       // Session mode cancels IN-PROCESS (POST /cancel) instead of relying on the
       // host to kill the container: a detached container has no parent to signal

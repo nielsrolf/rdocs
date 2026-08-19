@@ -53,14 +53,22 @@ export async function register() {
   // the silence reaper runs, re-attach to every orphaned container that still
   // answers. An adopted run heartbeats again immediately, so the sweep below
   // cannot mistake it for abandoned. Never blocks boot.
-  try {
-    const { detachedContainersEnabled } = await import("@/lib/agent-runner/session-store");
-    if (detachedContainersEnabled(process.env)) {
+  //
+  // Adoption deliberately does NOT take a run whose owner is still heartbeating
+  // (LIVE_OWNER_SILENCE_MS in session-adoption.ts): during a blue/green deploy the
+  // draining sibling is still driving its runs, and attaching would invalidate its
+  // session token and kill a healthy run. That means boot alone is not enough —
+  // a container whose owner dies right after we boot must be picked up later, so
+  // the same sweep also runs on the periodic reaper tick below.
+  const runAdoption = async (label: string) => {
+    try {
+      const { detachedContainersEnabled } = await import("@/lib/agent-runner/session-store");
+      if (!detachedContainersEnabled(process.env)) return;
       const { adoptOrphanedSessions } = await import("@/lib/agent-runner/session-adoption");
       const adoption = await adoptOrphanedSessions();
       if (adoption.adopted.length > 0) {
         console.log(
-          `[agent-session] adopted ${adoption.adopted.length} orphaned detached agent run(s) at startup.`
+          `[agent-session] adopted ${adoption.adopted.length} orphaned detached agent run(s) (${label}).`
         );
       }
       // The drive-to-completion promise is deliberately not awaited.
@@ -69,12 +77,14 @@ export async function register() {
           error: error instanceof Error ? error.message : error
         });
       });
+    } catch (error) {
+      console.error(`[agent-session] ${label} adoption failed`, {
+        error: error instanceof Error ? error.message : error
+      });
     }
-  } catch (error) {
-    console.error("[agent-session] startup adoption failed", {
-      error: error instanceof Error ? error.message : error
-    });
-  }
+  };
+
+  await runAdoption("startup");
 
   try {
     await runSweep("startup");
@@ -87,11 +97,15 @@ export async function register() {
   // Periodic global reaper — silence-based, so it can never kill a run whose
   // owning process (this one or a draining sibling) is still heartbeating.
   const globalReaper = setInterval(() => {
-    runSweep("reaper").catch((error) => {
-      console.error("[reaper] global sweep failed", {
-        error: error instanceof Error ? error.message : error
+    // Adoption first, sweep second — same order as at boot: a container that just
+    // lost its reader gets a new one before the silence rule can judge it.
+    void runAdoption("reaper")
+      .then(() => runSweep("reaper"))
+      .catch((error) => {
+        console.error("[reaper] global sweep failed", {
+          error: error instanceof Error ? error.message : error
+        });
       });
-    });
   }, 5 * 60_000);
   globalReaper.unref?.();
 

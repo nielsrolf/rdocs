@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   buildContainerEnv,
   buildContainerRunArgs,
+  resolveContainerPidsLimit,
   resolveContainerUser,
   serializeEnvFile
 } from "../lib/agent-runner/container-args";
@@ -41,6 +42,16 @@ test("container run args enforce the hardening profile", () => {
   assert.ok(joined.includes("--memory 4g"));
   // The image is the last argument.
   assert.equal(a[a.length - 1], "gdocs-agent:local");
+});
+
+test("the pids ceiling is a host-side knob, since the container cannot raise it itself", () => {
+  assert.equal(resolveContainerPidsLimit({}), 512);
+  assert.equal(resolveContainerPidsLimit({ AGENT_CONTAINER_PIDS_LIMIT: "4096" }), 4096);
+  assert.equal(resolveContainerPidsLimit({ AGENT_CONTAINER_PIDS_LIMIT: "-1" }), -1);
+  // Garbage and absurdly low values fall back / clamp rather than wedging runs.
+  assert.equal(resolveContainerPidsLimit({ AGENT_CONTAINER_PIDS_LIMIT: "lots" }), 512);
+  assert.equal(resolveContainerPidsLimit({ AGENT_CONTAINER_PIDS_LIMIT: "8" }), 64);
+  assert.ok(args({ pidsLimit: 4096 }).join(" ").includes("--pids-limit 4096"));
 });
 
 test("Docker Desktop runs as container root so its root-owned bind mounts stay writable", () => {

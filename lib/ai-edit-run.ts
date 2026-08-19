@@ -109,7 +109,7 @@ export async function runAiEditInBackground(input: {
   documentTitle: string;
   documentContentRaw: string;
   createdById: string | null;
-  agentConfig: { model: string | null; effort: string | null };
+  agentConfig: { model: string | null; effort: string | null; userInstructions?: string | null };
   agentAccessMode: AgentAccessMode;
   runnerMode: string;
 }) {
@@ -201,6 +201,7 @@ export async function runAiEditInBackground(input: {
           selectedMarkdown: parsed.selectedMarkdown ?? null,
           selectedContext: parsed.selectedContext ?? null,
           instruction: parsed.instruction.trim(),
+          userInstructions: agentConfig.userInstructions ?? null,
           conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined
         },
         {

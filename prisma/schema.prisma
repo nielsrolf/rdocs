@@ -17,6 +17,9 @@ model User {
   // (claude-sonnet-5, thinking off). Same storable values as Document.agentModel.
   defaultAgentModel  String?
   defaultAgentEffort String?
+  // Personal custom instructions, injected into the system prompt of EVERY
+  // agent run this user triggers (all modes, both harnesses). Null/empty = none.
+  agentInstructions  String?
   // Quicktake visibility: null = this user's quicktakes are public (readable
   // by everyone, logged-out included); a Group id = all their quicktakes are
   // visible to that group's members only. One setting for ALL quicktakes of a
@@ -24,6 +27,9 @@ model User {
   // string (no relation): deleting the group cascades away the group grants,
   // leaving those quicktakes owner-only rather than silently public.
   quicktakeGroupId   String?
+  // Slack DM notifications for new comments/replies on documents this user can
+  // see (owner/member/group member). Only effective with a SlackAccountLink.
+  commentSlackNotifications Boolean      @default(true)
   createdAt         DateTime             @default(now())
   updatedAt         DateTime             @updatedAt
   ownedDocuments    Document[]           @relation("DocumentOwner")
@@ -45,6 +51,7 @@ model User {
   groupMemberships  GroupMember[]
   documentVotes     DocumentVote[]
   commentVotes      CommentVote[]
+  slackCommentNotifications SlackCommentNotification[]
 }
 
 // A named set of users (a team/company) that documents can be shared with.
@@ -308,6 +315,32 @@ model SlackAccountLink {
   @@index([userId])
 }
 
+// One Slack DM notification thread per (comment thread, recipient): messageTs
+// is the ts of the ROOT notification message the bot posted into the user's
+// claudex DM; later comments in the same doc thread are posted as Slack thread
+// replies under it (no new row). Inbound DM replies threaded under messageTs
+// are routed back into the document's comment thread instead of starting an
+// agent run (lib/slack/events.ts).
+model SlackCommentNotification {
+  id             String        @id @default(cuid())
+  slackTeamId    String
+  // The D… IM channel the notification was posted to (chat.postMessage's
+  // resolved channel — inbound events carry this id, not the user id).
+  slackChannelId String
+  messageTs      String
+  threadId       String
+  documentId     String
+  userId         String
+  createdAt      DateTime      @default(now())
+  thread         CommentThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([slackChannelId, messageTs])
+  @@unique([threadId, userId])
+  @@index([userId])
+  @@index([documentId])
+}
+
 // User-uploaded files attached to a document. The bytes live on disk under the
 // per-document attachments dir (see lib/attachments.ts); this row holds the
 // metadata. Each attachment is rendered as a draggable chip in the document and
@@ -407,6 +440,7 @@ model CommentThread {
   createdBy     User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
   comments      Comment[]
   reads         CommentThreadRead[]
+  slackNotifications SlackCommentNotification[]
 }
 
 model CommentThreadRead {

@@ -3479,6 +3479,25 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 .doc-outline-tab-group {
   list-style: none;
   min-width: 0;
+  /* Insertion-line indicators for drag-and-drop tab reordering. */
+  border-top: 2px solid transparent;
+  border-bottom: 2px solid transparent;
+}
+
+.doc-outline-tab-group-drop-before {
+  border-top-color: #1a73e8;
+}
+
+.doc-outline-tab-group-drop-after {
+  border-bottom-color: #1a73e8;
+}
+
+.doc-outline-tab-group-dragging {
+  opacity: 0.45;
+}
+
+.doc-tab-row[draggable="true"] {
+  cursor: grab;
 }
 
 /* Headings live indented under their tab, behind a left rule, so they read as
@@ -4126,6 +4145,12 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   font-weight: 600;
   line-height: 15px;
   text-align: center;
+}
+
+/* Unread comments/replies: the badge switches to an attention color so the
+   collapsed rail doubles as a notification indicator. */
+.comment-rail-count-unread {
+  background: #d93025;
 }
 
 .comment-filter-panel {
@@ -6051,12 +6076,15 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   padding: 3rem 1rem;
 }
 
-/* Settings sections share one column: sub-nav on top, section card below. */
+/* Settings layout: sticky sidebar (route links + in-page anchors with a
+   scroll-spy) on the left, section cards on the right. Collapses to a single
+   column on narrow screens with the nav on top. */
 .settings-page {
-  width: min(100%, 680px);
-  display: flex;
-  flex-direction: column;
-  gap: 0.9rem;
+  width: min(100%, 900px);
+  display: grid;
+  grid-template-columns: 200px minmax(0, 680px);
+  align-items: start;
+  gap: 1.2rem;
 }
 
 .settings-page .slack-connect-card {
@@ -6065,12 +6093,21 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .settings-nav {
   display: flex;
-  gap: 0.4rem;
+  flex-direction: column;
+  gap: 0.6rem;
+  position: sticky;
+  top: 1rem;
+}
+
+.settings-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
 }
 
 .settings-nav-link {
-  border-radius: 999px;
-  padding: 0.45rem 1rem;
+  border-radius: 8px;
+  padding: 0.45rem 0.75rem;
   font-size: 0.9rem;
   font-weight: 600;
   color: var(--muted);
@@ -6086,6 +6123,83 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 .settings-nav-link.is-active {
   background: rgba(26, 115, 232, 0.12);
   color: var(--accent);
+}
+
+.settings-nav-anchors {
+  display: flex;
+  flex-direction: column;
+  margin-left: 0.5rem;
+  border-left: 2px solid var(--border);
+}
+
+.settings-nav-sublink {
+  padding: 0.3rem 0.7rem;
+  font-size: 0.84rem;
+  color: var(--muted);
+  border-left: 2px solid transparent;
+  margin-left: -2px;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.settings-nav-sublink:hover {
+  color: var(--text);
+}
+
+.settings-nav-sublink.is-current {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  font-weight: 600;
+}
+
+/* Anchor targets shouldn't hide under the viewport top edge when jumped to. */
+.credentials-section[id] {
+  scroll-margin-top: 1rem;
+}
+
+@media (max-width: 860px) {
+  .settings-page {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-nav {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .settings-nav-group {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.3rem;
+  }
+
+  .settings-nav-anchors {
+    display: none;
+  }
+}
+
+/* Custom instructions textarea (settings → AI & credentials). */
+.agent-instructions-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 96px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  font: inherit;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  background: var(--background, #fff);
+  color: var(--text);
+}
+
+.agent-instructions-input:focus {
+  outline: 2px solid rgba(26, 115, 232, 0.35);
+  outline-offset: 1px;
+}
+
+.agent-instructions-count {
+  margin-left: auto;
 }
 
 .forum-settings-error {

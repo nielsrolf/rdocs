@@ -10,6 +10,7 @@ import {
   parseDocumentContent,
   serializeDocumentContent
 } from "@/lib/content";
+import { notifyCommentPosted } from "@/lib/comment-notifications";
 import { db } from "@/lib/db";
 import { serializeComment, serializeThread } from "@/lib/document-data";
 import { copyOwnerDefaultSkillsToDocument } from "@/lib/document-skills";
@@ -17,6 +18,7 @@ import { applyMarkdownEdit, McpEditError } from "@/lib/mcp/apply-edit";
 import { widgetSourceUrl } from "@/lib/mcp/markdown-doc";
 import { commitFilesToWorkspace, McpFileError, type UploadedFile } from "@/lib/mcp/workspace-files";
 import { canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import { listQuicktakes as listQuicktakesForUser, QUICKTAKE_KIND } from "@/lib/quicktakes";
 import { ensureLinkedRepository, runWidgetBuild } from "@/lib/research-workspace";
 
 export type McpUser = { id: string; email: string; name: string };
@@ -59,6 +61,23 @@ async function requireAccess(ref: string, userId: string, level: "view" | "comme
     throw new McpToolError("You do not have comment access to this document.");
   }
   return { documentId, access };
+}
+
+// A quicktake's text lives in Document.quicktakeBody, not in the TipTap
+// content, so the markdown edit pipeline would happily rewrite an empty
+// document body and leave the visible take untouched. Refuse loudly instead.
+async function requireEditableDocument(ref: string, userId: string) {
+  const { documentId, access } = await requireAccess(ref, userId, "edit");
+  if (access.document.kind === QUICKTAKE_KIND) {
+    throw new McpToolError(
+      "This document is a forum quicktake — its text is not editable through document markdown tools. Read it with read_document/list_quicktakes; edit or delete it in the forum UI."
+    );
+  }
+  return { documentId, access };
+}
+
+function quicktakeUrl(origin: string, id: string) {
+  return `${origin}/forum/quicktakes/${id}`;
 }
 
 const THREAD_SELECT = {
@@ -105,17 +124,38 @@ function defineTool<S extends z.ZodType>(tool: {
   return tool as unknown as McpTool;
 }
 
+const DOCUMENT_LIST_SELECT = {
+  id: true,
+  title: true,
+  kind: true,
+  updatedAt: true,
+  forumPostedAt: true,
+  forumPublic: true
+} as const;
+
+type ListedDocument = {
+  id: string;
+  title: string;
+  kind: string;
+  updatedAt: Date;
+  forumPostedAt: Date | null;
+  forumPublic: boolean;
+};
+
+const ROLE_RANK: Record<string, number> = { owner: 4, edit: 3, comment: 2, view: 1 };
+
 const listDocuments = defineTool({
   name: "list_documents",
-  description: "List the documents you own or that are shared with you (most recently updated first).",
+  description:
+    "List the documents you own, that are shared with you directly, or that are shared with a group you belong to (most recently updated first). Forum quicktakes appear with kind \"quicktake\" — read their text with read_document or list_quicktakes.",
   schema: z.object({}).strict(),
   handler: async (_args, ctx) => {
-    const [owned, memberships] = await Promise.all([
+    const [owned, memberships, groupGrants] = await Promise.all([
       db.document.findMany({
         where: { ownerId: ctx.user.id },
         orderBy: { updatedAt: "desc" },
         take: 50,
-        select: { id: true, title: true, updatedAt: true }
+        select: DOCUMENT_LIST_SELECT
       }),
       db.documentMembership.findMany({
         where: { userId: ctx.user.id },
@@ -123,23 +163,76 @@ const listDocuments = defineTool({
         take: 50,
         select: {
           permission: true,
-          document: { select: { id: true, title: true, updatedAt: true } }
+          document: { select: DOCUMENT_LIST_SELECT }
+        }
+      }),
+      // Documents shared with a group the user owns or belongs to — the
+      // "share with my team" path, which has no membership row.
+      db.documentGroupAccess.findMany({
+        where: {
+          group: { OR: [{ ownerId: ctx.user.id }, { members: { some: { userId: ctx.user.id } } }] }
+        },
+        orderBy: { document: { updatedAt: "desc" } },
+        take: 50,
+        select: {
+          permission: true,
+          document: { select: DOCUMENT_LIST_SELECT }
         }
       })
     ]);
+
+    const best = new Map<string, { doc: ListedDocument; role: string }>();
+    const add = (doc: ListedDocument, role: string) => {
+      const existing = best.get(doc.id);
+      if (existing && (ROLE_RANK[existing.role] ?? 0) >= (ROLE_RANK[role] ?? 0)) return;
+      best.set(doc.id, { doc, role });
+    };
+    for (const doc of owned) add(doc, "owner");
+    for (const m of [...memberships, ...groupGrants]) add(m.document, m.permission.toLowerCase());
+
     return {
-      documents: [
-        ...owned.map((doc) => ({ ...doc, role: "owner" as string })),
-        ...memberships.map((m) => ({ ...m.document, role: m.permission.toLowerCase() }))
-      ]
-        .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
-        .map((doc) => ({
+      documents: [...best.values()]
+        .sort((a, b) => b.doc.updatedAt.getTime() - a.doc.updatedAt.getTime())
+        .map(({ doc, role }) => ({
           id: doc.id,
           title: doc.title,
+          kind: doc.kind,
           updated_at: doc.updatedAt.toISOString(),
-          role: doc.role,
-          url: `${ctx.origin}/documents/${doc.id}`
+          role,
+          posted_to_forum: Boolean(doc.forumPostedAt),
+          url:
+            doc.kind === QUICKTAKE_KIND
+              ? quicktakeUrl(ctx.origin, doc.id)
+              : `${ctx.origin}/documents/${doc.id}`
         }))
+    };
+  }
+});
+
+const listQuicktakes = defineTool({
+  name: "list_quicktakes",
+  description:
+    "List forum quicktakes (short twitter-like posts) you can read — your own, public ones, and ones shared with a group you belong to — newest first, with their FULL body text, author, score and comment count.",
+  schema: z
+    .object({
+      limit: z.number().int().min(1).max(200).optional().describe("Max quicktakes to return (default 50).")
+    })
+    .strict(),
+  handler: async (args, ctx) => {
+    const takes = await listQuicktakesForUser(ctx.user.id, args.limit ?? 50);
+    return {
+      quicktakes: takes.map((take) => ({
+        id: take.id,
+        body: take.body,
+        created_at: take.createdAt.toISOString(),
+        author: take.owner.name,
+        author_id: take.owner.id,
+        is_owner: take.isOwner,
+        visibility: take.isPublic ? "public" : take.groupName ? `group:${take.groupName}` : "private",
+        score: take.score,
+        comment_count: take.commentCount,
+        url: quicktakeUrl(ctx.origin, take.id)
+      }))
     };
   }
 });
@@ -147,13 +240,24 @@ const listDocuments = defineTool({
 const readDocument = defineTool({
   name: "read_document",
   description:
-    "Read a document as markdown. Existing interactive widgets appear as ![widget: <label>](widget://<widget_id>) placeholders and images as workspace paths — echo them verbatim to keep them when editing. Also returns the document's widgets and open comment threads.",
+    "Read a document as markdown. Works for forum quicktakes too (their body is returned as the markdown). Existing interactive widgets appear as ![widget: <label>](widget://<widget_id>) placeholders and images as workspace paths — echo them verbatim to keep them when editing. Also returns the document's widgets and open comment threads.",
   schema: z.object({ document: documentRef }).strict(),
   handler: async (args, ctx) => {
     const { documentId } = await requireAccess(args.document, ctx.user.id, "view");
     const document = await db.document.findUniqueOrThrow({
       where: { id: documentId },
-      select: { id: true, title: true, content: true, repoUrl: true, repoBranch: true, updatedAt: true }
+      select: {
+        id: true,
+        title: true,
+        kind: true,
+        content: true,
+        quicktakeBody: true,
+        forumPostedAt: true,
+        forumPublic: true,
+        repoUrl: true,
+        repoBranch: true,
+        updatedAt: true
+      }
     });
     const [widgets, threads] = await Promise.all([
       db.embeddedWidget.findMany({
@@ -167,13 +271,27 @@ const readDocument = defineTool({
       })
     ]);
     const content = parseDocumentContent(document.content);
+    const isQuicktake = document.kind === QUICKTAKE_KIND;
     return {
       id: document.id,
       title: document.title,
-      url: `${ctx.origin}/documents/${document.id}`,
+      kind: document.kind,
+      url: isQuicktake
+        ? quicktakeUrl(ctx.origin, document.id)
+        : `${ctx.origin}/documents/${document.id}`,
+      forum: document.forumPostedAt
+        ? {
+            posted_at: document.forumPostedAt.toISOString(),
+            public: document.forumPublic,
+            url: isQuicktake
+              ? quicktakeUrl(ctx.origin, document.id)
+              : `${ctx.origin}/forum/${document.id}`
+          }
+        : null,
       repo: document.repoUrl ? { url: document.repoUrl, branch: document.repoBranch } : null,
       updated_at: document.updatedAt.toISOString(),
-      markdown: getDocumentMarkdown(content),
+      // A quicktake keeps its text in quicktakeBody; its TipTap content is empty.
+      markdown: isQuicktake ? document.quicktakeBody ?? "" : getDocumentMarkdown(content),
       widgets: widgets.map((widget) => ({
         widget_id: widget.id,
         label: widget.label,
@@ -200,7 +318,7 @@ const replaceInDocument = defineTool({
     })
     .strict(),
   handler: async (args, ctx) => {
-    const { documentId } = await requireAccess(args.document, ctx.user.id, "edit");
+    const { documentId } = await requireEditableDocument(args.document, ctx.user.id);
     const { version } = await applyMarkdownEdit({
       documentId,
       userId: ctx.user.id,
@@ -222,7 +340,7 @@ const appendToDocument = defineTool({
     })
     .strict(),
   handler: async (args, ctx) => {
-    const { documentId } = await requireAccess(args.document, ctx.user.id, "edit");
+    const { documentId } = await requireEditableDocument(args.document, ctx.user.id);
     const { version } = await applyMarkdownEdit({
       documentId,
       userId: ctx.user.id,
@@ -244,7 +362,7 @@ const replaceDocument = defineTool({
     })
     .strict(),
   handler: async (args, ctx) => {
-    const { documentId } = await requireAccess(args.document, ctx.user.id, "edit");
+    const { documentId } = await requireEditableDocument(args.document, ctx.user.id);
     const { version } = await applyMarkdownEdit({
       documentId,
       userId: ctx.user.id,
@@ -489,6 +607,13 @@ const addComment = defineTool({
       thread: serializeThread(thread),
       updatedAt: null
     });
+    void notifyCommentPosted({
+      threadId: thread.id,
+      documentId,
+      commentBody: args.body,
+      authorLabel: ctx.user.name,
+      excludeUserIds: [ctx.user.id]
+    });
     return { thread_id: thread.id };
   }
 });
@@ -530,12 +655,20 @@ const replyToComment = defineTool({
       threadId: thread.id,
       comment: serializeComment(comment)
     });
+    void notifyCommentPosted({
+      threadId: thread.id,
+      documentId: thread.documentId,
+      commentBody: args.body,
+      authorLabel: ctx.user.name,
+      excludeUserIds: [ctx.user.id]
+    });
     return { comment_id: comment.id };
   }
 });
 
 export const MCP_TOOLS: McpTool[] = [
   listDocuments,
+  listQuicktakes,
   readDocument,
   replaceInDocument,
   appendToDocument,

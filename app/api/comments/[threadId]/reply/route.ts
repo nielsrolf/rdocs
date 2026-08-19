@@ -5,6 +5,7 @@ import { jsonError, requireDocumentAccess, type RouteContext } from "@/lib/api-h
 import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { serializeComment } from "@/lib/document-data";
 import { db } from "@/lib/db";
+import { notifyCommentPosted } from "@/lib/comment-notifications";
 import { syncCommentMentions } from "@/lib/mention-data";
 import { canCommentOnDocument } from "@/lib/permissions";
 
@@ -127,6 +128,15 @@ export async function POST(request: Request, { params }: RouteContext<{ threadId
     { threadId, comment: serialized },
     parsed.data.clientId ?? null
   );
+
+  // Slack DM notifications — fire-and-forget after the write is committed.
+  void notifyCommentPosted({
+    threadId,
+    documentId: thread.documentId,
+    commentBody: parsed.data.body,
+    authorLabel: user?.name ?? comment.guestName ?? "Guest",
+    excludeUserIds: [user?.id]
+  });
 
   console.log("[comment-reply]", {
     threadId,

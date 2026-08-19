@@ -23,7 +23,7 @@
 
 import { finalizeConversationRun } from "@/lib/agent-conversation";
 import { createLiveCommentRecorder } from "@/lib/agent-comments";
-import { createDeferredHeartbeat, recordAiRunEvent } from "@/lib/ai-runs";
+import { AI_RUN_HEARTBEAT_INTERVAL_MS, createDeferredHeartbeat, recordAiRunEvent } from "@/lib/ai-runs";
 import { getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
 import { markdownToMrkdwn } from "@/lib/slack/mrkdwn";
@@ -35,6 +35,7 @@ import {
 } from "./container-session";
 import {
   deregisterRunAbortController,
+  isCancellableAiRun,
   isRunCancellation,
   registerRunAbortController,
   RUN_CANCELLED_MESSAGE
@@ -70,8 +71,22 @@ export type SessionAdoptionDeps = {
 
 export type SessionAdoptionSkip = {
   aiRunId: string;
-  reason: "unreachable" | "in-flight" | "unsupported-trigger";
+  reason: "unreachable" | "in-flight" | "unsupported-trigger" | "live-owner";
 };
+
+/**
+ * How long a run must have been silent before adoption may take its container.
+ *
+ * A reachable container proves NOTHING about whether anybody is reading it: the
+ * most reachable container in the world is one whose owner is working in it right
+ * now. Attaching invalidates that owner's token (single-attach arbitration in
+ * container-session.ts), so adopting a live run actively breaks it — which is
+ * exactly what a blue/green boot did on 2026-08-11. The heartbeat is the only
+ * signal about the READER, so require several missed beats (the same evidence the
+ * silence reaper uses, just a shorter fuse so a genuine orphan is picked up long
+ * before STALE_AI_RUN_MS).
+ */
+export const LIVE_OWNER_SILENCE_MS = 3 * AI_RUN_HEARTBEAT_INTERVAL_MS;
 
 export type SessionAdoptionResult = {
   adopted: string[];
@@ -138,7 +153,9 @@ export async function adoptOrphanedSessions(
       sessionEndpoint: true,
       sessionSecret: true,
       frameCursor: true,
-      workspacePath: true
+      workspacePath: true,
+      startedAt: true,
+      heartbeatAt: true
     }
   });
 
@@ -151,6 +168,15 @@ export async function adoptOrphanedSessions(
     if (!run.sessionEndpoint || !run.sessionSecret) continue;
     if (state.inFlight.has(run.id)) {
       skipped.push({ aiRunId: run.id, reason: "in-flight" });
+      continue;
+    }
+    if (hasLiveOwner(run)) {
+      // Somebody is driving this run — this process (registry) or a sibling that
+      // is still heartbeating (e.g. a blue/green process draining its in-flight
+      // runs). Stealing the container would kill a healthy run. A genuinely dead
+      // owner stops heartbeating, and the periodic sweep adopts the run minutes
+      // later, still well inside the container's own no-contact TTL.
+      skipped.push({ aiRunId: run.id, reason: "live-owner" });
       continue;
     }
     if (!CONVERSATION_TRIGGER_TYPES.has(run.triggerType)) {
@@ -202,6 +228,22 @@ export async function adoptOrphanedSessions(
     skipped,
     settled: Promise.all(running).then(() => undefined)
   };
+}
+
+/**
+ * True when the run still looks driven: this process holds its abort controller,
+ * or its last heartbeat (falling back to its start) is younger than
+ * LIVE_OWNER_SILENCE_MS.
+ */
+function hasLiveOwner(run: {
+  id: string;
+  startedAt: Date | null;
+  heartbeatAt: Date | null;
+}): boolean {
+  if (isCancellableAiRun(run.id)) return true;
+  const lastSign = Math.max(run.heartbeatAt?.getTime() ?? 0, run.startedAt?.getTime() ?? 0);
+  if (!lastSign) return false;
+  return Date.now() - lastSign < LIVE_OWNER_SILENCE_MS;
 }
 
 type AdoptedRun = {

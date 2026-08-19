@@ -57,6 +57,26 @@ export type ContainerRunSpec = {
   sessionSecret?: string;
 };
 
+export const DEFAULT_CONTAINER_PIDS_LIMIT = 512;
+
+/**
+ * Process/thread ceiling for an agent container. 512 is plenty for normal repo
+ * work but too low for workloads that fan out (ML training with dataloader
+ * workers, parallel sweeps): the container hits the cgroup pids cap and child
+ * processes die with rc=1, which looks like an application bug. The agent
+ * cannot raise it from inside (read-only cgroupfs + cap-drop ALL), so it is a
+ * host-side knob: AGENT_CONTAINER_PIDS_LIMIT. Floor 64; -1 means unlimited.
+ */
+export function resolveContainerPidsLimit(env: Record<string, string | undefined>): number {
+  const raw = env.AGENT_CONTAINER_PIDS_LIMIT?.trim();
+  if (!raw) return DEFAULT_CONTAINER_PIDS_LIMIT;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed)) return DEFAULT_CONTAINER_PIDS_LIMIT;
+  if (parsed === -1) return -1;
+  if (parsed < 64) return 64;
+  return parsed;
+}
+
 export function resolveContainerUser(
   platform: NodeJS.Platform,
   uid: number | undefined,

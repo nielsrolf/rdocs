@@ -3,7 +3,6 @@ import {
   SUBMITTING_FINAL_RESPONSE,
   submissionRejectedMessage
 } from "./lifecycle-messages";
-import type { Thread, ThreadItem } from "@openai/codex-sdk";
 import { z } from "zod";
 
 import {
@@ -19,23 +18,12 @@ import {
 } from "./agent";
 import { applyAgentConfigDirEnv, buildAgentEnv } from "./agent-env";
 import { resolveCodexAgentConfig } from "./agent-config";
+import { CodexAppServerClient, type CodexNotification } from "./codex-app-server";
 
 export type CodexResearchAgentOptions = ClaudeAgentRunOptions;
 export const MAX_SUBMISSION_ATTEMPTS = SHARED_MAX_SUBMISSION_ATTEMPTS;
-type CodexModule = typeof import("@openai/codex-sdk");
-type CodexConfigObject = NonNullable<NonNullable<ConstructorParameters<CodexModule["Codex"]>[0]>["config"]>;
-
-// The app/test TypeScript target is CommonJS while @openai/codex-sdk is
-// import-only ESM. Keep it off every Claude-only path and preserve a native
-// dynamic import here (tsx otherwise rewrites `import()` to `require()`).
-const nativeImport = new Function("specifier", "return import(specifier)") as (
-  specifier: string
-) => Promise<CodexModule>;
-let codexModulePromise: Promise<CodexModule> | null = null;
-export function loadCodexSdk() {
-  codexModulePromise ??= nativeImport("@openai/codex-sdk");
-  return codexModulePromise;
-}
+/** The free-form `config` object the app-server accepts on thread/start. */
+type CodexConfigObject = Record<string, unknown>;
 
 // OpenAI structured outputs require every property to be required. Codex uses
 // empty strings/lists for fields that do not apply to the current mode; the
@@ -75,47 +63,295 @@ function clip(value: unknown, limit = 1200): string {
   return text.length <= limit ? text : `${text.slice(0, limit)}…`;
 }
 
-export function codexItemProgress(item: ThreadItem): ClaudeAgentProgressEvent | null {
-  switch (item.type) {
-    case "reasoning":
-      return item.text.trim() ? { role: "agent", message: item.text } : null;
-    case "command_execution":
-      if (item.status === "in_progress") {
-        return { role: "tool", message: `Bash: ${JSON.stringify({ command: item.command })}` };
-      }
-      return {
-        role: "tool_result",
-        message: clip(JSON.stringify({ stdout: item.aggregated_output, stderr: "", exitCode: item.exit_code }))
-      };
-    case "file_change":
-      return {
-        role: "tool",
-        message: `Codex file changes: ${JSON.stringify({ status: item.status, changes: item.changes })}`
-      };
-    case "mcp_tool_call":
-      return item.status === "in_progress"
-        ? { role: "tool", message: `mcp__${item.server}__${item.tool}: ${clip(item.arguments)}` }
-        : {
-            role: "tool_result",
-            message: item.error?.message ?? clip(item.result?.structured_content ?? item.result?.content ?? "completed")
-          };
-    case "web_search":
-      return { role: "tool", message: `WebSearch: ${JSON.stringify({ query: item.query })}` };
-    case "todo_list":
-      return { role: "tool", message: `TodoWrite: ${JSON.stringify({ todos: item.items })}` };
-    case "error":
-      return { role: "error", message: item.message };
-    case "agent_message":
-      return null;
-  }
-}
-
 function emit(
   onProgress: CodexResearchAgentOptions["onProgress"],
   event: ClaudeAgentProgressEvent | null
 ) {
   if (!onProgress || !event?.message.trim()) return;
   void Promise.resolve(onProgress(event)).catch(() => null);
+}
+
+// --------------------------------------------------------------- app-server
+//
+// The app-server protocol carries v2 thread items (camelCase: `commandExecution`,
+// `content: string[]`, …). They are mapped onto the same timeline strings the
+// client renderer asserts.
+
+type CodexV2Item = Record<string, unknown> & { type?: string; id?: string };
+
+function asString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+export function codexV2ItemProgress(item: CodexV2Item): ClaudeAgentProgressEvent | null {
+  const inProgress = item.status === "inProgress";
+  switch (item.type) {
+    case "reasoning": {
+      const content = Array.isArray(item.content) ? item.content.map(asString) : [];
+      const summary = Array.isArray(item.summary) ? item.summary.map(asString) : [];
+      const text = [...summary, ...content].filter((part) => part.trim()).join("\n\n");
+      return text.trim() ? { role: "agent", message: text } : null;
+    }
+    case "commandExecution":
+      if (inProgress) {
+        return { role: "tool", message: `Bash: ${JSON.stringify({ command: asString(item.command) })}` };
+      }
+      return {
+        role: "tool_result",
+        message: clip(
+          JSON.stringify({
+            stdout: asString(item.aggregatedOutput),
+            stderr: "",
+            exitCode: typeof item.exitCode === "number" ? item.exitCode : null
+          })
+        )
+      };
+    case "fileChange":
+      return {
+        role: "tool",
+        message: `Codex file changes: ${JSON.stringify({ status: item.status, changes: item.changes })}`
+      };
+    case "mcpToolCall": {
+      const label = `mcp__${asString(item.server)}__${asString(item.tool)}`;
+      if (inProgress) return { role: "tool", message: `${label}: ${clip(item.arguments)}` };
+      const error = item.error as { message?: string } | undefined;
+      if (error?.message) return { role: "error", message: error.message };
+      return { role: "tool_result", message: clip(item.result ?? "completed") };
+    }
+    case "dynamicToolCall":
+    case "collabAgentToolCall": {
+      const name = asString(item.tool) || asString(item.name) || "tool";
+      return inProgress
+        ? { role: "tool", message: `${name}: ${clip(item.arguments ?? item.input ?? {})}` }
+        : { role: "tool_result", message: clip(item.result ?? "completed") };
+    }
+    case "webSearch":
+      return { role: "tool", message: `WebSearch: ${JSON.stringify({ query: asString(item.query) })}` };
+    case "sleep":
+      return { role: "tool", message: `Sleep: ${clip(item.durationMs ?? item.duration ?? "")}` };
+    case "contextCompaction":
+      return { role: "system", message: "Compacted the conversation context." };
+    default:
+      // userMessage (including the echo of a steering message), agentMessage,
+      // plan, and the review-mode markers have no timeline row of their own.
+      return null;
+  }
+}
+
+const V2_PLAN_STATUS: Record<string, string> = {
+  pending: "pending",
+  inProgress: "in_progress",
+  completed: "completed"
+};
+
+/**
+ * `turn/plan/updated` carries the whole plan every time, which is exactly the
+ * snapshot shape the session plan rail already understands — so it is rendered
+ * as a TodoWrite row rather than as a new client-side concept.
+ */
+export function codexV2PlanProgress(params: Record<string, unknown>): ClaudeAgentProgressEvent | null {
+  const plan = Array.isArray(params.plan) ? (params.plan as Record<string, unknown>[]) : [];
+  if (plan.length === 0) return null;
+  const todos = plan.map((entry) => ({
+    content: asString(entry.step),
+    status: V2_PLAN_STATUS[asString(entry.status)] ?? "pending"
+  }));
+  return { role: "tool", message: `TodoWrite: ${clip(JSON.stringify({ todos }))}` };
+}
+
+type CodexTurnState = {
+  threadId: string;
+  activeTurnId: string | null;
+  /** Steering messages that arrived while no turn was active. */
+  buffered: string[];
+};
+
+/**
+ * Run ONE app-server turn and return the final assistant message.
+ *
+ * Unlike the exec path (one process per turn, stdin closed immediately), the
+ * thread stays alive here, so a message pushed onto options.inputChannel is
+ * delivered into THIS turn via `turn/steer` — real parity with Claude.
+ */
+async function runCodexAppServerTurn(
+  client: CodexAppServerClient,
+  state: CodexTurnState,
+  prompt: string,
+  options: CodexResearchAgentOptions
+): Promise<string> {
+  let finalResponse = "";
+  let settle: ((error: Error | null) => void) | null = null;
+  const finished = new Promise<void>((resolve, reject) => {
+    settle = (error) => {
+      settle = null;
+      if (error) reject(error);
+      else resolve();
+    };
+  });
+  const done = (error: Error | null) => settle?.(error);
+
+  const unsubscribe = client.onNotification((notification: CodexNotification) => {
+    const { method, params } = notification;
+    if (method === "thread/started") {
+      const thread = params.thread as { id?: string } | undefined;
+      if (thread?.id) {
+        state.threadId = thread.id;
+        if (options.onSessionId) void Promise.resolve(options.onSessionId(thread.id)).catch(() => null);
+      }
+      return;
+    }
+    if (params.threadId && params.threadId !== state.threadId) return;
+    switch (method) {
+      case "turn/started": {
+        const turn = params.turn as { id?: string } | undefined;
+        if (turn?.id) {
+          state.activeTurnId = turn.id;
+          flushBufferedSteering(client, state, options);
+        }
+        return;
+      }
+      case "turn/plan/updated":
+        emit(options.onProgress, codexV2PlanProgress(params));
+        return;
+      case "item/started":
+      case "item/completed": {
+        const item = params.item as CodexV2Item | undefined;
+        if (!item) return;
+        if (item.type === "agentMessage") {
+          if (method === "item/completed") finalResponse = asString(item.text);
+          return;
+        }
+        emit(options.onProgress, codexV2ItemProgress(item));
+        return;
+      }
+      case "error": {
+        // `willRetry` errors are transient and the server keeps working.
+        if (params.willRetry) {
+          const retryable = params.error as { message?: string } | undefined;
+          emit(options.onProgress, {
+            role: "system",
+            message: `Codex is retrying after an error: ${retryable?.message ?? "unknown error"}`
+          });
+          return;
+        }
+        const error = params.error as { message?: string } | undefined;
+        done(new Error(error?.message ?? "Codex reported an error."));
+        return;
+      }
+      case "turn/completed": {
+        const turn = params.turn as
+          | { id?: string; status?: string; error?: { message?: string } }
+          | undefined;
+        state.activeTurnId = null;
+        if (turn?.status === "failed") {
+          done(new Error(turn.error?.message ?? "Codex turn failed."));
+          return;
+        }
+        if (turn?.status === "interrupted") {
+          done(new Error("Codex turn was interrupted."));
+          return;
+        }
+        done(null);
+        return;
+      }
+      default:
+        return;
+    }
+  });
+
+  const onAbort = () => {
+    if (state.activeTurnId) {
+      void client
+        .request("turn/interrupt", { threadId: state.threadId, turnId: state.activeTurnId })
+        .catch(() => null);
+    }
+    done(new Error("Codex run was cancelled."));
+  };
+  if (options.signal?.aborted) {
+    unsubscribe();
+    throw new Error("Codex run was cancelled.");
+  }
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    const started = await client.request<{ turn?: { id?: string } }>("turn/start", {
+      threadId: state.threadId,
+      input: [{ type: "text", text: prompt }],
+      outputSchema: CODEX_SUBMISSION_JSON_SCHEMA
+    });
+    if (started?.turn?.id && !state.activeTurnId) {
+      state.activeTurnId = started.turn.id;
+      flushBufferedSteering(client, state, options);
+    }
+    await finished;
+    return finalResponse;
+  } finally {
+    unsubscribe();
+    options.signal?.removeEventListener("abort", onAbort);
+    state.activeTurnId = null;
+  }
+}
+
+function flushBufferedSteering(
+  client: CodexAppServerClient,
+  state: CodexTurnState,
+  options: CodexResearchAgentOptions
+) {
+  if (state.buffered.length === 0) return;
+  const pending = state.buffered.splice(0, state.buffered.length);
+  for (const text of pending) void deliverSteering(client, state, text, options);
+}
+
+/**
+ * Deliver one user message into the running turn. `expectedTurnId` is a
+ * server-side precondition, so a message that lands just after the turn ended
+ * fails cleanly instead of vanishing — the same boundary race the Claude
+ * channel has, and it must stay visible in the timeline rather than silent.
+ */
+async function deliverSteering(
+  client: CodexAppServerClient,
+  state: CodexTurnState,
+  text: string,
+  options: CodexResearchAgentOptions
+): Promise<void> {
+  const expectedTurnId = state.activeTurnId;
+  if (!expectedTurnId) {
+    state.buffered.push(text);
+    return;
+  }
+  try {
+    await client.request("turn/steer", {
+      threadId: state.threadId,
+      expectedTurnId,
+      input: [{ type: "text", text }]
+    });
+  } catch (error) {
+    emit(options.onProgress, {
+      role: "error",
+      message: `A message could not be delivered into the running Codex turn: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    });
+  }
+}
+
+/** Pump the host's steering channel into `turn/steer` for the run's lifetime. */
+function startSteeringPump(
+  client: CodexAppServerClient,
+  state: CodexTurnState,
+  options: CodexResearchAgentOptions
+): void {
+  const channel = options.inputChannel;
+  if (!channel) return;
+  void (async () => {
+    try {
+      for await (const text of channel) {
+        await deliverSteering(client, state, text, options);
+      }
+    } catch {
+      // The channel closing is the normal end of this loop.
+    }
+  })();
 }
 
 export async function runCodexSubmissionLoop(input: {
@@ -214,36 +450,34 @@ export function codexProviderConfig(
   return { config };
 }
 
-async function runCodexTurn(
-  thread: Thread,
-  prompt: string,
-  options: CodexResearchAgentOptions
-): Promise<string> {
-  const streamed = await thread.runStreamed(prompt, {
-    outputSchema: CODEX_SUBMISSION_JSON_SCHEMA,
-    signal: options.signal
-  });
-  let finalResponse = "";
-  for await (const event of streamed.events) {
-    if (event.type === "thread.started" && options.onSessionId) {
-      await options.onSessionId(event.thread_id);
-      continue;
-    }
-    if (event.type === "item.started" || event.type === "item.completed") {
-      if (event.item.type === "agent_message" && event.type === "item.completed") {
-        finalResponse = event.item.text;
-      } else if (event.type === "item.started" || event.item.type !== "command_execution") {
-        emit(options.onProgress, codexItemProgress(event.item));
-      } else {
-        emit(options.onProgress, codexItemProgress(event.item));
+/**
+ * Fold the provider settings into the free-form `config` the app-server accepts
+ * on `thread/start`. There is no `baseUrl`/`apiKey` surface there, so a custom
+ * OpenAI base URL becomes a named model provider exactly like the LiteLLM one.
+ */
+export function codexAppServerThreadConfig(
+  provider: { config: CodexConfigObject; baseUrl?: string; apiKey?: string },
+  effort?: string | null
+): { config: Record<string, unknown>; modelProvider?: string } {
+  const config = { ...(provider.config as Record<string, unknown>) };
+  if (effort) config.model_reasoning_effort = effort;
+  if (provider.baseUrl) {
+    const baseUrl = provider.baseUrl.replace(/\/+$/, "");
+    config.model_providers = {
+      ...((config.model_providers as Record<string, unknown>) ?? {}),
+      rdocs_openai: {
+        name: "r-docs OpenAI",
+        base_url: baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl}/v1`,
+        env_key: "OPENAI_API_KEY",
+        wire_api: "responses"
       }
-    } else if (event.type === "turn.failed") {
-      throw new Error(event.error.message);
-    } else if (event.type === "error") {
-      throw new Error(event.message);
-    }
+    };
+    config.model_provider = "rdocs_openai";
   }
-  return finalResponse;
+  return {
+    config,
+    modelProvider: typeof config.model_provider === "string" ? config.model_provider : undefined
+  };
 }
 
 export async function runCodexResearchAgent(
@@ -262,46 +496,54 @@ export async function runCodexResearchAgent(
     runKey: options.runKey
   });
   const provider = codexProviderConfig(resolved.provider, agentEnv, input);
-  const { Codex } = await loadCodexSdk();
-  const codex = new Codex({
-    env: agentEnv,
-    config: provider.config,
-    ...(provider.baseUrl ? { baseUrl: provider.baseUrl } : {}),
-    ...(provider.apiKey ? { apiKey: provider.apiKey } : {})
-  });
-  const threadOptions = {
-    model: resolved.model,
-    workingDirectory: input.workspacePath,
-    skipGitRepoCheck: true,
-    sandboxMode: (input.accessMode === "read_only" ? "read-only" : "danger-full-access") as
-      | "read-only"
-      | "danger-full-access",
-    approvalPolicy: "never" as const,
-    networkAccessEnabled: input.accessMode !== "read_only",
-    ...(resolved.effort ? { modelReasoningEffort: resolved.effort } : {})
-  };
-  const thread = input.resumeSessionId
-    ? codex.resumeThread(input.resumeSessionId, threadOptions)
-    : codex.startThread(threadOptions);
+  const { config, modelProvider } = codexAppServerThreadConfig(provider, resolved.effort);
+  const env = { ...agentEnv };
+  if (provider.apiKey) env.OPENAI_API_KEY = provider.apiKey;
+  const client = await CodexAppServerClient.start({ env, cwd: input.workspacePath ?? undefined });
+  try {
+    emit(options.onProgress, { role: "system", message: "Starting Codex research agent." });
+    const threadParams = {
+      cwd: input.workspacePath,
+      sandbox: input.accessMode === "read_only" ? "read-only" : "danger-full-access",
+      approvalPolicy: "never",
+      model: resolved.model,
+      ...(modelProvider ? { modelProvider } : {}),
+      config
+    };
+    const started = input.resumeSessionId
+      ? await client.request<{ thread?: { id?: string } }>("thread/resume", {
+          threadId: input.resumeSessionId,
+          ...threadParams
+        })
+      : await client.request<{ thread?: { id?: string } }>("thread/start", threadParams);
+    const threadId = started?.thread?.id;
+    if (!threadId) throw new Error("Codex app-server did not return a thread id.");
+    if (options.onSessionId) await options.onSessionId(threadId);
 
-  emit(options.onProgress, { role: "system", message: "Starting Codex research agent." });
-  const parsed = await runCodexSubmissionLoop({
-    initialPrompt: codexPrompt(input),
-    runTurn: (prompt) => runCodexTurn(thread, prompt, options),
-    validateSubmission: options.validateSubmission,
-    onRejected: (error) =>
-      emit(options.onProgress, { role: "system", message: submissionRejectedMessage(error) })
-  });
-  emit(options.onProgress, { role: "system", message: SUBMITTING_FINAL_RESPONSE });
-  emit(options.onProgress, { role: "system", message: PREPARING_DOCUMENT_UPDATE });
-  return {
-    ...parsed,
-    images: parsed.images ?? [],
-    widgets: parsed.widgets ?? [],
-    suggestions: parsed.suggestions ?? [],
-    comments: parsed.comments ?? [],
-    model: resolved.label
-  };
+    const state: CodexTurnState = { threadId, activeTurnId: null, buffered: [] };
+    startSteeringPump(client, state, options);
+
+    const parsed = await runCodexSubmissionLoop({
+      initialPrompt: codexPrompt(input),
+      runTurn: (prompt) => runCodexAppServerTurn(client, state, prompt, options),
+      validateSubmission: options.validateSubmission,
+      onRejected: (error) =>
+        emit(options.onProgress, { role: "system", message: submissionRejectedMessage(error) })
+    });
+    emit(options.onProgress, { role: "system", message: SUBMITTING_FINAL_RESPONSE });
+    emit(options.onProgress, { role: "system", message: PREPARING_DOCUMENT_UPDATE });
+    return {
+      ...parsed,
+      images: parsed.images ?? [],
+      widgets: parsed.widgets ?? [],
+      suggestions: parsed.suggestions ?? [],
+      comments: parsed.comments ?? [],
+      model: resolved.label
+    };
+  } finally {
+    options.inputChannel?.close();
+    client.close();
+  }
 }
 
 export async function runCodexMergeConflictResolver(input: {
@@ -319,33 +561,28 @@ export async function runCodexMergeConflictResolver(input: {
     sessionConfigDir: input.sessionConfigDir,
     runKey: `merge-${input.commitSha}`
   });
+  const mergePrompt = `A git merge is in progress in this repository. The commit being merged is ${input.commitSha}.\n\nResolve every conflict in the working tree. Preserve both sides when compatible and make the smallest coherent choice for semantic conflicts. Remove conflict markers, do not commit, then run git status --porcelain and ensure there are no unmerged paths.`;
   const provider = codexProviderConfig(resolved.provider, agentEnv, undefined);
-  const { Codex } = await loadCodexSdk();
-  const codex = new Codex({
-    env: agentEnv,
-    config: provider.config,
-    ...(provider.baseUrl ? { baseUrl: provider.baseUrl } : {}),
-    ...(provider.apiKey ? { apiKey: provider.apiKey } : {})
-  });
+  const { config, modelProvider } = codexAppServerThreadConfig(provider, resolved.effort);
+  const env = { ...agentEnv };
+  if (provider.apiKey) env.OPENAI_API_KEY = provider.apiKey;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 300_000);
+  const client = await CodexAppServerClient.start({ env, cwd: input.workspacePath });
   try {
-    const thread = codex.startThread({
-      model: resolved.model,
-      workingDirectory: input.workspacePath,
-      skipGitRepoCheck: true,
-      sandboxMode: input.isolatedRuntime ? "danger-full-access" : "workspace-write",
+    const started = await client.request<{ thread?: { id?: string } }>("thread/start", {
+      cwd: input.workspacePath,
+      sandbox: input.isolatedRuntime ? "danger-full-access" : "workspace-write",
       approvalPolicy: "never",
-      networkAccessEnabled: false,
-      ...(resolved.effort ? { modelReasoningEffort: resolved.effort } : {})
+      model: resolved.model,
+      ...(modelProvider ? { modelProvider } : {}),
+      config
     });
-    const result = await thread.run(
-      `A git merge is in progress in this repository. The commit being merged is ${input.commitSha}.\n\nResolve every conflict in the working tree. Preserve both sides when compatible and make the smallest coherent choice for semantic conflicts. Remove conflict markers, do not commit, then run git status --porcelain and ensure there are no unmerged paths.`,
-      { signal: controller.signal }
-    );
-    if (!result.finalResponse.trim()) {
-      throw new Error("Codex merge conflict resolver returned no result.");
-    }
+    const threadId = started?.thread?.id;
+    if (!threadId) throw new Error("Codex app-server did not return a thread id.");
+    const state: CodexTurnState = { threadId, activeTurnId: null, buffered: [] };
+    const result = await runCodexAppServerTurn(client, state, mergePrompt, { signal: controller.signal });
+    if (!result.trim()) throw new Error("Codex merge conflict resolver returned no result.");
   } catch (error) {
     if (controller.signal.aborted) {
       throw new Error("Codex merge conflict resolution timed out after 300 seconds.");
@@ -353,5 +590,6 @@ export async function runCodexMergeConflictResolver(input: {
     throw error;
   } finally {
     clearTimeout(timeout);
+    client.close();
   }
 }

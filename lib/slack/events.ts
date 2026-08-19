@@ -14,7 +14,16 @@
 // ✅ / ❌ when the run finishes — and posts the agent's reply as a message.
 
 import { RUN_STARTED_SLACK } from "@/agent-core/lifecycle-messages";
+import { broadcastDocumentEvent } from "@/lib/collaboration";
+import { notifyCommentPosted } from "@/lib/comment-notifications";
 import { db } from "@/lib/db";
+import { serializeComment } from "@/lib/document-data";
+import { syncCommentMentions } from "@/lib/mention-data";
+import {
+  agentAccessModeForDocumentAccess,
+  canCommentOnDocument,
+  resolveDocumentAccess
+} from "@/lib/permissions";
 import { resolveAgentConfigForUser } from "@/lib/agent-defaults";
 import { saveAttachmentToStore } from "@/lib/attachments";
 import { copyOwnerDefaultSkillsToDocument } from "@/lib/document-skills";
@@ -58,6 +67,13 @@ export type SlackEventDeps = {
   // tests can drive both the "injected into the live run" and the
   // "backend can't steer -> queued" paths.
   injectRunMessage?: (aiRunId: string, text: string) => boolean;
+  // Injectable Ask-AI starter for comment-notification DM replies that mention
+  // the bot; default is startAskAiRunForThread (lib/ask-ai.ts).
+  startAskAi?: (args: {
+    threadId: string;
+    userId: string;
+    agentAccessMode: "workspace" | "read_only";
+  }) => Promise<string | null>;
   // Injectable voice transcription; default resolves the triggering user's
   // OpenAI/LiteLLM credential (lib/slack/transcribe.ts).
   transcribe?: (args: {
@@ -682,6 +698,139 @@ export async function deliverSlackThreadMessage(args: {
   return { outcome: "started", aiRunId, documentId: document.id, threadTs: conversationKey };
 }
 
+/**
+ * A DM reply inside a comment-notification thread posts back into the doc's
+ * comment thread as the USER, never as an agent run — unless the reply
+ * mentions the bot, which additionally triggers the same Ask-AI run the
+ * document's "Ask AI" button would (the AI's reply then flows back to every
+ * watcher's Slack thread through the notifier).
+ *
+ * Exported for tests; production reaches it through handleSlackDirectMessage
+ * (the notification lookup in handleIncomingSlackMessage).
+ */
+export async function handleCommentNotificationReply(args: {
+  event: SlackIncomingMessage;
+  deps: SlackEventDeps;
+  userId: string;
+  notification: { threadId: string; documentId: string };
+}) {
+  const { event, deps, userId, notification } = args;
+  const react = (name: string) =>
+    deps.slack.addReaction({ channel: event.channel, ts: event.ts, name }).catch(() => null);
+
+  const thread = await db.commentThread.findUnique({
+    where: { id: notification.threadId },
+    select: { id: true, documentId: true }
+  });
+  if (!thread) {
+    await react("x");
+    await deps.slack
+      .postMessage({
+        channel: event.channel,
+        threadTs: event.threadTs,
+        text: "That comment thread no longer exists, so I couldn't post your reply."
+      })
+      .catch(() => null);
+    return { handled: true as const, action: "comment-thread-gone" as const };
+  }
+  const access = await resolveDocumentAccess(thread.documentId, userId);
+  if (!access || !canCommentOnDocument(access, true)) {
+    await react("x");
+    await deps.slack
+      .postMessage({
+        channel: event.channel,
+        threadTs: event.threadTs,
+        text: "You no longer have comment access to that document, so I couldn't post your reply."
+      })
+      .catch(() => null);
+    return { handled: true as const, action: "comment-access-denied" as const };
+  }
+
+  const mentionsBot = event.text.includes(`<@${deps.botUserId}>`);
+  const body = stripBotMention(event.text, deps.botUserId);
+  if (!body && !mentionsBot) {
+    return { handled: false as const, reason: "empty-comment-reply" as const };
+  }
+
+  let commentId: string | null = null;
+  if (body) {
+    const comment = await db.comment.create({
+      data: { threadId: thread.id, body, authorId: userId },
+      select: {
+        id: true,
+        body: true,
+        aiModel: true,
+        guestName: true,
+        sourceLinks: true,
+        commitSha: true,
+        commitUrl: true,
+        aiRunId: true,
+        createdAt: true,
+        author: { select: { id: true, name: true } }
+      }
+    });
+    commentId = comment.id;
+    const now = new Date();
+    await db.commentThread.update({ where: { id: thread.id }, data: { updatedAt: now } });
+    await db.commentThreadRead.upsert({
+      where: { threadId_userId: { threadId: thread.id, userId } },
+      create: { threadId: thread.id, userId, lastReadAt: now },
+      update: { lastReadAt: now }
+    });
+    await syncCommentMentions({
+      commentId: comment.id,
+      documentId: thread.documentId,
+      body,
+      authorId: userId
+    });
+    broadcastDocumentEvent(thread.documentId, "comment-created", {
+      threadId: thread.id,
+      comment: serializeComment(comment)
+    });
+    // Fan the reply out to the OTHER watchers' Slack threads (the author is
+    // literally typing in theirs).
+    void notifyCommentPosted({
+      threadId: thread.id,
+      documentId: thread.documentId,
+      commentBody: body,
+      authorLabel: comment.author?.name ?? "Someone",
+      excludeUserIds: [userId],
+      deps: { slack: deps.slack, appUrl: deps.appUrl, botUserId: deps.botUserId }
+    });
+    console.log("[comment-notify] DM reply posted as comment", {
+      threadId: thread.id,
+      documentId: thread.documentId,
+      userId,
+      commentId: comment.id,
+      mentionsBot
+    });
+  }
+
+  if (mentionsBot) {
+    const startAskAi =
+      deps.startAskAi ??
+      (async (input: { threadId: string; userId: string; agentAccessMode: "workspace" | "read_only" }) => {
+        const { startAskAiRunForThread } = await import("@/lib/ask-ai");
+        return startAskAiRunForThread(input);
+      });
+    const aiRunId = await startAskAi({
+      threadId: thread.id,
+      userId,
+      agentAccessMode: agentAccessModeForDocumentAccess(access)
+    });
+    await react(aiRunId ? "eyes" : "x");
+    return {
+      handled: true as const,
+      action: "comment-reply-ask-ai" as const,
+      commentId,
+      aiRunId
+    };
+  }
+
+  await react("speech_balloon");
+  return { handled: true as const, action: "comment-reply" as const, commentId };
+}
+
 async function handleIncomingSlackMessage(
   event: SlackIncomingMessage,
   deps: SlackEventDeps,
@@ -709,6 +858,21 @@ async function handleIncomingSlackMessage(
     await sendConnectPrompt(event, deps, surface);
     return { handled: false as const, reason: "unlinked-user" as const };
   }
+  // Comment-notification DM threads are NOT agent conversations: a reply under
+  // one of our comment-notification root messages goes back into the document's
+  // comment thread as the user (agent run only on an explicit bot mention).
+  if (surface === "dm" && event.threadTs && event.threadTs !== event.ts) {
+    const notification = await db.slackCommentNotification.findUnique({
+      where: {
+        slackChannelId_messageTs: { slackChannelId: event.channel, messageTs: event.threadTs }
+      },
+      select: { threadId: true, documentId: true }
+    });
+    if (notification) {
+      return handleCommentNotificationReply({ event, deps, userId: link.userId, notification });
+    }
+  }
+
   // Host dev mode: allowlisted channel + allowlisted user → the run executes
   // unsandboxed in the live deployment directory (lib/slack/dev-mode.ts).
   const hostDevRun = isHostDevRun(event.channel, link.user.email);

@@ -4,9 +4,7 @@ import { test } from "node:test";
 import {
   CODEX_SUBMISSION_JSON_SCHEMA,
   MAX_SUBMISSION_ATTEMPTS,
-  codexItemProgress,
   codexProviderConfig,
-  loadCodexSdk,
   runCodexSubmissionLoop
 } from "../agent-core/codex-agent";
 
@@ -27,11 +25,6 @@ test("Codex Slack runs attach the same Slack and rdocs MCP surfaces Claude recei
   assert.equal(servers.rdocs?.url, "https://docs.example/api/mcp");
 });
 
-test("the import-only Codex SDK loads from the app's CommonJS test runtime", async () => {
-  const sdk = await loadCodexSdk();
-  assert.equal(typeof sdk.Codex, "function");
-});
-
 test("Codex structured output schema requires every top-level field", () => {
   const required = new Set((CODEX_SUBMISSION_JSON_SCHEMA as { required?: string[] }).required ?? []);
   assert.deepEqual(
@@ -39,27 +32,6 @@ test("Codex structured output schema requires every top-level field", () => {
     new Set(["replacementText", "reply", "sources", "images", "widgets", "summary", "suggestions", "comments"])
   );
   assert.equal((CODEX_SUBMISSION_JSON_SCHEMA as { additionalProperties?: boolean }).additionalProperties, false);
-});
-
-test("Codex native stream items map into the existing agent timeline roles", () => {
-  assert.deepEqual(
-    codexItemProgress({
-      id: "cmd-1",
-      type: "command_execution",
-      command: "git status --short",
-      aggregated_output: " M file.ts",
-      exit_code: 0,
-      status: "completed"
-    }),
-    {
-      role: "tool_result",
-      message: JSON.stringify({ stdout: " M file.ts", stderr: "", exitCode: 0 })
-    }
-  );
-  assert.deepEqual(
-    codexItemProgress({ id: "reason-1", type: "reasoning", text: "Inspecting the repository" }),
-    { role: "agent", message: "Inspecting the repository" }
-  );
 });
 
 test("Codex returns parse and validation failures to the same thread until the submission is valid", async () => {

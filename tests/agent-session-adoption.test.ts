@@ -85,7 +85,13 @@ async function makeOrphan(options: {
   frameCursor?: number;
   triggerType?: string;
   triggerId?: string | null;
+  /**
+   * How long ago the previous owner last heartbeat. Default is well past
+   * LIVE_OWNER_SILENCE_MS: an orphan is by definition a run nobody is driving.
+   */
+  heartbeatAgoMs?: number;
 }) {
+  const heartbeatAgoMs = options.heartbeatAgoMs ?? 10 * 60_000;
   return db.aiRun.create({
     data: {
       documentId: options.documentId,
@@ -94,8 +100,8 @@ async function makeOrphan(options: {
       triggerId: options.triggerId ?? null,
       instruction: "orphaned detached run",
       status: "RUNNING",
-      startedAt: new Date(Date.now() - 60_000),
-      heartbeatAt: new Date(Date.now() - 60_000),
+      startedAt: new Date(Date.now() - heartbeatAgoMs),
+      heartbeatAt: new Date(Date.now() - heartbeatAgoMs),
       containerId: "abcdef012345",
       sessionEndpoint: options.endpoint,
       sessionSecret: options.endpoint ? SECRET : null,
@@ -182,6 +188,50 @@ test("frames at or below the persisted cursor are not replayed", async () => {
     const messages = await eventMessages(run.id);
     assert.equal(messages.filter((message) => message.includes("already persisted")).length, 0);
     assert.equal(messages.filter((message) => message.includes("brand new")).length, 1);
+  } finally {
+    await container.close();
+    await cleanup(document.id, user.id);
+  }
+});
+
+// 2026-08-11 incident: a blue/green deploy booted while the OLD process was
+// still actively driving a detached Slack run. Boot adoption probed the
+// container, found it alive (of course — its owner was working in it), attached,
+// and the /attach invalidated the live owner's token. The owner's frames poll
+// got 409, its lifecycle marked the run FAILED, Slack posted "The run failed:
+// Another process attached to this agent session container.", and the broker
+// then revoked the still-working agent's keys. Liveness of the CONTAINER says
+// nothing about liveness of its READER — the heartbeat does.
+test("a run whose owner is still heartbeating is not stolen from it", async () => {
+  const { user, document } = await makeDoc("liveowner");
+  const container = await startFakeContainer();
+  try {
+    const run = await makeOrphan({
+      documentId: document.id,
+      createdById: user.id,
+      endpoint: container.endpoint,
+      triggerType: "SLACK_MENTION",
+      triggerId: "C123:1700000000.000200",
+      heartbeatAgoMs: 5_000
+    });
+    // Present so a wrongly-adopting reader terminates and fails the assertions
+    // below instead of hanging the test on an open frames poll.
+    container.emit({ type: "result", output: { reply: "stolen from its owner" } });
+
+    const result = await adoptOrphanedSessions({ runIds: [run.id], waitMs: 200 });
+    await result.settled;
+
+    assert.deepEqual(result.adopted, [], "a live owner's run must never be adopted");
+    assert.equal(result.skipped.find((entry) => entry.aiRunId === run.id)?.reason, "live-owner");
+
+    const fresh = await db.aiRun.findUnique({
+      where: { id: run.id },
+      select: { status: true, sessionEndpoint: true }
+    });
+    assert.equal(fresh?.status, "RUNNING");
+    assert.equal(fresh?.sessionEndpoint, container.endpoint, "the handle stays for the real owner");
+    assert.deepEqual(await eventMessages(run.id), [], "no adoption event for a run we did not adopt");
+    assert.deepEqual(container.exits, [], "the live owner's container must not be released");
   } finally {
     await container.close();
     await cleanup(document.id, user.id);

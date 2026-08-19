@@ -6,6 +6,7 @@ import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { documentHasAnchorForThread, parseDocumentContent } from "@/lib/content";
 import { serializeThread } from "@/lib/document-data";
 import { db } from "@/lib/db";
+import { notifyCommentPosted } from "@/lib/comment-notifications";
 import { syncCommentMentions } from "@/lib/mention-data";
 import { canCommentOnDocument } from "@/lib/permissions";
 
@@ -175,6 +176,15 @@ export async function POST(request: Request, { params }: RouteContext<{ id: stri
       { thread: serialized, updatedAt: updated?.updatedAt ?? null },
       parsed.data.clientId ?? null
     );
+
+    // Slack DM notifications — fire-and-forget after the write is committed.
+    void notifyCommentPosted({
+      threadId: thread.id,
+      documentId: id,
+      commentBody: parsed.data.body,
+      authorLabel: user?.name ?? guestName ?? "Guest",
+      excludeUserIds: [user?.id]
+    });
 
     console.log("[comment-create]", {
       documentId: id,
