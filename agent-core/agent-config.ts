@@ -24,7 +24,13 @@
 //     automatic fallback for Anthropic-model runs with no credential anywhere.
 
 export type AgentHarness = "claude-code" | "codex";
-export type AgentModelProvider = "anthropic" | "openai" | "openrouter" | "litellm" | "local";
+export type AgentModelProvider =
+  | "anthropic"
+  | "openai"
+  | "openai-chatgpt"
+  | "openrouter"
+  | "litellm"
+  | "local";
 
 export type AgentModelOption = {
   /** Value stored on Document.agentModel. */
@@ -39,6 +45,7 @@ export const LITELLM_MODEL_PREFIX = "litellm/";
 export const LOCAL_MODEL_PREFIX = "local/";
 export const CODEX_OPENAI_MODEL_PREFIX = "codex/openai/";
 export const CODEX_LITELLM_MODEL_PREFIX = "codex/litellm/";
+export const CODEX_CHATGPT_MODEL_PREFIX = "codex/chatgpt/";
 
 export const ANTHROPIC_AGENT_MODELS: readonly AgentModelOption[] = [
   { value: "claude-sonnet-5", label: "Sonnet 5", hint: "Fast, capable default", provider: "anthropic" },
@@ -91,6 +98,16 @@ export const CODEX_OPENAI_AGENT_MODELS: readonly AgentModelOption[] = [
   { value: "codex/openai/gpt-5.6-luna", label: "GPT-5.6 Luna", hint: "Fast coding model", provider: "openai" }
 ] as const;
 
+// ChatGPT-subscription Codex models: same OpenAI models, authenticated with a
+// connected ~/.codex/auth.json (OAuth tokens) instead of an API key. The blob
+// is materialized into $CODEX_HOME/auth.json by the Codex runtime.
+export const CODEX_CHATGPT_AGENT_MODELS: readonly AgentModelOption[] =
+  CODEX_OPENAI_AGENT_MODELS.map((model) => ({
+    ...model,
+    value: `${CODEX_CHATGPT_MODEL_PREFIX}${model.value.slice(CODEX_OPENAI_MODEL_PREFIX.length)}`,
+    provider: "openai-chatgpt"
+  }));
+
 export const CODEX_LITELLM_AGENT_MODELS: readonly AgentModelOption[] =
   LITELLM_AGENT_MODELS.map((model) => ({
     ...model,
@@ -121,17 +138,22 @@ export type AgentEffort = (typeof AGENT_EFFORTS)[number]["value"];
 
 export const DEFAULT_AGENT_MODEL = "claude-sonnet-5";
 export const DEFAULT_CODEX_AGENT_MODEL = "codex/openai/gpt-5.6-terra";
+export const DEFAULT_CODEX_CHATGPT_AGENT_MODEL = "codex/chatgpt/gpt-5.6-terra";
 export const DEFAULT_CODEX_LITELLM_AGENT_MODEL = "codex/litellm/openai/gpt-5.6-terra";
 export const DEFAULT_AGENT_EFFORT: AgentEffort = "off";
 
-/** Pick the usable Codex route when the harness is selected from scratch. */
+/** Pick the usable Codex route when the harness is selected from scratch:
+ * native OpenAI when an API key is present, else a connected ChatGPT
+ * subscription, else LiteLLM's Responses endpoint. */
 export function defaultCodexAgentModelForCredentials(input: {
   hasOpenAiKey: boolean;
   hasLiteLlmKey: boolean;
+  hasChatgptAuth?: boolean;
 }): string {
-  return input.hasLiteLlmKey && !input.hasOpenAiKey
-    ? DEFAULT_CODEX_LITELLM_AGENT_MODEL
-    : DEFAULT_CODEX_AGENT_MODEL;
+  if (input.hasOpenAiKey) return DEFAULT_CODEX_AGENT_MODEL;
+  if (input.hasChatgptAuth) return DEFAULT_CODEX_CHATGPT_AGENT_MODEL;
+  if (input.hasLiteLlmKey) return DEFAULT_CODEX_LITELLM_AGENT_MODEL;
+  return DEFAULT_CODEX_AGENT_MODEL;
 }
 
 /** Equivalent OpenAI-compatible LiteLLM route for a native Codex model. */
@@ -185,8 +207,16 @@ export function isCodexLiteLlmAgentModel(value: unknown): boolean {
   return typeof value === "string" && normalizeAgentModel(value).startsWith(CODEX_LITELLM_MODEL_PREFIX);
 }
 
+export function isCodexChatgptAgentModel(value: unknown): boolean {
+  return typeof value === "string" && normalizeAgentModel(value).startsWith(CODEX_CHATGPT_MODEL_PREFIX);
+}
+
 export function isCodexAgentModel(value: unknown): boolean {
-  return isCodexOpenAiAgentModel(value) || isCodexLiteLlmAgentModel(value);
+  return (
+    isCodexOpenAiAgentModel(value) ||
+    isCodexLiteLlmAgentModel(value) ||
+    isCodexChatgptAgentModel(value)
+  );
 }
 
 export function agentHarnessForModel(value: unknown): AgentHarness {
@@ -200,6 +230,7 @@ export function agentHarnessForModel(value: unknown): AgentHarness {
  */
 export function agentModelProvider(value: unknown): AgentModelProvider {
   if (isCodexOpenAiAgentModel(value)) return "openai";
+  if (isCodexChatgptAgentModel(value)) return "openai-chatgpt";
   if (isCodexLiteLlmAgentModel(value)) return "litellm";
   if (isOpenRouterAgentModel(value)) return "openrouter";
   if (isLiteLlmAgentModel(value)) return "litellm";
@@ -230,6 +261,10 @@ export function isStorableAgentModel(value: unknown): value is string {
     const name = normalized.slice(CODEX_LITELLM_MODEL_PREFIX.length);
     return !name.includes("..") && LITELLM_MODEL_RE.test(name);
   }
+  if (normalized.startsWith(CODEX_CHATGPT_MODEL_PREFIX)) {
+    const name = normalized.slice(CODEX_CHATGPT_MODEL_PREFIX.length);
+    return !name.includes("..") && LITELLM_MODEL_RE.test(name);
+  }
   if (isKnownAnthropicModel(normalized)) return true;
   if (normalized.startsWith(OPENROUTER_MODEL_PREFIX)) {
     const slug = normalized.slice(OPENROUTER_MODEL_PREFIX.length);
@@ -251,7 +286,7 @@ export function isStorableAgentModel(value: unknown): value is string {
 
 export type ResolvedCodexAgentConfig = {
   model: string;
-  provider: "openai" | "litellm";
+  provider: "openai" | "litellm" | "chatgpt";
   effort?: "low" | "medium" | "high";
   label: string;
 };
@@ -260,8 +295,17 @@ export function resolveCodexAgentConfig(
   config: DocumentAgentConfig | null | undefined
 ): ResolvedCodexAgentConfig {
   const requested = isCodexAgentModel(config?.model) ? normalizeAgentModel(config!.model!) : DEFAULT_CODEX_AGENT_MODEL;
-  const provider = requested.startsWith(CODEX_LITELLM_MODEL_PREFIX) ? "litellm" : "openai";
-  const prefix = provider === "litellm" ? CODEX_LITELLM_MODEL_PREFIX : CODEX_OPENAI_MODEL_PREFIX;
+  const provider = requested.startsWith(CODEX_LITELLM_MODEL_PREFIX)
+    ? "litellm"
+    : requested.startsWith(CODEX_CHATGPT_MODEL_PREFIX)
+      ? "chatgpt"
+      : "openai";
+  const prefix =
+    provider === "litellm"
+      ? CODEX_LITELLM_MODEL_PREFIX
+      : provider === "chatgpt"
+        ? CODEX_CHATGPT_MODEL_PREFIX
+        : CODEX_OPENAI_MODEL_PREFIX;
   const effort = parseEffort(config?.effort) ?? undefined;
   return {
     model: requested.slice(prefix.length),

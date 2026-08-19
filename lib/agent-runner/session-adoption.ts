@@ -27,6 +27,7 @@ import { AI_RUN_HEARTBEAT_INTERVAL_MS, createDeferredHeartbeat, recordAiRunEvent
 import { getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
 import { markdownToMrkdwn } from "@/lib/slack/mrkdwn";
+import { persistRefreshedCodexAuth } from "@/lib/user-credentials";
 
 import {
   attachDetachedSession,
@@ -307,6 +308,11 @@ async function driveAdoptedRun(run: AdoptedRun, deps?: SessionAdoptionDeps): Pro
         },
         onSessionId: async (sessionId) => {
           await db.aiRun.update({ where: { id: aiRunId }, data: { sdkSessionId: sessionId } }).catch(() => null);
+        },
+        // Adopted ChatGPT-subscription Codex runs still rotate auth.json;
+        // persist it or the stored refresh token goes stale. Secret material.
+        onCodexAuthRefreshed: async (authJson) => {
+          await persistRefreshedCodexAuth(documentId, run.createdById, authJson).catch(() => null);
         }
       }
     });

@@ -6,6 +6,8 @@ import { useEffect, useState } from "react";
 import {
   AGENT_EFFORTS,
   ANTHROPIC_AGENT_MODELS,
+  CODEX_CHATGPT_AGENT_MODELS,
+  CODEX_CHATGPT_MODEL_PREFIX,
   CODEX_LITELLM_AGENT_MODELS,
   CODEX_LITELLM_MODEL_PREFIX,
   CODEX_OPENAI_AGENT_MODELS,
@@ -283,6 +285,7 @@ export function AgentPanel({
   hasOpenRouterKey,
   hasLiteLlmKey,
   hasOpenAiKey,
+  hasChatgptAuth,
   localModel,
   anthropicFreeFallback,
   runnerMode,
@@ -319,6 +322,9 @@ export function AgentPanel({
   hasOpenRouterKey: boolean;
   hasLiteLlmKey: boolean;
   hasOpenAiKey: boolean;
+  /** ChatGPT-subscription Codex auth is connected (doc env blob or a linked
+   * "openai-chatgpt" credential). Presence only. */
+  hasChatgptAuth: boolean;
   /** The deployment's free local model ("local/<name>") when configured. */
   localModel: string | null;
   /** No Anthropic credential anywhere: Anthropic-model runs would actually
@@ -386,6 +392,9 @@ export function AgentPanel({
   const showOpenRouterGroup = hasOpenRouterKey || modelIsOpenRouter;
   const showLiteLlmGroup = hasLiteLlmKey || modelIsLiteLlm;
   const codexModelIsLiteLlm = normalizedModel.startsWith(CODEX_LITELLM_MODEL_PREFIX);
+  const codexModelIsChatgpt = normalizedModel.startsWith(CODEX_CHATGPT_MODEL_PREFIX);
+  // Keep a stored subscription selection visible even if the auth was removed.
+  const showChatgptGroup = hasChatgptAuth || codexModelIsChatgpt;
   const storedCustomCodexOpenAiModel =
     normalizedModel.startsWith(CODEX_OPENAI_MODEL_PREFIX) &&
     !CODEX_OPENAI_AGENT_MODELS.some((m) => m.value === normalizedModel)
@@ -393,6 +402,10 @@ export function AgentPanel({
       : null;
   const storedCustomCodexLiteLlmModel =
     codexModelIsLiteLlm && !CODEX_LITELLM_AGENT_MODELS.some((m) => m.value === normalizedModel)
+      ? normalizedModel
+      : null;
+  const storedCustomCodexChatgptModel =
+    codexModelIsChatgpt && !CODEX_CHATGPT_AGENT_MODELS.some((m) => m.value === normalizedModel)
       ? normalizedModel
       : null;
 
@@ -455,7 +468,7 @@ export function AgentPanel({
                 setCustomMode(null);
                 onAgentModelChange(
                   event.target.value === "codex"
-                    ? defaultCodexAgentModelForCredentials({ hasOpenAiKey, hasLiteLlmKey })
+                    ? defaultCodexAgentModelForCredentials({ hasOpenAiKey, hasLiteLlmKey, hasChatgptAuth })
                     : DEFAULT_AGENT_MODEL
                 );
               }}
@@ -556,6 +569,16 @@ export function AgentPanel({
                   ) : null}
                   <option value={CODEX_OPENAI_CUSTOM_SENTINEL}>Custom OpenAI model…</option>
                 </optgroup>
+                {showChatgptGroup ? (
+                  <optgroup label="ChatGPT subscription">
+                    {CODEX_CHATGPT_AGENT_MODELS.map((model) => (
+                      <option key={model.value} value={model.value}>{model.label}</option>
+                    ))}
+                    {storedCustomCodexChatgptModel ? (
+                      <option value={storedCustomCodexChatgptModel}>{storedCustomCodexChatgptModel.slice(CODEX_CHATGPT_MODEL_PREFIX.length)}</option>
+                    ) : null}
+                  </optgroup>
+                ) : null}
                 {hasLiteLlmKey || codexModelIsLiteLlm ? (
                   <optgroup label="LiteLLM (OpenAI Responses)">
                     {CODEX_LITELLM_AGENT_MODELS.map((model) => (
@@ -628,10 +651,15 @@ export function AgentPanel({
               {ANTHROPIC_AGENT_MODELS.find((m) => m.value === normalizedModel)?.label ?? "Claude"}.
               Connect a credential under Settings (topbar) to use Claude.
             </span>
+          ) : isCodex && codexModelIsChatgpt && !hasChatgptAuth ? (
+            <span className="agent-config-hint">
+              This model runs on a ChatGPT subscription — connect one (paste ~/.codex/auth.json)
+              under Settings, or add CODEX_CHATGPT_AUTH_JSON in the Env menu.
+            </span>
           ) : isCodex && codexModelIsLiteLlm && !hasLiteLlmKey ? (
             <span className="agent-config-hint">Codex via LiteLLM needs LITELLM_API_KEY and an OpenAI-compatible Responses endpoint.</span>
-          ) : isCodex && !hasOpenAiKey ? (
-            <span className="agent-config-hint">Native Codex needs an OpenAI API key. Select a LiteLLM model to use your LiteLLM credential.</span>
+          ) : isCodex && !codexModelIsChatgpt && !codexModelIsLiteLlm && !hasOpenAiKey ? (
+            <span className="agent-config-hint">Native Codex needs an OpenAI API key. Select a LiteLLM or ChatGPT-subscription model to use another credential.</span>
           ) : modelIsOpenRouter && !hasOpenRouterKey ? (
             <span className="agent-config-hint">
               This model needs an OpenRouter key — add OPENROUTER_API_KEY in the Env menu or connect

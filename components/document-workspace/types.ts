@@ -90,6 +90,9 @@ export type DocumentWorkspaceProps = {
   initialHasOpenRouterKey: boolean;
   initialHasLiteLlmKey: boolean;
   initialHasOpenAiKey: boolean;
+  /** ChatGPT-subscription Codex auth (doc env blob, or a connected
+   * "openai-chatgpt" credential of the owner/viewer). Presence only. */
+  initialHasChatgptAuth: boolean;
   /** The deployment's free local model ("local/<name>") when configured. */
   localAgentModel: string | null;
   /** True when an Anthropic-model run started by this viewer has no credential
@@ -102,6 +105,7 @@ export type DocumentWorkspaceProps = {
   credentialHasOpenRouterKey: boolean;
   credentialHasLiteLlmKey: boolean;
   credentialHasOpenAiKey: boolean;
+  credentialHasChatgptAuth: boolean;
   isAuthenticated: boolean;
   isOwner: boolean;
   shareToken: string | null;

@@ -141,11 +141,13 @@ export default async function ForumDocumentPage({ params }: PageProps) {
           initialHasOpenRouterKey={false}
           initialHasLiteLlmKey={false}
           initialHasOpenAiKey={false}
+          initialHasChatgptAuth={false}
           localAgentModel={null}
           anthropicFreeFallback={false}
           credentialHasOpenRouterKey={false}
           credentialHasLiteLlmKey={false}
           credentialHasOpenAiKey={false}
+          credentialHasChatgptAuth={false}
           initialThreads={normalizedThreads}
           initialTitle={access.document.title}
           documentKind={access.document.kind}

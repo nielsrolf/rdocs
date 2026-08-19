@@ -21,6 +21,7 @@ import { normalizeAgentImages } from "@/lib/ai-edit-submission";
 import { createLiveCommentRecorder } from "@/lib/agent-comments";
 import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
 import { getWorkspaceOverview } from "@/lib/research-workspace";
+import { persistRefreshedCodexAuth } from "@/lib/user-credentials";
 
 export type ConversationRunOutcome = {
   status: "SUCCEEDED" | "FAILED";
@@ -293,6 +294,11 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
         // cancelled runs stay resumable) and, for the container runner, mount
         // the conversation's session dir as CLAUDE_CONFIG_DIR.
         onSessionId: sessionsSupported ? (sessionId) => recordRunSessionId(aiRunId, sessionId) : undefined,
+        // ChatGPT-subscription Codex runs rotate the auth.json refresh token;
+        // persist the rotated blob back into the supplying credential row or a
+        // later run fails with an expired token. Secret material — never logged.
+        onCodexAuthRefreshed: (authJson) =>
+          persistRefreshedCodexAuth(documentId, createdById, authJson).then(() => undefined),
         sessionDirHostPath: sessionPlan?.sessionDir,
         trustedHostRun: hostDevRun,
         onProgress: ctx.onProgress

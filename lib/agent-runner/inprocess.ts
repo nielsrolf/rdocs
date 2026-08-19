@@ -62,6 +62,7 @@ export class InProcessRunner implements AgentRunner {
       sessionConfigDir: options?.sessionDirHostPath,
       runKey: options?.aiRunId,
       onSessionId: options?.onSessionId,
+      onCodexAuthRefreshed: options?.onCodexAuthRefreshed,
       agentConfig: options?.agentConfig,
       agentEnv: options?.agentEnv,
       validateSubmission,

@@ -245,11 +245,13 @@ export function DocumentWorkspace({
   initialHasOpenRouterKey,
   initialHasLiteLlmKey,
   initialHasOpenAiKey,
+  initialHasChatgptAuth,
   localAgentModel,
   anthropicFreeFallback,
   credentialHasOpenRouterKey,
   credentialHasLiteLlmKey,
   credentialHasOpenAiKey,
+  credentialHasChatgptAuth,
   isAuthenticated,
   isOwner,
   shareToken,
@@ -271,6 +273,7 @@ export function DocumentWorkspace({
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(initialHasOpenRouterKey);
   const [hasLiteLlmKey, setHasLiteLlmKey] = useState(initialHasLiteLlmKey);
   const [hasOpenAiKey, setHasOpenAiKey] = useState(initialHasOpenAiKey);
+  const [hasChatgptAuth, setHasChatgptAuth] = useState(initialHasChatgptAuth);
   const [repoBusy, setRepoBusy] = useState(false);
   const [repoNotice, setRepoNotice] = useState<string | null>(null);
   const [repoAccessIssue, setRepoAccessIssue] = useState<{
@@ -4690,6 +4693,7 @@ export function DocumentWorkspace({
                 setHasOpenRouterKey(keys.includes("OPENROUTER_API_KEY") || credentialHasOpenRouterKey);
                 setHasLiteLlmKey(keys.includes("LITELLM_API_KEY") || credentialHasLiteLlmKey);
                 setHasOpenAiKey(keys.includes("OPENAI_API_KEY") || credentialHasOpenAiKey);
+                setHasChatgptAuth(keys.includes("CODEX_CHATGPT_AUTH_JSON") || credentialHasChatgptAuth);
               }}
             />
           ) : null}
@@ -4949,6 +4953,7 @@ export function DocumentWorkspace({
             setHasOpenRouterKey(keys.includes("OPENROUTER_API_KEY") || credentialHasOpenRouterKey);
             setHasLiteLlmKey(keys.includes("LITELLM_API_KEY") || credentialHasLiteLlmKey);
             setHasOpenAiKey(keys.includes("OPENAI_API_KEY") || credentialHasOpenAiKey);
+            setHasChatgptAuth(keys.includes("CODEX_CHATGPT_AUTH_JSON") || credentialHasChatgptAuth);
           }}
           title={title}
           documentId={documentId}
@@ -4971,6 +4976,7 @@ export function DocumentWorkspace({
           hasOpenRouterKey={hasOpenRouterKey}
           hasLiteLlmKey={hasLiteLlmKey}
           hasOpenAiKey={hasOpenAiKey}
+          hasChatgptAuth={hasChatgptAuth}
           localModel={localAgentModel}
           anthropicFreeFallback={anthropicFreeFallback}
           runnerMode={runnerMode}

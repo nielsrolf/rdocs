@@ -16,12 +16,21 @@ export const runtime = "nodejs";
 // route: values are write-only over the API — listed back masked, never in
 // full.
 
-const providerSchema = z.enum(["anthropic", "openai", "openrouter", "litellm", "github"]);
+const providerSchema = z.enum([
+  "anthropic",
+  "openai",
+  "openai-chatgpt",
+  "openrouter",
+  "litellm",
+  "github"
+]);
 
 const upsertSchema = z.object({
   provider: providerSchema.optional().nullable(),
   kind: z.enum(["api_key", "oauth"]).optional().nullable(),
-  value: z.string().min(1).max(8192),
+  // 64 KiB ceiling: a pasted ~/.codex/auth.json (openai-chatgpt) is ~7-10 KB;
+  // plain API keys stay far below it.
+  value: z.string().min(1).max(65536),
   label: z.string().max(128).optional().nullable()
 });
 

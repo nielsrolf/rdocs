@@ -118,6 +118,7 @@ export class ContainerRunner implements AgentRunner {
       onComment: options?.onComment,
       onSlackMessage: options?.onSlackMessage,
       onSessionId: options?.onSessionId,
+      onCodexAuthRefreshed: options?.onCodexAuthRefreshed,
       signal: options?.signal,
       containerName: options?.containerName,
       // Steering: lets the host push extra user messages into the live turn
@@ -156,6 +157,7 @@ export class ContainerRunner implements AgentRunner {
     onComment?: AgentRunOptions["onComment"];
     onSlackMessage?: AgentRunOptions["onSlackMessage"];
     onSessionId?: AgentRunOptions["onSessionId"];
+    onCodexAuthRefreshed?: AgentRunOptions["onCodexAuthRefreshed"];
     signal?: AbortSignal;
     containerName?: string;
     steerRunId?: string;
@@ -282,7 +284,8 @@ export class ContainerRunner implements AgentRunner {
                 onProgress: opts.onProgress,
                 onComment: opts.onComment,
                 onSlackMessage: opts.onSlackMessage,
-                onSessionId: opts.onSessionId
+                onSessionId: opts.onSessionId,
+                onCodexAuthRefreshed: opts.onCodexAuthRefreshed
               }
             });
           }
@@ -290,6 +293,7 @@ export class ContainerRunner implements AgentRunner {
             signal: opts.signal,
             containerName: opts.containerName,
             onSessionId: opts.onSessionId,
+            onCodexAuthRefreshed: opts.onCodexAuthRefreshed,
             steerRunId: steerRunId
           });
         } catch (error) {
@@ -346,6 +350,7 @@ export class ContainerRunner implements AgentRunner {
       signal?: AbortSignal;
       containerName?: string;
       onSessionId?: AgentRunOptions["onSessionId"];
+      onCodexAuthRefreshed?: AgentRunOptions["onCodexAuthRefreshed"];
       /** AiRun id to register a live-steering injector for (Claude harness only). */
       steerRunId?: string;
     }
@@ -405,6 +410,7 @@ export class ContainerRunner implements AgentRunner {
           comment?: { findText?: unknown; body?: unknown };
           text?: unknown;
           sessionId?: unknown;
+          authJson?: unknown;
           output?: Record<string, unknown>;
           message?: string;
         };
@@ -439,6 +445,12 @@ export class ContainerRunner implements AgentRunner {
           // SDK session id — the host persists it for follow-up session resume.
           if (cancel?.onSessionId) {
             pending.push(Promise.resolve(cancel.onSessionId(frame.sessionId)).catch(() => {}));
+          }
+        } else if (frame.type === "codex_auth" && typeof frame.authJson === "string" && frame.authJson) {
+          // Refreshed ChatGPT-subscription auth.json — secret material, never
+          // logged; the host persists it into the user's stored credential.
+          if (cancel?.onCodexAuthRefreshed) {
+            pending.push(Promise.resolve(cancel.onCodexAuthRefreshed(frame.authJson)).catch(() => {}));
           }
         } else if (frame.type === "result" && frame.output) {
           result = frame.output;

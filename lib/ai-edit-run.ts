@@ -22,6 +22,7 @@ import { createLiveCommentRecorder } from "@/lib/agent-comments";
 import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
 import { getWorkspaceOverview } from "@/lib/research-workspace";
 import { normalizeSourceLinks } from "@/lib/sources";
+import { persistRefreshedCodexAuth } from "@/lib/user-credentials";
 
 export async function createAgentWidgets(input: {
   widgets: unknown;
@@ -213,6 +214,11 @@ export async function runAiEditInBackground(input: {
           aiRunId,
           onComment: commentRecorder?.onComment,
           onProgress: ctx.onProgress,
+          // ChatGPT-subscription Codex runs rotate the auth.json refresh token;
+          // persist it back into the supplying credential row (see
+          // persistRefreshedCodexAuth). Secret material — never logged.
+          onCodexAuthRefreshed: (authJson) =>
+            persistRefreshedCodexAuth(documentId, createdById, authJson).then(() => undefined),
           // Serializable validation spec — reconstructed into a validator wherever
           // the agent actually runs (in-process, or inside the container, where
           // the untrusted widget build is sandboxed).

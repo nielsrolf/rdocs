@@ -5,6 +5,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import {
   AGENT_EFFORTS,
   ANTHROPIC_AGENT_MODELS,
+  CODEX_CHATGPT_AGENT_MODELS,
   CODEX_LITELLM_AGENT_MODELS,
   CODEX_OPENAI_AGENT_MODELS,
   defaultCodexAgentModelForCredentials,
@@ -43,6 +44,7 @@ type McpToken = {
 function credentialLabel(credential: MaskedCredential): string {
   if (credential.provider === "openrouter") return "OpenRouter API key";
   if (credential.provider === "openai") return "OpenAI API key";
+  if (credential.provider === "openai-chatgpt") return "ChatGPT subscription (Codex)";
   if (credential.provider === "litellm") return "LiteLLM API key";
   if (credential.provider === "github") return "GitHub access token";
   return credential.kind === "oauth" ? "Claude subscription" : "Anthropic API key";
@@ -74,6 +76,15 @@ const PROVIDER_HINTS: Record<CredentialProvider, ReactNode> = {
       Anthropic&apos;s ToS; use with your own account at your own risk.
     </>
   ),
+  "openai-chatgpt": (
+    <>
+      Your ChatGPT-subscription login for Codex: paste the contents of{" "}
+      <code>~/.codex/auth.json</code> from a machine where <code>codex login</code> succeeded.
+      Unlocks the &quot;ChatGPT subscription&quot; Codex models; the login refreshes itself and the
+      rotated token is saved back automatically. Subject to OpenAI&apos;s ToS — use with your own
+      account at your own risk.
+    </>
+  ),
   openrouter: (
     <>
       Unlocks OpenRouter models on every document you own — pick one under Agents → Model.
@@ -101,6 +112,7 @@ const PROVIDER_HINTS: Record<CredentialProvider, ReactNode> = {
 const PROVIDER_CREDENTIAL: Record<string, CredentialProvider | null> = {
   anthropic: "anthropic",
   openai: "openai",
+  "openai-chatgpt": "openai-chatgpt",
   openrouter: "openrouter",
   litellm: "litellm",
   local: null
@@ -578,7 +590,8 @@ export function SlackConnectConfig({
                 event.target.value === "codex"
                   ? defaultCodexAgentModelForCredentials({
                       hasOpenAiKey: hasCredential("openai"),
-                      hasLiteLlmKey: hasCredential("litellm")
+                      hasLiteLlmKey: hasCredential("litellm"),
+                      hasChatgptAuth: hasCredential("openai-chatgpt")
                     })
                   : DEFAULT_AGENT_MODEL
               )}
@@ -643,6 +656,16 @@ export function SlackConnectConfig({
                     <option value={normalizedModel}>{normalizedModel}</option>
                   ) : null}
                 </optgroup>
+                {hasCredential("openai-chatgpt") || provider === "openai-chatgpt" ? (
+                  <optgroup label="ChatGPT subscription">
+                    {CODEX_CHATGPT_AGENT_MODELS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                    {provider === "openai-chatgpt" && !CODEX_CHATGPT_AGENT_MODELS.some((option) => option.value === normalizedModel) ? (
+                      <option value={normalizedModel}>{normalizedModel}</option>
+                    ) : null}
+                  </optgroup>
+                ) : null}
                 {hasCredential("litellm") || provider === "litellm" ? (
                   <optgroup label="LiteLLM (OpenAI Responses)">
                     {CODEX_LITELLM_AGENT_MODELS.map((option) => (

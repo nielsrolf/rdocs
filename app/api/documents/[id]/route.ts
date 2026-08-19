@@ -241,6 +241,9 @@ export async function GET(request: Request, { params }: RouteContext<{ id: strin
       hasOpenAiKey:
         (await hasDocumentEnvKey(access.document.id, "OPENAI_API_KEY")) ||
         (await hasUserCredential(access.document.ownerId, "openai")),
+      hasChatgptAuth:
+        (await hasDocumentEnvKey(access.document.id, "CODEX_CHATGPT_AUTH_JSON")) ||
+        (await hasUserCredential(access.document.ownerId, "openai-chatgpt")),
       updatedAt: access.document.updatedAt
     },
     threads,

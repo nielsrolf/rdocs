@@ -44,6 +44,7 @@ export type NormalizedCredentialInput = OwnerCredential & { provider: Credential
 export const CREDENTIAL_PROVIDERS: readonly CredentialProvider[] = [
   "anthropic",
   "openai",
+  "openai-chatgpt",
   "openrouter",
   "litellm",
   "github"
@@ -104,6 +105,10 @@ export function normalizeCredentialInput(input: {
   }
   const detected = detectCredentialKind(value);
 
+  if (provider === "openai-chatgpt") {
+    return { provider, kind: "oauth", value: normalizeCodexAuthJson(value) };
+  }
+
   if (provider !== "anthropic") {
     if (detected) {
       throw new Error(
@@ -127,6 +132,60 @@ export function normalizeCredentialInput(input: {
     );
   }
   return { provider, kind: detected, value };
+}
+
+/**
+ * Validate + compact a pasted `~/.codex/auth.json` (ChatGPT-subscription login
+ * for the Codex CLI). The whole file is the credential: the CLI needs the
+ * OAuth tokens bundle (and rotates the refresh token on refresh), so we store
+ * it verbatim — re-serialized compactly so the value has no newlines and can
+ * ride a single env var / docker --env-file line. Throws a user-facing Error
+ * on anything that is not a usable ChatGPT auth.json.
+ */
+export function normalizeCodexAuthJson(value: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(
+      "ChatGPT subscription credential must be the JSON contents of ~/.codex/auth.json."
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      "ChatGPT subscription credential must be the JSON contents of ~/.codex/auth.json."
+    );
+  }
+  const auth = parsed as {
+    auth_mode?: unknown;
+    tokens?: { refresh_token?: unknown } | null;
+    OPENAI_API_KEY?: unknown;
+  };
+  const refreshToken =
+    typeof auth.tokens?.refresh_token === "string" ? auth.tokens.refresh_token.trim() : "";
+  if (!refreshToken) {
+    throw new Error(
+      "This auth.json has no OAuth tokens (tokens.refresh_token). Log in with `codex login` (ChatGPT sign-in, not an API key) and paste the refreshed ~/.codex/auth.json."
+    );
+  }
+  if (auth.auth_mode !== undefined && auth.auth_mode !== "chatgpt") {
+    throw new Error(
+      `This auth.json uses auth_mode "${String(auth.auth_mode)}", not a ChatGPT subscription login. Use \`codex login\` with ChatGPT sign-in, or connect the API key as an OpenAI credential instead.`
+    );
+  }
+  return JSON.stringify(parsed);
+}
+
+/** Parse the `last_refresh` timestamp out of a stored auth.json blob (ms epoch), or null. */
+export function codexAuthLastRefreshMs(authJson: string): number | null {
+  try {
+    const parsed = JSON.parse(authJson) as { last_refresh?: unknown };
+    if (typeof parsed.last_refresh !== "string") return null;
+    const ms = Date.parse(parsed.last_refresh);
+    return Number.isFinite(ms) ? ms : null;
+  } catch {
+    return null;
+  }
 }
 
 // --- DB access ------------------------------------------------------------
@@ -207,6 +266,9 @@ export async function deleteUserCredential(
 /** The document-env variable each third-party provider authenticates with. */
 export const PROVIDER_ENV_KEY = {
   openai: "OPENAI_API_KEY",
+  // The whole ~/.codex/auth.json blob (compact JSON) — materialized into
+  // $CODEX_HOME/auth.json by the Codex runtime, never used as an API key.
+  "openai-chatgpt": "CODEX_CHATGPT_AUTH_JSON",
   openrouter: "OPENROUTER_API_KEY",
   litellm: "LITELLM_API_KEY"
 } as const;
@@ -327,6 +389,15 @@ export function providerKeyRequirementFailure(
   }
   const keyVar = PROVIDER_ENV_KEY[provider];
   if (agentEnv[keyVar]?.trim()) return null;
+  if (provider === "openai-chatgpt") {
+    return {
+      code: "provider-key-missing",
+      provider,
+      envKey: keyVar,
+      message:
+        "ChatGPT-subscription Codex model selected but no ChatGPT login is connected. Paste your ~/.codex/auth.json under Settings (topbar) → AI & credentials."
+    };
+  }
   const label = provider === "openrouter" ? "OpenRouter" : provider === "litellm" ? "LiteLLM" : "OpenAI";
   const article = label === "LiteLLM" ? "a" : "an";
   return {
@@ -563,6 +634,60 @@ async function resolveModelCredentialEnv(
     throw new AgentCredentialError(requirementFailure);
   }
   return env;
+}
+
+/**
+ * Persist a refreshed Codex ChatGPT auth.json after a run. The Codex CLI
+ * rotates the OAuth refresh token when it refreshes, so the newest blob must
+ * win or the stored credential eventually goes stale and every later run
+ * fails auth. Re-resolves WHICH UserCredential row supplied the run's blob
+ * (same precedence as resolveModelCredentialEnv: document env → triggering
+ * user → owner, with the selfHosted owner override) and updates that row —
+ * a doc-env-supplied blob is deliberately NOT persisted (we cannot write
+ * DocumentEnvVar safely from here; the doc admin owns that value).
+ * Last-writer-wins on the blob's `last_refresh` timestamp: an older blob
+ * never overwrites a newer stored one (two overlapping runs).
+ */
+export async function persistRefreshedCodexAuth(
+  documentId: string,
+  runnerUserId: string | null,
+  authJson: string
+): Promise<{ persisted: boolean; reason?: string }> {
+  let normalized: string;
+  try {
+    normalized = normalizeCodexAuthJson(authJson);
+  } catch (error) {
+    return { persisted: false, reason: error instanceof Error ? error.message : "invalid auth.json" };
+  }
+  const doc = await db.document.findUnique({
+    where: { id: documentId },
+    select: { ownerId: true, runnerMode: true }
+  });
+  const effectiveRunnerUserId = doc?.runnerMode === "selfHosted" ? doc.ownerId : runnerUserId;
+  const docEnv = await loadDocumentEnv(documentId);
+  if (docEnv.CODEX_CHATGPT_AUTH_JSON?.trim()) {
+    return { persisted: false, reason: "credential came from document env" };
+  }
+  const candidates = [
+    effectiveRunnerUserId,
+    doc?.ownerId && doc.ownerId !== effectiveRunnerUserId ? doc.ownerId : null
+  ].filter((id): id is string => Boolean(id));
+  for (const userId of candidates) {
+    const existing = await getUserCredential(userId, "openai-chatgpt");
+    if (!existing) continue;
+    const existingMs = codexAuthLastRefreshMs(existing.value);
+    const refreshedMs = codexAuthLastRefreshMs(normalized);
+    if (existingMs !== null && refreshedMs !== null && refreshedMs <= existingMs) {
+      return { persisted: false, reason: "stored credential is newer" };
+    }
+    await upsertUserCredential(
+      userId,
+      { provider: "openai-chatgpt", kind: "oauth", value: normalized },
+      "ChatGPT subscription (auto-refreshed)"
+    );
+    return { persisted: true };
+  }
+  return { persisted: false, reason: "no stored openai-chatgpt credential to update" };
 }
 
 /**

@@ -223,6 +223,15 @@ export type ClaudeAgentRunOptions = {
    */
   onSlackMessage?: (text: string) => void | Promise<void>;
   /**
+   * ChatGPT-subscription Codex runs only: called after the run when the Codex
+   * CLI refreshed the seeded $CODEX_HOME/auth.json (it ROTATES the refresh
+   * token, so the host must persist the new blob or the stored login goes
+   * stale). Receives the full auth.json contents — treat like a password:
+   * never log, never attach to run output, never persist as a run event.
+   * Runtime-only; the container runner bridges it as a "codex_auth" frame.
+   */
+  onCodexAuthRefreshed?: (authJson: string) => void | Promise<void>;
+  /**
    * External cancellation. Aborting tears down the SDK loop itself (the run's
    * subprocess exits), not just the caller's bookkeeping — required for
    * in-process runs, where there is no container to kill.

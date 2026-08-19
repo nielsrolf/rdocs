@@ -1,3 +1,6 @@
+import { promises as fs } from "node:fs";
+import path from "node:path";
+
 import {
   PREPARING_DOCUMENT_UPDATE,
   SUBMITTING_FINAL_RESPONSE,
@@ -399,7 +402,7 @@ export async function runCodexSubmissionLoop(input: {
 }
 
 export function codexProviderConfig(
-  provider: "openai" | "litellm",
+  provider: "openai" | "litellm" | "chatgpt",
   env: Record<string, string>,
   input: Pick<ClaudeResearchAgentInput, "slackTools"> | undefined
 ): { config: CodexConfigObject; baseUrl?: string; apiKey?: string } {
@@ -433,6 +436,18 @@ export function codexProviderConfig(
       apiKey: env.OPENAI_API_KEY?.trim() || undefined
     };
   }
+  if (provider === "chatgpt") {
+    // ChatGPT-subscription auth: no API key, no base URL. The auth.json blob
+    // (CODEX_CHATGPT_AUTH_JSON) is materialized into $CODEX_HOME/auth.json by
+    // seedCodexChatgptAuth before the app-server starts.
+    if (!env.CODEX_CHATGPT_AUTH_JSON?.trim()) {
+      throw new Error(
+        "ChatGPT-subscription Codex model selected but CODEX_CHATGPT_AUTH_JSON is not set."
+      );
+    }
+    config.preferred_auth_method = "chatgpt";
+    return { config };
+  }
   const key = env.LITELLM_API_KEY?.trim();
   const configuredBase = env.LITELLM_BASE_URL?.trim();
   if (!key) throw new Error("Codex LiteLLM model selected but LITELLM_API_KEY is not set.");
@@ -448,6 +463,48 @@ export function codexProviderConfig(
     }
   };
   return { config };
+}
+
+// ------------------------------------------------- ChatGPT-subscription auth
+//
+// A chatgpt-provider run authenticates with the user's Codex CLI login
+// (~/.codex/auth.json contents) instead of an API key. The blob rides the
+// CODEX_CHATGPT_AUTH_JSON env var only as TRANSPORT: it is materialized into
+// $CODEX_HOME/auth.json (mode 0600) before the app-server starts and stripped
+// from the child env. Codex ROTATES the refresh token when it refreshes, so
+// after the run the file is read back and, when changed, handed to
+// options.onCodexAuthRefreshed for persistence — never re-seed a later run
+// from a stale original blob.
+
+export async function seedCodexChatgptAuth(env: Record<string, string>): Promise<string> {
+  const blob = env.CODEX_CHATGPT_AUTH_JSON?.trim();
+  if (!blob) {
+    throw new Error(
+      "ChatGPT-subscription Codex model selected but CODEX_CHATGPT_AUTH_JSON is not set."
+    );
+  }
+  const home = env.CODEX_HOME?.trim();
+  if (!home) throw new Error("Codex ChatGPT auth requires CODEX_HOME to be set.");
+  await fs.mkdir(home, { recursive: true });
+  const authPath = path.join(home, "auth.json");
+  await fs.writeFile(authPath, blob, { mode: 0o600 });
+  return authPath;
+}
+
+export async function collectRefreshedCodexAuth(
+  authPath: string,
+  seededBlob: string,
+  onRefreshed: ((authJson: string) => void | Promise<void>) | undefined
+): Promise<void> {
+  if (!onRefreshed) return;
+  try {
+    const current = (await fs.readFile(authPath, "utf8")).trim();
+    if (!current || current === seededBlob.trim()) return;
+    JSON.parse(current); // only propagate a well-formed file
+    await onRefreshed(current);
+  } catch {
+    // Best-effort: a missing or garbled file just means nothing to persist.
+  }
 }
 
 /**
@@ -499,6 +556,16 @@ export async function runCodexResearchAgent(
   const { config, modelProvider } = codexAppServerThreadConfig(provider, resolved.effort);
   const env = { ...agentEnv };
   if (provider.apiKey) env.OPENAI_API_KEY = provider.apiKey;
+  let chatgptAuth: { path: string; seeded: string } | null = null;
+  if (resolved.provider === "chatgpt") {
+    const seeded = env.CODEX_CHATGPT_AUTH_JSON ?? "";
+    const authPath = await seedCodexChatgptAuth(env);
+    chatgptAuth = { path: authPath, seeded };
+    // The blob is transport only — never expose it to the agent subprocess,
+    // and never mix API-key auth into a subscription run.
+    delete env.CODEX_CHATGPT_AUTH_JSON;
+    delete env.OPENAI_API_KEY;
+  }
   const client = await CodexAppServerClient.start({ env, cwd: input.workspacePath ?? undefined });
   try {
     emit(options.onProgress, { role: "system", message: "Starting Codex research agent." });
@@ -543,6 +610,13 @@ export async function runCodexResearchAgent(
   } finally {
     options.inputChannel?.close();
     client.close();
+    if (chatgptAuth) {
+      await collectRefreshedCodexAuth(
+        chatgptAuth.path,
+        chatgptAuth.seeded,
+        options.onCodexAuthRefreshed
+      );
+    }
   }
 }
 
@@ -566,6 +640,11 @@ export async function runCodexMergeConflictResolver(input: {
   const { config, modelProvider } = codexAppServerThreadConfig(provider, resolved.effort);
   const env = { ...agentEnv };
   if (provider.apiKey) env.OPENAI_API_KEY = provider.apiKey;
+  if (resolved.provider === "chatgpt") {
+    await seedCodexChatgptAuth(env);
+    delete env.CODEX_CHATGPT_AUTH_JSON;
+    delete env.OPENAI_API_KEY;
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 300_000);
   const client = await CodexAppServerClient.start({ env, cwd: input.workspacePath });

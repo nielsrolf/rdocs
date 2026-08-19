@@ -2,7 +2,13 @@
 // and the client credentials menu (single input field, no provider dropdown).
 // No imports — this must stay safe to bundle client-side.
 
-export type CredentialProvider = "anthropic" | "openai" | "openrouter" | "litellm" | "github";
+export type CredentialProvider =
+  | "anthropic"
+  | "openai"
+  | "openai-chatgpt"
+  | "openrouter"
+  | "litellm"
+  | "github";
 
 export type CredentialKind = "api_key" | "oauth";
 
@@ -48,12 +54,30 @@ const PREFIX_RULES: Array<{ prefixes: string[]; detected: DetectedCredential }> 
 export function detectCredential(value: string): DetectedCredential | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
+  if (looksLikeCodexAuthJson(trimmed)) {
+    return {
+      provider: "openai-chatgpt",
+      kind: "oauth",
+      label: "ChatGPT subscription (Codex auth.json)"
+    };
+  }
   for (const rule of PREFIX_RULES) {
     if (rule.prefixes.some((prefix) => trimmed.startsWith(prefix))) {
       return rule.detected;
     }
   }
   return null;
+}
+
+/**
+ * A pasted `~/.codex/auth.json` (ChatGPT-subscription login for the Codex
+ * CLI): a JSON object carrying an OAuth `tokens` bundle. Cheap shape check
+ * only — full validation happens server-side in normalizeCredentialInput.
+ */
+export function looksLikeCodexAuthJson(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{")) return false;
+  return trimmed.includes('"tokens"') || trimmed.includes('"auth_mode"');
 }
 
 /** Our own MCP bearer tokens — pasting one here is always a mix-up. */

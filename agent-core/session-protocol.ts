@@ -61,7 +61,7 @@ export const DEFAULT_MAX_LIFETIME_MS = 26 * 60 * 60_000;
 export const DEFAULT_FRAME_LOG_LIMIT = 5_000;
 
 export type AgentSessionFrameBody = {
-  type: "progress" | "comment" | "slack_message" | "session" | "result" | "error";
+  type: "progress" | "comment" | "slack_message" | "session" | "codex_auth" | "result" | "error";
   [key: string]: unknown;
 };
 

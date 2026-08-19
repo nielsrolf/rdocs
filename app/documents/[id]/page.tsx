@@ -153,7 +153,10 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
     viewerHasOpenRouterKey,
     viewerHasLiteLlmKey,
     ownerHasOpenAiKeyOnly,
-    viewerHasOpenAiKey
+    viewerHasOpenAiKey,
+    envHasChatgptAuth,
+    ownerHasChatgptAuth,
+    viewerHasChatgptAuth
   ] = await Promise.all([
     hasDocumentEnvKey(id, "OPENROUTER_API_KEY"),
     hasDocumentEnvKey(id, "LITELLM_API_KEY"),
@@ -163,7 +166,10 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
     viewerId ? hasUserCredential(viewerId, "openrouter") : Promise.resolve(false),
     viewerId ? hasUserCredential(viewerId, "litellm") : Promise.resolve(false),
     hasUserCredential(access.document.ownerId, "openai"),
-    viewerId ? hasUserCredential(viewerId, "openai") : Promise.resolve(false)
+    viewerId ? hasUserCredential(viewerId, "openai") : Promise.resolve(false),
+    hasDocumentEnvKey(id, "CODEX_CHATGPT_AUTH_JSON"),
+    hasUserCredential(access.document.ownerId, "openai-chatgpt"),
+    viewerId ? hasUserCredential(viewerId, "openai-chatgpt") : Promise.resolve(false)
   ]);
   // Whether an Anthropic-model run started by this viewer would actually run
   // on the free local model (no credential anywhere) — surfaced in the UI so
@@ -184,9 +190,11 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
   const credentialHasOpenRouterKey = ownerHasOpenRouterKeyOnly || viewerHasOpenRouterKey;
   const credentialHasLiteLlmKey = ownerHasLiteLlmKeyOnly || viewerHasLiteLlmKey;
   const credentialHasOpenAiKey = ownerHasOpenAiKeyOnly || viewerHasOpenAiKey;
+  const credentialHasChatgptAuth = ownerHasChatgptAuth || viewerHasChatgptAuth;
   const initialHasOpenRouterKey = envHasOpenRouterKey || credentialHasOpenRouterKey;
   const initialHasLiteLlmKey = envHasLiteLlmKey || credentialHasLiteLlmKey;
   const initialHasOpenAiKey = envHasOpenAiKey || credentialHasOpenAiKey;
+  const initialHasChatgptAuth = envHasChatgptAuth || credentialHasChatgptAuth;
   const initialCollaborationVersion = await getCollaborationVersion(
     access.document.id,
     access.document.content,
@@ -215,11 +223,13 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         initialHasOpenRouterKey={initialHasOpenRouterKey}
         initialHasLiteLlmKey={initialHasLiteLlmKey}
         initialHasOpenAiKey={initialHasOpenAiKey}
+        initialHasChatgptAuth={initialHasChatgptAuth}
         localAgentModel={freeLocalAgentModel()}
         anthropicFreeFallback={anthropicFreeFallback}
         credentialHasOpenRouterKey={credentialHasOpenRouterKey}
         credentialHasLiteLlmKey={credentialHasLiteLlmKey}
         credentialHasOpenAiKey={credentialHasOpenAiKey}
+        credentialHasChatgptAuth={credentialHasChatgptAuth}
         initialThreads={normalizedThreads}
         initialFocusThreadId={focusThreadId}
         initialTitle={access.document.title}

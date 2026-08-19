@@ -15,6 +15,8 @@ export const CONNECT_ANTHROPIC_CREDENTIAL_MESSAGE =
   "Connect an Anthropic credential in settings to run this model.";
 export const CONNECT_OPENAI_CREDENTIAL_MESSAGE =
   "Connect an OpenAI credential under Settings to run this Codex model.";
+export const CONNECT_CHATGPT_CREDENTIAL_MESSAGE =
+  "Connect your ChatGPT subscription (paste ~/.codex/auth.json) under Settings to run this Codex model.";
 
 export function resolveAgentCredentialEnv(
   containerEnv: Record<string, string | undefined>,
@@ -42,6 +44,15 @@ export function resolveContainerCredentialEnv(
     return containerEnv.OPENAI_API_KEY?.trim()
       ? { added: {}, warning: null, error: null }
       : { added: {}, warning: null, error: CONNECT_OPENAI_CREDENTIAL_MESSAGE };
+  }
+  // ChatGPT-subscription Codex: the credential is the whole ~/.codex/auth.json
+  // blob riding CODEX_CHATGPT_AUTH_JSON (materialized into $CODEX_HOME inside
+  // the container). Must short-circuit before the generic branch below, which
+  // has no PROVIDER_KEY_VARS entry for this provider.
+  if (provider === "openai-chatgpt") {
+    return containerEnv.CODEX_CHATGPT_AUTH_JSON?.trim()
+      ? { added: {}, warning: null, error: null }
+      : { added: {}, warning: null, error: CONNECT_CHATGPT_CREDENTIAL_MESSAGE };
   }
   if (provider !== "anthropic") {
     if (provider === "local") {

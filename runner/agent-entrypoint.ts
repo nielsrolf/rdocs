@@ -199,6 +199,10 @@ async function executeJob(
       // The SDK session id crosses as its own frame so the host can persist it
       // (AiRun.sdkSessionId) for follow-up session resume.
       onSessionId: (sessionId: string) => emit({ type: "session", sessionId }),
+      // A ChatGPT-subscription Codex run rotates its auth.json refresh token;
+      // the refreshed blob crosses as its own frame so the host can persist it
+      // into the user's stored credential (secret material — never logged).
+      onCodexAuthRefreshed: (authJson: string) => emit({ type: "codex_auth", authJson }),
       agentConfig: job.agentConfig as never,
       agentEnv: job.agentEnv,
       // The runner mounts the conversation's session store here and exports it

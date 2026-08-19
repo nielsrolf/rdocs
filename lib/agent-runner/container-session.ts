@@ -99,6 +99,7 @@ export type SessionFrameSink = {
   onComment?: AgentRunOptions["onComment"];
   onSlackMessage?: AgentRunOptions["onSlackMessage"];
   onSessionId?: AgentRunOptions["onSessionId"];
+  onCodexAuthRefreshed?: AgentRunOptions["onCodexAuthRefreshed"];
 };
 
 /**
@@ -131,6 +132,12 @@ export function createFrameApplier(sink: SessionFrameSink) {
       } else {
         process.stderr.write("[agent-session] dropped slack_message frame (no handler)\n");
       }
+      return;
+    }
+    if (frame.type === "codex_auth" && typeof frame.authJson === "string" && frame.authJson) {
+      // Refreshed ChatGPT-subscription auth.json. Secret material: never log
+      // the payload; a missing handler just means the rotation is not persisted.
+      await Promise.resolve(sink.onCodexAuthRefreshed?.(frame.authJson)).catch(() => {});
       return;
     }
     if (frame.type === "session" && typeof frame.sessionId === "string" && frame.sessionId) {

@@ -39,6 +39,11 @@ export type AgentRunOptions = {
   // Reports the run's SDK session id (see ClaudeAgentRunOptions.onSessionId)
   // so the host can persist it for follow-up session resume. Runtime-only.
   onSessionId?: ClaudeAgentRunOptions["onSessionId"];
+  // Refreshed ChatGPT-subscription Codex auth.json (see
+  // ClaudeAgentRunOptions.onCodexAuthRefreshed). Secret material; the host
+  // persists it into the user's stored credential. Runtime-only — never
+  // shipped as part of the serialized job.
+  onCodexAuthRefreshed?: ClaudeAgentRunOptions["onCodexAuthRefreshed"];
   // Host path of the per-conversation session store. Container runner:
   // bind-mounted rw and exported as CLAUDE_CONFIG_DIR, so SDK session
   // transcripts survive the container. Ignored by the in-process runner

@@ -25,6 +25,7 @@ import { notifyCommentPosted } from "@/lib/comment-notifications";
 import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
 import { normalizeSourceLinks, serializeSourceLinks } from "@/lib/sources";
 import { getWorkspaceOverview } from "@/lib/research-workspace";
+import { persistRefreshedCodexAuth } from "@/lib/user-credentials";
 
 export type ThreadForReply = {
   id: string;
@@ -232,7 +233,11 @@ export async function runAskAiInBackground(input: {
         aiRunId,
         validation: { kind: "comment_reply", documentText: suggestionAnchorText },
         onComment: commentRecorder.onComment,
-        onProgress: ctx.onProgress
+        onProgress: ctx.onProgress,
+        // ChatGPT-subscription Codex runs rotate the auth.json refresh token;
+        // persist it back into the supplying credential row. Secret material.
+        onCodexAuthRefreshed: (authJson) =>
+          persistRefreshedCodexAuth(thread.documentId, createdById, authJson).then(() => undefined)
       });
       const commit = await ctx.commitRunChanges(`AI research for document comment ${thread.id}`);
       const sourceLinks = normalizeSourceLinks([
