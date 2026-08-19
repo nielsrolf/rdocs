@@ -95,6 +95,42 @@ body.public-view-shell .document-page-shell {
   gap: 0.75rem;
 }
 
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  min-width: 0;
+}
+
+/* Studio / Forum mode switch, always visible next to the brand. */
+.topbar-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.topbar-mode-link {
+  border-radius: 999px;
+  padding: 0.38rem 0.9rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--muted);
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.topbar-mode-link:hover {
+  color: var(--text);
+}
+
+.topbar-mode-link.is-active {
+  background: rgba(26, 115, 232, 0.12);
+  color: var(--accent);
+}
+
 .brand {
   display: inline-flex;
   align-items: center;
@@ -563,8 +599,16 @@ body.public-view-shell .document-page-shell {
 .agent-main {
   display: grid;
   grid-template-rows: auto 1fr auto;
+  /* second column is the session plan rail; collapses to 0 when absent */
+  grid-template-columns: minmax(0, 1fr) auto;
   min-height: 0;
   min-width: 0;
+}
+
+.agent-main > .agent-main-header,
+.agent-main > .agent-compose,
+.agent-main > .agent-main-empty {
+  grid-column: 1 / -1;
 }
 
 .agent-main-header {
@@ -961,6 +1005,359 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   word-break: break-word;
 }
 
+/* --- Lifecycle step rows (run started / submitting / finishing) --- */
+
+.agent-step {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.12rem 0.5rem;
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+
+.agent-step-icon {
+  flex: 0 0 auto;
+  width: 0.85rem;
+  text-align: center;
+  font-size: 0.68rem;
+  color: #3f9d5f;
+}
+
+.agent-step-active .agent-step-icon {
+  color: #7555cc;
+  animation: agent-thinking-bounce 1.2s infinite ease-in-out both;
+}
+
+.agent-step-label {
+  flex: 0 1 auto;
+  letter-spacing: 0.01em;
+}
+
+.agent-step-time {
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+/* Consecutive steps read as one checklist. */
+.agent-timeline > .agent-step + .agent-step {
+  margin-top: -0.72rem;
+}
+
+/* --- Final reply badge --- */
+
+.agent-reply-chip {
+  display: inline-block;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: rgba(117, 85, 204, 0.12);
+  color: #7555cc;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.agent-bubble-reply .agent-bubble-body {
+  border-left: 3px solid rgba(117, 85, 204, 0.45);
+}
+
+/* --- Tool body: terminal + diff + todos --- */
+
+.agent-tool-desc {
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.agent-tool-prompt {
+  color: #3f9d5f;
+  font-weight: 700;
+}
+
+.agent-tool-pre-terminal {
+  background: #24222d;
+  color: #e6e2f2;
+  border-color: #24222d;
+}
+
+.agent-term-prompt {
+  color: #7ee29a;
+  font-weight: 700;
+  user-select: none;
+}
+
+.agent-term-stderr {
+  color: #ff9d97;
+}
+
+.agent-tool-truncated {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* Inline preview of an image the agent Read (data URI, small images only). */
+.agent-tool-image {
+  display: block;
+  max-width: 100%;
+  max-height: 20rem;
+  border: 1px solid rgba(117, 85, 204, 0.14);
+  border-radius: 6px;
+}
+
+.agent-tool-image-placeholder {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px dashed rgba(117, 85, 204, 0.3);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+/* Message payload of Slack-posting tools, rendered as prose instead of JSON. */
+.agent-tool-message {
+  padding: 0.45rem 0.6rem;
+  border-left: 3px solid rgba(117, 85, 204, 0.35);
+  background: rgba(117, 85, 204, 0.05);
+  border-radius: 0 6px 6px 0;
+  font-size: 0.8rem;
+}
+
+.agent-file-view {
+  border: 1px solid rgba(117, 85, 204, 0.14);
+  border-radius: 6px;
+  background: #fbfaff;
+  overflow: auto;
+  max-height: 22rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.agent-file-line {
+  display: flex;
+}
+
+.agent-file-num {
+  flex: 0 0 auto;
+  min-width: 3ch;
+  padding: 0 0.6rem 0 0.5rem;
+  text-align: right;
+  color: var(--muted);
+  opacity: 0.65;
+  user-select: none;
+  border-right: 1px solid rgba(117, 85, 204, 0.12);
+}
+
+.agent-file-text {
+  flex: 1 1 auto;
+  padding: 0 0.6rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agent-file-view-add {
+  background: rgba(46, 133, 64, 0.05);
+}
+
+.agent-file-view-add .agent-file-text {
+  color: #1f6b38;
+}
+
+.agent-diff {
+  border: 1px solid rgba(117, 85, 204, 0.14);
+  border-radius: 6px;
+  overflow: auto;
+  max-height: 20rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.agent-diff-hunk + .agent-diff-hunk {
+  border-top: 1px dashed rgba(117, 85, 204, 0.25);
+}
+
+.agent-diff-line {
+  display: flex;
+  gap: 0.45rem;
+  padding: 0 0.6rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agent-diff-sign {
+  flex: 0 0 auto;
+  user-select: none;
+  font-weight: 700;
+}
+
+.agent-diff-del {
+  background: rgba(197, 34, 31, 0.08);
+  color: #8f2320;
+}
+
+.agent-diff-add {
+  background: rgba(46, 133, 64, 0.1);
+  color: #1f6b38;
+}
+
+/* --- Session plan rail (TodoWrite outline) --- */
+
+.agent-plan {
+  grid-row: 2;
+  grid-column: 2;
+  width: 15rem;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.9rem 0.75rem 1.5rem;
+  border-left: 1px solid var(--border);
+  background: #f7f8fa;
+}
+
+.agent-plan-collapsed {
+  width: auto;
+}
+
+.agent-plan-header {
+  position: sticky;
+  top: -0.9rem;
+  margin: -0.9rem -0.75rem 0.5rem;
+  padding: 0.55rem 0.75rem;
+  background: #f7f8fa;
+}
+
+.agent-plan-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  width: 100%;
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.agent-plan-title {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.agent-plan-count {
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.1rem;
+  counter-reset: none;
+}
+
+.agent-plan-item {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  padding: 0.3rem 0.4rem;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--foreground);
+  cursor: pointer;
+}
+
+.agent-plan-item:hover {
+  background: rgba(117, 85, 204, 0.08);
+}
+
+.agent-plan-mark {
+  flex: 0 0 auto;
+  width: 0.9rem;
+  text-align: center;
+  color: var(--muted);
+}
+
+.agent-plan-completed {
+  color: var(--muted);
+}
+
+.agent-plan-completed .agent-plan-mark {
+  color: #3f9d5f;
+}
+
+.agent-plan-in_progress .agent-plan-mark {
+  color: #7555cc;
+}
+
+.agent-plan-item-current {
+  background: rgba(117, 85, 204, 0.12);
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.agent-plan-item-current:hover {
+  background: rgba(117, 85, 204, 0.18);
+}
+
+.agent-event-flash {
+  animation: agent-event-flash 1.2s ease-out;
+}
+
+@keyframes agent-event-flash {
+  0% { background: rgba(117, 85, 204, 0.22); }
+  100% { background: transparent; }
+}
+
+.agent-todo-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+}
+
+.agent-todo-item {
+  display: flex;
+  gap: 0.45rem;
+  align-items: baseline;
+}
+
+.agent-todo-mark {
+  flex: 0 0 auto;
+  width: 0.9rem;
+  text-align: center;
+  color: var(--muted);
+}
+
+.agent-todo-completed {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.agent-todo-completed .agent-todo-mark {
+  color: #3f9d5f;
+  text-decoration: none;
+}
+
+.agent-todo-in_progress .agent-todo-mark {
+  color: #7555cc;
+}
+
 /* --- Thinking indicator --- */
 
 .agent-thinking {
@@ -996,9 +1393,19 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 /* --- Composer --- */
 
-/* Final-edit payload of a succeeded selection-edit run. Lives at the END of
-   the timeline scroll, collapsed by default — the edit is already applied to
-   the document, so it must be reachable without covering the conversation. */
+/* Persisted run outputs: final edits/replies, in-document comments and tracked
+   suggestions. These live after the transcript so tool chatter never obscures
+   what the run actually delivered. */
+.agent-run-artifact-list,
+.agent-run-artifacts {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.agent-run-artifacts + .agent-run-artifacts {
+  padding-top: 0.15rem;
+}
+
 .agent-result {
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
@@ -1048,6 +1455,90 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   user-select: text;
   border-top: 1px solid var(--border);
   padding-top: 0.6rem;
+}
+
+.agent-artifact {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  overflow: hidden;
+}
+
+.agent-artifact-reply {
+  border-left: 3px solid var(--accent);
+}
+
+.agent-artifact-comment {
+  border-left: 3px solid #d59c39;
+}
+
+.agent-artifact-suggestion {
+  border-left: 3px solid #4a9a73;
+}
+
+.agent-artifact > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.agent-artifact > summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-artifact-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.15rem;
+  padding: 0.45rem 0.75rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.agent-artifact-header strong {
+  color: var(--text);
+  font-size: 0.78rem;
+}
+
+.agent-artifact-header span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-artifact-reason {
+  margin: 0;
+  padding: 0.55rem 0.8rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.agent-artifact-diff {
+  border-top: 1px solid var(--border);
+  font-size: 0.78rem;
+}
+
+.agent-artifact-diff pre {
+  display: grid;
+  grid-template-columns: 1.4rem minmax(0, 1fr);
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0.5rem 0.7rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.agent-artifact-before {
+  color: #a34444;
+  background: color-mix(in srgb, #d85b5b 9%, transparent);
+}
+
+.agent-artifact-after {
+  color: #277451;
+  background: color-mix(in srgb, #45a474 10%, transparent);
 }
 
 /* --- Conversation context card (what triggered the run) --- */
@@ -1183,6 +1674,15 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   .agent-main-header {
     flex-wrap: wrap;
     gap: 0.5rem;
+  }
+
+  /* No room for the plan rail next to the timeline on narrow screens. */
+  .agent-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .agent-plan {
+    display: none;
   }
 }
 
@@ -1546,12 +2046,87 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .eyebrow,
 .permission-pill,
-.subtle-pill {
+.subtle-pill,
+.slack-pill {
   display: inline-flex;
   align-items: center;
   border-radius: 999px;
   padding: 0.28rem 0.7rem;
   font-size: 0.8rem;
+}
+
+/* Slack-channel documents (claudex bot workspaces) — Slack aubergine tint. */
+.slack-pill {
+  background: rgba(74, 21, 75, 0.1);
+  color: #4a154b;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Explainer strip shown at the top of a Slack-channel document. */
+.slack-doc-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.55rem 1rem;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: #4a154b;
+  background: rgba(74, 21, 75, 0.06);
+  border-bottom: 1px solid rgba(74, 21, 75, 0.15);
+}
+
+.slack-doc-banner-link {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #4a154b;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.channels-tab-note {
+  margin: 0.75rem 0 1rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: var(--muted);
+  max-width: 46rem;
+}
+
+/* Onboarding card shown on the Slack channels tab before any channel exists. */
+.slack-onboarding {
+  padding: 1.5rem 1.75rem;
+  max-width: 46rem;
+  line-height: 1.55;
+}
+
+.slack-onboarding h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.15rem;
+}
+
+.slack-onboarding h3 {
+  margin: 1.25rem 0 0.35rem;
+  font-size: 0.95rem;
+}
+
+.slack-onboarding ol,
+.slack-onboarding ul {
+  margin: 0.4rem 0 0.75rem;
+  padding-left: 1.3rem;
+}
+
+.slack-onboarding li {
+  margin-bottom: 0.45rem;
+  font-size: 0.92rem;
+}
+
+.slack-onboarding p {
+  font-size: 0.92rem;
+  margin: 0.35rem 0;
 }
 
 .eyebrow {
@@ -1752,11 +2327,16 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 }
 
 .dashboard-list {
+  width: 100%;
   max-width: 1200px;
   margin: 0 auto;
 }
 
+/* width:100% is load-bearing — the toolbar is a flex item of the .dashboard-tabs
+   column, where margin:auto with no explicit width would shrink it to its
+   content (~420px) and wrap the sort control onto a second row. */
 .dashboard-toolbar {
+  width: 100%;
   max-width: 1200px;
   margin: 0 auto 1rem;
   display: flex;
@@ -1767,35 +2347,65 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 }
 
 .dashboard-search-input {
-  flex: 1 1 280px;
-  max-width: 420px;
-  padding: 0.65rem 0.9rem;
+  flex: 1 1 320px;
+  max-width: 480px;
+  padding: 0.7rem 0.95rem 0.7rem 2.5rem;
   border-radius: 14px;
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.85);
+  background-color: rgba(255, 255, 255, 0.85);
+  /* Inline magnifier icon so the field reads as search without extra markup. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cline x1='21' y1='21' x2='16.65' y2='16.65'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: 0.85rem center;
   font-size: 0.95rem;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.dashboard-search-input::placeholder {
+  color: var(--muted);
 }
 
 .dashboard-search-input:focus {
-  outline: 2px solid rgba(26, 115, 232, 0.4);
-  outline-offset: 1px;
+  outline: none;
+  border-color: var(--accent-strong);
+  box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.18);
 }
 
 .dashboard-sort {
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.55rem;
   font-size: 0.9rem;
   color: var(--muted);
+  white-space: nowrap;
 }
 
 .dashboard-sort select {
-  padding: 0.5rem 0.7rem;
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 0.6rem 2rem 0.6rem 0.85rem;
   border-radius: 12px;
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.85);
+  background-color: rgba(255, 255, 255, 0.85);
+  /* Custom chevron replaces the native select arrow for a consistent look. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
   font-size: 0.9rem;
-  color: inherit;
+  font-weight: 500;
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.dashboard-sort select:hover {
+  border-color: var(--accent-strong);
+}
+
+.dashboard-sort select:focus {
+  outline: none;
+  border-color: var(--accent-strong);
+  box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.18);
 }
 
 .doc-row-unified {
@@ -2308,6 +2918,38 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   padding: 0.58rem 0.7rem;
 }
 
+/* The Slack-channel workspace link gets its own full-width row inside the
+   repo panel (the panel itself is a 3-column grid), separated by a divider. */
+.workspace-link-section {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(360px, 1.4fr);
+  gap: 0.85rem;
+  align-items: center;
+  border-top: 1px solid var(--border);
+  padding-top: 0.85rem;
+}
+
+.workspace-link-controls {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) auto;
+  gap: 0.55rem;
+  align-items: center;
+  width: 100%;
+}
+
+.workspace-link-controls select {
+  border-radius: 8px;
+  padding: 0.58rem 0.7rem;
+  min-width: 0;
+  width: 100%;
+}
+
+.workspace-link-controls button {
+  white-space: nowrap;
+  justify-self: start;
+}
+
 .dashboard-header-actions {
   display: flex;
   align-items: center;
@@ -2463,6 +3105,33 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   white-space: nowrap;
 }
 
+/* Row variant with the secret/config badge between key and value. */
+.env-var-row-classified {
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
+}
+
+.env-var-kind {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.env-var-kind-secret {
+  color: #b45309;
+  border-color: color-mix(in srgb, #b45309 40%, transparent);
+}
+
+.env-var-kind:hover {
+  border-color: var(--muted);
+}
+
 .env-var-delete {
   background: transparent;
   border: none;
@@ -2496,9 +3165,10 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   color: #d93025;
 }
 
-/* "AI credentials" topbar dropdown. Sits in the app topbar, which lacks the
-   compact control overrides of the document topbar — so the panel scopes its
-   own: quieter note blocks (not pills), tighter inputs/buttons, wider panel. */
+/* Credential-section building blocks, shared by the full-page AI settings
+   screen (.slack-connect-card). .credentials-panel is kept for backwards
+   compatibility but no longer mounted (the topbar popup was merged into
+   /settings/agent). */
 .credentials-panel {
   width: min(480px, calc(100vw - 2rem));
   max-height: min(78vh, 640px);
@@ -2593,6 +3263,7 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   padding: 0.5rem 0.6rem;
   border-radius: 6px;
   background: rgba(32, 33, 36, 0.08);
+  white-space: pre-wrap;
   word-break: break-all;
   user-select: all;
 }
@@ -2647,8 +3318,9 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .editor-stage {
   --outline-width: 220px;
+  --comments-width: 320px;
   display: grid;
-  grid-template-columns: var(--outline-width) minmax(0, 980px) 320px;
+  grid-template-columns: var(--outline-width) minmax(0, 980px) var(--comments-width);
   justify-content: center;
   gap: 24px;
   align-items: start;
@@ -2658,11 +3330,35 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   --outline-width: 36px;
 }
 
+.editor-stage[data-comments-collapsed="true"] {
+  --comments-width: 36px;
+}
+
+/* Both sidebars collapsed: stop capping the page at 980px and let it fill
+   the shell (same width as the menu bar), minus the two 36px toggle strips. */
+.editor-stage[data-outline-collapsed="true"][data-comments-collapsed="true"] {
+  grid-template-columns: var(--outline-width) minmax(0, 1fr) var(--comments-width);
+}
+
+.editor-stage[data-outline-collapsed="true"][data-comments-collapsed="true"] .editor-page {
+  width: 100%;
+}
+
 /* Public/view-only renders no outline, so the grid children are just
    [editor-page-shell, CommentRail]. Don't reserve a leading outline track —
    otherwise the editor lands in a 0-width column and wraps one char per line. */
 .editor-stage[data-public-view="true"] {
-  grid-template-columns: minmax(0, 980px) 320px;
+  grid-template-columns: minmax(0, 980px) var(--comments-width);
+}
+
+/* Public view has no outline sidebar, so collapsing the comments alone frees
+   the full width. */
+.editor-stage[data-public-view="true"][data-comments-collapsed="true"] {
+  grid-template-columns: minmax(0, 1fr) var(--comments-width);
+}
+
+.editor-stage[data-public-view="true"][data-comments-collapsed="true"] .editor-page {
+  width: 100%;
 }
 
 .editor-stage[data-public-view="true"][data-comments-hidden="true"] {
@@ -2680,7 +3376,7 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   width: min(100%, 980px);
   min-height: calc(100vh - 168px);
   margin: 0 auto;
-  padding: 72px 96px;
+  padding: 44px 56px;
   position: relative;
   background: white;
 }
@@ -2783,6 +3479,25 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 .doc-outline-tab-group {
   list-style: none;
   min-width: 0;
+  /* Insertion-line indicators for drag-and-drop tab reordering. */
+  border-top: 2px solid transparent;
+  border-bottom: 2px solid transparent;
+}
+
+.doc-outline-tab-group-drop-before {
+  border-top-color: #1a73e8;
+}
+
+.doc-outline-tab-group-drop-after {
+  border-bottom-color: #1a73e8;
+}
+
+.doc-outline-tab-group-dragging {
+  opacity: 0.45;
+}
+
+.doc-tab-row[draggable="true"] {
+  cursor: grab;
 }
 
 /* Headings live indented under their tab, behind a left rule, so they read as
@@ -2964,6 +3679,9 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 /* The active tab's break renders as the tab's in-document title header, so
    users don't need to duplicate the tab name as an h1 inside the tab. */
 .tab-break-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   padding-bottom: 0.45rem;
   margin-bottom: 0.9rem;
   border-bottom: 1px solid rgba(60, 64, 67, 0.18);
@@ -2971,11 +3689,61 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .tab-break-header-title {
   display: block;
+  flex: 1;
+  min-width: 0;
   font-size: 2rem;
   font-weight: 700;
   line-height: 1.2;
   color: var(--text);
   letter-spacing: -0.01em;
+}
+
+/* Editable tab title: looks identical to the static header until focused. */
+.tab-break-header-input {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  width: 100%;
+  font-family: inherit;
+  user-select: text;
+  border-radius: 6px;
+}
+
+.tab-break-header-input:hover {
+  background: rgba(60, 64, 67, 0.05);
+}
+
+.tab-break-header-input:focus {
+  outline: none;
+  background: rgba(26, 115, 232, 0.06);
+}
+
+.tab-break-copy {
+  opacity: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.tab-break-header:hover .tab-break-copy,
+.tab-break-copy:focus-visible {
+  opacity: 1;
+}
+
+.tab-break-copy:hover {
+  background: rgba(26, 115, 232, 0.12);
+  color: rgb(26, 115, 232);
 }
 
 .tab-hidden-block {
@@ -3042,6 +3810,7 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 }
 
 .doc-outline-row:hover .doc-outline-copy,
+.doc-tab-row:hover .doc-outline-copy,
 .doc-outline-copy:focus-visible {
   opacity: 1;
 }
@@ -3318,6 +4087,70 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .comment-rail {
   position: relative;
+}
+
+/* Collapse/expand toggle for the comments sidebar (mirrors the outline toggle). */
+.comment-rail-header {
+  /* Floats just above the first card slot (cards start at top: 16px). */
+  position: absolute;
+  top: -8px;
+  right: 0;
+  z-index: 6;
+}
+
+.comment-rail-collapsed {
+  min-height: 0 !important;
+  padding: 0.4rem 0;
+  display: flex;
+  justify-content: center;
+  position: sticky;
+  top: 72px;
+}
+
+.comment-rail-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  padding: 0;
+}
+
+.comment-rail-header .comment-rail-toggle {
+  background: white;
+  border-color: var(--border);
+}
+
+.comment-rail-toggle:hover {
+  background: rgba(60, 64, 67, 0.08);
+  color: var(--text);
+}
+
+.comment-rail-count {
+  position: absolute;
+  top: -6px;
+  right: -7px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--accent, #1a73e8);
+  color: white;
+  font-size: 0.62rem;
+  font-weight: 600;
+  line-height: 15px;
+  text-align: center;
+}
+
+/* Unread comments/replies: the badge switches to an attention color so the
+   collapsed rail doubles as a notification indicator. */
+.comment-rail-count-unread {
+  background: #d93025;
 }
 
 .comment-filter-panel {
@@ -4303,15 +5136,56 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   margin-top: 1.25rem;
 }
 
+/* /groups management page: reuse the share-modal building blocks as cards. */
+.groups-page {
+  display: grid;
+  gap: 1.1rem;
+  margin-top: 1.5rem;
+}
+
+.groups-page .share-modal-section {
+  margin: 0;
+  padding: 1.1rem 1.25rem;
+  border: 1px solid #e8e4dc;
+  border-radius: 12px;
+  background: #fff;
+  display: grid;
+  gap: 0.9rem;
+}
+
+.groups-card-header {
+  align-items: flex-start;
+}
+
+.groups-card-header h3 {
+  margin: 0;
+}
+
+.groups-doc-list {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.groups-doc-list h4 {
+  margin: 0;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #6f6a60;
+}
+
 @media (max-width: 1080px) {
   .hero-card,
   .dashboard-grid,
   .editor-stage,
-  .research-repo-panel {
+  .research-repo-panel,
+  .workspace-link-section {
     grid-template-columns: 1fr;
   }
 
-  .editor-stage[data-outline-collapsed="true"] {
+  .editor-stage[data-outline-collapsed="true"],
+  .editor-stage[data-outline-collapsed="true"][data-comments-collapsed="true"],
+  .editor-stage[data-public-view="true"][data-comments-collapsed="true"] {
     grid-template-columns: 1fr;
   }
 
@@ -4435,7 +5309,8 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
     align-items: stretch;
   }
 
-  .research-repo-controls {
+  .research-repo-controls,
+  .workspace-link-controls {
     grid-template-columns: 1fr;
   }
 
@@ -4456,6 +5331,20 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   .comment-composer-actions {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  /* Keep the always-visible Studio/Forum switch from overflowing: drop the
+     brand word (the mark stays) and tighten the pills. */
+  .topbar-left {
+    gap: 0.6rem;
+  }
+
+  .brand span {
+    display: none;
+  }
+
+  .topbar-mode-link {
+    padding: 0.3rem 0.7rem;
   }
 
   /* Prevent iOS tap-to-zoom: focusable text surfaces need >= 16px text. */
@@ -5015,4 +5904,906 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   .lp-visual {
     min-height: 0;
   }
+}
+
+/* Dashboard tabs + cross-document comment inbox */
+.dashboard-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.dashboard-tabs-bar {
+  display: flex;
+  gap: 0.4rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.dashboard-tab {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.95rem;
+  font-weight: 600;
+  padding: 0.5rem 0.9rem;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+
+.dashboard-tab-active {
+  color: var(--accent-strong);
+  border-bottom-color: var(--accent-strong);
+}
+
+.comment-inbox {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.comment-inbox-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.comment-inbox-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.comment-inbox-empty-hint,
+.comment-inbox-and-hint {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.comment-inbox-error {
+  color: #c5221f;
+  font-size: 0.88rem;
+  margin: 0;
+}
+
+.comment-inbox-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 1.4rem;
+}
+
+.comment-inbox-group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.6rem;
+}
+
+.comment-inbox-doc-title {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.comment-inbox-doc-title:hover {
+  color: var(--accent-strong);
+}
+
+.comment-inbox-group-count {
+  color: var(--muted);
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.comment-inbox-thread-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.comment-inbox-thread {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.85rem 1rem;
+  background: var(--surface-strong);
+}
+
+.comment-inbox-anchor {
+  margin: 0 0 0.6rem;
+  padding: 0.35rem 0.7rem;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+  font-style: italic;
+  font-size: 0.88rem;
+}
+
+.comment-inbox-comments {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.comment-inbox-comment-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.2rem;
+}
+
+.comment-inbox-author {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.comment-inbox-time {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.comment-inbox-reply {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.comment-inbox-reply-input {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  font: inherit;
+}
+
+.comment-inbox-reply-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.6rem;
+}
+
+/* Full-page AI settings screen (/settings/agent and /slack/connected):
+   credentials, default model, MCP, skills, self-hosted worker. */
+.slack-connect-shell {
+  display: grid;
+  justify-items: center;
+  padding: 3rem 1rem;
+}
+
+/* Settings layout: sticky sidebar (route links + in-page anchors with a
+   scroll-spy) on the left, section cards on the right. Collapses to a single
+   column on narrow screens with the nav on top. */
+.settings-page {
+  width: min(100%, 900px);
+  display: grid;
+  grid-template-columns: 200px minmax(0, 680px);
+  align-items: start;
+  gap: 1.2rem;
+}
+
+.settings-page .slack-connect-card {
+  width: 100%;
+}
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  position: sticky;
+  top: 1rem;
+}
+
+.settings-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.settings-nav-link {
+  border-radius: 8px;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--muted);
+  border: 1px solid transparent;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.settings-nav-link:hover {
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.settings-nav-link.is-active {
+  background: rgba(26, 115, 232, 0.12);
+  color: var(--accent);
+}
+
+.settings-nav-anchors {
+  display: flex;
+  flex-direction: column;
+  margin-left: 0.5rem;
+  border-left: 2px solid var(--border);
+}
+
+.settings-nav-sublink {
+  padding: 0.3rem 0.7rem;
+  font-size: 0.84rem;
+  color: var(--muted);
+  border-left: 2px solid transparent;
+  margin-left: -2px;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.settings-nav-sublink:hover {
+  color: var(--text);
+}
+
+.settings-nav-sublink.is-current {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  font-weight: 600;
+}
+
+/* Anchor targets shouldn't hide under the viewport top edge when jumped to. */
+.credentials-section[id] {
+  scroll-margin-top: 1rem;
+}
+
+@media (max-width: 860px) {
+  .settings-page {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-nav {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .settings-nav-group {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.3rem;
+  }
+
+  .settings-nav-anchors {
+    display: none;
+  }
+}
+
+/* Custom instructions textarea (settings → AI & credentials). */
+.agent-instructions-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 96px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  font: inherit;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  background: var(--background, #fff);
+  color: var(--text);
+}
+
+.agent-instructions-input:focus {
+  outline: 2px solid rgba(26, 115, 232, 0.35);
+  outline-offset: 1px;
+}
+
+.agent-instructions-count {
+  margin-left: auto;
+}
+
+.forum-settings-error {
+  color: #d93025;
+}
+
+.slack-connect-card {
+  width: min(100%, 680px);
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  padding: 1.5rem;
+  background: white;
+}
+
+.slack-connect-card select,
+.slack-connect-card input {
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  padding: 0.5rem 0.6rem;
+  font-size: 0.88rem;
+  background: white;
+}
+
+.slack-connect-card .ghost-button {
+  border-radius: 8px;
+  padding: 0.45rem 0.8rem;
+  font-size: 0.88rem;
+  background: white;
+  border-color: var(--border);
+}
+
+.slack-connect-card .env-add-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+}
+
+.slack-connect-warning {
+  line-height: 1.45;
+}
+
+.slack-connect-worker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.slack-connect-config-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.75rem;
+}
+
+.slack-connect-config-row .agent-config-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+/* Share-modal Groups + Forum sections */
+.share-groups-grant,
+.share-groups-create {
+  margin-top: 0.6rem;
+}
+
+.share-groups-create input,
+.share-groups-manage input {
+  flex: 1;
+  min-width: 0;
+}
+
+.share-groups-manage {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.share-groups-error {
+  color: #b3261e;
+}
+
+/* ===== Forum (LessWrong-inspired) ===== */
+
+.forum-shell {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+  font-family: Georgia, "Times New Roman", serif;
+  color: #2b2b2b;
+}
+
+.forum-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.75rem;
+}
+
+.forum-header-nav {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.forum-title {
+  font-size: 1.9rem;
+  font-weight: 700;
+  margin: 0 0 0.25rem;
+  line-height: 1.2;
+}
+
+.forum-subtitle {
+  margin: 0;
+  color: #6b6b6b;
+  font-size: 0.95rem;
+}
+
+.forum-btn,
+.forum-btn-ghost {
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 0.85rem;
+  border-radius: 6px;
+  padding: 0.35rem 0.8rem;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.forum-btn {
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid var(--accent);
+}
+
+.forum-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.forum-btn-ghost {
+  background: transparent;
+  color: #555;
+  border: 1px solid #d5d5d5;
+}
+
+.forum-btn-ghost:hover {
+  border-color: #999;
+  color: #222;
+}
+
+.forum-post-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.forum-post-card {
+  display: flex;
+  gap: 0.9rem;
+  padding: 0.85rem 1rem;
+  background: #fff;
+  border: 1px solid #e8e4dc;
+  border-radius: 8px;
+  align-items: flex-start;
+}
+
+.forum-post-body {
+  min-width: 0;
+}
+
+.forum-post-title {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: #222;
+  text-decoration: none;
+  display: block;
+  margin-bottom: 0.2rem;
+}
+
+.forum-post-title:hover {
+  color: var(--accent-strong);
+  text-decoration: underline;
+}
+
+.forum-post-meta {
+  display: flex;
+  gap: 0.4rem;
+  color: #8a8a8a;
+  font-size: 0.82rem;
+  font-family: Arial, Helvetica, sans-serif;
+  flex-wrap: wrap;
+}
+
+.forum-post-excerpt {
+  margin: 0.45rem 0 0;
+  color: #555;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.forum-vote {
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  color: #7a7a7a;
+  font-family: Arial, Helvetica, sans-serif;
+  flex-shrink: 0;
+}
+
+.forum-vote-vertical {
+  flex-direction: column;
+}
+
+.forum-vote-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #b5b0a6;
+  font-size: 0.8rem;
+  padding: 0.1rem 0.3rem;
+  line-height: 1;
+}
+
+.forum-vote-btn:hover:not(:disabled) {
+  color: var(--accent);
+}
+
+.forum-vote-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.forum-vote-active {
+  color: var(--accent);
+}
+
+.forum-vote-score {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #444;
+}
+
+.forum-empty {
+  color: #8a8a8a;
+  font-style: italic;
+  padding: 1.5rem 0;
+}
+
+.forum-error {
+  color: #d93025;
+  font-size: 0.9rem;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Forum document page */
+
+.forum-document-shell {
+  max-width: 860px;
+}
+
+.forum-post-header {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  margin-bottom: 1.25rem;
+}
+
+.forum-document-body {
+  border: 1px solid #e8e4dc;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+  margin-bottom: 2rem;
+}
+
+/* Comments */
+
+.forum-comments {
+  margin-top: 1rem;
+}
+
+.forum-comments-heading {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin: 0 0 1rem;
+  border-bottom: 1px solid #e8e4dc;
+  padding-bottom: 0.5rem;
+}
+
+.forum-comment {
+  margin-top: 0.9rem;
+}
+
+.forum-comment-main {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  background: #fff;
+  border: 1px solid #eee9e0;
+  border-radius: 8px;
+  padding: 0.7rem 0.85rem;
+}
+
+.forum-comment-children {
+  margin-left: 1.75rem;
+  border-left: 2px solid #eee9e0;
+  padding-left: 0.9rem;
+}
+
+.forum-comment-content {
+  min-width: 0;
+  flex: 1;
+}
+
+.forum-comment-meta {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 0.82rem;
+  margin-bottom: 0.3rem;
+}
+
+.forum-comment-author {
+  font-weight: 700;
+  color: #333;
+}
+
+.forum-comment-date {
+  color: #9a9a9a;
+}
+
+.forum-badge-ai {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.05rem 0.35rem;
+}
+
+.forum-anchor-quote {
+  margin: 0 0 0.45rem;
+  padding: 0.3rem 0.75rem;
+  border-left: 3px solid #d8d2c6;
+  color: #777;
+  font-style: italic;
+  background: #faf8f4;
+  border-radius: 0 4px 4px 0;
+}
+
+.forum-comment-body {
+  white-space: pre-wrap;
+  line-height: 1.55;
+  font-size: 0.98rem;
+}
+
+.forum-comment-actions {
+  margin-top: 0.4rem;
+}
+
+.forum-comment-actions .forum-btn-ghost {
+  border: none;
+  padding: 0.1rem 0.2rem;
+  font-size: 0.78rem;
+  color: #8a8a8a;
+}
+
+.forum-reply-form {
+  margin-top: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.forum-reply-form textarea {
+  width: 100%;
+  border: 1px solid #d5d0c6;
+  border-radius: 6px;
+  padding: 0.55rem 0.7rem;
+  font-family: inherit;
+  font-size: 0.95rem;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.forum-reply-form textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.forum-reply-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+/* Quicktakes */
+
+.forum-section-title {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #444;
+  margin: 0;
+}
+
+.quicktake-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 1.75rem;
+}
+
+.quicktake-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #e8e4dc;
+  padding-bottom: 0.4rem;
+  margin-bottom: 0.3rem;
+}
+
+.forum-post-list > .forum-section-title {
+  border-bottom: 1px solid #e8e4dc;
+  padding-bottom: 0.4rem;
+  margin-bottom: 0.3rem;
+}
+
+.quicktake-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.quicktake-card {
+  display: flex;
+  gap: 0.9rem;
+  padding: 0.75rem 1rem;
+  background: #fff;
+  border: 1px solid #e8e4dc;
+  border-radius: 8px;
+  align-items: flex-start;
+}
+
+.quicktake-content {
+  min-width: 0;
+  flex: 1;
+}
+
+.quicktake-meta {
+  display: flex;
+  gap: 0.4rem;
+  color: #8a8a8a;
+  font-size: 0.82rem;
+  font-family: Arial, Helvetica, sans-serif;
+  flex-wrap: wrap;
+  align-items: baseline;
+}
+
+.quicktake-author {
+  font-weight: 600;
+  color: #555;
+}
+
+.quicktake-visibility {
+  color: #6f6a60;
+}
+
+.quicktake-body {
+  margin-top: 0.3rem;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: #333;
+}
+
+.quicktake-actions {
+  display: flex;
+  gap: 0.9rem;
+  margin-top: 0.4rem;
+  align-items: baseline;
+}
+
+.quicktake-delete:hover {
+  color: #d93025;
+}
+
+.quicktake-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  background: #fff;
+  border: 1px solid #e8e4dc;
+  border-radius: 8px;
+  margin-bottom: 0.5rem;
+}
+
+.quicktake-composer textarea {
+  width: 100%;
+  border: 1px solid #e8e4dc;
+  border-radius: 6px;
+  padding: 0.5rem 0.65rem;
+  font: inherit;
+  font-size: 0.95rem;
+  resize: vertical;
+}
+
+.quicktake-composer-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.quicktake-visibility-select {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  color: #6f6a60;
+  font-size: 0.85rem;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.quicktake-visibility-select select {
+  border: 1px solid #e8e4dc;
+  border-radius: 6px;
+  padding: 0.25rem 0.4rem;
+  font-size: 0.85rem;
+  background: #fff;
+  color: #444;
+}
+
+.quicktake-visibility-hint {
+  margin: 0;
+  color: #b5b0a6;
+  font-size: 0.78rem;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Comment / quicktake permalinks */
+
+.forum-copy-link {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: #8a8a8a;
+  font-size: 0.8rem;
+  font-family: Arial, Helvetica, sans-serif;
+  text-decoration: none;
+}
+
+.forum-copy-link:hover {
+  color: var(--accent-strong);
+  text-decoration: underline;
+}
+
+/* Landing on a #comment-<id> / #quicktake-<id> fragment highlights the
+   target, like heading links. */
+.forum-comment:target > .forum-comment-main,
+.quicktake-card:target {
+  animation: forum-target-flash 2.5s ease-out;
+  border-radius: 8px;
+}
+
+@keyframes forum-target-flash {
+  0% {
+    background: #fdf2d0;
+  }
+  100% {
+    background: #fff;
+  }
+}
+
+.forum-comment:target {
+  scroll-margin-top: 4rem;
+}
+
+.quicktake-card:target {
+  scroll-margin-top: 4rem;
+}
+
+/* Inline comment threads expanded inside a quicktake card on the feed. */
+.quicktake-comments {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #e8e4dc;
+}
+
+.quicktake-comments .forum-comments {
+  margin-top: 0;
+}
+
+.quicktake-comments .forum-comments-heading {
+  font-size: 0.95rem;
+  margin-top: 0;
 }

@@ -4,7 +4,7 @@
 // would otherwise be readable from inside an untrusted document's agent run.
 //
 // Instead we start from an allow-list of host variables the agent genuinely
-// needs to function (toolchain + Claude/GitHub auth) and layer the document's
+// needs to function (toolchain + non-secret service config) and layer the document's
 // own configured secrets on top. Everything else from the host is dropped.
 
 // Exact host variable names copied through when present.
@@ -33,6 +33,26 @@ const ALLOWLIST_EXACT = new Set([
   "NODE_EXTRA_CA_CERTS",
   // App-specific bits the agent relies on.
   "PYTHON_BIN",
+  "CLAUDE_AGENT_MODEL",
+  "CLAUDE_AGENT_MAX_TURNS",
+  "CLAUDE_MERGE_MAX_TURNS",
+  // Effective context window Claude Code auto-compacts against (see
+  // DEFAULT_AUTO_COMPACT_WINDOW). Allowlisted so the deployment can override
+  // the app default from .env without a code change.
+  "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+  // Set by the hardened container runner. Claude Code permits
+  // bypassPermissions under uid 0 only when this marker confirms an outer
+  // sandbox is the security boundary. It must survive the entrypoint's second
+  // environment scrub before the SDK spawns the CLI.
+  "IS_SANDBOX",
+  // Codex session/auth root. The container runner strips the host value before
+  // spawning and injects its own mounted /agent-sessions path; admitting that
+  // runtime value here is required because the Codex SDK receives this
+  // scrubbed env instead of inheriting process.env.
+  "CODEX_HOME",
+  // Explicit binary override for the `codex app-server` harness (the Codex
+  // execution path). Configuration, not a credential.
+  "CODEX_APP_SERVER_BIN",
   // GITHUB_TOKEN / GH_TOKEN are deliberately NOT allowlisted: the host token is
   // the shared bot account, and copying it into every (untrusted) agent run
   // would let any user act on every repo the bot can see. GitHub auth arrives
@@ -49,17 +69,9 @@ const ALLOWLIST_EXACT = new Set([
   "LOCAL_MODEL_NAME"
 ]);
 
-// Host variables whose names start with one of these prefixes are copied
-// through (covers ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN / CLAUDE_AGENT_*
-// auth + config the SDK and CLI read).
-const ALLOWLIST_PREFIXES = ["ANTHROPIC_", "CLAUDE_", "AWS_BEDROCK_", "GOOGLE_VERTEX_"];
-
-// Names that match a prefix above but must NOT propagate: these are the IPC /
-// session control vars a PARENT Claude Code process sets for itself. Inheriting
-// them makes the agent's own bundled `claude` CLI try to attach to a
-// non-existent parent session (SSE port, session id) and exit 1. The auth token
-// (CLAUDE_CODE_OAUTH_TOKEN) and our own CLAUDE_AGENT_* config are deliberately
-// not in this list.
+// Parent Claude Code IPC/session vars must not propagate. More importantly,
+// no host credential prefix is allowlisted: Anthropic, OpenAI, Bedrock, Vertex,
+// and subscription credentials must arrive through the document/account env.
 const DENYLIST_EXACT = new Set([
   "CLAUDECODE",
   "CLAUDE_CODE_ENTRYPOINT",
@@ -71,15 +83,98 @@ const DENYLIST_EXACT = new Set([
 
 function isAllowlisted(name: string): boolean {
   if (DENYLIST_EXACT.has(name)) return false;
-  if (ALLOWLIST_EXACT.has(name)) return true;
-  return ALLOWLIST_PREFIXES.some((prefix) => name.startsWith(prefix));
+  return ALLOWLIST_EXACT.has(name);
 }
+
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import type { AgentModelProvider } from "./agent-config";
 
 export type DocumentEnv = Record<string, string>;
 
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api";
+
+/**
+ * Effective context window (tokens) Claude Code measures auto-compaction
+ * against, injected into every agent run as CLAUDE_CODE_AUTO_COMPACT_WINDOW.
+ *
+ * Why set it at all: auto-compaction is on by default, but the default window
+ * is the model's FULL window (200k for the current Anthropic models — the CLI
+ * clamps this value to the model window, so a value ABOVE it is a no-op). The
+ * compaction trigger then sits at `window - maxOutputTokens - 13k` ≈ 167k, so
+ * a single fat tool result can jump from "below the trigger" straight past the
+ * hard limit and the API rejects the request with "Prompt is too long" before
+ * compaction ever runs — and a session that ends over the limit can no longer
+ * be resumed at all.
+ *
+ * Declaring a smaller window reserves that headroom: compaction fires at
+ * ~117k and leaves ~80k of slack for one oversized turn. The CLI floor is
+ * 100k, the ceiling is the model window (1M only with the context-1m beta).
+ */
+export const DEFAULT_AUTO_COMPACT_WINDOW = "150000";
+
+/**
+ * The one beta the Claude Agent SDK accepts (its `SdkBeta` union): it raises the
+ * model context window from 200k to 1M, which is what makes a 500k compaction
+ * window meaningful instead of a silent no-op.
+ */
+export const LONG_CONTEXT_BETA = "context-1m-2025-08-07";
+
+/**
+ * Compaction window used when the 1M-context beta is actually in effect.
+ * Compaction then fires around 467k and still leaves ~500k of slack below the
+ * hard limit — the same "reserve real headroom" idea as the 150k default,
+ * scaled to the larger window.
+ */
+export const LONG_CONTEXT_AUTO_COMPACT_WINDOW = "500000";
+
+/**
+ * Whether the `context-1m-2025-08-07` beta will actually take effect for this
+ * run — which decides both whether to pass it and which compaction window is
+ * honest. Two hard constraints, both read out of the bundled CLI rather than
+ * assumed:
+ *
+ *  1. **Anthropic only.** OpenRouter / LiteLLM / the local llama.cpp server are
+ *     Anthropic-*compatible* endpoints, not Anthropic. The CLI forwards this
+ *     particular beta to third parties instead of dropping it, but none of them
+ *     widen a context window because of it — so a 500k window there would just
+ *     switch compaction off.
+ *  2. **API-key auth only.** The CLI discards caller-provided betas on
+ *     subscription/OAuth auth ("Custom betas are only available for API key
+ *     users"). Declaring 500k on an OAuth run would clamp straight back to the
+ *     200k model window and reintroduce the exact "Prompt is too long" failure
+ *     this is meant to prevent.
+ *
+ * A non-entitled API key is safe on its own: the CLI catches the 1M-credits
+ * rejection and clamps its window back to 200k for the rest of the session.
+ */
+export function usesLongContext(
+  env: Record<string, string>,
+  provider: AgentModelProvider
+): boolean {
+  if (provider !== "anthropic") return false;
+  if (env.CLAUDE_CODE_OAUTH_TOKEN?.trim()) return false;
+  return Boolean(env.ANTHROPIC_API_KEY?.trim());
+}
+
+/**
+ * Betas to hand the SDK for this run, paired with the matching compaction
+ * window. Raises the window ONLY while it still holds our own conservative
+ * default — a deployment (`.env`) or document override is a deliberate choice
+ * and must survive.
+ */
+export function applyLongContextEnv(
+  env: Record<string, string>,
+  provider: AgentModelProvider
+): string[] {
+  if (!usesLongContext(env, provider)) return [];
+  if (env.CLAUDE_CODE_AUTO_COMPACT_WINDOW === DEFAULT_AUTO_COMPACT_WINDOW) {
+    env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = LONG_CONTEXT_AUTO_COMPACT_WINDOW;
+  }
+  return [LONG_CONTEXT_BETA];
+}
 
 /**
  * Rewrite an already-built agent env for the selected provider. No-op for
@@ -118,18 +213,20 @@ export function applyProviderEnv(
     // The SDK requires a non-empty token; llama.cpp ignores it.
     key = "local-no-key";
   } else if (provider === "openrouter") {
-    baseUrl = OPENROUTER_BASE_URL;
+    // An env override exists so the credential broker can interpose itself
+    // (OPENROUTER_BASE_URL → the per-run broker URL, with a virtual key).
+    baseUrl = (env.OPENROUTER_BASE_URL?.trim() || OPENROUTER_BASE_URL).replace(/\/+$/, "");
     key = env.OPENROUTER_API_KEY?.trim();
     if (!key) {
       throw new Error(
-        "OpenRouter model selected but OPENROUTER_API_KEY is not set. Add it via the Env menu, or connect an OpenRouter key in the AI credentials menu."
+        "OpenRouter model selected but OPENROUTER_API_KEY is not set. Add it via the Env menu, or connect an OpenRouter key under Settings (topbar)."
       );
     }
   } else {
     key = env.LITELLM_API_KEY?.trim();
     if (!key) {
       throw new Error(
-        "LiteLLM model selected but LITELLM_API_KEY is not set. Add it via the Env menu, or connect a LiteLLM key in the AI credentials menu."
+        "LiteLLM model selected but LITELLM_API_KEY is not set. Add it via the Env menu, or connect a LiteLLM key under Settings (topbar)."
       );
     }
     const rawBase = env.LITELLM_BASE_URL?.trim();
@@ -171,7 +268,89 @@ export function buildAgentEnv(
   for (const [key, value] of Object.entries(documentEnv)) {
     result[key] = value;
   }
+  // Reserve compaction headroom unless the deployment or the document set an
+  // explicit window of its own.
+  if (!result.CLAUDE_CODE_AUTO_COMPACT_WINDOW?.trim()) {
+    result.CLAUDE_CODE_AUTO_COMPACT_WINDOW = DEFAULT_AUTO_COMPACT_WINDOW;
+  }
   return result;
+}
+
+/**
+ * Pin the harness's native config/session root to a RUN-SCOPED directory.
+ *
+ * Why this is mandatory and not an optimization: `HOME` is allowlisted (the
+ * toolchain needs it), so without an explicit config dir the Claude CLI
+ * resolves `~/.claude` and the Codex CLI `~/.codex` — the HOST's logged-in
+ * sessions. The CLI then treats those stored credentials as a fallback and
+ * retries a 401 with them, which both violates the "no host credentials, ever"
+ * rule and breaks the credential broker: the broker only accepts its own
+ * per-run virtual token, so a host-token retry comes back as
+ * "Missing or malformed broker token." and fails the whole run.
+ *
+ * `sessionConfigDir` is the caller-provided root (per-conversation session dir,
+ * or the container's mounted /agent-sessions). Without one we still never fall
+ * back to the host: a per-run temp dir is used instead, so transcripts are
+ * ephemeral but credentials stay confined to the injected env.
+ */
+export function resolveAgentConfigDir(input: {
+  harness: "claude" | "codex";
+  sessionConfigDir?: string | null;
+  /** Run id (or any stable key) used to name the fallback temp dir. */
+  runKey?: string | null;
+  tmpDir?: string;
+}): string {
+  const explicit = input.sessionConfigDir?.trim();
+  if (explicit) return explicit;
+  const base = input.tmpDir?.trim() || os.tmpdir();
+  const key = (input.runKey ?? "").replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 80) || "run";
+  return path.join(base, "rdocs-agent-config", input.harness, key);
+}
+
+/**
+ * Apply {@link resolveAgentConfigDir} to a built agent env: sets the harness's
+ * config-dir variable and clears the other harness's, so neither CLI can walk
+ * back to a host session directory. Creates the directory.
+ */
+export function applyAgentConfigDirEnv(
+  env: Record<string, string>,
+  input: { harness: "claude" | "codex"; sessionConfigDir?: string | null; runKey?: string | null }
+): Record<string, string> {
+  const dir = resolveAgentConfigDir(input);
+  fs.mkdirSync(dir, { recursive: true });
+  if (input.harness === "codex") {
+    env.CODEX_HOME = dir;
+    delete env.CLAUDE_CONFIG_DIR;
+  } else {
+    env.CLAUDE_CONFIG_DIR = dir;
+    delete env.CODEX_HOME;
+  }
+  return env;
+}
+
+// Host-provided configuration (not credentials) worth disclosing to the agent
+// alongside the document env keys, because it changes which services are
+// reachable (e.g. a LiteLLM proxy endpoint).
+const PROMPT_ENV_HOST_KEYS = ["LITELLM_BASE_URL", "LOCAL_MODEL_BASE_URL", "LOCAL_MODEL_NAME"];
+
+/**
+ * Env var NAMES (never values) to disclose in the agent's system prompt so it
+ * knows which API keys/services are available in its run environment — e.g.
+ * whether to call OpenAI directly (OPENAI_API_KEY) or go through a LiteLLM
+ * proxy (LITELLM_API_KEY + LITELLM_BASE_URL). Discloses only the
+ * document-configured env (incl. per-run injected credentials like
+ * GITHUB_TOKEN) plus a few host config keys — never the host allowlist noise
+ * or harness-internal vars. Keys that ended up empty in the final env (e.g.
+ * ANTHROPIC_API_KEY cleared by applyProviderEnv) are dropped.
+ */
+export function agentEnvKeysForPrompt(
+  documentEnv: DocumentEnv,
+  finalEnv: Record<string, string>
+): string[] {
+  const keys = new Set<string>();
+  for (const key of Object.keys(documentEnv)) keys.add(key);
+  for (const key of PROMPT_ENV_HOST_KEYS) keys.add(key);
+  return [...keys].filter((key) => Boolean(finalEnv[key]?.trim())).sort();
 }
 
 /**

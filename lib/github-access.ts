@@ -27,7 +27,7 @@ function githubHeaders(token: string | null | undefined) {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
-    "User-Agent": "gdocs-ai"
+    "User-Agent": "r-docs"
   };
   if (token) {
     headers.Authorization = `Bearer ${token}`;

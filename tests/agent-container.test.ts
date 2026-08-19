@@ -4,9 +4,12 @@ import { test } from "node:test";
 import {
   buildContainerEnv,
   buildContainerRunArgs,
+  resolveContainerPidsLimit,
+  resolveContainerUser,
   serializeEnvFile
 } from "../lib/agent-runner/container-args";
 import { classifyContainerFailure } from "../lib/agent-runner/container";
+import { DEFAULT_AUTO_COMPACT_WINDOW } from "../agent-core/agent-env";
 
 const WS = "/repo/.research-workspaces/doc-1/worktrees/run-1";
 const ENVFILE = "/tmp/gdocs-agent-x/env";
@@ -14,6 +17,7 @@ const ENVFILE = "/tmp/gdocs-agent-x/env";
 function args(overrides = {}) {
   return buildContainerRunArgs({
     image: "gdocs-agent:local",
+    agentHarness: "claude-code",
     workspaceHostPath: WS,
     envFileHostPath: ENVFILE,
     uid: 501,
@@ -40,6 +44,36 @@ test("container run args enforce the hardening profile", () => {
   assert.equal(a[a.length - 1], "gdocs-agent:local");
 });
 
+test("the pids ceiling is a host-side knob, since the container cannot raise it itself", () => {
+  assert.equal(resolveContainerPidsLimit({}), 512);
+  assert.equal(resolveContainerPidsLimit({ AGENT_CONTAINER_PIDS_LIMIT: "4096" }), 4096);
+  assert.equal(resolveContainerPidsLimit({ AGENT_CONTAINER_PIDS_LIMIT: "-1" }), -1);
+  // Garbage and absurdly low values fall back / clamp rather than wedging runs.
+  assert.equal(resolveContainerPidsLimit({ AGENT_CONTAINER_PIDS_LIMIT: "lots" }), 512);
+  assert.equal(resolveContainerPidsLimit({ AGENT_CONTAINER_PIDS_LIMIT: "8" }), 64);
+  assert.ok(args({ pidsLimit: 4096 }).join(" ").includes("--pids-limit 4096"));
+});
+
+test("Docker Desktop runs as container root so its root-owned bind mounts stay writable", () => {
+  assert.deepEqual(resolveContainerUser("darwin", 505, 20), { uid: undefined, gid: undefined });
+  assert.deepEqual(resolveContainerUser("linux", 1001, 1001), { uid: 1001, gid: 1001 });
+});
+
+test("root-run Claude container identifies the hardened outer container as its sandbox", () => {
+  const containerUser = resolveContainerUser("darwin", 505, 20);
+  const a = args({ ...containerUser, agentHarness: "claude-code" });
+  assert.ok(!a.includes("--user"), "Docker Desktop bind mounts require container root");
+  assert.ok(
+    a.some((value, index) => value === "IS_SANDBOX=1" && a[index - 1] === "-e"),
+    "Claude Code otherwise rejects bypassPermissions when its effective uid is root"
+  );
+});
+
+test("Codex container does not receive Claude's sandbox compatibility marker", () => {
+  const a = args({ agentHarness: "codex", image: "gdocs-codex-agent:local" });
+  assert.ok(!a.includes("IS_SANDBOX=1"));
+});
+
 test("the ONLY host path mounted is the document workspace", () => {
   const a = args();
   const mounts = a.filter((_, i) => a[i - 1] === "-v");
@@ -47,6 +81,28 @@ test("the ONLY host path mounted is the document workspace", () => {
   // No docker socket, no extra binds, no host home.
   assert.ok(!a.join(" ").includes("docker.sock"));
   assert.ok(!a.join(" ").includes(":/host"));
+});
+
+test("Claude and Codex mount the exact same prepared workspace", () => {
+  const claude = args({ agentHarness: "claude-code", image: "gdocs-agent:local" });
+  const codex = args({ agentHarness: "codex", image: "gdocs-codex-agent:local" });
+  const workspaceMount = (argv: string[]) => argv[argv.indexOf("-w") + 3];
+  assert.equal(workspaceMount(claude), `${WS}:/workspace`);
+  assert.equal(workspaceMount(codex), `${WS}:/workspace`);
+});
+
+test("Codex session storage is mounted as CODEX_HOME without translating its native files", () => {
+  const sessionDir = "/repo/.research-workspaces/doc-1/agent-sessions/conversation-1";
+  const a = args({ sessionDirHostPath: sessionDir, agentHarness: "codex" });
+  assert.ok(a.join(" ").includes(`-v ${sessionDir}:/agent-sessions`));
+  assert.ok(a.join(" ").includes("-e CODEX_HOME=/agent-sessions"));
+  assert.ok(!a.join(" ").includes("CLAUDE_CONFIG_DIR"));
+});
+
+test("Claude session storage remains mounted as CLAUDE_CONFIG_DIR", () => {
+  const a = args({ sessionDirHostPath: "/tmp/claude-session", agentHarness: "claude-code" });
+  assert.ok(a.join(" ").includes("-e CLAUDE_CONFIG_DIR=/agent-sessions"));
+  assert.ok(!a.join(" ").includes("CODEX_HOME"));
 });
 
 test("egress is allowed (never --network none)", () => {
@@ -90,7 +146,7 @@ test("buildContainerEnv keeps secrets/tokens but drops host filesystem vars", ()
     { MY_DOC_SECRET: "doc-secret", GITHUB_TOKEN: "gh-doc-resolved" }
   );
 
-  assert.equal(env.ANTHROPIC_API_KEY, "sk-ant-123");
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
   assert.equal(env.GITHUB_TOKEN, "gh-doc-resolved");
   assert.equal(env.LANG, "en_US.UTF-8");
   assert.equal(env.MY_DOC_SECRET, "doc-secret");
@@ -101,16 +157,21 @@ test("buildContainerEnv keeps secrets/tokens but drops host filesystem vars", ()
   assert.ok(!("XDG_CACHE_HOME" in env));
   // host's own non-allowlisted secret never leaks (agent-env allowlist):
   assert.ok(!("AWS_SECRET_ACCESS_KEY" in env));
+  // the compaction window must reach the containerized CLI, or the container
+  // runner keeps compacting too late while in-process runs don't. This is the
+  // conservative baseline; agent-core raises it to the long-context window
+  // in-container, once the run's credential shape is known.
+  assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, DEFAULT_AUTO_COMPACT_WINDOW);
 });
 
-test("buildContainerEnv drops empty values (so an empty ANTHROPIC_API_KEY can't shadow the OAuth token)", () => {
+test("buildContainerEnv never inherits host Anthropic credentials", () => {
   const env = buildContainerEnv(
     { ANTHROPIC_API_KEY: "", CLAUDE_CODE_OAUTH_TOKEN: "tok", LANG: "  " },
     {}
   );
   assert.ok(!("ANTHROPIC_API_KEY" in env));
   assert.ok(!("LANG" in env));
-  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "tok");
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
 });
 
 test("a document OPENROUTER_API_KEY reaches the container env file intact", () => {
@@ -123,21 +184,44 @@ test("a document OPENROUTER_API_KEY reaches the container env file intact", () =
   assert.ok(lines.includes("OPENROUTER_API_KEY=sk-or-v1-abc"));
 });
 
-test("classifyContainerFailure re-resolves once on a 401 for Anthropic jobs, then fails actionably", () => {
-  const authErr = new Error("Failed to authenticate. API Error: 401 Invalid authentication credentials");
-  // First 401 (nothing retried yet) → re-resolve the credential and retry once.
-  assert.deepEqual(
-    classifyContainerFailure(authErr, { usesProviderKey: false, authRetried: false, transientAttempt: 0 }),
-    { action: "auth-retry" }
+test("OpenAI and LiteLLM keys reach a Codex container without exposing host CODEX_HOME", () => {
+  const env = buildContainerEnv(
+    { OPENAI_API_KEY: "host-key-must-not-leak", CODEX_HOME: "/Users/example/.codex" },
+    {
+      OPENAI_API_KEY: "sk-openai",
+      LITELLM_API_KEY: "sk-litellm",
+      LITELLM_BASE_URL: "http://litellm:4000"
+    }
   );
-  // Second 401 (already retried) → give up with the actionable host-session message.
+  assert.equal(env.OPENAI_API_KEY, "sk-openai");
+  assert.equal(env.LITELLM_API_KEY, "sk-litellm");
+  assert.equal(env.LITELLM_BASE_URL, "http://litellm:4000");
+  assert.ok(!("CODEX_HOME" in env));
+});
+
+test("classifyContainerFailure never retries host auth and gives account-scoped guidance", () => {
+  const authErr = new Error("Failed to authenticate. API Error: 401 Invalid authentication credentials");
   const second = classifyContainerFailure(authErr, {
     usesProviderKey: false,
-    authRetried: true,
+    authRetried: false,
     transientAttempt: 0
   });
   assert.equal(second.action, "auth-fail");
-  assert.match(second.action === "auth-fail" ? second.message : "", /run `claude` on the host/i);
+  assert.match(second.action === "auth-fail" ? second.message : "", /connect.*credential.*settings/i);
+  assert.doesNotMatch(second.action === "auth-fail" ? second.message : "", /host|run `claude`/i);
+});
+
+test("classifyContainerFailure never uses native host Codex auth", () => {
+  const authErr = new Error("unexpected status 401 Unauthorized: Missing bearer");
+  const final = classifyContainerFailure(authErr, {
+    harness: "codex",
+    usesProviderKey: false,
+    authRetried: false,
+    transientAttempt: 0
+  });
+  assert.equal(final.action, "auth-fail");
+  assert.match(final.action === "auth-fail" ? final.message : "", /connect.*OpenAI.*Settings/i);
+  assert.doesNotMatch(final.action === "auth-fail" ? final.message : "", /host|codex login/i);
 });
 
 test("classifyContainerFailure never re-resolves a 401 for OpenRouter jobs (durable key)", () => {
@@ -193,4 +277,53 @@ test("serializeEnvFile emits VAR=VALUE lines and skips multiline values", () => 
   assert.ok(lines.includes("A=1"));
   assert.ok(lines.includes("B=two words"));
   assert.ok(!lines.some((l) => l.startsWith("BAD=")));
+});
+
+// --- detached session containers ------------------------------------------
+// A detached container outlives the app process that started it, so its run
+// args differ in three ways that all matter: no stdin pipe to a dead parent,
+// a published loopback port to reach it over, and the env marker that puts the
+// entrypoint into session mode.
+
+test("a detached container is started with -d and no stdin pipe", () => {
+  const a = args({ detached: true, sessionPort: 8787 });
+  assert.ok(a.includes("-d"), "must be detached or it dies with the app process");
+  assert.ok(!a.includes("-i"), "nobody is holding the other end of stdin");
+  // Still auto-removed: the container is the durable holder of the RUN, not of
+  // any state we need after it exits.
+  assert.ok(a.includes("--rm"));
+});
+
+test("a detached container publishes its session port on loopback only", () => {
+  const a = args({ detached: true, sessionPort: 8787 });
+  const pIndex = a.indexOf("-p");
+  assert.notEqual(pIndex, -1, "the host reaches the session over HTTP, so the port must be published");
+  // Ephemeral host port (discovered with `docker port`), bound to 127.0.0.1 so
+  // the session API is not reachable from off-host. The Bearer secret is the
+  // second, independent gate.
+  assert.equal(a[pIndex + 1], "127.0.0.1::8787");
+  assert.ok(!a.some((arg) => arg === "0.0.0.0::8787"));
+});
+
+test("session mode is selected by AGENT_SESSION_PORT in the container env", () => {
+  const a = args({ detached: true, sessionPort: 8787 });
+  const envIndex = a.findIndex((arg) => arg === "AGENT_SESSION_PORT=8787");
+  assert.notEqual(envIndex, -1);
+  assert.equal(a[envIndex - 1], "-e");
+});
+
+test("the piped path is unchanged when detached mode is off", () => {
+  const a = args();
+  assert.ok(a.includes("-i"));
+  assert.ok(!a.includes("-d"));
+  assert.ok(!a.includes("-p"));
+  assert.ok(!a.some((arg) => arg.startsWith("AGENT_SESSION_PORT=")));
+});
+
+test("the session secret never appears in the docker argv", () => {
+  // It travels in the --env-file instead: argv is visible to every user via
+  // `ps`, an env-file is not.
+  const a = args({ detached: true, sessionPort: 8787, sessionSecret: "s3cret-value" });
+  assert.ok(!a.some((arg) => arg.includes("s3cret-value")));
+  assert.ok(a.includes("--env-file"));
 });

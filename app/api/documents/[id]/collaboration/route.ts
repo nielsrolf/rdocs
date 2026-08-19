@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import {
   forcePushDocument,
   mergeCommitDocument,
@@ -10,7 +10,7 @@ import {
   submitCollaborationSteps,
   SuggestionOnlyError
 } from "@/lib/collaboration";
-import { canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import { canEdit } from "@/lib/permissions";
 
 // Sole-client "force push": when a tab's local doc has diverged so far that
 // prosemirror-collab can no longer rebase its pending steps, and it is the only
@@ -59,30 +59,23 @@ const submitStepsSchema = z.object({
     .optional()
 });
 
-type RouteContext = {
-  params: Promise<{
-    id: string;
-  }>;
-};
-
-export async function GET(request: Request, { params }: RouteContext) {
+export async function GET(request: Request, { params }: RouteContext<{ id: string }>) {
   const startedAt = Date.now();
   const { id } = await params;
-  const user = await getCurrentUser();
   const url = new URL(request.url);
-  const shareToken = url.searchParams.get("share");
   const version = Number.parseInt(url.searchParams.get("version") ?? "0", 10);
 
   if (!Number.isFinite(version) || version < 0) {
-    console.warn("[collab-pull] invalid version", { documentId: id, userId: user?.id ?? null, rawVersion: url.searchParams.get("version") });
+    console.warn("[collab-pull] invalid version", { documentId: id, rawVersion: url.searchParams.get("version") });
     return NextResponse.json({ error: "Invalid collaboration version." }, { status: 400 });
   }
 
-  const access = await resolveDocumentAccess(id, user?.id, shareToken);
-  if (!access) {
-    console.warn("[collab-pull] no access", { documentId: id, userId: user?.id ?? null, hasShareToken: !!shareToken });
-    return NextResponse.json({ error: "Document not found." }, { status: 404 });
+  const gate = await requireDocumentAccess(request, id, "VIEW");
+  if (!gate.ok) {
+    console.warn("[collab-pull] no access", { documentId: id, status: gate.response.status });
+    return gate.response;
   }
+  const { user, access } = gate;
 
   const payload = await pullCollaborationSteps({
     documentId: id,
@@ -103,10 +96,9 @@ export async function GET(request: Request, { params }: RouteContext) {
   return NextResponse.json(payload);
 }
 
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<{ id: string }>) {
   const startedAt = Date.now();
   const { id } = await params;
-  const user = await getCurrentUser();
   const body = await request.json().catch(() => null);
 
   // Sole-client force-push path (distinct from the normal step push below).
@@ -115,10 +107,14 @@ export async function POST(request: Request, { params }: RouteContext) {
     if (!parsedForce.success) {
       return NextResponse.json({ error: "Invalid force-push payload." }, { status: 400 });
     }
-    const forceAccess = await resolveDocumentAccess(id, user?.id, parsedForce.data.shareToken ?? null);
-    if (!forceAccess || !canEdit(forceAccess.permission)) {
-      return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+    const forceGate = await requireDocumentAccess(request, id, "EDIT", {
+      shareToken: parsedForce.data.shareToken ?? null,
+      forbiddenMessage: "You do not have edit access."
+    });
+    if (!forceGate.ok) {
+      return forceGate.response;
     }
+    const { user, access: forceAccess } = forceGate;
     try {
       const result = await forcePushDocument({
         documentId: id,
@@ -162,10 +158,14 @@ export async function POST(request: Request, { params }: RouteContext) {
     if (!parsedMerge.success) {
       return NextResponse.json({ error: "Invalid merge payload." }, { status: 400 });
     }
-    const mergeAccess = await resolveDocumentAccess(id, user?.id, parsedMerge.data.shareToken ?? null);
-    if (!mergeAccess || !canEdit(mergeAccess.permission)) {
-      return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+    const mergeGate = await requireDocumentAccess(request, id, "EDIT", {
+      shareToken: parsedMerge.data.shareToken ?? null,
+      forbiddenMessage: "You do not have edit access."
+    });
+    if (!mergeGate.ok) {
+      return mergeGate.response;
     }
+    const { user, access: mergeAccess } = mergeGate;
     try {
       const result = await mergeCommitDocument({
         documentId: id,
@@ -207,27 +207,27 @@ export async function POST(request: Request, { params }: RouteContext) {
   if (!parsed.success) {
     console.warn("[collab-push] invalid payload", {
       documentId: id,
-      userId: user?.id ?? null,
       issues: parsed.error.issues.map((issue) => issue.path.join(".") + ":" + issue.code)
     });
     return NextResponse.json({ error: "Invalid collaboration step payload." }, { status: 400 });
   }
 
-  const access = await resolveDocumentAccess(id, user?.id, parsed.data.shareToken ?? null);
   // Comment-access users may push, but only suggestion-only changes (enforced in
   // submitCollaborationSteps via the committed-view guard). Editors push freely.
-  const canPushEdits = Boolean(access) && canEdit(access!.permission);
-  const canPushSuggestions = Boolean(access) && canComment(access!.permission);
-  if (!access || (!canPushEdits && !canPushSuggestions)) {
+  const gate = await requireDocumentAccess(request, id, "COMMENT", {
+    shareToken: parsed.data.shareToken ?? null,
+    forbiddenMessage: "You do not have edit access."
+  });
+  if (!gate.ok) {
     console.warn("[collab-push] forbidden", {
       documentId: id,
-      userId: user?.id ?? null,
       clientId: parsed.data.clientId,
-      hasAccess: !!access,
-      permission: access?.permission ?? null
+      status: gate.response.status
     });
-    return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+    return gate.response;
   }
+  const { user, access } = gate;
+  const canPushEdits = canEdit(access.permission);
 
   try {
     const result = await submitCollaborationSteps({

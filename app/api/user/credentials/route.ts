@@ -16,7 +16,7 @@ export const runtime = "nodejs";
 // route: values are write-only over the API — listed back masked, never in
 // full.
 
-const providerSchema = z.enum(["anthropic", "openrouter", "litellm", "github"]);
+const providerSchema = z.enum(["anthropic", "openai", "openrouter", "litellm", "github"]);
 
 const upsertSchema = z.object({
   provider: providerSchema.optional().nullable(),

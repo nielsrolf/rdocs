@@ -2,7 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 
-type EnvVar = { key: string; masked: string; updatedAt: string };
+type EnvVar = {
+  key: string;
+  masked: string;
+  updatedAt: string;
+  isSecret: boolean;
+  isSecretAuto: boolean;
+};
 
 export function EnvironmentMenu({
   documentId,
@@ -86,6 +92,27 @@ export function EnvironmentMenu({
     }
   }
 
+  async function handleToggleSecret(entry: EnvVar) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/documents/${documentId}/environment`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: entry.key, isSecret: !entry.isSecret, ...shareBody })
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        setError(data?.error ?? "Failed to update variable.");
+        return;
+      }
+      applyVars(data.vars ?? []);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleDelete(key: string) {
     if (busy) return;
     setBusy(true);
@@ -114,8 +141,9 @@ export function EnvironmentMenu({
         <div>
           <strong>Document environment</strong>
           <p>
-            Secrets injected into this document&apos;s agent runs. Values are write-only — shown
-            masked, never in full. The agent does not inherit the server&apos;s environment.
+            Variables injected into this document&apos;s agent runs. <strong>Secrets</strong> (API
+            keys, tokens) are shown masked; <strong>config</strong> vars (URLs, model names) are
+            shown in full. The agent does not inherit the server&apos;s environment.
           </p>
           <p>
             AI providers: set <code>OPENROUTER_API_KEY</code> or <code>LITELLM_API_KEY</code> (+{" "}
@@ -129,8 +157,22 @@ export function EnvironmentMenu({
             <div className="env-empty">Loading…</div>
           ) : vars && vars.length > 0 ? (
             vars.map((entry) => (
-              <div className="env-var-row" key={entry.key}>
+              <div className="env-var-row env-var-row-classified" key={entry.key}>
                 <span className="env-var-key">{entry.key}</span>
+                <button
+                  className={`env-var-kind ${entry.isSecret ? "env-var-kind-secret" : "env-var-kind-config"}`}
+                  disabled={busy}
+                  onClick={() => handleToggleSecret(entry)}
+                  title={
+                    (entry.isSecret
+                      ? "Secret: masked, and replaced with a per-run virtual key when the credential broker is enabled."
+                      : "Config: plain setting, shown in full and passed to the agent verbatim.") +
+                    (entry.isSecretAuto ? " (auto-detected — click to change)" : " (click to change)")
+                  }
+                  type="button"
+                >
+                  {entry.isSecret ? "secret" : "config"}
+                </button>
                 <span className="env-var-value">{entry.masked}</span>
                 <button
                   aria-label={`Delete ${entry.key}`}

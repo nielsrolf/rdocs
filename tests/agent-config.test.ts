@@ -4,6 +4,9 @@ import { test } from "node:test";
 import {
   DEFAULT_AGENT_MAX_TURNS,
   DEFAULT_AGENT_MODEL,
+  DEFAULT_CODEX_AGENT_MODEL,
+  defaultCodexAgentModelForCredentials,
+  agentHarnessForModel,
   agentModelProvider,
   isAgentEffort,
   isAgentModel,
@@ -13,9 +16,53 @@ import {
   normalizeAgentModel,
   parseMaxTurns,
   resolveAgentSdkConfig,
+  resolveCodexAgentConfig,
   resolveRefusalFallbackModel,
-  REFUSAL_FALLBACK_MODEL
+  REFUSAL_FALLBACK_MODEL,
+  THIRD_PARTY_THINKING_BUDGETS
 } from "../lib/agent-config";
+
+test("Codex models encode harness and provider without allowing direct Anthropic API routing", () => {
+  assert.equal(agentHarnessForModel("claude-sonnet-5"), "claude-code");
+  assert.equal(agentHarnessForModel("litellm/openai/gpt-5.6-terra"), "claude-code");
+  assert.equal(agentHarnessForModel("codex/openai/gpt-5.6-terra"), "codex");
+  assert.equal(agentHarnessForModel("codex/litellm/anthropic/claude-opus-4-8"), "codex");
+
+  assert.equal(isStorableAgentModel(DEFAULT_CODEX_AGENT_MODEL), true);
+  assert.equal(isStorableAgentModel("codex/litellm/anthropic/claude-opus-4-8"), true);
+  assert.equal(isStorableAgentModel("codex/anthropic/claude-opus-4-8"), false);
+  assert.equal(isStorableAgentModel("codex/openai/../../secret"), false);
+});
+
+test("Codex defaults to LiteLLM when it is the only connected Codex provider", () => {
+  assert.equal(
+    defaultCodexAgentModelForCredentials({ hasOpenAiKey: false, hasLiteLlmKey: true }),
+    "codex/litellm/openai/gpt-5.6-terra"
+  );
+  assert.equal(
+    defaultCodexAgentModelForCredentials({ hasOpenAiKey: true, hasLiteLlmKey: true }),
+    DEFAULT_CODEX_AGENT_MODEL
+  );
+  assert.equal(
+    defaultCodexAgentModelForCredentials({ hasOpenAiKey: false, hasLiteLlmKey: false }),
+    DEFAULT_CODEX_AGENT_MODEL
+  );
+});
+
+test("resolveCodexAgentConfig selects native OpenAI or LiteLLM Responses providers", () => {
+  assert.deepEqual(resolveCodexAgentConfig({ model: "codex/openai/gpt-5.6-terra", effort: "high" }), {
+    model: "gpt-5.6-terra",
+    provider: "openai",
+    effort: "high",
+    label: "codex-sdk:openai/gpt-5.6-terra+high"
+  });
+  assert.deepEqual(resolveCodexAgentConfig({ model: "codex/litellm/anthropic/claude-opus-4-8" }), {
+    model: "anthropic/claude-opus-4-8",
+    provider: "litellm",
+    effort: undefined,
+    label: "codex-sdk:litellm/anthropic/claude-opus-4-8"
+  });
+});
 
 test("parseMaxTurns defaults to an effectively-unbounded budget (never the old low cap)", () => {
   // Regression: the merge-conflict resolver used to cap at 8 turns and die with
@@ -43,27 +90,29 @@ test("defaults to the built-in model with thinking disabled when unconfigured", 
 });
 
 test("uses the env fallback model when the document has no explicit model", () => {
-  const resolved = resolveAgentSdkConfig({ effort: "off" }, "claude-opus-4-8");
-  assert.equal(resolved.model, "claude-opus-4-8");
+  const resolved = resolveAgentSdkConfig({ effort: "off" }, "claude-opus-5");
+  assert.equal(resolved.model, "claude-opus-5");
   assert.deepEqual(resolved.thinking, { type: "disabled" });
 });
 
 test("legacy alias values (documents and env fallback) normalize to canonical ids", () => {
   assert.equal(normalizeAgentModel("sonnet"), "claude-sonnet-5");
-  assert.equal(normalizeAgentModel("opus"), "claude-opus-4-8");
+  assert.equal(normalizeAgentModel("opus"), "claude-opus-5");
+  // Superseded canonical id: existing rows keep working, remapped on read.
+  assert.equal(normalizeAgentModel("claude-opus-4-8"), "claude-opus-5");
   assert.equal(normalizeAgentModel("claude-fable-5"), "claude-fable-5");
 
   const fromDocument = resolveAgentSdkConfig({ model: "opus", effort: "high" });
-  assert.equal(fromDocument.model, "claude-opus-4-8");
-  assert.equal(fromDocument.label, "claude-agent-sdk:claude-opus-4-8+high");
+  assert.equal(fromDocument.model, "claude-opus-5");
+  assert.equal(fromDocument.label, "claude-agent-sdk:claude-opus-5+high");
 
   const fromEnvFallback = resolveAgentSdkConfig(null, "sonnet");
   assert.equal(fromEnvFallback.model, "claude-sonnet-5");
 });
 
 test("an explicit document model overrides the env fallback", () => {
-  const resolved = resolveAgentSdkConfig({ model: "claude-opus-4-8", effort: null }, "claude-sonnet-5");
-  assert.equal(resolved.model, "claude-opus-4-8");
+  const resolved = resolveAgentSdkConfig({ model: "claude-opus-5", effort: null }, "claude-sonnet-5");
+  assert.equal(resolved.model, "claude-opus-5");
 });
 
 test("an unrecognised model falls back instead of being passed through", () => {
@@ -73,10 +122,10 @@ test("an unrecognised model falls back instead of being passed through", () => {
 
 test("enables adaptive thinking with the chosen effort level", () => {
   for (const effort of ["low", "medium", "high"] as const) {
-    const resolved = resolveAgentSdkConfig({ model: "claude-opus-4-8", effort });
+    const resolved = resolveAgentSdkConfig({ model: "claude-opus-5", effort });
     assert.deepEqual(resolved.thinking, { type: "adaptive" });
     assert.equal(resolved.effort, effort);
-    assert.equal(resolved.label, `claude-agent-sdk:claude-opus-4-8+${effort}`);
+    assert.equal(resolved.label, `claude-agent-sdk:claude-opus-5+${effort}`);
   }
 });
 
@@ -88,15 +137,43 @@ test("an invalid or off effort disables extended thinking", () => {
   }
 });
 
-test("openrouter models resolve to the bare slug with thinking force-disabled", () => {
-  const resolved = resolveAgentSdkConfig({ model: "openrouter/openai/gpt-5.2", effort: "high" });
-  assert.equal(resolved.provider, "openrouter");
-  assert.equal(resolved.model, "openai/gpt-5.2");
-  // Anthropic-specific adaptive-thinking params must never reach the compat
-  // endpoint for non-Claude models, even when the document configured effort.
-  assert.deepEqual(resolved.thinking, { type: "disabled" });
-  assert.equal(resolved.effort, undefined);
-  assert.equal(resolved.label, "openrouter:openai/gpt-5.2");
+test("openrouter models honor effort as a fixed thinking-token budget", () => {
+  for (const effort of ["low", "medium", "high"] as const) {
+    const resolved = resolveAgentSdkConfig({ model: "openrouter/openai/gpt-5.2", effort });
+    assert.equal(resolved.provider, "openrouter");
+    assert.equal(resolved.model, "openai/gpt-5.2");
+    // Non-Claude models can't take Anthropic adaptive thinking, but both
+    // compat endpoints translate the classic budget_tokens form (GPT
+    // reasoning effort / Gemini thinking budget) — so effort maps to a
+    // fixed budget instead of being force-disabled.
+    assert.deepEqual(resolved.thinking, {
+      type: "enabled",
+      budgetTokens: THIRD_PARTY_THINKING_BUDGETS[effort]
+    });
+    // The SDK `effort` option is adaptive-thinking-specific — never set it
+    // for third-party providers.
+    assert.equal(resolved.effort, undefined);
+    assert.equal(resolved.label, `openrouter:openai/gpt-5.2+${effort}`);
+  }
+});
+
+test("openrouter models with effort off (or unset) keep thinking disabled", () => {
+  for (const effort of ["off", "", null, undefined, "bogus"]) {
+    const resolved = resolveAgentSdkConfig({
+      model: "openrouter/openai/gpt-5.2",
+      effort: effort as string
+    });
+    assert.deepEqual(resolved.thinking, { type: "disabled" });
+    assert.equal(resolved.effort, undefined);
+    assert.equal(resolved.label, "openrouter:openai/gpt-5.2");
+  }
+});
+
+test("third-party thinking budgets are distinct and within compat-endpoint clamps", () => {
+  const { low, medium, high } = THIRD_PARTY_THINKING_BUDGETS;
+  // OpenRouter clamps reasoning budgets to 1024..32000.
+  assert.ok(low >= 1024 && high <= 32000);
+  assert.ok(low < medium && medium < high, "tiers must be strictly increasing");
 });
 
 test("an openrouter env fallback routes through the openrouter provider too", () => {
@@ -109,6 +186,7 @@ test("isStorableAgentModel accepts known models, legacy aliases, and well-formed
   for (const value of [
     "claude-sonnet-5",
     "claude-fable-5",
+    "claude-opus-5",
     "claude-opus-4-8",
     "sonnet",
     "opus",
@@ -161,15 +239,15 @@ test("type guards accept known values and reject unknown ones", () => {
 
 test("resolveRefusalFallbackModel maps a fable run to opus and nothing else", () => {
   // The one case that should fall back: a Fable run refused by the safety
-  // classifiers reruns on Opus 4.8.
+  // classifiers reruns on Opus.
   assert.equal(
     resolveRefusalFallbackModel({ model: "claude-fable-5", effort: "high" }),
     REFUSAL_FALLBACK_MODEL
   );
-  assert.equal(REFUSAL_FALLBACK_MODEL, "claude-opus-4-8");
+  assert.equal(REFUSAL_FALLBACK_MODEL, "claude-opus-5");
 
   // Already on the fallback model (or another Anthropic model): no fallback.
-  assert.equal(resolveRefusalFallbackModel({ model: "claude-opus-4-8" }), null);
+  assert.equal(resolveRefusalFallbackModel({ model: "claude-opus-5" }), null);
   assert.equal(resolveRefusalFallbackModel({ model: "claude-sonnet-5" }), null);
   assert.equal(resolveRefusalFallbackModel(null), null);
 
@@ -184,13 +262,20 @@ test("resolveRefusalFallbackModel honors the env fallback model like resolveAgen
   assert.equal(resolveRefusalFallbackModel(null, "claude-sonnet-5"), null);
 });
 
-test("litellm models resolve to the bare name with thinking force-disabled", () => {
+test("litellm models honor effort as a fixed thinking-token budget", () => {
   const resolved = resolveAgentSdkConfig({ model: "litellm/anthropic/claude-opus-4-8", effort: "high" });
   assert.equal(resolved.provider, "litellm");
   assert.equal(resolved.model, "anthropic/claude-opus-4-8");
-  assert.deepEqual(resolved.thinking, { type: "disabled" });
+  assert.deepEqual(resolved.thinking, {
+    type: "enabled",
+    budgetTokens: THIRD_PARTY_THINKING_BUDGETS.high
+  });
   assert.equal(resolved.effort, undefined);
-  assert.equal(resolved.label, "litellm:anthropic/claude-opus-4-8");
+  assert.equal(resolved.label, "litellm:anthropic/claude-opus-4-8+high");
+
+  const off = resolveAgentSdkConfig({ model: "litellm/openai/gpt-5.6-luna", effort: "off" });
+  assert.deepEqual(off.thinking, { type: "disabled" });
+  assert.equal(off.label, "litellm:openai/gpt-5.6-luna");
 });
 
 test("isStorableAgentModel accepts well-formed litellm model names of any depth", () => {

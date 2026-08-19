@@ -1,0 +1,141 @@
+// Socket Mode transport for the Slack bot. Started once at boot from
+// instrumentation.ts when SLACK_BOT_TOKEN + SLACK_APP_TOKEN are configured.
+// All actual event logic lives in lib/slack/events.ts; this file only wires
+// the websocket, acks envelopes fast, and supplies real dependencies.
+
+import {
+  handleSlackAppMention,
+  handleSlackDirectMessage,
+  handleSlackThreadReply,
+  type SlackIncomingMessage
+} from "@/lib/slack/events";
+import { createSlackWebClient, slackAuthTest } from "@/lib/slack/web";
+
+let started = false;
+let activeSocket: { disconnect: () => Promise<void> } | null = null;
+let draining = false;
+
+// Graceful drain (blue/green deploy): disconnect the websocket so Slack stops
+// round-robining events to the outgoing process. In-flight runs keep posting
+// replies via the Web API (plain HTTPS), which needs no socket. Idempotent.
+export async function stopSlackSocketService() {
+  draining = true;
+  const socket = activeSocket;
+  activeSocket = null;
+  if (!socket) return;
+  try {
+    await socket.disconnect();
+    console.log("[slack] Socket Mode disconnected (drain)");
+  } catch (error) {
+    console.warn("[slack] socket disconnect failed (drain)", {
+      error: error instanceof Error ? error.message : error
+    });
+  }
+}
+
+export async function startSlackSocketService() {
+  if (started) return;
+  const botToken = process.env.SLACK_BOT_TOKEN?.trim();
+  const appToken = process.env.SLACK_APP_TOKEN?.trim();
+  if (!botToken || !appToken) {
+    return;
+  }
+  const appUrl = process.env.APP_URL?.trim() || "http://localhost:14141";
+  started = true;
+
+  const { SocketModeClient } = await import("@slack/socket-mode");
+  const slack = createSlackWebClient(botToken);
+  const auth = await slackAuthTest(botToken);
+  if (!auth.userId) {
+    console.error("[slack] auth.test returned no bot user id; Slack service not started.");
+    started = false;
+    return;
+  }
+  const botUserId = auth.userId;
+
+  const socket = new SocketModeClient({ appToken });
+
+  const toIncoming = (event: Record<string, any>, body: Record<string, any>): SlackIncomingMessage => ({
+    eventId: typeof body?.event_id === "string" ? body.event_id : `${event.channel}:${event.ts}`,
+    teamId: body?.team_id ?? event.team ?? auth.teamId ?? "unknown",
+    channel: event.channel,
+    user: event.user,
+    botId: event.bot_id,
+    subtype: event.subtype,
+    text: event.text ?? "",
+    ts: event.ts,
+    threadTs: event.thread_ts,
+    files: Array.isArray(event.files)
+      ? event.files.map((file: Record<string, unknown>) => ({
+          downloadUrl: typeof file.url_private_download === "string" ? file.url_private_download : undefined,
+          name: typeof file.name === "string" ? file.name : undefined,
+          mimetype: typeof file.mimetype === "string" ? file.mimetype : undefined
+        }))
+      : undefined
+  });
+
+  socket.on("app_mention", async ({ event, body, ack }) => {
+    // Ack immediately — Slack redelivers unacked envelopes, and the run is
+    // tracked in the DB anyway (same 202-style contract as the HTTP routes).
+    await ack();
+    // Mentions inside a DM also fire message.im — the message handler owns DMs.
+    if (typeof event.channel === "string" && event.channel.startsWith("D")) return;
+    try {
+      const mention = toIncoming(event, body);
+      const result = await handleSlackAppMention(mention, { slack, appUrl, botUserId });
+      console.log("[slack] app_mention", {
+        channel: mention.channel,
+        user: mention.user,
+        ...result
+      });
+    } catch (error) {
+      console.error("[slack] app_mention handler failed", {
+        error: error instanceof Error ? error.message : error
+      });
+    }
+  });
+
+  // DMs: every user message is a prompt, no mention required. Channel thread
+  // replies to existing claudex conversations also come through here (that is
+  // how "wait" works without re-mentioning the bot) — requires the message.channels
+  // + message.groups event subscriptions in the Slack app config.
+  socket.on("message", async ({ event, body, ack }) => {
+    await ack();
+    const isDm = event.channel_type === "im";
+    const isChannel = event.channel_type === "channel" || event.channel_type === "group";
+    if (!isDm && !(isChannel && event.thread_ts)) return;
+    try {
+      const message = toIncoming(event, body);
+      const result = isDm
+        ? await handleSlackDirectMessage(message, { slack, appUrl, botUserId })
+        : await handleSlackThreadReply(message, { slack, appUrl, botUserId });
+      // Our own replies echo back as message events, and most channel thread
+      // replies have no claudex session — don't log that noise.
+      if (result.handled || (result.reason !== "bot-message" && result.reason !== "no-session")) {
+        console.log("[slack] dm", {
+          channel: message.channel,
+          user: message.user,
+          ...result
+        });
+      }
+    } catch (error) {
+      console.error("[slack] dm handler failed", {
+        error: error instanceof Error ? error.message : error
+      });
+    }
+  });
+
+  socket.on("disconnected", () => {
+    if (draining) return;
+    console.warn("[slack] socket disconnected; client will reconnect automatically.");
+  });
+
+  if (draining) {
+    // Drain began while we were still handshaking — don't connect at all.
+    started = false;
+    return;
+  }
+  await socket.start();
+  activeSocket = socket;
+  console.log("[slack] Socket Mode connected", { botUserId, teamId: auth.teamId });
+}

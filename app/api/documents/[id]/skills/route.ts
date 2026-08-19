@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { db } from "@/lib/db";
-import { canManageDocumentAutomation, resolveDocumentAccess } from "@/lib/permissions";
+import { loadCatalogSkill } from "@/lib/skill-catalog";
 import {
   copySkillDir,
   getDocumentSkillDir,
@@ -20,12 +20,6 @@ export const runtime = "nodejs";
 // library. Attached skills are materialized into every agent worktree at
 // `.claude/skills/<name>` and enabled by name for the run.
 
-type RouteContext = {
-  params: Promise<{
-    id: string;
-  }>;
-};
-
 function serializeDocumentSkill(skill: {
   id: string;
   name: string;
@@ -40,19 +34,24 @@ function serializeDocumentSkill(skill: {
   };
 }
 
-const copySchema = z.object({
-  userSkillId: z.string().min(1),
-  share: z.string().optional().nullable()
-});
+// JSON attach payload: copy from the caller's library (userSkillId) OR
+// one-click install from the curated catalog (catalogName).
+const copySchema = z
+  .object({
+    userSkillId: z.string().min(1).optional(),
+    catalogName: z.string().min(1).optional(),
+    share: z.string().optional().nullable()
+  })
+  .refine((value) => Boolean(value.userSkillId) !== Boolean(value.catalogName), {
+    message: "Provide exactly one of userSkillId or catalogName."
+  });
 
-export async function GET(request: Request, { params }: RouteContext) {
+export async function GET(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
-  const shareToken = new URL(request.url).searchParams.get("share");
 
-  const access = await resolveDocumentAccess(id, user?.id, shareToken);
-  if (!access) {
-    return NextResponse.json({ error: "Document not found." }, { status: 404 });
+  const gate = await requireDocumentAccess(request, id, "VIEW");
+  if (!gate.ok) {
+    return gate.response;
   }
 
   const skills = await db.documentSkill.findMany({
@@ -63,9 +62,8 @@ export async function GET(request: Request, { params }: RouteContext) {
   return NextResponse.json({ skills: skills.map(serializeDocumentSkill) });
 }
 
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
   const contentType = request.headers.get("content-type") ?? "";
 
   // JSON body → copy a skill from the caller's own library into the document.
@@ -76,12 +74,42 @@ export async function POST(request: Request, { params }: RouteContext) {
       return NextResponse.json({ error: "Invalid skill payload." }, { status: 400 });
     }
 
-    const access = await resolveDocumentAccess(id, user?.id, parsed.data.share ?? null);
-    if (!access || !canManageDocumentAutomation(access, user?.id)) {
-      return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+    const gate = await requireDocumentAccess(request, id, "EDIT", {
+      shareToken: parsed.data.share ?? null,
+      requireUser: true,
+      forbiddenMessage: "You do not have edit access."
+    });
+    if (!gate.ok) {
+      return gate.response;
     }
-    if (!user) {
-      return NextResponse.json({ error: "Not signed in." }, { status: 401 });
+    const { user } = gate;
+
+    // One-click install straight from the curated catalog onto the document.
+    if (parsed.data.catalogName) {
+      let prepared;
+      try {
+        prepared = await loadCatalogSkill(parsed.data.catalogName);
+      } catch (error) {
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Failed to load the skill catalog." },
+          { status: 502 }
+        );
+      }
+      if (!prepared) {
+        return NextResponse.json({ error: "Skill not found in the catalog." }, { status: 404 });
+      }
+      await writeSkillToStore(getDocumentSkillDir(id, prepared.name), prepared);
+      const skill = await db.documentSkill.upsert({
+        where: { documentId_name: { documentId: id, name: prepared.name } },
+        create: {
+          documentId: id,
+          name: prepared.name,
+          description: prepared.description,
+          createdById: user.id
+        },
+        update: { description: prepared.description }
+      });
+      return NextResponse.json({ skill: serializeDocumentSkill(skill) });
     }
 
     const userSkill = await db.userSkill.findUnique({ where: { id: parsed.data.userSkillId } });
@@ -111,10 +139,15 @@ export async function POST(request: Request, { params }: RouteContext) {
   }
   const shareToken = typeof formData.get("share") === "string" ? (formData.get("share") as string) : null;
 
-  const access = await resolveDocumentAccess(id, user?.id, shareToken);
-  if (!access || !canManageDocumentAutomation(access, user?.id)) {
-    return NextResponse.json({ error: "Sign in with edit access to manage agent skills." }, { status: 403 });
+  const gate = await requireDocumentAccess(request, id, "EDIT", {
+    shareToken,
+    requireUser: true,
+    forbiddenMessage: "Sign in with edit access to manage agent skills."
+  });
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { user } = gate;
 
   let prepared;
   try {

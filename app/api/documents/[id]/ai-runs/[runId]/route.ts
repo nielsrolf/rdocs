@@ -1,16 +1,15 @@
 import { NextResponse } from "next/server";
 
-import { getCurrentUser } from "@/lib/auth";
+import { jsonError, requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { cancelAiRun } from "@/lib/agent-runner/run-registry";
 import { db } from "@/lib/db";
-import { canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
+import { canComment, canEdit } from "@/lib/permissions";
 
-type RouteContext = {
-  params: Promise<{
-    id: string;
-    runId: string;
-  }>;
-};
+// Safety cap on the lazy-loaded full timeline — orders of magnitude above the
+// poll's per-run window, small enough to bound a pathological run's payload.
+const AI_RUN_DETAIL_EVENT_CAP = 5000;
+
+type RunRouteParams = { id: string; runId: string };
 
 function parseJsonArray<T>(raw: string | null | undefined): T[] {
   if (!raw) return [];
@@ -22,15 +21,11 @@ function parseJsonArray<T>(raw: string | null | undefined): T[] {
   }
 }
 
-export async function GET(request: Request, { params }: RouteContext) {
+export async function GET(request: Request, { params }: RouteContext<RunRouteParams>) {
   const { id, runId } = await params;
-  const url = new URL(request.url);
-  const shareToken = url.searchParams.get("share");
-  const user = await getCurrentUser();
-
-  const access = await resolveDocumentAccess(id, user?.id, shareToken);
-  if (!access) {
-    return NextResponse.json({ error: "You do not have access to this run." }, { status: 403 });
+  const gate = await requireDocumentAccess(request, id, "VIEW");
+  if (!gate.ok) {
+    return gate.response;
   }
 
   const run = await db.aiRun.findUnique({
@@ -58,7 +53,35 @@ export async function GET(request: Request, { params }: RouteContext) {
       replacementSources: true,
       suggestions: true,
       agentComments: true,
-      suggestOnly: true
+      suggestOnly: true,
+      // Persisted application outputs are the source of truth for the result
+      // view. In particular, comment-reply runs historically stored only the
+      // model's short summary in AiRunEvent; the actual reply lives here.
+      comments: {
+        orderBy: [{ createdAt: "asc" as const }, { id: "asc" as const }],
+        select: {
+          id: true,
+          threadId: true,
+          body: true,
+          createdAt: true,
+          thread: { select: { anchorText: true } }
+        }
+      },
+      // FULL timeline for this run (generous safety cap, far above any real
+      // run). The polled document list only ships a small tail window per run
+      // (`eventsClipped`) and omits events on older runs (`eventsOmitted`);
+      // the agent panel lazy-loads complete timelines from here, so this
+      // route must not apply the poll's per-run window.
+      events: {
+        orderBy: [{ createdAt: "desc" as const }, { id: "desc" as const }],
+        take: AI_RUN_DETAIL_EVENT_CAP,
+        select: {
+          id: true,
+          role: true,
+          message: true,
+          createdAt: true
+        }
+      }
     }
   });
 
@@ -73,9 +96,10 @@ export async function GET(request: Request, { params }: RouteContext) {
   const widgets = isSucceeded ? parseJsonArray<Record<string, unknown>>(run.replacementWidgets) : [];
   const sources = isSucceeded ? parseJsonArray<string>(run.replacementSources) : [];
   const suggestions = isSucceeded ? parseJsonArray<Record<string, unknown>>(run.suggestions) : [];
-  const agentComments = isSucceeded
-    ? parseJsonArray<{ threadId: string; findText: string }>(run.agentComments)
-    : [];
+  // Unlike the fields above, agentComments is NOT gated on success: comments
+  // the agent leaves mid-run via add_comment already exist as threads, and the
+  // client anchors each one as soon as it appears.
+  const agentComments = parseJsonArray<{ threadId: string; findText: string }>(run.agentComments);
 
   return NextResponse.json({
     aiRun: {
@@ -101,35 +125,39 @@ export async function GET(request: Request, { params }: RouteContext) {
       sources,
       suggestions,
       agentComments,
-      suggestOnly: run.suggestOnly
+      comments: run.comments.map((comment) => ({
+        id: comment.id,
+        threadId: comment.threadId,
+        anchorText: comment.thread.anchorText,
+        body: comment.body,
+        createdAt: comment.createdAt
+      })),
+      suggestOnly: run.suggestOnly,
+      // Flipped back to chronological order for rendering.
+      events: [...run.events].reverse()
     }
   });
 }
 
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<RunRouteParams>) {
   const { id, runId } = await params;
   const body = await request.json().catch(() => null);
   const action = body && typeof body === "object" ? (body as { action?: unknown }).action : null;
-  const shareToken =
-    body && typeof body === "object"
-      ? (body as { shareToken?: unknown }).shareToken
-      : null;
 
   if (action !== "markApplied" && action !== "cancel") {
     return NextResponse.json({ error: "Unsupported action." }, { status: 400 });
   }
 
-  const user = await getCurrentUser();
-  const access = await resolveDocumentAccess(
-    id,
-    user?.id,
-    typeof shareToken === "string" ? shareToken : null
-  );
+  const gate = await requireDocumentAccess(request, id, "VIEW", { body });
+  if (!gate.ok) {
+    return gate.response;
+  }
+  const { access } = gate;
 
   if (action === "cancel") {
     // Anyone who can start agent runs (comment access) may stop one.
-    if (!access || !canComment(access.permission)) {
-      return NextResponse.json({ error: "You do not have agent access." }, { status: 403 });
+    if (!canComment(access.permission)) {
+      return jsonError(403, "You do not have agent access.");
     }
     const target = await db.aiRun.findFirst({
       where: { id: runId, documentId: id },
@@ -161,9 +189,9 @@ export async function POST(request: Request, { params }: RouteContext) {
     where: { id: runId, documentId: id },
     select: { suggestOnly: true }
   });
-  const allowed = Boolean(access) && (canEdit(access!.permission) || (run?.suggestOnly === true && canComment(access!.permission)));
+  const allowed = canEdit(access.permission) || (run?.suggestOnly === true && canComment(access.permission));
   if (!allowed) {
-    return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+    return jsonError(403, "You do not have edit access.");
   }
 
   const updated = await db.aiRun.updateMany({

@@ -1,5 +1,7 @@
 import type { Prisma } from "@prisma/client";
 
+import { removeRunContainers, type ContainerCleanupOptions } from "@/lib/agent-runner/container-cleanup";
+import { revokeBrokerKeysForRun } from "@/lib/credential-broker";
 import { db } from "@/lib/db";
 
 // A RUNNING run is considered abandoned (server restart/crash) only after this
@@ -33,22 +35,78 @@ export function startAiRunHeartbeat(aiRunId: string): () => void {
   return () => clearInterval(timer);
 }
 
+// A heartbeat whose start can be postponed past a blocking wait.
+//
+// Conversation runs first queue on the per-conversation session mutex
+// (withConversationLock). A run parked there is doing NOTHING — but while it
+// heartbeat-ticked from the moment the background function started, it looked
+// perfectly alive: RUNNING with a fresh heartbeat, so the reaper spared it
+// forever, while it had no steering channel and no container. In a Slack thread
+// that is the worst possible state — the thread has an "active" run that can
+// neither be steered nor finish, so follow-ups queue behind a ghost. Deferring
+// the heartbeat until the run actually holds the lock makes such a parked run
+// go silent and get reaped like any other dead run.
+//
+// begin() is idempotent; stop() is safe before begin() and after it.
+export function createDeferredHeartbeat(
+  aiRunId: string,
+  opts: { deferred?: boolean; start?: (aiRunId: string) => () => void } = {}
+): { begin: () => void; stop: () => void } {
+  const start = opts.start ?? startAiRunHeartbeat;
+  let stopFn: (() => void) | null = null;
+  let stopped = false;
+  const begin = () => {
+    if (stopFn || stopped) return;
+    stopFn = start(aiRunId);
+  };
+  const stop = () => {
+    stopped = true;
+    stopFn?.();
+    stopFn = null;
+  };
+  if (!opts.deferred) begin();
+  return { begin, stop };
+}
+
 export type AbandonedRunResult = {
   failedIds: Set<string>;
   error: string;
   finishedAt: Date;
 };
 
-// Marks abandoned RUNNING runs as FAILED. Returns the affected ids so callers
-// can patch already-fetched copies, or null when nothing was reaped.
+// Non-terminal statuses judged by the silence rule. PENDING is included: a
+// PENDING row whose owning process died would otherwise linger forever (no
+// heartbeat is ever written for it, and the old boot sweep was the only thing
+// that cleaned those up).
+const REAPABLE_STATUSES = new Set(["RUNNING", "PENDING"]);
+
+// Marks abandoned RUNNING/PENDING runs as FAILED. Returns the affected ids so
+// callers can patch already-fetched copies, or null when nothing was reaped.
+//
+// This is the ONLY orphan-detection mechanism — the boot sweep uses it too
+// (sweepAbandonedAiRuns below) instead of failing every non-terminal run.
+// With blue/green deploys two server processes overlap: a freshly booted
+// process must not kill runs the draining old process is still working on.
+// Their heartbeats are fresh, so the silence rule spares them.
+export type SessionProbeCandidate = {
+  id: string;
+  sessionEndpoint: string | null;
+  sessionSecret: string | null;
+};
+
 export async function failAbandonedAiRuns(
   runs: Array<{ id: string; status: string; startedAt: Date }>,
-  now = Date.now()
+  now = Date.now(),
+  deps: {
+    containerCleanup?: ContainerCleanupOptions;
+    /** Injected in tests; defaults to a real `GET /status` on the handle. */
+    sessionProbe?: (candidate: SessionProbeCandidate) => Promise<boolean>;
+  } = {}
 ): Promise<AbandonedRunResult | null> {
   // Runs younger than the threshold cannot have been silent longer than it, so
   // this pre-filter also avoids the event lookup on every poll of a fresh run.
   const candidates = runs.filter(
-    (run) => run.status === "RUNNING" && now - run.startedAt.getTime() > STALE_AI_RUN_MS
+    (run) => REAPABLE_STATUSES.has(run.status) && now - run.startedAt.getTime() > STALE_AI_RUN_MS
   );
   if (candidates.length === 0) {
     return null;
@@ -63,12 +121,12 @@ export async function failAbandonedAiRuns(
     // after the caller's query still counts.
     db.aiRun.findMany({
       where: { id: { in: candidates.map((run) => run.id) } },
-      select: { id: true, heartbeatAt: true }
+      select: { id: true, heartbeatAt: true, sessionEndpoint: true, sessionSecret: true }
     })
   ]);
   const lastEventAt = new Map(lastEvents.map((e) => [e.aiRunId, e._max.createdAt?.getTime() ?? 0]));
   const heartbeatAt = new Map(heartbeats.map((r) => [r.id, r.heartbeatAt?.getTime() ?? 0]));
-  const abandonedIds = candidates
+  const silentIds = candidates
     .filter((run) => {
       const lastActivity = Math.max(
         run.startedAt.getTime(),
@@ -78,16 +136,90 @@ export async function failAbandonedAiRuns(
       return now - lastActivity > STALE_AI_RUN_MS;
     })
     .map((run) => run.id);
+  if (silentIds.length === 0) {
+    return null;
+  }
+
+  // Silence proves a dead *process*, which used to prove a dead *run* — the
+  // container was that process's child. A detached session container is nobody's
+  // child (lib/agent-runner/container-session.ts): it survives deploys and is
+  // adopted by whichever process attaches next. So before reaping, ask any
+  // advertised session whether it is still there; if it answers, the run is
+  // alive and the probe itself becomes its heartbeat.
+  const advertised = heartbeats.filter(
+    (run) => silentIds.includes(run.id) && run.sessionEndpoint && run.sessionSecret
+  );
+  const aliveIds = new Set<string>();
+  if (advertised.length > 0) {
+    const probe =
+      deps.sessionProbe ??
+      (async (candidate: SessionProbeCandidate) => {
+        const { probeAgentSession } = await import("@/lib/agent-runner/session-client");
+        return probeAgentSession(candidate.sessionEndpoint!, candidate.sessionSecret!);
+      });
+    await Promise.all(
+      advertised.map(async (run) => {
+        const alive = await probe(run).catch(() => false);
+        if (alive) aliveIds.add(run.id);
+      })
+    );
+    if (aliveIds.size > 0) {
+      // Note what is deliberately NOT done here: the run's heartbeat is left
+      // stale. Sparing must stay conditional on the container answering EVERY
+      // sweep, so an orphan nobody adopts is reaped as soon as its own
+      // no-contact TTL takes it down (the probe does not reset that TTL).
+      console.log(`[agent-session] sparing ${aliveIds.size} silent run(s) whose detached container still answers`);
+    }
+  }
+  const abandonedIds = silentIds.filter((id) => !aliveIds.has(id));
   if (abandonedIds.length === 0) {
     return null;
   }
   const finishedAt = new Date();
   const error = "Run abandoned (server restart or crash).";
   await db.aiRun.updateMany({
-    where: { id: { in: abandonedIds }, status: "RUNNING" },
+    where: { id: { in: abandonedIds }, status: { in: [...REAPABLE_STATUSES] } },
     data: { status: "FAILED", error, finishedAt }
   });
+  // Kill the reaped runs' broker keys too (the per-request run-status check
+  // already rejects them; this wipes the stored secret material as well).
+  await Promise.all(abandonedIds.map((id) => revokeBrokerKeysForRun(id).catch(() => 0)));
+  // Kill the reaped runs' agent containers. A reaped run's owning process is
+  // dead (silence rule), so even if its container is still executing, nobody
+  // consumes the result — leaving it alive only burns tokens/CPU. Best-effort:
+  // in-process runs and already-exited `--rm` containers make `rm -f` a no-op.
+  await removeRunContainers(abandonedIds, deps.containerCleanup).catch(() => {});
   return { failedIds: new Set(abandonedIds), error, finishedAt };
+}
+
+// Global orphan sweep: fetch every non-terminal run and apply the silence
+// rule. Used at boot and by the periodic reaper interval (instrumentation.ts)
+// so runs whose document nobody has open still get reaped after a crash.
+// Returns the runs that were actually failed, with workspace info so callers
+// can salvage their uncommitted work (lib/run-salvage.ts).
+// `scope.documentId` exists for tests, which share the real database with the
+// running service — a global sweep in a test must not touch unrelated rows.
+export async function sweepAbandonedAiRuns(now = Date.now(), scope?: { documentId?: string }) {
+  const runs = await db.aiRun.findMany({
+    where: {
+      status: { in: [...REAPABLE_STATUSES] },
+      ...(scope?.documentId ? { documentId: scope.documentId } : {})
+    },
+    select: {
+      id: true,
+      documentId: true,
+      workspacePath: true,
+      branchName: true,
+      status: true,
+      startedAt: true
+    }
+  });
+  if (runs.length === 0) {
+    return { failed: [], scanned: 0 };
+  }
+  const result = await failAbandonedAiRuns(runs, now);
+  const failed = result ? runs.filter((run) => result.failedIds.has(run.id)) : [];
+  return { failed, scanned: runs.length };
 }
 
 // The single terminal-success write for agent runs. All three agent routes
@@ -99,7 +231,7 @@ export async function markAiRunSucceeded(
   aiRunId: string,
   data: Omit<Prisma.AiRunUpdateInput, "status" | "finishedAt" | "error">
 ) {
-  return db.aiRun.update({
+  const updated = await db.aiRun.update({
     where: { id: aiRunId },
     data: {
       ...data,
@@ -108,6 +240,10 @@ export async function markAiRunSucceeded(
       finishedAt: new Date()
     }
   });
+  // Credential broker: a finished run's virtual keys are dead (the per-request
+  // run-status check enforces it); revoking also wipes the stored secrets.
+  await revokeBrokerKeysForRun(aiRunId).catch(() => 0);
+  return updated;
 }
 
 const CONVERSATION_HISTORY_ROLES = new Set(["user", "agent"]);
@@ -169,53 +305,111 @@ export async function recordAiRunEvent(input: {
   });
 }
 
-// How many run rows the document poll returns, and how many of each run's
-// events. The event window must show the LATEST activity — a run that outgrows
-// it should drop its oldest events, not freeze.
-export const AI_RUN_LIST_LIMIT = 12;
+// How many run rows the document poll returns, how many of the newest runs
+// carry their event timelines inline, and how many events each of those runs
+// ships. The event window must show the LATEST activity — a run that outgrows
+// it should drop its oldest events, not freeze. Older runs are returned
+// WITHOUT events (`eventsOmitted: true`) to keep the 2s poll payload sane; the
+// client lazy-loads their events from the run-detail route when a conversation
+// is opened. Runs older than the list limit are not shown at all — 200 rows is
+// far beyond what the sidebar can usefully display.
+export const AI_RUN_LIST_LIMIT = 200;
+export const AI_RUN_EVENT_RUNS = 12;
 export const AI_RUN_EVENT_WINDOW = 80;
 
 // The run list the document poll (and the agent view) is built from. Shared
 // with tests so the event-window behavior is pinned by a regression test.
 export async function fetchDocumentAiRuns(documentId: string) {
-  const runs = await db.aiRun.findMany({
-    where: { documentId },
-    orderBy: { startedAt: "desc" },
-    take: AI_RUN_LIST_LIMIT,
-    select: {
-      id: true,
-      triggerType: true,
-      triggerId: true,
-      selectionId: true,
-      selectedText: true,
-      parentRunId: true,
-      instruction: true,
-      status: true,
-      progress: true,
-      model: true,
-      workspacePath: true,
-      branchName: true,
-      commitSha: true,
-      commitUrl: true,
-      error: true,
-      startedAt: true,
-      finishedAt: true,
-      appliedAt: true,
-      events: {
-        // Newest N, then flipped back to chronological below — asc+take would
-        // pin the window to a long run's FIRST N events and freeze the timeline.
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        take: AI_RUN_EVENT_WINDOW,
-        select: {
-          id: true,
-          role: true,
-          message: true,
-          createdAt: true
+  const runSelect = {
+    id: true,
+    triggerType: true,
+    triggerId: true,
+    selectionId: true,
+    selectedText: true,
+    parentRunId: true,
+    instruction: true,
+    status: true,
+    progress: true,
+    model: true,
+    workspacePath: true,
+    branchName: true,
+    commitSha: true,
+    commitUrl: true,
+    error: true,
+    startedAt: true,
+    finishedAt: true,
+    appliedAt: true,
+    // Live comments left mid-run (add_comment). Carried in the polled list so
+    // clients can anchor them while the run is still working.
+    agentComments: true
+  } as const;
+
+  const [recentRuns, olderRuns] = await Promise.all([
+    // Newest runs ship their event timelines inline — these are the ones that
+    // can still be RUNNING and streaming.
+    db.aiRun.findMany({
+      where: { documentId },
+      orderBy: { startedAt: "desc" },
+      take: AI_RUN_EVENT_RUNS,
+      select: {
+        ...runSelect,
+        _count: { select: { events: true } },
+        events: {
+          // Newest N, then flipped back to chronological below — asc+take would
+          // pin the window to a long run's FIRST N events and freeze the timeline.
+          orderBy: [{ createdAt: "desc" as const }, { id: "desc" as const }],
+          take: AI_RUN_EVENT_WINDOW,
+          select: {
+            id: true,
+            role: true,
+            message: true,
+            createdAt: true
+          }
         }
       }
-    }
-  });
-  return runs.map((run) => ({ ...run, events: [...run.events].reverse() }));
+    }),
+    // Older runs come back WITHOUT events so long histories (e.g. Slack channel
+    // docs) stay visible in the sidebar without bloating every 2s poll. Their
+    // events are immutable (terminal runs) and lazy-loaded from the run-detail
+    // route when the conversation is opened.
+    db.aiRun.findMany({
+      where: { documentId },
+      orderBy: { startedAt: "desc" },
+      skip: AI_RUN_EVENT_RUNS,
+      take: AI_RUN_LIST_LIMIT - AI_RUN_EVENT_RUNS,
+      select: runSelect
+    })
+  ]);
+
+  return [
+    ...recentRuns.map(({ _count, ...run }) => ({
+      ...run,
+      agentComments: parseAgentComments(run.agentComments),
+      events: [...run.events].reverse(),
+      eventsOmitted: false,
+      // The run outgrew the poll window — its EARLIEST events are missing from
+      // this payload. The client lazy-loads the full timeline from the
+      // run-detail route when the conversation is opened.
+      eventsClipped: _count.events > AI_RUN_EVENT_WINDOW
+    })),
+    ...olderRuns.map((run) => ({
+      ...run,
+      agentComments: parseAgentComments(run.agentComments),
+      events: [] as Array<{ id: string; role: string; message: string; createdAt: Date }>,
+      eventsOmitted: true,
+      eventsClipped: false
+    }))
+  ];
+}
+
+function parseAgentComments(raw: string | null): Array<{ threadId: string; findText: string }> {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 export function serializeAiRun(run: {
@@ -237,21 +431,33 @@ export function serializeAiRun(run: {
   startedAt: Date;
   finishedAt?: Date | null;
   appliedAt?: Date | null;
+  // Parsed by fetchDocumentAiRuns; raw JSON column when a route serializes a
+  // run it fetched itself.
+  agentComments?: string | Array<{ threadId: string; findText: string }> | null;
   events?: Array<{
     id: string;
     role: string;
     message: string;
     createdAt: Date;
   }>;
+  /** True when this run's events were dropped from the poll payload (lazy-loaded client-side). */
+  eventsOmitted?: boolean;
+  /** True when the run outgrew the inline event window — earliest events missing (lazy-loaded client-side). */
+  eventsClipped?: boolean;
 }) {
   return {
     ...run,
+    eventsOmitted: run.eventsOmitted ?? false,
+    eventsClipped: run.eventsClipped ?? false,
     selectionId: run.selectionId ?? null,
     selectedText: run.selectedText ?? null,
     parentRunId: run.parentRunId ?? null,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt ?? null,
     appliedAt: run.appliedAt ?? null,
+    agentComments: Array.isArray(run.agentComments)
+      ? run.agentComments
+      : parseAgentComments(run.agentComments ?? null),
     events: run.events ?? []
   };
 }

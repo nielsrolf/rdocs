@@ -107,6 +107,23 @@ test("adding a comment anchor does NOT change the committed view (annotations ar
   assert.equal(committed(annotatedDoc), committed(plainDoc));
 });
 
+test("comment anchor on a hardBreak (or other inline node) does NOT change the committed view", () => {
+  // Regression: a comment anchored over a range that spans a hardBreak applies the
+  // `commentAnchor` mark to the hardBreak node too (addMark marks all inline
+  // content, not just text). computeCommittedContent used to strip the mark only
+  // from `text` nodes, so the marked hardBreak survived and the committed view
+  // differed — tripping the server suggestion-only guard, which the client then
+  // mis-escalated into a force-push / merge dialog and the comment was lost.
+  const committed = (content: unknown) => JSON.stringify(computeCommittedContent(content));
+  const plainDoc = docWith(plain("Hello "), { type: "hardBreak" }, plain("world"));
+  const annotatedDoc = docWith(
+    { type: "text", text: "Hello ", marks: [{ type: "commentAnchor", attrs: { threadId: "t1" } }] },
+    { type: "hardBreak", marks: [{ type: "commentAnchor", attrs: { threadId: "t1" } }] },
+    { type: "text", text: "world", marks: [{ type: "commentAnchor", attrs: { threadId: "t1" } }] }
+  );
+  assert.equal(committed(annotatedDoc), committed(plainDoc));
+});
+
 test("flattenDocumentTextNodes concatenates text in document order, no separators", () => {
   const content = {
     type: "doc",

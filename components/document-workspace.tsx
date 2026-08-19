@@ -1,5 +1,11 @@
 "use client";
 
+import {
+  RUN_RETRYING,
+  RUN_STARTED_CLAUDE,
+  RUN_STARTED_CODEX,
+  RUN_STARTED_LOCAL_FALLBACK
+} from "@/agent-core/lifecycle-messages";
 import ImageExtension from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
@@ -10,6 +16,7 @@ import TableRow from "@tiptap/extension-table-row";
 import TaskList from "@tiptap/extension-task-list";
 import Underline from "@tiptap/extension-underline";
 import { getVersion, receiveTransaction, sendableSteps } from "@tiptap/pm/collab";
+import { Fragment } from "@tiptap/pm/model";
 import { NodeSelection } from "@tiptap/pm/state";
 import { Step } from "@tiptap/pm/transform";
 import { EditorContent, JSONContent, useEditor, type Editor } from "@tiptap/react";
@@ -23,6 +30,7 @@ import {
   isLiteLlmAgentModel,
   isLocalAgentModel,
   isOpenRouterAgentModel,
+  agentHarnessForModel,
   normalizeAgentModel
 } from "@/lib/agent-config";
 import type { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
@@ -48,6 +56,7 @@ import {
   upsertAiEditSelection
 } from "./document-workspace/ai-edit-selections";
 import { buildAiEditRemountTransaction } from "./document-workspace/ai-edit-remount";
+import { startAiEditRun } from "./document-workspace/ai-edit-kickoff";
 import { resolveSuggestionRange, type AgentSuggestionInput } from "./document-workspace/ai-suggestions";
 import { submitPendingReplyThenAskAi } from "./document-workspace/ask-ai-flow";
 import {
@@ -65,8 +74,9 @@ import {
   type SuggestionSummary
 } from "./document-workspace/suggestions";
 import { CommentRail } from "./document-workspace/comment-rail";
+import { layoutCommentRail } from "./document-workspace/comment-rail-layout";
 import { DocOutline, OUTLINE_MAX_WIDTH, OUTLINE_MIN_WIDTH } from "./document-workspace/doc-outline";
-import { MoveBlock, SlashTab, StrikeShortcut, TaskItem } from "./document-workspace/editor-extras";
+import { MoveBlock, SlashTab, StrikeShortcut, TabIndentGuard, TaskItem } from "./document-workspace/editor-extras";
 import { EnvironmentMenu } from "./document-workspace/environment-menu";
 import { SkillsMenu } from "./document-workspace/skills-menu";
 import { ExportMenu } from "./document-workspace/export-menu";
@@ -78,6 +88,7 @@ import { LinkPopover } from "./document-workspace/link-popover";
 import { HeadingCopyOverlay } from "./document-workspace/heading-copy-overlay";
 import {
   buildCommentAnchorTransaction,
+  collectCommentAnchorRanges,
   CommentAnchor,
   createCommentHighlightExtension,
   resolveCommentAnchorRange
@@ -109,7 +120,7 @@ import { useCollaborationStream } from "./document-workspace/use-collaboration-s
 import { usePresence } from "./document-workspace/use-presence";
 import { FindBar } from "./document-workspace/find-bar";
 import { SearchExtension } from "./document-workspace/search";
-import { aiRunsFingerprint, buildConversations, selectionBlocksRunSync } from "./document-workspace/conversations";
+import { aiRunsFingerprint, buildConversations, mergeRunEventTimelines, selectionBlocksRunSync } from "./document-workspace/conversations";
 import { createLatexRenderExtension } from "./document-workspace/latex";
 import { AttachmentChip, EmbeddedWidget, RepoImage, TabBreak } from "./document-workspace/nodes";
 import {
@@ -149,8 +160,8 @@ import { WidgetDialog } from "./document-workspace/widget-dialog";
 import {
   DEFAULT_COMMENT_TAGS,
   type ActiveAiRunView,
-  type ActiveAiTarget,
   type AiEditImage,
+  type AiRunEventView,
   type AiEditWidget,
   type CommentTagFilterValue,
   type DocumentWorkspaceProps,
@@ -215,6 +226,7 @@ export function DocumentWorkspace({
   currentUserName,
   documentId,
   initialTitle,
+  documentKind,
   initialContent,
   initialCollaborationVersion,
   initialDocumentUpdatedAt,
@@ -223,23 +235,30 @@ export function DocumentWorkspace({
   mentionMembers,
   initialMentionedCommentIds,
   initialThreads,
+  initialFocusThreadId,
   initialShareLinks,
   initialRepoUrl,
   initialRepoBranch,
   initialAgentModel,
   initialAgentEffort,
+  initialRunnerMode,
   initialHasOpenRouterKey,
   initialHasLiteLlmKey,
+  initialHasOpenAiKey,
   localAgentModel,
   anthropicFreeFallback,
   credentialHasOpenRouterKey,
   credentialHasLiteLlmKey,
+  credentialHasOpenAiKey,
   isAuthenticated,
   isOwner,
   shareToken,
-  viaShareLink
+  viaShareLink,
+  forumView = false,
+  initialForumPostedAt = null,
+  initialForumPublic = false
 }: DocumentWorkspaceProps) {
-  const isPublicView = viaShareLink && initialPermission === "VIEW";
+  const isPublicView = forumView || (viaShareLink && initialPermission === "VIEW");
   const [title, setTitle] = useState(initialTitle);
   const [members, setMembers] = useState<MemberView[]>(initialMembers);
   const [threads, setThreads] = useState<ThreadView[]>(initialThreads);
@@ -248,14 +267,30 @@ export function DocumentWorkspace({
   const [repoBranch, setRepoBranch] = useState(initialRepoBranch ?? "");
   const [agentModel, setAgentModel] = useState(initialAgentModel ?? DEFAULT_AGENT_MODEL);
   const [agentEffort, setAgentEffort] = useState(initialAgentEffort ?? DEFAULT_AGENT_EFFORT);
+  const [runnerMode, setRunnerMode] = useState(initialRunnerMode ?? "managed");
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(initialHasOpenRouterKey);
   const [hasLiteLlmKey, setHasLiteLlmKey] = useState(initialHasLiteLlmKey);
+  const [hasOpenAiKey, setHasOpenAiKey] = useState(initialHasOpenAiKey);
   const [repoBusy, setRepoBusy] = useState(false);
   const [repoNotice, setRepoNotice] = useState<string | null>(null);
   const [repoAccessIssue, setRepoAccessIssue] = useState<{
     login: string | null;
     tokenSource: string;
   } | null>(null);
+  // Slack-channel workspace link (Document.workspaceDocumentId): when set, this
+  // doc's agent runs use the channel document's workspace instead of a repo of
+  // its own. Loaded lazily the first time the Repo menu is opened.
+  const [workspaceLink, setWorkspaceLink] = useState<{
+    id: string;
+    title: string;
+    slackChannelId: string | null;
+  } | null>(null);
+  const [workspaceChannels, setWorkspaceChannels] = useState<
+    { id: string; title: string; slackChannelId: string | null }[]
+  >([]);
+  const [workspaceLinkLoaded, setWorkspaceLinkLoaded] = useState(false);
+  const [workspaceLinkChoice, setWorkspaceLinkChoice] = useState("");
+  const [workspaceLinkBusy, setWorkspaceLinkBusy] = useState(false);
   // Bumped on every doc-changing transaction (local or remote) so anchor-derived
   // memos (e.g. visibleThreads) recompute when content — and its comment anchors —
   // is deleted. Keeps orphaned comments from lingering after a select-all delete.
@@ -291,20 +326,22 @@ export function DocumentWorkspace({
   const maybeShowFreeFallbackNotice = useCallback(() => {
     if (!anthropicFreeFallback || freeFallbackNoticeShownRef.current) return;
     const model = normalizeAgentModel(agentModel);
-    const usesAnthropic =
+    const usesAnthropic = agentHarnessForModel(model) === "claude-code" &&
       !isOpenRouterAgentModel(model) && !isLiteLlmAgentModel(model) && !isLocalAgentModel(model);
     if (!usesAnthropic) return;
     freeFallbackNoticeShownRef.current = true;
     const localName = localAgentModel ? localAgentModel.slice(LOCAL_MODEL_PREFIX.length) : "the local model";
     setFreeFallbackNotice(
-      `No AI credential connected — this run uses the free local model ${localName}, which is very slow. To use Claude, add a credential in the AI credentials menu (topbar).`
+      `No AI credential connected — this run uses the free local model ${localName}, which is very slow. To use Claude, add a credential under Settings (topbar).`
     );
   }, [anthropicFreeFallback, agentModel, localAgentModel]);
   // Optimistic progress line for a just-started run — must not claim "Claude"
   // when the credential-less free fallback will do the work.
-  const startingProgress = anthropicFreeFallback
-    ? "Starting free local model agent (no credential connected — this is slow)."
-    : "Starting Claude research agent.";
+  const startingProgress = agentHarnessForModel(agentModel) === "codex"
+    ? RUN_STARTED_CODEX
+    : anthropicFreeFallback
+      ? RUN_STARTED_LOCAL_FALLBACK
+      : RUN_STARTED_CLAUDE;
   const reportClientError = useCallback(
     (message: string, scope: string, data?: unknown) => {
       setGlobalError(message);
@@ -353,9 +390,18 @@ export function DocumentWorkspace({
   const askAiRunIdRef = useRef<string | null>(null);
   const agentRunIdRef = useRef<string | null>(null);
   const mountedAtRef = useRef<number>(Date.now());
-  const [, setActiveAiTarget] = useState<ActiveAiTarget | null>(null);
-  const [agentPanelOpen, setAgentPanelOpen] = useState(false);
+  // Slack-channel documents exist FOR the agent: land on the agent panel
+  // (config + run history) instead of the mostly-empty notebook body.
+  const [agentPanelOpen, setAgentPanelOpen] = useState(documentKind === "slack_channel");
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  // Full timelines lazily fetched from the run-detail route: for older runs
+  // the poll returns without events (`eventsOmitted`) and for long runs whose
+  // earliest events fell out of the poll's tail window (`eventsClipped`).
+  // Fetched once per run when its conversation is opened, cached here and
+  // merged into the conversation view. Kept separate from `aiRuns` so the
+  // 2s poll (which never carries the missing events) can't clobber them.
+  const [archivedRunEvents, setArchivedRunEvents] = useState<Record<string, AiRunEventView[]>>({});
+  const archivedRunEventsRequestedRef = useRef<Set<string>>(new Set());
   const [composeMode, setComposeMode] = useState<"selected" | "new">("selected");
   const [agentMessage, setAgentMessage] = useState("");
   const [agentBusy, setAgentBusy] = useState(false);
@@ -394,6 +440,7 @@ export function DocumentWorkspace({
   const [newTagDraft, setNewTagDraft] = useState("");
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [outlineWidth, setOutlineWidth] = useState(220);
+  const [commentsCollapsed, setCommentsCollapsed] = useState(false);
   const [activeTabId, setActiveTabIdState] = useState<string | null>(null);
   const [tabs, setTabs] = useState<TabSummary[]>([]);
   const [tableControlsActive, setTableControlsActive] = useState(false);
@@ -438,6 +485,7 @@ export function DocumentWorkspace({
   // flushed by the selectionchange listener below (or superseded by the next poll).
   const pendingAiRunsRef = useRef<ActiveAiRunView[] | null>(null);
   const syncAiRunsRef = useRef<(runs: ActiveAiRunView[]) => void>(() => {});
+  const updateThreadOffsetsRef = useRef<() => void>(() => {});
   const remotePresenceRef = useRef<RemotePresenceView[]>([]);
   const receivedMappingsRef = useRef<ReceivedMappingEntry[]>([]);
   const currentUserIdRef = useRef<string | null>(currentUserId);
@@ -457,8 +505,9 @@ export function DocumentWorkspace({
   } = useAgentNotifications();
   // Anonymous visitors holding a COMMENT/EDIT share link can comment too — the
   // server resolves their access from the token, like collab pushes and AI edits.
-  const canWriteComments = (isAuthenticated || Boolean(shareToken)) && initialPermission !== "VIEW";
-  const canWriteDocument = initialPermission === "EDIT";
+  const canWriteComments =
+    !forumView && (isAuthenticated || Boolean(shareToken)) && initialPermission !== "VIEW";
+  const canWriteDocument = initialPermission === "EDIT" && !forumView;
   // Mirrors canManageDocumentAutomation server-side: signed-in edit access,
   // including edit gained via a share link.
   const canManageAutomation = canWriteDocument && isAuthenticated;
@@ -533,8 +582,9 @@ export function DocumentWorkspace({
     []
   );
   const tabsVisibilityExtension = useMemo(
-    () => createTabsVisibilityExtension(null),
-    []
+    // Forum view stacks all tabs vertically instead of one-at-a-time.
+    () => createTabsVisibilityExtension(null, { showAllTabs: forumView }),
+    [forumView]
   );
   const handleCreateTabRef = useRef<(() => void) | null>(null);
   const slashTabExtension = useMemo(
@@ -584,6 +634,10 @@ export function DocumentWorkspace({
       if (stored === "true") {
         setOutlineCollapsed(true);
       }
+      const storedComments = window.localStorage.getItem("r-docs:comments-collapsed");
+      if (storedComments === "true") {
+        setCommentsCollapsed(true);
+      }
       const storedWidth = window.localStorage.getItem("r-docs:outline-width");
       if (storedWidth) {
         const parsed = Number.parseInt(storedWidth, 10);
@@ -606,6 +660,17 @@ export function DocumentWorkspace({
       // Ignore quota / privacy errors.
     }
   }, [outlineCollapsed]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        "r-docs:comments-collapsed",
+        commentsCollapsed ? "true" : "false"
+      );
+    } catch {
+      // Ignore quota / privacy errors.
+    }
+  }, [commentsCollapsed]);
 
   useEffect(() => {
     try {
@@ -732,30 +797,44 @@ export function DocumentWorkspace({
     }
 
     const pageRect = editorPageRef.current.getBoundingClientRect();
-    const nextOffsets = threads
-      .map((thread) => {
-        try {
-          const range = resolveCommentAnchorRange(editor.state.doc, thread);
-          const top = range ? editor.view.coordsAtPos(range.fromPos).top - pageRect.top : 0;
-          return { id: thread.id, top: Math.max(16, top) };
-        } catch {
-          return { id: thread.id, top: 16 };
-        }
-      })
-      .sort((left, right) => left.top - right.top);
-
-    let cursor = 16;
-    const normalized: Record<string, number> = {};
-
-    nextOffsets.forEach((item) => {
-      const top = Math.max(item.top, cursor);
-      normalized[item.id] = top;
-      cursor = top + (item.id === activeThreadId ? 264 : 152);
+    // Lay out exactly the threads the rail renders. `threads` also contains
+    // ones hidden by tag filters or anchored on another tab; including those
+    // used to reserve stacking space for cards that don't exist, pushing the
+    // visible cards far below their anchors.
+    const anchorTops = orderedThreads.map((thread) => {
+      try {
+        const range = resolveCommentAnchorRange(editor.state.doc, thread);
+        const top = range ? editor.view.coordsAtPos(range.fromPos).top - pageRect.top : 0;
+        return { id: thread.id, top };
+      } catch {
+        return { id: thread.id, top: 16 };
+      }
     });
 
-    setThreadOffsets(normalized);
-    setRailHeight(Math.max(editorPageRef.current.offsetHeight, cursor + 32));
+    // Real rendered card heights: a long comment or reply chain is much
+    // taller than any fixed estimate, and stacking with a wrong height puts
+    // every following card at the wrong position.
+    const heights: Record<string, number> = {};
+    document.querySelectorAll<HTMLElement>(".comment-thread-card[data-thread-id]").forEach((card) => {
+      const id = card.dataset.threadId;
+      if (id && card.offsetHeight > 0) {
+        heights[id] = card.offsetHeight;
+      }
+    });
+
+    const { offsets, bottom } = layoutCommentRail(anchorTops, activeThreadId, heights);
+
+    // Offsets are recomputed from ResizeObserver ticks; only re-render when
+    // something actually moved.
+    setThreadOffsets((previous) => {
+      const ids = Object.keys(offsets);
+      const unchanged =
+        ids.length === Object.keys(previous).length && ids.every((id) => previous[id] === offsets[id]);
+      return unchanged ? previous : offsets;
+    });
+    setRailHeight(Math.max(editorPageRef.current.offsetHeight, bottom + 32));
   }
+  updateThreadOffsetsRef.current = updateThreadOffsets;
 
   function markCollaborationSavedIfSettled() {
     if (!editor || sendableSteps(editor.state)) {
@@ -1153,29 +1232,6 @@ export function DocumentWorkspace({
     setThreads(snapshot.threads);
     syncAiRuns(snapshot.aiRuns ?? snapshot.activeAiRuns ?? (snapshot.activeAiRun ? [snapshot.activeAiRun] : []));
     setAiRunsLoaded(true);
-    setActiveAiTarget((currentTarget) => {
-      const visibleRun = snapshot.activeAiRun ?? snapshot.activeAiRuns?.[0] ?? null;
-      if (!visibleRun) {
-        return null;
-      }
-
-      if (visibleRun.triggerType === "COMMENT_THREAD" && visibleRun.triggerId) {
-        return {
-          type: "comment-thread",
-          threadId: visibleRun.triggerId
-        };
-      }
-
-      if (visibleRun.triggerType === "SELECTION_EDIT" && editor) {
-        const selectionId = parseAiRunSelectionId(visibleRun.triggerId);
-        const range = selectionId ? getAiEditSelectionRange(editor.state, selectionId) : null;
-        if (range) {
-          return getRangeEditTarget(range.from, range.to);
-        }
-      }
-
-      return currentTarget?.type === "selection-edit" ? currentTarget : null;
-    });
     setActiveThreadId((currentThreadId) =>
       currentThreadId && snapshot.threads.some((thread) => thread.id === currentThreadId)
         ? currentThreadId
@@ -1254,6 +1310,7 @@ export function DocumentWorkspace({
       TaskItem.configure({ nested: true }),
       StrikeShortcut,
       MoveBlock,
+      TabIndentGuard,
       slashTabExtension,
       Image.configure({
         allowBase64: true,
@@ -1501,8 +1558,8 @@ export function DocumentWorkspace({
   // convert edits into tracked changes, and who is authoring them.
   useEffect(() => {
     if (!editor) return;
-    editor.view.dispatch(setSuggestionMode(editor.state, suggestingMode, suggestionAuthor));
-  }, [editor, suggestingMode, suggestionAuthor]);
+    editor.view.dispatch(setSuggestionMode(editor.state, suggestingMode, suggestionAuthor, suggestOnlyUser));
+  }, [editor, suggestingMode, suggestionAuthor, suggestOnlyUser]);
 
   // Recompute the pending-suggestion list whenever the document changes.
   useEffect(() => {
@@ -1635,31 +1692,35 @@ export function DocumentWorkspace({
   }
 
   function handleReorderTab(tabId: string, direction: "up" | "down") {
+    const idx = tabs.findIndex((tab) => tab.id === tabId);
+    if (idx === -1) return;
+    handleMoveTab(tabId, direction === "up" ? idx - 1 : idx + 1);
+  }
+
+  // Move a tab (its tabBreak + content slice) to `targetIndex` in the tab
+  // order. Rebuilds the whole tabbed region in the new order with a single
+  // replaceWith, so it works for any distance, not just adjacent swaps.
+  function handleMoveTab(tabId: string, targetIndex: number) {
     if (!editor || !canWriteDocument) return;
     const idx = tabs.findIndex((tab) => tab.id === tabId);
     if (idx === -1) return;
-    const swapIdx = direction === "up" ? idx - 1 : idx + 1;
-    if (swapIdx < 0 || swapIdx >= tabs.length) return;
-
-    const a = tabs[idx];
-    const b = tabs[swapIdx];
-    // a.contentFrom..a.contentTo and b.contentFrom..b.contentTo are adjacent (separated
-    // by the next tabBreak). We move whichever tab comes first to where the second was,
-    // by swapping the two slices including their leading tabBreak nodes.
-    const first = direction === "up" ? b : a;
-    const second = direction === "up" ? a : b;
-    const firstFrom = first.breakPos;
-    const firstTo = first.contentTo;
-    const secondFrom = second.breakPos;
-    const secondTo = second.contentTo;
-    if (firstTo !== secondFrom) return; // sanity check: adjacency
-    const firstSlice = editor.state.doc.slice(firstFrom, firstTo);
-    const secondSlice = editor.state.doc.slice(secondFrom, secondTo);
-    const tr = editor.state.tr.replaceWith(
-      firstFrom,
-      secondTo,
-      secondSlice.content.append(firstSlice.content)
-    );
+    const clamped = Math.max(0, Math.min(tabs.length - 1, targetIndex));
+    if (clamped === idx) return;
+    // Sanity check: tabs must be contiguous slices (each tab's content ends
+    // where the next tab's break begins) so re-concatenation is lossless.
+    for (let i = 0; i < tabs.length - 1; i += 1) {
+      if (tabs[i].contentTo !== tabs[i + 1].breakPos) return;
+    }
+    const order = [...tabs];
+    const [moved] = order.splice(idx, 1);
+    order.splice(clamped, 0, moved);
+    const from = tabs[0].breakPos;
+    const to = tabs[tabs.length - 1].contentTo;
+    let content = Fragment.empty;
+    for (const tab of order) {
+      content = content.append(editor.state.doc.slice(tab.breakPos, tab.contentTo).content);
+    }
+    const tr = editor.state.tr.replaceWith(from, to, content);
     editor.view.dispatch(tr);
   }
 
@@ -1695,12 +1756,6 @@ export function DocumentWorkspace({
     setRemotePresence,
     setRemoteNotice
   });
-
-  useEffect(() => {
-    window.requestAnimationFrame(() => {
-      updateThreadOffsets();
-    });
-  }, [editor, threads, activeThreadId]);
 
   // Initial word/character count once the editor is ready.
   useEffect(() => {
@@ -1873,6 +1928,33 @@ export function DocumentWorkspace({
     });
   }
 
+  // Only the actual owner may flip this (enforced again server-side) — it
+  // decides whose AI credentials every collaborator's run uses.
+  async function handleSaveRunnerMode(next: "managed" | "selfHosted") {
+    if (!isOwner) {
+      return;
+    }
+    const previous = runnerMode;
+    setRunnerMode(next);
+    setSaveState("saving");
+    const response = await fetch(`/api/documents/${documentId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, shareToken, runnerMode: next })
+    });
+    const data = await response.json().catch(() => null);
+    if (response.ok && typeof data?.updatedAt === "string") {
+      setDocumentUpdatedAt(data.updatedAt);
+      setSaveState("saved");
+      return;
+    }
+    setRunnerMode(previous);
+    setSaveState("error");
+    reportClientError("Failed to save the self-hosted runner setting.", "runner-mode-config", {
+      status: response.status
+    });
+  }
+
   async function handleSaveRepository() {
     if (!canWriteDocument) {
       return;
@@ -1938,7 +2020,59 @@ export function DocumentWorkspace({
           : "Repository link removed"
       );
     }
+    if (data.repository.repoUrl) {
+      // The server clears the workspace link when a repo is linked.
+      setWorkspaceLink(null);
+    }
     setRepoBusy(false);
+  }
+
+  async function refreshWorkspaceLink() {
+    if (!canManageAutomation) {
+      return;
+    }
+    const response = await fetch(`/api/documents/${documentId}/workspace-link`).catch(() => null);
+    const data = await response?.json().catch(() => null);
+    if (!response?.ok || !data) {
+      return;
+    }
+    setWorkspaceLink(data.link ?? null);
+    setWorkspaceChannels(Array.isArray(data.channels) ? data.channels : []);
+    setWorkspaceLinkLoaded(true);
+  }
+
+  async function handleSetWorkspaceLink(targetDocumentId: string | null) {
+    if (!canManageAutomation || workspaceLinkBusy) {
+      return;
+    }
+    setWorkspaceLinkBusy(true);
+    setRepoNotice(null);
+    const response = await fetch(`/api/documents/${documentId}/workspace-link`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceDocumentId: targetDocumentId })
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      reportClientError(data?.error ?? "Unable to update the workspace link.", "workspace-link", {
+        documentId,
+        targetDocumentId,
+        status: response.status
+      });
+      setWorkspaceLinkBusy(false);
+      return;
+    }
+    setWorkspaceLink(data?.link ?? null);
+    if (data?.link) {
+      // Linking a channel workspace clears any linked repo server-side.
+      setRepoUrl("");
+      setRepoBranch("");
+      setRepoAccessIssue(null);
+      setRepoNotice(`Connected to the ${data.link.title} workspace`);
+    } else {
+      setRepoNotice("Workspace link removed");
+    }
+    setWorkspaceLinkBusy(false);
   }
 
   async function handleInsertWidget() {
@@ -2284,31 +2418,6 @@ export function DocumentWorkspace({
     setCommentBusy(false);
   }
 
-  function getRangeEditTarget(from: number, to: number): ActiveAiTarget | null {
-    if (!editor || !editorPageRef.current) {
-      return null;
-    }
-
-    const boundedFrom = Math.max(0, Math.min(from, editor.state.doc.content.size));
-    const boundedTo = Math.max(boundedFrom, Math.min(to, editor.state.doc.content.size));
-    const start = editor.view.coordsAtPos(boundedFrom);
-    const end = editor.view.coordsAtPos(boundedTo);
-    const pageRect = editorPageRef.current.getBoundingClientRect();
-    const isMultiline = end.bottom - start.top > 32 || end.left < start.left;
-    const left = isMultiline ? 0 : Math.max(18, start.left - pageRect.left);
-    const availableWidth = Math.max(220, pageRect.width - left - 24);
-    const selectedWidth = Math.abs(end.right - start.left);
-    const selectedHeight = Math.max(76, end.bottom - start.top + 24);
-
-    return {
-      type: "selection-edit",
-      left,
-      top: Math.max(24, start.top - pageRect.top - 8),
-      width: isMultiline ? pageRect.width : Math.min(Math.max(selectedWidth, 260), availableWidth),
-      height: Math.min(selectedHeight, Math.max(160, pageRect.height - (start.top - pageRect.top) + 16))
-    };
-  }
-
   async function handleAiEdit() {
     if (!selection || !editInstruction.trim() || !editor) {
       return;
@@ -2345,46 +2454,39 @@ export function DocumentWorkspace({
     setSelection(null);
     setEditInstruction("");
 
-    const fetchStartedAt = Date.now();
-    const response = await fetch(`/api/documents/${documentId}/ai-edit`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
+    const kickoff = await startAiEditRun(
+      documentId,
+      {
         selectedText: editSelection.text,
         selectedMarkdown,
         selectedContext: editSelection.context,
         instruction,
         selectionId,
         shareToken
-      })
-    }).catch((error) => {
-      logClientEvent({
-        scope: "ai-edit",
-        level: "error",
-        message: "kickoff fetch threw",
-        data: {
-          documentId,
-          selectionId,
-          error: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-        }
-      });
-      return null;
-    });
+      },
+      {
+        onFetchError: (error) =>
+          logClientEvent({
+            scope: "ai-edit",
+            level: "error",
+            message: "kickoff fetch threw",
+            data: {
+              documentId,
+              selectionId,
+              error: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+            }
+          })
+      }
+    );
 
-    const data = await response?.json().catch(() => null);
-    const kickoffAiRunId =
-      data && typeof data.aiRunId === "string" ? (data.aiRunId as string) : null;
-
-    if (!response?.ok || !kickoffAiRunId) {
-      reportClientError(data?.error ?? "AI edit failed to start.", "ai-edit-kickoff", {
+    if (!kickoff.ok) {
+      reportClientError(kickoff.error, "ai-edit-kickoff", {
         documentId,
         selectionId,
-        status: response?.status ?? null,
-        ok: response?.ok ?? false,
-        serverError: typeof data?.error === "string" ? data.error : null,
-        elapsedMs: Date.now() - fetchStartedAt
+        status: kickoff.status,
+        ok: false,
+        serverError: kickoff.serverError,
+        elapsedMs: kickoff.elapsedMs
       });
       notifyAgentCompleted({
         id: `failed-selection-edit-${Date.now()}`,
@@ -2393,7 +2495,6 @@ export function DocumentWorkspace({
         status: "FAILED"
       });
       setActiveAiRun(null);
-      setActiveAiTarget(null);
       editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
       return;
     }
@@ -2405,8 +2506,8 @@ export function DocumentWorkspace({
       data: {
         documentId,
         selectionId,
-        aiRunId: kickoffAiRunId,
-        elapsedMs: Date.now() - fetchStartedAt
+        aiRunId: kickoff.aiRunId,
+        elapsedMs: kickoff.elapsedMs
       }
     });
     // Polling effect (watching `aiRuns`) will pick up status changes and apply the
@@ -2495,7 +2596,7 @@ export function DocumentWorkspace({
         id: selectionId,
         from: range.from,
         to: range.to,
-        progress: "Retrying Claude research agent."
+        progress: RUN_RETRYING
       })
     );
     setActiveAiRun({
@@ -2505,7 +2606,7 @@ export function DocumentWorkspace({
       selectionId,
       instruction,
       status: "RUNNING",
-      progress: "Retrying Claude research agent.",
+      progress: RUN_RETRYING,
       startedAt: new Date().toISOString()
     });
 
@@ -2516,42 +2617,38 @@ export function DocumentWorkspace({
       data: { documentId, selectionId, previousAiRunId: failed.aiRunId }
     });
 
-    const fetchStartedAt = Date.now();
-    const response = await fetch(`/api/documents/${documentId}/ai-edit`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const kickoff = await startAiEditRun(
+      documentId,
+      {
         selectedText,
         selectedMarkdown,
         selectedContext: getSelectionContextFromEditor(editor, range.from, range.to) || undefined,
         instruction,
         selectionId,
         shareToken
-      })
-    }).catch((error) => {
-      logClientEvent({
-        scope: "ai-edit-retry",
-        level: "error",
-        message: "retry kickoff fetch threw",
-        data: {
-          documentId,
-          selectionId,
-          error: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-        }
-      });
-      return null;
-    });
+      },
+      {
+        onFetchError: (error) =>
+          logClientEvent({
+            scope: "ai-edit-retry",
+            level: "error",
+            message: "retry kickoff fetch threw",
+            data: {
+              documentId,
+              selectionId,
+              error: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+            }
+          })
+      }
+    );
 
-    const data = await response?.json().catch(() => null);
-    const kickoffAiRunId = data && typeof data.aiRunId === "string" ? (data.aiRunId as string) : null;
-
-    if (!response?.ok || !kickoffAiRunId) {
-      reportClientError(data?.error ?? "AI edit failed to start.", "ai-edit-retry", {
+    if (!kickoff.ok) {
+      reportClientError(kickoff.error, "ai-edit-retry", {
         documentId,
         selectionId,
-        status: response?.status ?? null,
-        serverError: typeof data?.error === "string" ? data.error : null,
-        elapsedMs: Date.now() - fetchStartedAt
+        status: kickoff.status,
+        serverError: kickoff.serverError,
+        elapsedMs: kickoff.elapsedMs
       });
       // Re-arm the retry affordance so the user can try again (marker is intact).
       setActiveAiRun(null);
@@ -2559,7 +2656,7 @@ export function DocumentWorkspace({
         selectionId,
         aiRunId: failed.aiRunId,
         instruction,
-        error: typeof data?.error === "string" ? data.error : "AI edit failed to start."
+        error: kickoff.error
       });
       return;
     }
@@ -2710,7 +2807,6 @@ export function DocumentWorkspace({
         status: "FAILED"
       });
       setActiveAiRun(null);
-      setActiveAiTarget(null);
       editor.view.dispatch(removeAiEditSelection(editor.state, selectionId));
       return;
     }
@@ -2741,7 +2837,6 @@ export function DocumentWorkspace({
     }
 
     setActiveAiRun(null);
-    setActiveAiTarget(null);
     notifyAgentCompleted({
       id: aiRunId,
       triggerType: "SELECTION_EDIT",
@@ -2861,11 +2956,15 @@ export function DocumentWorkspace({
   // adding the commentAnchor mark for each at its resolved range, through the
   // collab pipeline. The threads already exist + show in the rail; this places
   // their highlight in the text. Unresolved anchors leave the thread unanchored.
-  function applyAgentComments(aiRunId: string, comments: Array<{ threadId: string; findText: string }>) {
-    if (!editor || comments.length === 0) return;
+  function applyAgentComments(aiRunId: string, comments: Array<{ threadId: string; findText: string }>): number {
+    if (!editor || comments.length === 0) return 0;
+    // Idempotency: a thread already anchored in the doc (by this client's live
+    // mid-run pass, the end-of-run pass, or another collaborator) is skipped.
+    const anchored = collectCommentAnchorRanges(editor.state.doc);
     let applied = 0;
     const skipped: string[] = [];
     for (const comment of comments) {
+      if (anchored.has(comment.threadId)) continue;
       const range = resolveSuggestionRange(editor.state.doc, comment.findText);
       if (!range) {
         skipped.push(comment.threadId);
@@ -2887,6 +2986,7 @@ export function DocumentWorkspace({
         data: { documentId, aiRunId, applied, skipped: skipped.length, total: comments.length }
       });
     }
+    return applied;
   }
 
   function handleAcceptSuggestion(suggestionId: string) {
@@ -2990,10 +3090,6 @@ export function DocumentWorkspace({
     setAiBusyThreadId(threadId);
     setGlobalError(null);
     await ensureAgentNotificationPermission();
-    setActiveAiTarget({
-      type: "comment-thread",
-      threadId
-    });
     setActiveAiRun({
       id: "pending-comment-reply",
       triggerType: "COMMENT_THREAD",
@@ -3031,7 +3127,6 @@ export function DocumentWorkspace({
         status: "FAILED"
       });
       setActiveAiRun(null);
-      setActiveAiTarget(null);
       setAiBusyThreadId(null);
       return;
     }
@@ -3141,25 +3236,24 @@ export function DocumentWorkspace({
     setComposeMode("selected");
     setSelectedConversationId(rootId);
 
-    const response = await fetch(`/api/documents/${documentId}/ai-edit`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const kickoff = await startAiEditRun(
+      documentId,
+      {
         selectedText,
         instruction: message,
         selectionId,
         parentRunId: latestRun.id,
         shareToken,
         suggest: canWriteDocument ? undefined : true
-      })
-    });
-    const data = await response.json().catch(() => null);
-    if (!response.ok || !data?.aiRunId) {
-      reportClientError(data?.error ?? "Agent follow-up failed to start.", "agent-edit-followup", {
+      },
+      { fallbackError: "Agent follow-up failed to start." }
+    );
+    if (!kickoff.ok) {
+      reportClientError(kickoff.error, "agent-edit-followup", {
         documentId,
         parentRunId: latestRun.id,
-        status: response.status,
-        serverError: typeof data?.error === "string" ? data.error : null
+        status: kickoff.status,
+        serverError: kickoff.serverError
       });
       syncAiRuns(aiRuns.filter((run) => run.id !== pendingRun.id));
       setAgentBusy(false);
@@ -3181,9 +3275,9 @@ export function DocumentWorkspace({
       scope: "ai-edit-kickoff",
       level: "info",
       message: "edit session follow-up accepted by server",
-      data: { documentId, selectionId, aiRunId: data.aiRunId, parentRunId: latestRun.id }
+      data: { documentId, selectionId, aiRunId: kickoff.aiRunId, parentRunId: latestRun.id }
     });
-    agentRunIdRef.current = data.aiRunId;
+    agentRunIdRef.current = kickoff.aiRunId;
   }
 
   async function handleStopAgentRun(runId: string) {
@@ -3426,6 +3520,20 @@ export function DocumentWorkspace({
     }
   }
 
+  // Arrived from the cross-document comment inbox (?comment=<threadId>): once
+  // the editor is ready, open that thread and scroll its anchor into view.
+  // Fires once — subsequent doc edits must not re-hijack the selection.
+  const focusThreadHandledRef = useRef(false);
+  useEffect(() => {
+    if (focusThreadHandledRef.current) return;
+    if (!initialFocusThreadId || !editor) return;
+    const target = threads.find((thread) => thread.id === initialFocusThreadId);
+    if (!target) return;
+    focusThreadHandledRef.current = true;
+    window.requestAnimationFrame(() => focusThread(target));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor, initialFocusThreadId, threads]);
+
   async function handleDeleteComment(commentId: string) {
     setDeleteBusyCommentId(commentId);
     setGlobalError(null);
@@ -3631,9 +3739,64 @@ export function DocumentWorkspace({
     const activeThread = visibleThreads.find((thread) => thread.id === activeThreadId);
     return activeThread ? [...inactiveThreads, activeThread] : inactiveThreads;
   }, [activeThreadId, visibleThreads]);
+
+  useEffect(() => {
+    window.requestAnimationFrame(() => {
+      updateThreadOffsets();
+    });
+  }, [editor, orderedThreads, activeThreadId]);
+
+  // Comment offsets are computed from coordsAtPos, which is only valid for the
+  // layout at that instant. Widget iframes report their height asynchronously
+  // (postMessage), images load late, KaTeX renders after mount — each shifts
+  // everything below it without any editor transaction. Observe the page (its
+  // height changes on any such shift) and the cards themselves (expanding a
+  // thread / long replies change stacking) and recompute.
+  useEffect(() => {
+    const page = editorPageRef.current;
+    if (!page) return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        updateThreadOffsetsRef.current();
+      });
+    });
+    observer.observe(page);
+    document
+      .querySelectorAll<HTMLElement>(".comment-thread-card[data-thread-id]")
+      .forEach((card) => observer.observe(card));
+    return () => {
+      observer.disconnect();
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [editor, orderedThreads, activeThreadId]);
   const selectedVersion =
     historyVersions.find((version) => version.id === selectedVersionId) ?? historyVersions[0] ?? null;
-  const conversations = useMemo(() => buildConversations(aiRuns), [aiRuns]);
+  const conversations = useMemo(() => {
+    // Splice lazily-loaded events back into runs the poll ships incomplete:
+    // older runs come without timelines (`eventsOmitted` — replace outright),
+    // and long runs come with only their latest window (`eventsClipped` — the
+    // archived fetch has the beginning, the poll has the live tail, so merge
+    // the two by event id).
+    const merged = aiRuns.map((run) => {
+      const archived = archivedRunEvents[run.id];
+      if (!archived) return run;
+      if (run.eventsOmitted) {
+        return { ...run, events: archived, eventsOmitted: false };
+      }
+      if (run.eventsClipped) {
+        return {
+          ...run,
+          events: mergeRunEventTimelines(archived, run.events ?? []),
+          eventsClipped: false
+        };
+      }
+      return run;
+    });
+    return buildConversations(merged);
+  }, [aiRuns, archivedRunEvents]);
   const selectedConversation = useMemo(() => {
     if (composeMode === "new") return null;
     if (selectedConversationId) {
@@ -3642,6 +3805,35 @@ export function DocumentWorkspace({
     }
     return conversations[0] ?? null;
   }, [composeMode, conversations, selectedConversationId]);
+
+  // Lazy-load the full event timelines of the selected conversation's runs the
+  // poll ships incomplete: older runs without events (`eventsOmitted`) and long
+  // runs whose earliest events fell out of the poll window (`eventsClipped`).
+  // One fetch per run, deduped across renders; failures clear the guard so a
+  // re-select retries. For a still-RUNNING clipped run one fetch is enough —
+  // its missing events are the immutable beginning, and the live tail keeps
+  // arriving through the poll (merged in the conversations memo above).
+  useEffect(() => {
+    if (!selectedConversation) return;
+    for (const run of selectedConversation.runs) {
+      if (!(run.eventsOmitted || run.eventsClipped) || archivedRunEventsRequestedRef.current.has(run.id)) continue;
+      archivedRunEventsRequestedRef.current.add(run.id);
+      const shareQuery = shareToken ? `?share=${encodeURIComponent(shareToken)}` : "";
+      fetch(`/api/documents/${documentId}/ai-runs/${run.id}${shareQuery}`, { cache: "no-store" })
+        .then((response) => (response.ok ? response.json() : null))
+        .then((data) => {
+          const events = data?.aiRun?.events;
+          if (Array.isArray(events)) {
+            setArchivedRunEvents((previous) => ({ ...previous, [run.id]: events }));
+          } else {
+            archivedRunEventsRequestedRef.current.delete(run.id);
+          }
+        })
+        .catch(() => {
+          archivedRunEventsRequestedRef.current.delete(run.id);
+        });
+    }
+  }, [selectedConversation, documentId, shareToken]);
 
   useEffect(() => {
     if (composeMode === "new") return;
@@ -3834,7 +4026,6 @@ export function DocumentWorkspace({
             body: JSON.stringify({ action: "markApplied", shareToken })
           }).catch(() => null);
           setActiveAiRun(null);
-          setActiveAiTarget(null);
           aiEditRunStateRef.current.set(run.id, "applied");
           return;
         }
@@ -3929,6 +4120,25 @@ export function DocumentWorkspace({
     }
   }, [aiRuns, editor, documentId, shareToken, canPersistEdits]);
 
+  // Anchor comments the agent leaves MID-RUN (live add_comment delivery). The
+  // polled run list carries the growing agentComments list; each new threadId
+  // is attempted once here (failures are retried by the end-of-run apply
+  // paths, which re-run over the full list — applyAgentComments skips
+  // already-anchored threads, so the overlap is idempotent).
+  const liveCommentAttemptedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!editor || !canPersistEdits) return;
+    for (const run of aiRuns) {
+      if (run.status !== "RUNNING") continue;
+      const comments = Array.isArray(run.agentComments) ? run.agentComments : [];
+      const fresh = comments.filter((comment) => !liveCommentAttemptedRef.current.has(comment.threadId));
+      if (fresh.length === 0) continue;
+      fresh.forEach((comment) => liveCommentAttemptedRef.current.add(comment.threadId));
+      const applied = applyAgentComments(run.id, fresh);
+      if (applied > 0) void flushCollaborationSteps();
+    }
+  }, [aiRuns, editor, canPersistEdits]);
+
   // Clear async run busy-state once the run we kicked off reaches a terminal
   // state in the polled runs. (The comment reply itself arrives via the SSE
   // comment-created broadcast; conversation replies arrive as polled run events.)
@@ -3939,9 +4149,6 @@ export function DocumentWorkspace({
       if (run && run.status !== "RUNNING") {
         askAiRunIdRef.current = null;
         setAiBusyThreadId(null);
-        setActiveAiTarget((current) =>
-          current?.type === "comment-thread" && current.threadId === run.triggerId ? null : current
-        );
       }
     }
 
@@ -4038,6 +4245,16 @@ export function DocumentWorkspace({
       <>
       {isPublicView ? null : (
       <div className="document-chrome">
+        {documentKind === "slack_channel" ? (
+          <div className="slack-doc-banner">
+            <strong>Slack workspace.</strong> This document backs a Slack conversation: the agent
+            settings here configure claudex for that channel, Slack-triggered runs appear in the
+            agent panel, and this body is a shared notebook the agent reads on every run.
+            <button className="slack-doc-banner-link" onClick={() => setAgentPanelOpen(true)} type="button">
+              Open agent panel
+            </button>
+          </div>
+        ) : null}
         <div className="document-topbar">
           <div className="document-topbar-left">
             <input
@@ -4049,6 +4266,14 @@ export function DocumentWorkspace({
               onChange={(event) => setTitle(event.target.value)}
               value={title}
             />
+            {documentKind === "slack_channel" ? (
+              <span
+                className="slack-pill"
+                title="This document is the claudex bot's workspace for a Slack channel: its text is the channel notebook, and the agent settings here (model, skills, environment) configure the bot in that channel."
+              >
+                Slack channel
+              </span>
+            ) : null}
           </div>
 
           <div className="document-compact-status">
@@ -4324,18 +4549,28 @@ export function DocumentWorkspace({
             </div>
           </details>
 
-          <details className="header-menu header-menu-wide" data-tour="repo-menu">
+          <details
+            className="header-menu header-menu-wide"
+            data-tour="repo-menu"
+            onToggle={(event) => {
+              if (event.currentTarget.open && !workspaceLinkLoaded) {
+                void refreshWorkspaceLink();
+              }
+            }}
+          >
             <summary>Repo</summary>
             <div className="header-menu-panel research-repo-panel">
               <div>
                 <strong>Research repository</strong>
                 <p>
-                  {repoUrl
+                  {workspaceLink
+                    ? `Using the shared workspace of ${workspaceLink.title} (Slack channel).`
+                    : repoUrl
                     ? `${repoUrl}${repoBranch ? ` on ${repoBranch}` : ""}${repoUrl.startsWith("https://huggingface.co/") ? " (read-only)" : ""}`
                     : "Link a GitHub repo, or a public HuggingFace repo (read-only), to give the AI a checked-out workspace."}
                 </p>
               </div>
-              {canWriteDocument ? (
+              {canWriteDocument && !workspaceLink ? (
                 <div className="research-repo-controls">
                   <input
                     aria-label="Repository URL"
@@ -4359,6 +4594,59 @@ export function DocumentWorkspace({
                   </button>
                 </div>
               ) : null}
+              {canManageAutomation && documentKind !== "slack_channel" ? (
+                <div className="workspace-link-section">
+                  <div>
+                    <strong>Slack channel workspace</strong>
+                    <p>
+                      {workspaceLink
+                        ? "Agent runs on this doc read and write the channel's shared workspace (repos checked out there included)."
+                        : "Instead of linking a repo, share the workspace of a Slack channel your claudex bot works in — this doc's agent then sees the same files and context."}
+                    </p>
+                  </div>
+                  {workspaceLink ? (
+                    <div className="workspace-link-controls">
+                      <button
+                        className="ghost-button"
+                        disabled={workspaceLinkBusy}
+                        onClick={() => handleSetWorkspaceLink(null)}
+                        type="button"
+                      >
+                        {workspaceLinkBusy ? "Disconnecting..." : `Disconnect ${workspaceLink.title}`}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="workspace-link-controls">
+                      <select
+                        aria-label="Slack channel workspace"
+                        onChange={(event) => setWorkspaceLinkChoice(event.target.value)}
+                        value={workspaceLinkChoice}
+                      >
+                        <option value="">
+                          {workspaceLinkLoaded
+                            ? workspaceChannels.length
+                              ? "Choose a Slack channel..."
+                              : "No Slack channel workspaces available"
+                            : "Loading channels..."}
+                        </option>
+                        {workspaceChannels.map((channel) => (
+                          <option key={channel.id} value={channel.id}>
+                            {channel.title}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        className="ghost-button"
+                        disabled={workspaceLinkBusy || !workspaceLinkChoice}
+                        onClick={() => handleSetWorkspaceLink(workspaceLinkChoice || null)}
+                        type="button"
+                      >
+                        {workspaceLinkBusy ? "Connecting..." : "Connect"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : null}
               {repoNotice ? <span className="subtle-pill">{repoNotice}</span> : null}
               {repoAccessIssue ? (
                 <div className="repo-access-warning" role="alert">
@@ -4367,7 +4655,7 @@ export function DocumentWorkspace({
                     <p>
                       No GitHub credential is connected for this document. If the repository is
                       private (or you want the AI to push to it), connect a GitHub personal access
-                      token with access to it under <em>AI credentials</em> in the topbar, then
+                      token with access to it under <em>Settings</em> in the topbar, then
                       press Save again. Public repositories work read-only without a token — so
                       also check the URL for typos.
                     </p>
@@ -4401,6 +4689,7 @@ export function DocumentWorkspace({
               onKeysChanged={(keys) => {
                 setHasOpenRouterKey(keys.includes("OPENROUTER_API_KEY") || credentialHasOpenRouterKey);
                 setHasLiteLlmKey(keys.includes("LITELLM_API_KEY") || credentialHasLiteLlmKey);
+                setHasOpenAiKey(keys.includes("OPENAI_API_KEY") || credentialHasOpenAiKey);
               }}
             />
           ) : null}
@@ -4477,8 +4766,9 @@ export function DocumentWorkspace({
       <div
         className="editor-stage"
         data-outline-collapsed={outlineCollapsed ? "true" : "false"}
+        data-comments-collapsed={commentsCollapsed ? "true" : "false"}
         data-public-view={isPublicView ? "true" : "false"}
-        data-comments-hidden={isPublicView && !hasUnresolvedThreads ? "true" : "false"}
+        data-comments-hidden={forumView || (isPublicView && !hasUnresolvedThreads) ? "true" : "false"}
         style={{ "--outline-width": `${isPublicView ? 0 : outlineCollapsed ? 36 : Math.round(outlineWidth)}px` } as React.CSSProperties}
       >
         {isPublicView ? null : (
@@ -4496,10 +4786,11 @@ export function DocumentWorkspace({
             onRenameTab={handleRenameTab}
             onDeleteTab={handleDeleteTab}
             onReorderTab={handleReorderTab}
+            onMoveTab={handleMoveTab}
           />
         )}
         <div className="editor-page-shell">
-          {tabs.length > 1 ? (
+          {tabs.length > 1 && !forumView ? (
             <nav className="mobile-tab-strip" aria-label="Document tabs">
               {tabs.map((tab) => (
                 <button
@@ -4602,8 +4893,10 @@ export function DocumentWorkspace({
           </div>
         </div>
 
-        {isPublicView && !hasUnresolvedThreads ? null : (
+        {forumView || (isPublicView && !hasUnresolvedThreads) ? null : (
         <CommentRail
+          collapsed={commentsCollapsed}
+          onToggleCollapsed={() => setCommentsCollapsed((value) => !value)}
           threads={threads}
           orderedThreads={orderedThreads}
           activeThreadId={activeThreadId}
@@ -4651,6 +4944,12 @@ export function DocumentWorkspace({
 
       {agentPanelOpen ? (
         <AgentPanel
+          canManageAutomation={canManageAutomation}
+          onEnvKeysChanged={(keys) => {
+            setHasOpenRouterKey(keys.includes("OPENROUTER_API_KEY") || credentialHasOpenRouterKey);
+            setHasLiteLlmKey(keys.includes("LITELLM_API_KEY") || credentialHasLiteLlmKey);
+            setHasOpenAiKey(keys.includes("OPENAI_API_KEY") || credentialHasOpenAiKey);
+          }}
           title={title}
           documentId={documentId}
           shareToken={shareToken}
@@ -4671,10 +4970,14 @@ export function DocumentWorkspace({
           agentEffort={agentEffort}
           hasOpenRouterKey={hasOpenRouterKey}
           hasLiteLlmKey={hasLiteLlmKey}
+          hasOpenAiKey={hasOpenAiKey}
           localModel={localAgentModel}
           anthropicFreeFallback={anthropicFreeFallback}
+          runnerMode={runnerMode}
+          isOwner={isOwner}
           onAgentModelChange={(model) => void handleSaveAgentConfig({ model })}
           onAgentEffortChange={(effort) => void handleSaveAgentConfig({ effort })}
+          onRunnerModeChange={(mode) => void handleSaveRunnerMode(mode)}
           onClose={() => setAgentPanelOpen(false)}
           onSelectConversation={(rootId) => {
             setComposeMode("selected");
@@ -4715,6 +5018,9 @@ export function DocumentWorkspace({
 
       {shareModalOpen ? (
         <ShareModal
+          documentId={documentId}
+          initialForumPostedAt={initialForumPostedAt}
+          initialForumPublic={initialForumPublic}
           members={members}
           shareLinks={shareLinks}
           inviteEmail={inviteEmail}

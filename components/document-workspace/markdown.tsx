@@ -1,6 +1,7 @@
 import MarkdownIt from "markdown-it";
 import { useMemo } from "react";
 
+import { addLatexSupport } from "@/lib/latex-markdown";
 import { renderCommentHtml, type MentionViewer } from "@/lib/mention-markdown";
 import { getSourceLabel } from "@/lib/sources";
 
@@ -11,6 +12,19 @@ export const aiEditMarkdown = new MarkdownIt({
   linkify: true,
   breaks: true
 });
+addLatexSupport(aiEditMarkdown);
+
+// Instance for HTML that is parsed back into document nodes (AI-edit apply,
+// MCP edits). Latex must stay literal $...$ text here — the editor renders
+// math as decorations over that text; KaTeX HTML would be flattened to junk.
+// The rule still has to run so markdown-it doesn't mangle the equation body
+// (e.g. `_` inside $\mu_0$ becoming <em>).
+const aiEditInsertMarkdown = new MarkdownIt({
+  html: false,
+  linkify: true,
+  breaks: true
+});
+addLatexSupport(aiEditInsertMarkdown, { output: "source" });
 
 const defaultLinkOpenRenderer =
   aiEditMarkdown.renderer.rules.link_open ??
@@ -43,7 +57,7 @@ export function MarkdownBody({
 
 export function buildAiEditHtml(replacementText: string, sourceLinks: string[]) {
   const trimmed = replacementText.trim();
-  const renderedHtml = trimmed ? aiEditMarkdown.render(trimmed) : "<p></p>";
+  const renderedHtml = trimmed ? aiEditInsertMarkdown.render(trimmed) : "<p></p>";
 
   if (sourceLinks.length > 0) {
     return `${renderedHtml}<p><strong>Sources:</strong> ${sourceLinks

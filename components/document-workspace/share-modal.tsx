@@ -1,10 +1,14 @@
 import { permissionLevels, type PermissionLevelValue } from "@/lib/contracts";
 import { permissionLabel } from "@/lib/utils";
 
+import { ShareGroupsSection } from "./share-groups-section";
 import type { MemberView, ShareLinkView } from "./types";
 import { useDialogDismiss } from "./use-dialog-dismiss";
 
 export function ShareModal({
+  documentId,
+  initialForumPostedAt,
+  initialForumPublic,
   members,
   shareLinks,
   inviteEmail,
@@ -18,6 +22,9 @@ export function ShareModal({
   onRevokeShareLink,
   onClose
 }: {
+  documentId: string;
+  initialForumPostedAt: string | null;
+  initialForumPublic: boolean;
   members: MemberView[];
   shareLinks: ShareLinkView[];
   inviteEmail: string;
@@ -155,6 +162,12 @@ export function ShareModal({
             )}
           </div>
         </div>
+
+        <ShareGroupsSection
+          documentId={documentId}
+          initialForumPostedAt={initialForumPostedAt}
+          initialForumPublic={initialForumPublic}
+        />
       </div>
     </div>
   );

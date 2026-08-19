@@ -5,7 +5,7 @@ import "@/app/globals.css";
 import "katex/dist/katex.min.css";
 import { BrandMark } from "@/components/brand-mark";
 import { ChunkReloadRecovery } from "@/components/chunk-reload-recovery";
-import { UserCredentialMenu } from "@/components/user-credential-menu";
+import { TopbarModeSwitch } from "@/components/topbar-mode-switch";
 import { getCurrentUser } from "@/lib/auth";
 
 export const metadata: Metadata = {
@@ -34,15 +34,25 @@ export default async function RootLayout({
         <ChunkReloadRecovery />
         <div className="app-frame">
           <header className="topbar">
-            <Link href="/" className="brand">
-              <BrandMark />
-              <span>r-docs</span>
-            </Link>
+            <div className="topbar-left">
+              <Link href="/" className="brand">
+                <BrandMark />
+                <span>r-docs</span>
+              </Link>
+              {/* Studio / Forum mode switch — always visible, also signed out. */}
+              <TopbarModeSwitch />
+            </div>
             <nav className="topbar-nav">
               {user ? (
                 <>
                   <span className="user-chip">{user.name}</span>
-                  <UserCredentialMenu />
+                  {/* Full-page settings (AI credentials, default model, MCP,
+                      skills, self-hosted worker, forum preferences) — replaced
+                      the old "AI credentials" popup. Keeps the ai-credentials
+                      tour anchor. */}
+                  <Link href="/settings/agent" className="ghost-button" data-tour="ai-credentials">
+                    Settings
+                  </Link>
                   <form action="/api/auth/sign-out" method="post">
                     <button className="ghost-button" type="submit">
                       Sign out

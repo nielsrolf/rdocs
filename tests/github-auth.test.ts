@@ -74,7 +74,7 @@ test("runner PAT beats owner PAT; owner PAT fills in when runner has none", asyn
   });
 });
 
-test("host token requires the allowlist to admit the runner or owner", async () => {
+test("host GitHub token is ignored regardless of allowlist", async () => {
   const owner = await makeUser("gh-owner-host");
   const runner = await makeUser("gh-runner-host");
   const doc = await makeDoc(owner.id);
@@ -84,31 +84,14 @@ test("host token requires the allowlist to admit the runner or owner", async () 
     AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS: allowed
   });
 
-  // Runner allowlisted → host token.
-  assert.deepEqual(await resolveGithubAuthForDocument(doc.id, runner.id, hostEnv(runner.email)), {
-    token: "ghp_host",
-    source: "host"
-  });
-  // Owner allowlisted → host token (background ops on their docs keep working).
-  assert.deepEqual(await resolveGithubAuthForDocument(doc.id, runner.id, hostEnv(owner.email)), {
-    token: "ghp_host",
-    source: "host"
-  });
-  // Nobody allowlisted → anonymous. This is the fix for the confused-deputy hole.
-  assert.equal(
-    await resolveGithubAuthForDocument(doc.id, runner.id, hostEnv("someone-else@example.com")),
-    null
-  );
-  // No allowlist configured at all → host token stays open (single-tenant mode).
-  assert.deepEqual(
-    await resolveGithubAuthForDocument(doc.id, runner.id, hostEnv(undefined)),
-    { token: "ghp_host", source: "host" }
-  );
+  assert.equal(await resolveGithubAuthForDocument(doc.id, runner.id, hostEnv(runner.email)), null);
+  assert.equal(await resolveGithubAuthForDocument(doc.id, runner.id, hostEnv(owner.email)), null);
+  assert.equal(await resolveGithubAuthForDocument(doc.id, runner.id, hostEnv(undefined)), null);
   // No host token, nothing else → anonymous.
   assert.equal(await resolveGithubAuthForDocument(doc.id, runner.id, NO_HOST), null);
 });
 
-test("resolveGithubAuthForUser: own PAT, else allowlist-gated host token", async () => {
+test("resolveGithubAuthForUser: own PAT only, never host token", async () => {
   const user = await makeUser("gh-solo");
   assert.equal(await resolveGithubAuthForUser(user.id, NO_HOST), null);
 
@@ -126,10 +109,7 @@ test("resolveGithubAuthForUser: own PAT, else allowlist-gated host token", async
     }),
     null
   );
-  assert.deepEqual(
-    await resolveGithubAuthForUser(other.id, { GITHUB_TOKEN: "ghp_host" }),
-    { token: "ghp_host", source: "host" }
-  );
+  assert.equal(await resolveGithubAuthForUser(other.id, { GITHUB_TOKEN: "ghp_host" }), null);
 });
 
 test("github provider round-trips through normalizeCredentialInput", () => {

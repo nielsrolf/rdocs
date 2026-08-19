@@ -1,27 +1,23 @@
 import { NextResponse } from "next/server";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { db } from "@/lib/db";
-import { canManageDocumentAutomation, resolveDocumentAccess } from "@/lib/permissions";
 import { deleteSkillFromStore, getDocumentSkillDir } from "@/lib/skills";
 
 export const runtime = "nodejs";
 
-type RouteContext = {
-  params: Promise<{
-    id: string;
-    skillId: string;
-  }>;
-};
-
-export async function DELETE(request: Request, { params }: RouteContext) {
+export async function DELETE(
+  request: Request,
+  { params }: RouteContext<{ id: string; skillId: string }>
+) {
   const { id, skillId } = await params;
-  const user = await getCurrentUser();
-  const shareToken = new URL(request.url).searchParams.get("share");
 
-  const access = await resolveDocumentAccess(id, user?.id, shareToken);
-  if (!access || !canManageDocumentAutomation(access, user?.id)) {
-    return NextResponse.json({ error: "Sign in with edit access to manage agent skills." }, { status: 403 });
+  const gate = await requireDocumentAccess(request, id, "EDIT", {
+    requireUser: true,
+    forbiddenMessage: "Sign in with edit access to manage agent skills."
+  });
+  if (!gate.ok) {
+    return gate.response;
   }
 
   const skill = await db.documentSkill.findUnique({ where: { id: skillId } });

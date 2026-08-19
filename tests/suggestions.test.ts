@@ -77,6 +77,34 @@ test("appendTransaction does not loop / re-mark its own rewrite", () => {
   assert.equal(marksAt(next.doc, "suggestedInsertion")[0]?.text, "X");
 });
 
+test("strict mode: typing is still wrapped as a suggestion (committed view unchanged)", () => {
+  const base = stateWith("Hello world.");
+  const enabledStrict = base.apply(setSuggestionMode(base, true, AUTHOR, true));
+  const next = enabledStrict.apply(enabledStrict.tr.insertText(" brave", 6));
+  // The insertion is tracked, not swallowed by the strict revert.
+  assert.equal(docText(next.doc), "Hello brave world.");
+  assert.equal(marksAt(next.doc, "suggestedInsertion")[0]?.text, " brave");
+});
+
+test("strict mode: an untracked structural edit (Enter/split) is reverted, not committed", () => {
+  // Regression: a comment-only user pressing Enter used to produce an untracked
+  // committed-content change; the server rejected the push with a 403 that the
+  // client turned into a "resolve sync conflict" dialog on every keystroke.
+  const base = stateWith("Hello world.");
+  const strict = base.apply(setSuggestionMode(base, true, AUTHOR, true));
+  const after = strict.apply(strict.tr.split(6)); // split the paragraph at pos 6
+  // The split is undone: still a single paragraph, text intact, no new blocks.
+  assert.equal(after.doc.childCount, 1, "paragraph split was reverted");
+  assert.equal(docText(after.doc), "Hello world.");
+});
+
+test("non-strict suggesting mode (an editor) still allows structural edits", () => {
+  const base = stateWith("Hello world.");
+  const loose = base.apply(setSuggestionMode(base, true, AUTHOR, false));
+  const after = loose.apply(loose.tr.split(6));
+  assert.equal(after.doc.childCount, 2, "editor in suggesting mode can still split blocks");
+});
+
 test("consecutive insertions share one suggestion id (inclusive mark)", () => {
   let state = enable(stateWith("Hi"));
   state = state.apply(state.tr.insertText("a", 3)); // after "Hi"

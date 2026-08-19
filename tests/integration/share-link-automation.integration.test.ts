@@ -85,7 +85,7 @@ itLive("a signed-in user with an EDIT share link can change agent settings", asy
   const res = await fetch(`${BASE}/api/documents/${docId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", Cookie: collaborator.cookie },
-    body: JSON.stringify({ title, shareToken: token, agentModel: "claude-opus-4-8", agentEffort: "high" })
+    body: JSON.stringify({ title, shareToken: token, agentModel: "claude-opus-5", agentEffort: "high" })
   });
   assert.equal(res.status, 200, `agent settings save should succeed, got ${res.status}: ${await res.text()}`);
 
@@ -93,7 +93,7 @@ itLive("a signed-in user with an EDIT share link can change agent settings", asy
     where: { id: docId },
     select: { agentModel: true, agentEffort: true }
   });
-  assert.equal(stored.agentModel, "claude-opus-4-8");
+  assert.equal(stored.agentModel, "claude-opus-5");
   assert.equal(stored.agentEffort, "high");
 });
 
@@ -103,7 +103,7 @@ itLive("an anonymous bearer of the same EDIT link cannot change agent settings",
   const res = await fetch(`${BASE}/api/documents/${docId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, shareToken: token, agentModel: "claude-opus-4-8" })
+    body: JSON.stringify({ title, shareToken: token, agentModel: "claude-opus-5" })
   });
   assert.equal(res.status, 403);
 

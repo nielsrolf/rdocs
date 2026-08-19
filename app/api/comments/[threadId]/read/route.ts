@@ -1,26 +1,15 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { db } from "@/lib/db";
-import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 
 const schema = z.object({
   shareToken: z.string().optional().nullable()
 });
 
-type RouteContext = {
-  params: Promise<{
-    threadId: string;
-  }>;
-};
-
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<{ threadId: string }>) {
   const { threadId } = await params;
-  const user = await getCurrentUser();
-  if (!user) {
-    return NextResponse.json({ error: "You must be signed in." }, { status: 401 });
-  }
 
   const body = await request.json().catch(() => ({}));
   const parsed = schema.safeParse(body ?? {});
@@ -36,10 +25,15 @@ export async function POST(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Thread not found." }, { status: 404 });
   }
 
-  const access = await resolveDocumentAccess(thread.documentId, user.id, parsed.data.shareToken ?? null);
-  if (!access || !canComment(access.permission)) {
-    return NextResponse.json({ error: "You do not have access." }, { status: 403 });
+  const gate = await requireDocumentAccess(request, thread.documentId, "COMMENT", {
+    shareToken: parsed.data.shareToken ?? null,
+    requireUser: true,
+    forbiddenMessage: "You do not have access."
+  });
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { user } = gate;
 
   const now = new Date();
   await db.commentThreadRead.upsert({

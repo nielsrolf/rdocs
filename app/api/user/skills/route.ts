@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { loadCatalogSkill } from "@/lib/skill-catalog";
 import {
   getUserSkillDir,
   prepareSkillUpload,
@@ -49,6 +50,40 @@ export async function POST(request: Request) {
   const user = await getCurrentUser();
   if (!user) {
     return NextResponse.json({ error: "Not signed in." }, { status: 401 });
+  }
+
+  // JSON body → one-click install from the curated skill catalog.
+  const contentType = request.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    const body = await request.json().catch(() => null);
+    const catalogName = typeof body?.catalogName === "string" ? body.catalogName : "";
+    if (!catalogName) {
+      return NextResponse.json({ error: "Missing catalogName." }, { status: 400 });
+    }
+    let prepared;
+    try {
+      prepared = await loadCatalogSkill(catalogName);
+    } catch (error) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Failed to load the skill catalog." },
+        { status: 502 }
+      );
+    }
+    if (!prepared) {
+      return NextResponse.json({ error: "Skill not found in the catalog." }, { status: 404 });
+    }
+    await writeSkillToStore(getUserSkillDir(user.id, prepared.name), prepared);
+    const skill = await db.userSkill.upsert({
+      where: { userId_name: { userId: user.id, name: prepared.name } },
+      create: {
+        userId: user.id,
+        name: prepared.name,
+        description: prepared.description,
+        isDefault: body?.isDefault === true
+      },
+      update: { description: prepared.description }
+    });
+    return NextResponse.json({ skill: serializeUserSkill(skill) });
   }
 
   const formData = await request.formData().catch(() => null);

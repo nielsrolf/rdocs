@@ -1,0 +1,14 @@
+<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Forum favicon: same family as the studio mark, but green with a
+       speech-bubble motif so open forum tabs are distinguishable at a glance. -->
+  <defs>
+    <linearGradient id="fbg" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#188038"/>
+      <stop offset="1" stop-color="#0d652d"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="28" height="28" rx="8" fill="url(#fbg)"/>
+  <path d="M9 9.5 h14 a2.5 2.5 0 0 1 2.5 2.5 v6 a2.5 2.5 0 0 1 -2.5 2.5 h-8.5 l-4.5 4 v-4 h-1 a2.5 2.5 0 0 1 -2.5 -2.5 v-6 a2.5 2.5 0 0 1 2.5 -2.5 Z" fill="#ffffff" fill-opacity="0.95"/>
+  <rect x="10.5" y="13" width="11" height="1.8" rx="0.9" fill="#188038"/>
+  <rect x="10.5" y="16.4" width="7.5" height="1.8" rx="0.9" fill="#188038" fill-opacity="0.75"/>
+</svg>

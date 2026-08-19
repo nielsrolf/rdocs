@@ -14,8 +14,6 @@ export type TabSummary = {
   contentTo: number;
 };
 
-export const IMPLICIT_TAB_ID = "__implicit__";
-
 export function listTabs(doc: ProseMirrorNode): TabSummary[] {
   const tabs: TabSummary[] = [];
   const docSize = doc.content.size;
@@ -43,13 +41,6 @@ export function listTabs(doc: ProseMirrorNode): TabSummary[] {
   return tabs;
 }
 
-export function findTabByPosition(tabs: TabSummary[], pos: number): TabSummary | null {
-  for (const tab of tabs) {
-    if (pos >= tab.contentFrom && pos <= tab.contentTo) return tab;
-  }
-  return tabs[tabs.length - 1] ?? null;
-}
-
 type TabsPluginState = {
   activeTabId: string | null;
 };
@@ -58,7 +49,11 @@ const tabsPluginKey = new PluginKey<TabsPluginState>("tabs-visibility");
 
 const SET_ACTIVE_TAB_META = "tabs:set-active";
 
-export function createTabsVisibilityExtension(initialActiveTabId: string | null) {
+export function createTabsVisibilityExtension(
+  initialActiveTabId: string | null,
+  options?: { showAllTabs?: boolean }
+) {
+  const showAllTabs = options?.showAllTabs ?? false;
   return Extension.create({
     name: "tabsVisibility",
     addKeyboardShortcuts() {
@@ -98,6 +93,9 @@ export function createTabsVisibilityExtension(initialActiveTabId: string | null)
           },
           props: {
             decorations(state) {
+              // Forum (and other stacked read-only) views show every tab in
+              // sequence, with each tabBreak rendering as a section heading.
+              if (showAllTabs) return DecorationSet.empty;
               const tabs = listTabs(state.doc);
               if (tabs.length === 0) return DecorationSet.empty;
 
@@ -227,6 +225,21 @@ export function ensureTabsHaveContent(editor: Editor): boolean {
   }
   editor.view.dispatch(tr);
   return true;
+}
+
+// Tab links use a dedicated hash namespace ("#tab=<id>") that can never
+// collide with heading slugs: slugify strips '=' so no heading slug ever
+// starts with "tab=".
+const TAB_HASH_PREFIX = "tab=";
+
+export function tabHashSlug(tabId: string): string {
+  return `${TAB_HASH_PREFIX}${tabId}`;
+}
+
+export function tabIdFromHashSlug(hash: string): string | null {
+  if (!hash.startsWith(TAB_HASH_PREFIX)) return null;
+  const id = hash.slice(TAB_HASH_PREFIX.length);
+  return id || null;
 }
 
 export function createTabId() {

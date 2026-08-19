@@ -63,6 +63,7 @@ export type DocumentWorkspaceProps = {
   currentUserName: string;
   documentId: string;
   initialTitle: string;
+  documentKind?: string;
   initialContent: unknown;
   initialCollaborationVersion: number;
   initialDocumentUpdatedAt: string;
@@ -76,13 +77,19 @@ export type DocumentWorkspaceProps = {
   // mentioning comment when arriving from a dashboard notification.
   initialMentionedCommentIds: string[];
   initialThreads: ThreadView[];
+  // Thread to open and scroll to on mount, e.g. arriving from the cross-document
+  // comment inbox via ?comment=<threadId>.
+  initialFocusThreadId?: string | null;
   initialShareLinks: ShareLinkView[];
   initialRepoUrl: string | null;
   initialRepoBranch: string | null;
   initialAgentModel: string | null;
   initialAgentEffort: string | null;
+  /** "managed" (default) or "selfHosted" — see Document.runnerMode. */
+  initialRunnerMode: string;
   initialHasOpenRouterKey: boolean;
   initialHasLiteLlmKey: boolean;
+  initialHasOpenAiKey: boolean;
   /** The deployment's free local model ("local/<name>") when configured. */
   localAgentModel: string | null;
   /** True when an Anthropic-model run started by this viewer has no credential
@@ -94,10 +101,20 @@ export type DocumentWorkspaceProps = {
    * these, so they keep the model groups unlocked. */
   credentialHasOpenRouterKey: boolean;
   credentialHasLiteLlmKey: boolean;
+  credentialHasOpenAiKey: boolean;
   isAuthenticated: boolean;
   isOwner: boolean;
   shareToken: string | null;
   viaShareLink: boolean;
+  // Forum mode: render like the public share-link view (no chrome, no outline)
+  // with the editor read-only and the studio comment rail hidden — forum
+  // comments render below the workspace instead (app/forum/[id]).
+  forumView?: boolean;
+  // ISO timestamp when the document was posted to the forum (null = not
+  // posted). Seeds the share modal's forum toggle.
+  initialForumPostedAt?: string | null;
+  // Whether the forum post is public (readable by logged-out visitors).
+  initialForumPublic?: boolean;
 };
 
 export type VersionView = {
@@ -153,7 +170,13 @@ export type ActiveAiRunView = {
   startedAt: string | Date;
   finishedAt?: string | Date | null;
   appliedAt?: string | Date | null;
+  /** Comments the agent has left so far ({threadId, findText}); grows mid-run. */
+  agentComments?: Array<{ threadId: string; findText: string }>;
   events?: AiRunEventView[];
+  /** True when the poll dropped this run's events (older run) — the panel lazy-loads them from the run-detail route. */
+  eventsOmitted?: boolean;
+  /** True when the run outgrew the poll's per-run event window — its EARLIEST events are missing; the panel lazy-loads the full timeline and merges. */
+  eventsClipped?: boolean;
 };
 
 export type AgentToast = {
@@ -161,19 +184,6 @@ export type AgentToast = {
   title: string;
   body: string;
 };
-
-export type ActiveAiTarget =
-  | {
-      type: "selection-edit";
-      top: number;
-      left: number;
-      width: number;
-      height: number;
-    }
-  | {
-      type: "comment-thread";
-      threadId: string;
-    };
 
 export type SelectionState = {
   text: string;

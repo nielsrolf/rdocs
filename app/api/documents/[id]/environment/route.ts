@@ -2,23 +2,28 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { isValidEnvKey } from "@/lib/agent-env";
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import {
   deleteDocumentEnv,
   listDocumentEnvMasked,
+  setDocumentEnvSecretFlag,
   upsertDocumentEnv
 } from "@/lib/document-env";
-import { canManageDocumentAutomation, resolveDocumentAccess } from "@/lib/permissions";
 
 export const runtime = "nodejs";
-
-type RouteContext = {
-  params: Promise<{ id: string }>;
-};
 
 const upsertSchema = z.object({
   key: z.string().min(1).max(128),
   value: z.string().max(8192),
+  // Secret (masked + broker-eligible) vs plain config (shown in full).
+  // Omitted/null = auto-classify from the key name.
+  isSecret: z.boolean().optional().nullable(),
+  shareToken: z.string().optional().nullable()
+});
+
+const flagSchema = z.object({
+  key: z.string().min(1).max(128),
+  isSecret: z.boolean().nullable(),
   shareToken: z.string().optional().nullable()
 });
 
@@ -30,29 +35,29 @@ const deleteSchema = z.object({
 // Only contributors with edit access may read (even masked) or change the
 // document's environment — these are secrets, so view/comment access is not
 // enough.
-async function requireEditAccess(id: string, shareToken: string | null) {
-  const user = await getCurrentUser();
-  const access = await resolveDocumentAccess(id, user?.id, shareToken);
-  if (!access) {
-    return { error: NextResponse.json({ error: "Document not found." }, { status: 404 }) };
+async function requireEditAccess(request: Request, id: string, shareToken: string | null) {
+  const gate = await requireDocumentAccess(request, id, "EDIT", {
+    shareToken,
+    requireUser: true,
+    forbiddenMessage: "Sign in with edit access to manage secrets."
+  });
+  if (!gate.ok) {
+    return { error: gate.response };
   }
-  if (!canManageDocumentAutomation(access, user?.id)) {
-    return { error: NextResponse.json({ error: "Sign in with edit access to manage secrets." }, { status: 403 }) };
-  }
-  return { access };
+  return { access: gate.access };
 }
 
-export async function GET(request: Request, { params }: RouteContext) {
+export async function GET(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
   const shareToken = new URL(request.url).searchParams.get("share");
-  const { error } = await requireEditAccess(id, shareToken);
+  const { error } = await requireEditAccess(request, id, shareToken);
   if (error) return error;
 
   const vars = await listDocumentEnvMasked(id);
   return NextResponse.json({ vars });
 }
 
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
   const body = await request.json().catch(() => null);
   const parsed = upsertSchema.safeParse(body);
@@ -60,7 +65,7 @@ export async function POST(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Invalid environment variable payload." }, { status: 400 });
   }
 
-  const { error } = await requireEditAccess(id, parsed.data.shareToken ?? null);
+  const { error } = await requireEditAccess(request, id, parsed.data.shareToken ?? null);
   if (error) return error;
 
   const key = parsed.data.key.trim();
@@ -71,12 +76,33 @@ export async function POST(request: Request, { params }: RouteContext) {
     );
   }
 
-  await upsertDocumentEnv(id, key, parsed.data.value);
+  await upsertDocumentEnv(id, key, parsed.data.value, parsed.data.isSecret ?? undefined);
   const vars = await listDocumentEnvMasked(id);
   return NextResponse.json({ ok: true, vars });
 }
 
-export async function DELETE(request: Request, { params }: RouteContext) {
+// Reclassify an existing var (secret ↔ plain config) without resubmitting the
+// value. isSecret: true/false = explicit choice, null = back to auto-detect.
+export async function PATCH(request: Request, { params }: RouteContext<{ id: string }>) {
+  const { id } = await params;
+  const body = await request.json().catch(() => null);
+  const parsed = flagSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid request." }, { status: 400 });
+  }
+
+  const { error } = await requireEditAccess(request, id, parsed.data.shareToken ?? null);
+  if (error) return error;
+
+  const changed = await setDocumentEnvSecretFlag(id, parsed.data.key.trim(), parsed.data.isSecret);
+  if (!changed) {
+    return NextResponse.json({ error: "No such variable." }, { status: 404 });
+  }
+  const vars = await listDocumentEnvMasked(id);
+  return NextResponse.json({ ok: true, vars });
+}
+
+export async function DELETE(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
   const body = await request.json().catch(() => null);
   const parsed = deleteSchema.safeParse(body);
@@ -84,7 +110,7 @@ export async function DELETE(request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "Invalid request." }, { status: 400 });
   }
 
-  const { error } = await requireEditAccess(id, parsed.data.shareToken ?? null);
+  const { error } = await requireEditAccess(request, id, parsed.data.shareToken ?? null);
   if (error) return error;
 
   await deleteDocumentEnv(id, parsed.data.key.trim());

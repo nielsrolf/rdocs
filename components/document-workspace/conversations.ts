@@ -26,6 +26,31 @@ export function selectionBlocksRunSync(
   return panelRoot.contains(selection.anchorNode);
 }
 
+// Union of a run's lazy-loaded full timeline (`archived`, fetched once from the
+// run-detail route) and the poll's tail window (`polled`). A run flagged
+// `eventsClipped` may still be RUNNING: the archived fetch captured its
+// beginning, while new events keep arriving only through the poll window — so
+// neither list alone is complete. Dedupe by event id, keep chronological order
+// (createdAt, then id as the tiebreaker used by the server ordering).
+export function mergeRunEventTimelines(
+  archived: AiRunEventView[],
+  polled: AiRunEventView[]
+): AiRunEventView[] {
+  const seen = new Set<string>();
+  const merged: AiRunEventView[] = [];
+  for (const event of [...archived, ...polled]) {
+    if (seen.has(event.id)) continue;
+    seen.add(event.id);
+    merged.push(event);
+  }
+  merged.sort((a, b) => {
+    const delta = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+    if (delta !== 0) return delta;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+  return merged;
+}
+
 export type AgentConversation = {
   rootId: string;
   runs: ActiveAiRunView[];

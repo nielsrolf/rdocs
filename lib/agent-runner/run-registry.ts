@@ -4,8 +4,34 @@
 // runs owned by the CURRENT server process — which is exactly the case that
 // used to force a whole-service restart. Runs orphaned by a restart are already
 // handled by the boot sweep (instrumentation.ts) and the silence reaper.
+//
+// "Process-wide" must be taken literally, and a module-local Map is NOT that:
+// Next.js evaluates `instrumentation.ts` (which owns the Slack socket and the
+// scheduler, and therefore starts every Slack-triggered run) in a different
+// module context than the App Router route handlers. With per-module Maps, a
+// Slack run was invisible to the cancel route (409 "not owned by the current
+// server process"), to `/api/health` (`activeRuns: 0`), and hence to the
+// blue/green drain — which then exited after its grace period and killed
+// in-flight Slack runs. The maps therefore live on a globalThis slot that every
+// module instance in the process resolves to.
 
-const controllers = new Map<string, AbortController>();
+export const RUN_REGISTRY_GLOBAL_KEY = "__rdocsAgentRunRegistry__";
+
+type RunRegistry = {
+  controllers: Map<string, AbortController>;
+  injectors: Map<string, (text: string) => boolean>;
+};
+
+const registryHost = globalThis as typeof globalThis & {
+  [RUN_REGISTRY_GLOBAL_KEY]?: RunRegistry;
+};
+
+const registry: RunRegistry = (registryHost[RUN_REGISTRY_GLOBAL_KEY] ??= {
+  controllers: new Map<string, AbortController>(),
+  injectors: new Map<string, (text: string) => boolean>()
+});
+
+const controllers = registry.controllers;
 
 export const RUN_CANCELLED_MESSAGE = "Cancelled by user.";
 
@@ -40,6 +66,54 @@ export function cancelAiRun(aiRunId: string): boolean {
 
 export function isCancellableAiRun(aiRunId: string): boolean {
   return controllers.has(aiRunId);
+}
+
+/**
+ * How many agent runs THIS process currently owns. Every background runner
+ * registers here for its full lifetime (register in the route, deregister in
+ * the runner's finally), so this is the drain criterion for graceful
+ * shutdown: zero means no in-flight work would die with the process.
+ */
+export function activeRunCount(): number {
+  return controllers.size;
+}
+
+// Steering: runs whose backend can deliver a user message INTO the live agent
+// session register an injector here for their duration (see the input channel
+// in agent-core). Same process-local scope as the abort controllers above: a
+// run owned by another process (or a backend without a steering channel —
+// http/selfHosted) simply has no entry, and callers fall back to queueing a
+// follow-up run. Both harnesses steer: Claude via streaming input, Codex via
+// the app-server's turn/steer.
+// Shared across module instances for the same reason as the controllers above.
+const injectors = registry.injectors;
+
+export function registerRunMessageInjector(aiRunId: string, inject: (text: string) => boolean) {
+  injectors.set(aiRunId, inject);
+}
+
+export function deregisterRunMessageInjector(aiRunId: string) {
+  injectors.delete(aiRunId);
+}
+
+/**
+ * Deliver `text` to a running agent turn as an additional user message.
+ * Returns false when the run cannot accept it (unknown run, unsupported
+ * backend, or the turn already ended) — the caller MUST then fall back to
+ * queueing, so a message is never dropped.
+ */
+export function injectRunMessage(aiRunId: string, text: string): boolean {
+  const inject = injectors.get(aiRunId);
+  if (!inject) return false;
+  try {
+    return inject(text);
+  } catch {
+    return false;
+  }
+}
+
+export function isSteerableAiRun(aiRunId: string): boolean {
+  return injectors.has(aiRunId);
 }
 
 // A run's failure is a user cancellation when its signal was aborted —

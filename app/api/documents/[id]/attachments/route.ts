@@ -4,20 +4,13 @@ import {
   getAttachmentWorkspacePath,
   saveAttachmentToStore
 } from "@/lib/attachments";
-import { getCurrentUser } from "@/lib/auth";
+import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { db } from "@/lib/db";
-import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
 
 export const runtime = "nodejs";
 
 // Keep uploads well under the Cloudflare/Next body limits and avoid filling disk.
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
-
-type RouteContext = {
-  params: Promise<{
-    id: string;
-  }>;
-};
 
 function serializeAttachment(attachment: {
   id: string;
@@ -37,14 +30,12 @@ function serializeAttachment(attachment: {
   };
 }
 
-export async function GET(request: Request, { params }: RouteContext) {
+export async function GET(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
-  const shareToken = new URL(request.url).searchParams.get("share");
 
-  const access = await resolveDocumentAccess(id, user?.id, shareToken);
-  if (!access) {
-    return NextResponse.json({ error: "Document not found." }, { status: 404 });
+  const gate = await requireDocumentAccess(request, id, "VIEW");
+  if (!gate.ok) {
+    return gate.response;
   }
 
   const attachments = await db.attachment.findMany({
@@ -55,18 +46,21 @@ export async function GET(request: Request, { params }: RouteContext) {
   return NextResponse.json({ attachments: attachments.map(serializeAttachment) });
 }
 
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
-  const user = await getCurrentUser();
 
   const formData = await request.formData().catch(() => null);
   const file = formData?.get("file");
   const shareToken = typeof formData?.get("share") === "string" ? (formData.get("share") as string) : null;
 
-  const access = await resolveDocumentAccess(id, user?.id, shareToken);
-  if (!access || !canEdit(access.permission)) {
-    return NextResponse.json({ error: "You do not have edit access." }, { status: 403 });
+  const gate = await requireDocumentAccess(request, id, "EDIT", {
+    shareToken,
+    forbiddenMessage: "You do not have edit access."
+  });
+  if (!gate.ok) {
+    return gate.response;
   }
+  const { user } = gate;
 
   if (!(file instanceof File)) {
     return NextResponse.json({ error: "Missing file." }, { status: 400 });

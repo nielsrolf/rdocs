@@ -4,9 +4,12 @@ import test from "node:test";
 import { buildContainerRunArgs } from "../lib/agent-runner/container-args";
 import {
   RUN_CANCELLED_MESSAGE,
+  RUN_REGISTRY_GLOBAL_KEY,
   RunCancelledError,
+  activeRunCount,
   cancelAiRun,
   deregisterRunAbortController,
+  injectRunMessage,
   isCancellableAiRun,
   isRunCancellation,
   registerRunAbortController
@@ -51,6 +54,39 @@ test("isRunCancellation recognizes cancellations however they surface", () => {
   const liveSignal = new AbortController().signal;
   assert.equal(isRunCancellation(new Error("boom"), liveSignal), false);
   assert.equal(isRunCancellation(new Error("boom"), undefined), false);
+});
+
+// Next.js evaluates `instrumentation.ts` (Slack socket + scheduler) and the App
+// Router route handlers in SEPARATE module contexts, so a module-local Map gave
+// each context its own registry: a Slack-triggered run registered in the
+// instrumentation copy was invisible to the route handler's copy — cancel
+// returned 409 "not owned by the current server process", /api/health reported
+// activeRuns: 0, and the blue/green drain therefore exited immediately and
+// killed in-flight Slack runs. The registry must live on a globalThis slot so
+// every module instance in the process shares one view.
+test("the run registry is shared across module instances of the same process", () => {
+  const registry = (globalThis as Record<string, unknown>)[RUN_REGISTRY_GLOBAL_KEY] as
+    | { controllers: Map<string, AbortController>; injectors: Map<string, (text: string) => boolean> }
+    | undefined;
+  assert.ok(registry, "registry is published on globalThis");
+  assert.ok(registry.controllers instanceof Map);
+  assert.ok(registry.injectors instanceof Map);
+
+  // Stand in for "another module instance registered this run": write straight
+  // into the shared slot, then use the public API from this instance.
+  const foreign = new AbortController();
+  registry.controllers.set("foreign-run", foreign);
+  registry.injectors.set("foreign-run", () => true);
+  try {
+    assert.equal(isCancellableAiRun("foreign-run"), true, "sees a run registered by another instance");
+    assert.ok(activeRunCount() >= 1, "drain criterion counts cross-instance runs");
+    assert.equal(injectRunMessage("foreign-run", "hello"), true, "steering reaches cross-instance runs");
+    assert.equal(cancelAiRun("foreign-run"), true);
+    assert.equal(foreign.signal.aborted, true, "cancel aborts the other instance's controller");
+  } finally {
+    registry.controllers.delete("foreign-run");
+    registry.injectors.delete("foreign-run");
+  }
 });
 
 test("the container gets a stable --name so a cancel can docker-kill it deterministically", () => {

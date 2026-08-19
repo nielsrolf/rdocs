@@ -1,5 +1,6 @@
 import MarkdownIt from "markdown-it";
 
+import { addLatexSupport } from "@/lib/latex-markdown";
 import type { MentionCandidate } from "@/lib/mentions";
 
 // Renders comment markdown with recognized @mentions wrapped in styled spans:
@@ -38,6 +39,7 @@ function buildTokens(viewer: MentionViewer): MentionToken[] {
 }
 
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true });
+addLatexSupport(md);
 
 const defaultLinkOpen =
   md.renderer.rules.link_open ??

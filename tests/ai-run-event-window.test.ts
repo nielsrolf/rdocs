@@ -58,6 +58,11 @@ test("a run that outgrows the event window shows its latest events, oldest dropp
 
     assert.equal(events.length, AI_RUN_EVENT_WINDOW, "window size respected");
     assert.equal(
+      runs.find((r) => r.id === run.id)?.eventsClipped,
+      true,
+      "an overgrown run must be flagged so the client can lazy-load its full timeline"
+    );
+    assert.equal(
       events[events.length - 1]?.message,
       `event ${total - 1}`,
       "the newest event must be inside the window"
@@ -73,6 +78,27 @@ test("a run that outgrows the event window shows its latest events, oldest dropp
         "events stay in chronological order for rendering"
       );
     }
+  } finally {
+    await db.document.delete({ where: { id: document.id } }).catch(() => null);
+    await db.user.delete({ where: { id: user.id } }).catch(() => null);
+  }
+});
+
+test("a run inside the event window is not flagged clipped", async () => {
+  const { user, document, run } = await makeDocWithRun();
+  try {
+    await db.aiRunEvent.createMany({
+      data: Array.from({ length: 5 }, (_, i) => ({
+        aiRunId: run.id,
+        role: "tool",
+        message: `event ${i}`,
+        createdAt: new Date(Date.now() - (5 - i) * 1000)
+      }))
+    });
+    const runs = await fetchDocumentAiRuns(document.id);
+    const row = runs.find((r) => r.id === run.id);
+    assert.equal(row?.events.length, 5);
+    assert.equal(row?.eventsClipped, false);
   } finally {
     await db.document.delete({ where: { id: document.id } }).catch(() => null);
     await db.user.delete({ where: { id: user.id } }).catch(() => null);

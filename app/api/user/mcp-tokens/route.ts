@@ -12,7 +12,7 @@ export const runtime = "nodejs";
 // exactly once; afterwards tokens are listed by label/timestamps only.
 
 function buildConnectCommand(origin: string, token: string) {
-  return `claude mcp add --transport http gdocs-ai ${origin}/api/mcp --header "Authorization: Bearer ${token}"`;
+  return `claude mcp add --transport http r-docs ${origin}/api/mcp --header "Authorization: Bearer ${token}"`;
 }
 
 export async function GET() {

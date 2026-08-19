@@ -1,4 +1,3 @@
-import { NodeSelection } from "@tiptap/pm/state";
 import type { useEditor } from "@tiptap/react";
 
 import { getDocumentMarkdown } from "@/lib/content";
@@ -118,10 +117,6 @@ export function describeNodeSelection(node: { type?: { name?: string }; attrs?: 
   }
 
   return "";
-}
-
-export function isNodeSelection(value: unknown): value is NodeSelection {
-  return value instanceof NodeSelection;
 }
 
 export function logClientEvent(input: {

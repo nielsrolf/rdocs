@@ -13,6 +13,11 @@ export type LinkedRepository = {
   url: string | null;
   branch: string | null;
   workspace: string;
+  // The document whose directory actually holds the base workspace. Equal to
+  // the requested document id unless that document links a shared workspace
+  // (Document.workspaceDocumentId → a slack_channel document); then it is the
+  // target's id, and worktrees/merges/GC all happen under the target's dir.
+  workspaceDocumentId: string;
 };
 
 export type LinkedRepositoryWorktree = LinkedRepository & {
@@ -194,7 +199,7 @@ async function initLocalWorkspace(workspace: string) {
 
 async function ensureWorkspaceGitIdentity(workspace: string, token: string | null) {
   const identity = await resolveGithubIdentity(token);
-  const name = identity?.login ?? "gdocs-ai";
+  const name = identity?.login ?? "r-docs";
   const email = identity
     ? `${identity.id}+${identity.login}@users.noreply.github.com`
     : "ai-agent@r-docs.local";
@@ -222,12 +227,48 @@ export function getGithubCommitUrl(repoUrl: string | null | undefined, commitSha
   return repoPath ? `https://github.com/${repoPath}/commit/${commitSha}` : null;
 }
 
+// Resolve the document whose directory holds the base workspace. A document
+// with `workspaceDocumentId` set shares the workspace of that target document
+// (a slack_channel doc) instead of having one of its own. Resolution is
+// exactly ONE level deep — the target's own workspaceDocumentId is ignored —
+// so links can never form cycles. A dangling target falls back to the
+// document's own workspace (logged, never fatal).
+export async function resolveWorkspaceDocumentId(documentId: string): Promise<string | null> {
+  const document = await db.document.findUnique({
+    where: { id: documentId },
+    select: { id: true, workspaceDocumentId: true }
+  });
+  if (!document) {
+    return null;
+  }
+  if (!document.workspaceDocumentId || document.workspaceDocumentId === documentId) {
+    return documentId;
+  }
+  const target = await db.document.findUnique({
+    where: { id: document.workspaceDocumentId },
+    select: { id: true }
+  });
+  if (!target) {
+    console.warn(
+      "[research-workspace] linked workspace document is gone; using own workspace",
+      { documentId, workspaceDocumentId: document.workspaceDocumentId }
+    );
+    return documentId;
+  }
+  return target.id;
+}
+
 export async function ensureLinkedRepository(
   documentId: string,
   options: { requireClean?: boolean; pushPendingChanges?: boolean; runnerUserId?: string | null } = {}
 ): Promise<LinkedRepository | null> {
+  const workspaceDocumentId = await resolveWorkspaceDocumentId(documentId);
+  if (!workspaceDocumentId) {
+    return null;
+  }
+
   const document = await db.document.findUnique({
-    where: { id: documentId },
+    where: { id: workspaceDocumentId },
     select: {
       id: true,
       repoUrl: true,
@@ -245,7 +286,11 @@ export async function ensureLinkedRepository(
   // pinned into the repo-local config below, so later background ops (salvage,
   // reaper merges) reuse the last resolved auth. Null → anonymous git.
   const githubAuth = document.repoUrl?.startsWith("https://github.com/")
-    ? await resolveGithubAuthForDocument(documentId, options.runnerUserId ?? null)
+    ? // Auth follows the WORKSPACE-owning document (its env / owner PAT): the
+      // workspace's git config is shared by every doc linking it, so it must
+      // not depend on which linking doc triggered this call. The triggering
+      // user's PAT still participates via runnerUserId.
+      await resolveGithubAuthForDocument(document.id, options.runnerUserId ?? null)
     : null;
 
   const workspace = document.repoWorkspace || getWorkspacePath(document.id, document.repoUrl);
@@ -311,7 +356,8 @@ export async function ensureLinkedRepository(
   return {
     url: document.repoUrl,
     branch: document.repoBranch,
-    workspace
+    workspace,
+    workspaceDocumentId: document.id
   };
 }
 
@@ -330,12 +376,13 @@ export async function ensureLinkedRepositoryWorktree(
     return null;
   }
 
-  const worktree = getWorktreePath(documentId, linked.url, runId);
+  // Worktrees live next to the base checkout — under the WORKSPACE-owning
+  // document's dir — so gcStaleWorktrees and `git worktree prune` see them.
+  const worktree = getWorktreePath(linked.workspaceDocumentId, linked.url, runId);
   const branchName = `ai/${slugifyBranchPart(documentId)}/${slugifyBranchPart(runId)}`;
-  const baseRef = linked.branch && linked.url ? `origin/${linked.branch}` : "HEAD";
 
-  // fetch + worktree-add both mutate the shared base checkout's git metadata,
-  // so serialize them against other runs on the same base workspace.
+  // Fetch + isolated-checkout creation both read or mutate the shared base
+  // checkout, so serialize them against other runs on the same workspace.
   await withWorkspaceLock(linked.workspace, async () => {
     if (linked.url) {
       await runCommand("git", ["fetch", "--all", "--prune"], {
@@ -344,18 +391,92 @@ export async function ensureLinkedRepositoryWorktree(
       }).catch(() => null);
     }
 
-    const hasWorktree = await fs
+    const hasCheckout = await fs
       .stat(path.join(worktree, ".git"))
-      .then((stat) => stat.isFile() || stat.isDirectory())
+      // A gitfile created by `git worktree add` points outside the directory.
+      // That pointer breaks as soon as Docker bind-mounts only this checkout at
+      // /workspace. Require a real .git directory so the mounted workspace is
+      // a self-contained repository.
+      .then((stat) => stat.isDirectory())
       .catch(() => false);
 
     await fs.mkdir(path.dirname(worktree), { recursive: true });
 
-    if (!hasWorktree) {
-      await runCommand("git", ["worktree", "add", "-B", branchName, worktree, baseRef], {
-        cwd: linked.workspace,
+    if (!hasCheckout) {
+      await fs.rm(worktree, { recursive: true, force: true }).catch(() => null);
+
+      // Start from the app-managed base HEAD so local/unpushed workspace state
+      // is present, then fetch and merge the remote branch below so the run
+      // also receives its freshest non-conflicting content.
+      // Do not use `git worktree add`: its .git file contains an absolute
+      // pointer into the base checkout, which is deliberately outside the
+      // container mount. A no-local clone copies the objects and metadata into
+      // this one mounted directory, keeping git status/diff/commit functional
+      // without exposing the base clone or sibling runs.
+      await runCommand("git", ["clone", "--no-local", linked.workspace, worktree], {
+        cwd: path.dirname(worktree),
         timeoutMs: 300_000
       });
+      const localWorkspaceCommit = (
+        await runCommand("git", ["rev-parse", "--verify", "HEAD^{commit}"], { cwd: worktree })
+      ).stdout.trim();
+      await runCommand("git", ["checkout", "-B", branchName, localWorkspaceCommit], {
+        cwd: worktree
+      });
+
+      if (linked.url) {
+        await runCommand("git", ["remote", "set-url", "origin", linked.url], { cwd: worktree });
+      } else {
+        await runCommand("git", ["remote", "remove", "origin"], { cwd: worktree }).catch(() => null);
+      }
+
+      // A clone does not inherit repo-local identity/auth. Copy only the
+      // explicitly managed values from the base; never consult host-global git
+      // configuration for commits or remote access.
+      for (const key of ["user.name", "user.email", GITHUB_EXTRAHEADER_KEY]) {
+        const value = await runCommand("git", ["config", "--local", "--get", key], {
+          cwd: linked.workspace
+        })
+          .then((result) => result.stdout.trim())
+          .catch(() => "");
+        if (value) {
+          await runCommand("git", ["config", "--local", key, value], { cwd: worktree });
+        }
+      }
+
+      if (linked.url) {
+        // The base clone has the fetched object, but upload-pack does not
+        // advertise commits reachable only through remote-tracking refs to a
+        // local clone. Fetch the real origin into the standalone checkout so
+        // the remote default commit is both present and correctly named.
+        await runCommand("git", ["fetch", "--all", "--prune"], {
+          cwd: worktree,
+          timeoutMs: 300_000
+        });
+      }
+      if (linked.url) {
+        const remoteRef = linked.branch ? `origin/${linked.branch}` : "origin/HEAD";
+        const remoteCommit = (
+          await runCommand("git", ["rev-parse", "--verify", `${remoteRef}^{commit}`], {
+            cwd: worktree
+          })
+        ).stdout.trim();
+        if (remoteCommit !== localWorkspaceCommit) {
+          // The run must see BOTH the app-managed workspace state (including a
+          // locally committed draft whose push failed) and the freshest remote
+          // branch. Merge only inside this isolated checkout. Most updates
+          // fast-forward or merge cleanly; on a true conflict preserve the
+          // local workspace version while still taking every non-conflicting
+          // remote change. The agent can then inspect/refine the combined tree.
+          await runCommand("git", ["merge", "--no-edit", remoteCommit], { cwd: worktree })
+            .catch(async () => {
+              await runCommand("git", ["merge", "--abort"], { cwd: worktree }).catch(() => null);
+              await runCommand("git", ["merge", "--no-edit", "-X", "ours", remoteCommit], {
+                cwd: worktree
+              });
+            });
+        }
+      }
     }
   });
 
@@ -551,8 +672,19 @@ export async function syncBranchToBaseWorkspace(
   baseWorkspace: string,
   commitSha: string,
   push: boolean,
-  resolveConflicts: (baseWorkspace: string, commitSha: string) => Promise<void> = resolveMergeConflictsWithClaude
+  resolveConflicts: (baseWorkspace: string, commitSha: string) => Promise<void> = resolveMergeConflictsWithClaude,
+  sourceWorkspace?: string
 ) {
+  // Per-run checkouts are self-contained clones so they remain valid when
+  // mounted alone in a container. Import their commit into the base object
+  // database before attempting the merge.
+  if (sourceWorkspace && path.resolve(sourceWorkspace) !== path.resolve(baseWorkspace)) {
+    await runCommand("git", ["fetch", "--no-tags", sourceWorkspace, commitSha], {
+      cwd: baseWorkspace,
+      timeoutMs: 300_000
+    });
+  }
+
   // Self-heal from a prior run that left a merge half-done before refusing to merge.
   await ensureBaseWorkspaceClean(baseWorkspace);
   const status = await runCommand("git", ["status", "--porcelain"], { cwd: baseWorkspace });
@@ -664,7 +796,9 @@ export async function commitWorkspaceChanges(input: {
         commitSha,
         // Skip the base push when the worktree push was already denied — it
         // would fail identically; the local merge still keeps the base current.
-        input.push && !pushError && !isReadOnlyRepoUrl(input.repoUrl)
+        input.push && !pushError && !isReadOnlyRepoUrl(input.repoUrl),
+        resolveMergeConflictsWithClaude,
+        input.workspace
       )
     );
   }

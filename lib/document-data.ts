@@ -4,6 +4,13 @@ import { aggregateReactions, type RawReaction } from "@/lib/reactions";
 import { parseSourceLinks, serializeSourceLinks } from "@/lib/sources";
 
 const VERSION_SNAPSHOT_COOLDOWN_MS = 45_000;
+// Versions store full content snapshots; without retention a busy document
+// grows the SQLite file by megabytes per save until queries time out (the DB
+// once reached 39GB this way). Retention: keep every snapshot from the last
+// VERSION_RETENTION_FULL_MS, thin older ones to the newest per UTC day, and
+// hard-cap the total per document as a backstop against single-day bursts.
+const VERSION_RETENTION_FULL_MS = 24 * 60 * 60 * 1000;
+const MAX_VERSIONS_PER_DOCUMENT = 500;
 const DEFAULT_THREAD_TAGS = ["Resolved", "Footnote"];
 
 export function normalizeThreadTags(tags: unknown) {
@@ -267,6 +274,183 @@ export async function getDocumentCommentStats(userId: string, documentIds: strin
   return { unreadByDoc, lastCommentByDoc };
 }
 
+export type AccessibleDocument = {
+  id: string;
+  title: string;
+  kind: string;
+  updatedAt: Date;
+  isOwner: boolean;
+  permission: string;
+  owner: { id: string; name: string };
+};
+
+// The union of documents a user can reach: everything they own plus every
+// document they were added to as a member. This is the same list the dashboard
+// renders; extracted here so the cross-document comment view scopes to exactly
+// the same set (no leakage of docs the user cannot see).
+export async function listAccessibleDocumentsForUser(userId: string): Promise<AccessibleDocument[]> {
+  const [ownedDocuments, memberships, groupGrants] = await Promise.all([
+    db.document.findMany({
+      where: { ownerId: userId },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        id: true,
+        title: true,
+        kind: true,
+        updatedAt: true,
+        owner: { select: { id: true, name: true } }
+      }
+    }),
+    db.documentMembership.findMany({
+      where: { userId },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        permission: true,
+        document: {
+          select: {
+            id: true,
+            title: true,
+            kind: true,
+            updatedAt: true,
+            owner: { select: { id: true, name: true } }
+          }
+        }
+      }
+    }),
+    db.documentGroupAccess.findMany({
+      where: { group: { members: { some: { userId } } } },
+      select: {
+        permission: true,
+        document: {
+          select: {
+            id: true,
+            title: true,
+            kind: true,
+            updatedAt: true,
+            owner: { select: { id: true, name: true } }
+          }
+        }
+      }
+    })
+  ]);
+
+  const owned: AccessibleDocument[] = ownedDocuments.map((d) => ({
+    id: d.id,
+    title: d.title,
+    kind: d.kind,
+    updatedAt: d.updatedAt,
+    isOwner: true,
+    permission: "EDIT",
+    owner: d.owner
+  }));
+  const toShared = ({ document, permission }: {
+    document: { id: string; title: string; kind: string; updatedAt: Date; owner: { id: string; name: string } };
+    permission: string;
+  }): AccessibleDocument => ({
+    id: document.id,
+    title: document.title,
+    kind: document.kind,
+    updatedAt: document.updatedAt,
+    isOwner: false,
+    permission,
+    owner: document.owner
+  });
+
+  // Merge, deduped by document id, keeping the strongest permission (owner >
+  // direct membership > group grants — later entries only override when
+  // strictly stronger).
+  const rank: Record<string, number> = { VIEW: 1, COMMENT: 2, EDIT: 3 };
+  const byId = new Map<string, AccessibleDocument>();
+  for (const doc of [...owned, ...memberships.map(toShared), ...groupGrants.map(toShared)]) {
+    const existing = byId.get(doc.id);
+    if (!existing) {
+      byId.set(doc.id, doc);
+      continue;
+    }
+    if (!existing.isOwner && (rank[doc.permission] ?? 0) > (rank[existing.permission] ?? 0)) {
+      byId.set(doc.id, { ...doc, isOwner: existing.isOwner });
+    }
+  }
+  return [...byId.values()];
+}
+
+export type InboxThread = ReturnType<typeof serializeThread> & {
+  documentId: string;
+  documentTitle: string;
+};
+
+// Every comment thread across the documents a user can access, annotated with
+// its parent document, plus the distinct set of tags in play (for filter
+// chips). Filtering by tag is done client-side because tags live as a
+// JSON-string column, not a normalized table.
+export async function listTaggedThreadsForUser(
+  userId: string
+): Promise<{ threads: InboxThread[]; tags: string[] }> {
+  const documents = await listAccessibleDocumentsForUser(userId);
+  const titleByDoc = new Map(documents.map((d) => [d.id, d.title]));
+  const docIds = documents.map((d) => d.id);
+  if (docIds.length === 0) {
+    return { threads: [], tags: getDefaultThreadTags() };
+  }
+
+  const threads = await db.commentThread.findMany({
+    where: { documentId: { in: docIds } },
+    orderBy: { updatedAt: "desc" },
+    select: {
+      id: true,
+      documentId: true,
+      anchorText: true,
+      anchorContext: true,
+      status: true,
+      tags: true,
+      createdAt: true,
+      createdBy: { select: { id: true, name: true } },
+      comments: {
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true,
+          body: true,
+          aiModel: true,
+          guestName: true,
+          sourceLinks: true,
+          commitSha: true,
+          commitUrl: true,
+          aiRunId: true,
+          createdAt: true,
+          author: { select: { id: true, name: true } },
+          reactions: {
+            select: { emoji: true, userId: true, user: { select: { name: true } } }
+          }
+        }
+      }
+    }
+  });
+
+  const reads = await db.commentThreadRead.findMany({
+    where: { userId, threadId: { in: threads.map((t) => t.id) } },
+    select: { threadId: true, lastReadAt: true }
+  });
+  const lastReadByThread = new Map(reads.map((row) => [row.threadId, row.lastReadAt]));
+
+  const tagUniverse = new Set(getDefaultThreadTags());
+  const inboxThreads: InboxThread[] = threads.map((thread) => {
+    const serialized = serializeThread(thread, {
+      lastReadAt: lastReadByThread.get(thread.id) ?? null,
+      currentUserId: userId
+    });
+    for (const tag of serialized.tags) {
+      tagUniverse.add(tag);
+    }
+    return {
+      ...serialized,
+      documentId: thread.documentId,
+      documentTitle: titleByDoc.get(thread.documentId) ?? "Untitled"
+    };
+  });
+
+  return { threads: inboxThreads, tags: Array.from(tagUniverse) };
+}
+
 export async function listDocumentVersions(documentId: string) {
   const versions = await db.documentVersion.findMany({
     where: { documentId },
@@ -355,6 +539,9 @@ export async function maybeCreateVersionSnapshot(input: {
     latestVersion?.title === input.nextTitle && latestVersion?.content === input.nextContent;
 
   if (!input.force && (withinCooldown || snapshotMatchesLatest)) {
+    if (!previousIsArchived) {
+      await pruneVersionHistory(input.documentId);
+    }
     return;
   }
 
@@ -369,4 +556,40 @@ export async function maybeCreateVersionSnapshot(input: {
       aiRunId: input.aiRunId ?? null
     }
   });
+
+  await pruneVersionHistory(input.documentId);
+}
+
+export async function pruneVersionHistory(documentId: string, now: number = Date.now()) {
+  const versions = await db.documentVersion.findMany({
+    where: { documentId },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { id: true, createdAt: true }
+  });
+
+  const fullRetentionCutoff = now - VERSION_RETENTION_FULL_MS;
+  const seenDays = new Set<string>();
+  const excess: string[] = [];
+
+  versions.forEach((version, index) => {
+    if (index >= MAX_VERSIONS_PER_DOCUMENT) {
+      excess.push(version.id);
+      return;
+    }
+    if (version.createdAt.getTime() >= fullRetentionCutoff) {
+      return;
+    }
+    const day = version.createdAt.toISOString().slice(0, 10);
+    if (seenDays.has(day)) {
+      excess.push(version.id);
+    } else {
+      seenDays.add(day);
+    }
+  });
+
+  for (let index = 0; index < excess.length; index += 200) {
+    await db.documentVersion.deleteMany({ where: { id: { in: excess.slice(index, index + 200) } } });
+  }
+
+  return excess.length;
 }

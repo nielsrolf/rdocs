@@ -99,7 +99,7 @@ test("no credential anywhere still fails with the connect message", async () => 
   );
 });
 
-test("host allowlist admits the runner, not just the owner", async () => {
+test("host allowlist never admits a host credential", async () => {
   process.env.AGENT_REQUIRE_USER_CREDENTIAL = "";
   const owner = await makeUser("cred-owner-allow");
   const runner = await makeUser("cred-runner-allow");
@@ -107,12 +107,6 @@ test("host allowlist admits the runner, not just the owner", async () => {
   process.env.AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS = runner.email;
 
   try {
-    // Runner allowlisted → host fallback permitted (no throw), env left bare.
-    const env = await loadAgentEnvForDocument(doc.id, "claude-sonnet-5", runner.id);
-    assert.equal(env.ANTHROPIC_API_KEY, undefined);
-
-    // Nobody allowlisted → refused.
-    process.env.AGENT_HOST_CREDENTIAL_ALLOWED_EMAILS = "someone-else@example.com";
     await assert.rejects(
       () => loadAgentEnvForDocument(doc.id, "claude-sonnet-5", runner.id),
       /Connect an Anthropic credential/

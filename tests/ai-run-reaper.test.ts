@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
 
-import { failAbandonedAiRuns, markAiRunSucceeded, startAiRunHeartbeat, STALE_AI_RUN_MS } from "../lib/ai-runs";
+import {
+  createDeferredHeartbeat,
+  failAbandonedAiRuns,
+  markAiRunSucceeded,
+  startAiRunHeartbeat,
+  sweepAbandonedAiRuns,
+  STALE_AI_RUN_MS
+} from "../lib/ai-runs";
 import { serializeDocumentContent } from "../lib/content";
 import { db } from "../lib/db";
 
@@ -30,14 +37,15 @@ async function makeRun(
   documentId: string,
   startedAgoMs: number,
   now: number,
-  heartbeatAgoMs?: number
+  heartbeatAgoMs?: number,
+  status: "RUNNING" | "PENDING" = "RUNNING"
 ) {
   return db.aiRun.create({
     data: {
       documentId,
       triggerType: "SELECTION_EDIT",
       instruction: "test run",
-      status: "RUNNING",
+      status,
       startedAt: new Date(now - startedAgoMs),
       heartbeatAt: heartbeatAgoMs === undefined ? null : new Date(now - heartbeatAgoMs)
     }
@@ -211,6 +219,40 @@ test("startAiRunHeartbeat ticks heartbeatAt immediately and stops cleanly", asyn
   }
 });
 
+// A conversation run queued on the per-conversation session mutex is doing
+// nothing, but it used to heartbeat from the moment the background function
+// started — so it stayed RUNNING-with-fresh-heartbeat forever, unreapable,
+// unsteerable, and (in a Slack thread) blocking every follow-up behind a ghost.
+// The heartbeat must not start until the run actually holds the lock.
+test("a deferred heartbeat stays silent until the run starts working", async () => {
+  const started: string[] = [];
+  const stopped: string[] = [];
+  const fakeStart = (aiRunId: string) => {
+    started.push(aiRunId);
+    return () => stopped.push(aiRunId);
+  };
+
+  const deferred = createDeferredHeartbeat("run-parked", { deferred: true, start: fakeStart });
+  assert.deepEqual(started, [], "no heartbeat while parked on the lock");
+  deferred.begin();
+  deferred.begin();
+  assert.deepEqual(started, ["run-parked"], "begin is idempotent");
+  deferred.stop();
+  assert.deepEqual(stopped, ["run-parked"]);
+
+  // Stopping before ever beginning must not leak a later start (the lifecycle
+  // finally can run while the run is still parked, e.g. on cancellation).
+  const abandoned = createDeferredHeartbeat("run-cancelled", { deferred: true, start: fakeStart });
+  abandoned.stop();
+  abandoned.begin();
+  assert.deepEqual(started, ["run-parked"], "a stopped deferred heartbeat never starts");
+
+  // Non-conversation runs keep the old eager behaviour.
+  const eager = createDeferredHeartbeat("run-eager", { start: fakeStart });
+  assert.deepEqual(started, ["run-parked", "run-eager"]);
+  eager.stop();
+});
+
 // Regression: the reaper only flips the DB row — it cannot kill the process.
 // A falsely-reaped run that later finishes flips FAILED -> SUCCEEDED but used
 // to keep the stale "Run abandoned (server restart or crash)." error text,
@@ -233,6 +275,66 @@ test("a reaped run that later succeeds sheds the stale abandoned error", async (
     assert.equal(fresh?.status, "SUCCEEDED");
     assert.equal(fresh?.replacementText, "the results");
     assert.equal(fresh?.error, null, "success must clear the reaper's stale error text");
+  } finally {
+    await cleanup(document.id, user.id);
+  }
+});
+
+// Blue/green deploys: the boot sweep (instrumentation.ts) no longer fails
+// every non-terminal run — a freshly booted process must spare runs the
+// draining OLD process is still working on (their heartbeats are fresh) and
+// only reap runs of a genuinely dead process.
+test("sweepAbandonedAiRuns spares heartbeating runs of a draining sibling, reaps dead ones", async () => {
+  const { user, document } = await makeDoc("bootsweep");
+  const now = Date.now();
+  try {
+    // Old-process run, alive and draining: started long ago, heartbeated 1min ago.
+    const alive = await makeRun(document.id, STALE_AI_RUN_MS + 30 * 60 * 1000, now, 60 * 1000);
+    // Dead-process run: heartbeat and startedAt both silent past the threshold.
+    const dead = await makeRun(
+      document.id,
+      STALE_AI_RUN_MS + 30 * 60 * 1000,
+      now,
+      STALE_AI_RUN_MS + 60 * 1000
+    );
+
+    const { failed } = await sweepAbandonedAiRuns(now, { documentId: document.id });
+    const failedIds = new Set(failed.map((run) => run.id));
+
+    assert.equal(failedIds.has(alive.id), false, "heartbeating run must survive the boot sweep");
+    assert.equal(failedIds.has(dead.id), true, "silent run must be reaped");
+
+    const freshAlive = await db.aiRun.findUnique({ where: { id: alive.id }, select: { status: true } });
+    const freshDead = await db.aiRun.findUnique({ where: { id: dead.id }, select: { status: true } });
+    assert.equal(freshAlive?.status, "RUNNING");
+    assert.equal(freshDead?.status, "FAILED");
+
+    // The failed rows carry workspace fields for salvage.
+    const deadRow = failed.find((run) => run.id === dead.id);
+    assert.ok(deadRow && "workspacePath" in deadRow && "branchName" in deadRow);
+  } finally {
+    await cleanup(document.id, user.id);
+  }
+});
+
+// PENDING rows never heartbeat (the heartbeat starts with RUNNING), so a
+// PENDING orphan of a dead process used to linger forever once the boot
+// fail-all sweep went away. The silence rule must cover PENDING too.
+test("a stale PENDING run is reaped; a fresh PENDING run is spared", async () => {
+  const { user, document } = await makeDoc("pending");
+  const now = Date.now();
+  try {
+    const stalePending = await makeRun(document.id, STALE_AI_RUN_MS + 60 * 1000, now, undefined, "PENDING");
+    const freshPending = await makeRun(document.id, 30 * 1000, now, undefined, "PENDING");
+
+    const reaped = await failAbandonedAiRuns([stalePending, freshPending], now);
+
+    assert.equal(reaped?.failedIds.has(stalePending.id), true, "stale PENDING must be reaped");
+    assert.equal(reaped?.failedIds.has(freshPending.id) ?? false, false, "fresh PENDING must be spared");
+    const fresh = await db.aiRun.findUnique({ where: { id: stalePending.id }, select: { status: true } });
+    assert.equal(fresh?.status, "FAILED");
+    const spared = await db.aiRun.findUnique({ where: { id: freshPending.id }, select: { status: true } });
+    assert.equal(spared?.status, "PENDING");
   } finally {
     await cleanup(document.id, user.id);
   }

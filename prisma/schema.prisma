@@ -12,6 +12,24 @@ model User {
   email             String               @unique
   name              String
   passwordHash      String
+  // Per-user default agent config: used when a run's document has no explicit
+  // agentModel/agentEffort (today: Slack channel/DM runs). Null = app default
+  // (claude-sonnet-5, thinking off). Same storable values as Document.agentModel.
+  defaultAgentModel  String?
+  defaultAgentEffort String?
+  // Personal custom instructions, injected into the system prompt of EVERY
+  // agent run this user triggers (all modes, both harnesses). Null/empty = none.
+  agentInstructions  String?
+  // Quicktake visibility: null = this user's quicktakes are public (readable
+  // by everyone, logged-out included); a Group id = all their quicktakes are
+  // visible to that group's members only. One setting for ALL quicktakes of a
+  // user — changing it retroactively updates every existing quicktake. Plain
+  // string (no relation): deleting the group cascades away the group grants,
+  // leaving those quicktakes owner-only rather than silently public.
+  quicktakeGroupId   String?
+  // Slack DM notifications for new comments/replies on documents this user can
+  // see (owner/member/group member). Only effective with a SlackAccountLink.
+  commentSlackNotifications Boolean      @default(true)
   createdAt         DateTime             @default(now())
   updatedAt         DateTime             @updatedAt
   ownedDocuments    Document[]           @relation("DocumentOwner")
@@ -26,6 +44,89 @@ model User {
   credentials       UserCredential[]
   apiTokens         ApiToken[]
   skills            UserSkill[]
+  slackLinks        SlackAccountLink[]
+  aiRuns            AiRun[]              @relation("AiRunCreator")
+  scheduledTasks    ScheduledTask[]
+  ownedGroups       Group[]              @relation("GroupOwner")
+  groupMemberships  GroupMember[]
+  documentVotes     DocumentVote[]
+  commentVotes      CommentVote[]
+  slackCommentNotifications SlackCommentNotification[]
+}
+
+// A named set of users (a team/company) that documents can be shared with.
+// Group access participates in resolveDocumentAccess with the same
+// VIEW/COMMENT/EDIT permission levels as direct memberships; a user's
+// effective permission is the strongest across owner/membership/groups.
+model Group {
+  id             String                @id @default(cuid())
+  name           String
+  ownerId        String
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+  owner          User                  @relation("GroupOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members        GroupMember[]
+  documentAccess DocumentGroupAccess[]
+}
+
+model GroupMember {
+  id        String   @id @default(cuid())
+  groupId   String
+  userId    String
+  // "owner" may manage members and delete the group; "member" gets access.
+  role      String   @default("member")
+  createdAt DateTime @default(now())
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, userId])
+  @@index([userId])
+}
+
+// Grants every member of `group` the given permission on `document`.
+model DocumentGroupAccess {
+  id         String   @id @default(cuid())
+  documentId String
+  groupId    String
+  permission String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  group      Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, groupId])
+  @@index([groupId])
+}
+
+// Forum up/down vote on a posted document. value is +1 or -1; removing a vote
+// deletes the row. Score is aggregated at read time (internal-scale traffic).
+model DocumentVote {
+  id         String   @id @default(cuid())
+  documentId String
+  userId     String
+  value      Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, userId])
+  @@index([documentId])
+}
+
+// Forum up/down vote on a comment. Same semantics as DocumentVote.
+model CommentVote {
+  id        String   @id @default(cuid())
+  commentId String
+  userId    String
+  value     Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  comment   Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([commentId, userId])
+  @@index([commentId])
 }
 
 // A reusable agent skill in a user's personal library (a directory with a
@@ -105,13 +206,51 @@ model Document {
   id              String               @id @default(cuid())
   title           String
   content         String
+  // "document" (default) or "slack_channel". A slack_channel document is the
+  // per-channel agent workspace behind the Slack bot: same model/skills/env
+  // config surface, rendered differently in the dashboard. Slack ids identify
+  // the backing channel; one document per (team, channel).
+  kind            String               @default("document")
+  slackTeamId     String?
+  slackChannelId  String?
   ownerId         String
   repoUrl         String?
   repoBranch      String?
   repoWorkspace   String?
+  // When set, this document has NO workspace of its own: all agent runs use
+  // the base workspace of the referenced document instead (a slack_channel
+  // document — the per-channel agent workspace). Mutually exclusive with
+  // repoUrl. Resolved exactly one level deep in ensureLinkedRepository; a
+  // dangling id falls back to the document's own local workspace. Plain string
+  // (no Prisma relation) so deleting the target never cascades here.
+  workspaceDocumentId String?
   activeAiRunId   String?
   agentModel      String?
   agentEffort     String?
+  // "managed" (default): the app owns the repo/worktree and runs the agent on
+  // its own container/in-process runner (see lib/agent-runner). "selfHosted":
+  // the app never clones or mounts a worktree for this document — it only
+  // enqueues a SelfHostedJob describing the work; the OWNER's external worker
+  // (their own infra, polling POST /api/self-hosted/jobs/claim with their own
+  // ApiToken) clones the repo, does the work, and posts the result back.
+  // Collaborators on a selfHosted document run under the OWNER's AI
+  // credentials (see lib/user-credentials.ts) — an explicit, UI-disclosed
+  // trust decision the owner made by flipping this flag, analogous to the
+  // existing GitHub-auth owner-credential fallback.
+  runnerMode      String               @default("managed")
+  // When set, the document is "posted to the forum": it appears on the forum
+  // frontpage for every user who can access it (access management is shared
+  // with the studio view — posting never widens access by itself).
+  forumPostedAt   DateTime?
+  // Posted + public: the forum post is readable by EVERYONE, including
+  // logged-out visitors (resolveDocumentAccess grants anonymous VIEW).
+  // Meaningless without forumPostedAt; unposting clears it.
+  forumPublic     Boolean              @default(false)
+  // Raw markdown source of a quicktake (kind "quicktake"): a short
+  // twitter-like forum post backed by a document row so votes, nested
+  // comments, and group access all reuse the document machinery. Null for
+  // every other kind.
+  quicktakeBody   String?
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt
   owner           User                 @relation("DocumentOwner", fields: [ownerId], references: [id], onDelete: Cascade)
@@ -125,6 +264,81 @@ model Document {
   documentMentions DocumentMention[]
   attachments     Attachment[]
   skills          DocumentSkill[]
+  scheduledTasks  ScheduledTask[]
+  selfHostedJobs  SelfHostedJob[]
+  groupAccess     DocumentGroupAccess[]
+  forumVotes      DocumentVote[]
+
+  @@unique([slackTeamId, slackChannelId])
+}
+
+// A queued unit of work for a "selfHosted" runnerMode document. Created
+// instead of a worktree bind-mount when the runner picks the selfHostedPull
+// strategy (lib/agent-runner/self-hosted.ts); the owner's external worker
+// polls POST /api/self-hosted/jobs/claim, does the work in its OWN clone of
+// the repo, and posts the result to POST /api/self-hosted/jobs/:id/result.
+// `jobPayload` is the serialized AgentJob (input + agentConfig + agentEnv +
+// validation spec) — the same shape HttpRunner/ContainerRunner would ship.
+// `resultPayload` is the serialized ClaudeResearchAgentOutput (success) or an
+// error string (failure). No NDJSON progress stream yet — see
+// lib/agent-runner/self-hosted.ts for the "not done" list.
+model SelfHostedJob {
+  id             String    @id @default(cuid())
+  documentId     String
+  aiRunId        String
+  status         String    @default("pending") // pending | claimed | succeeded | failed
+  jobPayload     String
+  resultPayload  String?
+  error          String?
+  createdAt      DateTime  @default(now())
+  claimedAt      DateTime?
+  finishedAt     DateTime?
+  document       Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId, status])
+  @@index([aiRunId])
+}
+
+// Links a Slack identity to a gdocs-ai account so bot runs triggered by a
+// Slack mention execute with the mentioning user's credentials (runnerUserId
+// in lib/user-credentials.ts). One link per Slack identity per team.
+model SlackAccountLink {
+  id            String   @id @default(cuid())
+  slackTeamId   String
+  slackUserId   String
+  userId        String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([slackTeamId, slackUserId])
+  @@index([userId])
+}
+
+// One Slack DM notification thread per (comment thread, recipient): messageTs
+// is the ts of the ROOT notification message the bot posted into the user's
+// claudex DM; later comments in the same doc thread are posted as Slack thread
+// replies under it (no new row). Inbound DM replies threaded under messageTs
+// are routed back into the document's comment thread instead of starting an
+// agent run (lib/slack/events.ts).
+model SlackCommentNotification {
+  id             String        @id @default(cuid())
+  slackTeamId    String
+  // The D… IM channel the notification was posted to (chat.postMessage's
+  // resolved channel — inbound events carry this id, not the user id).
+  slackChannelId String
+  messageTs      String
+  threadId       String
+  documentId     String
+  userId         String
+  createdAt      DateTime      @default(now())
+  thread         CommentThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([slackChannelId, messageTs])
+  @@unique([threadId, userId])
+  @@index([userId])
+  @@index([documentId])
 }
 
 // User-uploaded files attached to a document. The bytes live on disk under the
@@ -154,11 +368,44 @@ model DocumentEnvVar {
   documentId String
   key        String
   value      String
+  // Whether this variable is a SECRET (API key/token — masked in the UI and
+  // eligible for credential-broker substitution) or plain configuration (URL,
+  // model name — shown in full). Null = auto-detect from the key name
+  // (isSecretEnvKey in lib/document-env.ts); true/false = explicit user choice.
+  isSecret   Boolean?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
   document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@unique([documentId, key])
+}
+
+// A per-run VIRTUAL credential minted by the agent credential broker
+// (lib/credential-broker). The agent's environment carries only the virtual
+// token; requests go to /api/broker/<id>/… where the broker swaps the virtual
+// token for the real credential and forwards to `upstreamBaseUrl`. The real
+// secret is stored encrypted (AES-256-GCM, CREDENTIAL_ENCRYPTION_KEY) and is
+// wiped when the key is revoked. `secretRef` is retained for forward-compatible
+// account-managed credential references; host credential references are never
+// minted or resolved. A key is only usable while its AiRun
+// is RUNNING (checked per request), not revoked, and not past expiresAt.
+model AgentBrokerKey {
+  id              String    @id @default(cuid())
+  tokenHash       String    @unique
+  aiRunId         String?
+  provider        String
+  upstreamBaseUrl String
+  // How the REAL credential is presented upstream: "authorization-bearer" or
+  // "x-api-key". Incoming virtual auth headers are stripped either way.
+  authMode        String
+  secret          String?
+  secretRef       String?
+  createdAt       DateTime  @default(now())
+  expiresAt       DateTime?
+  revokedAt       DateTime?
+  aiRun           AiRun?    @relation(fields: [aiRunId], references: [id], onDelete: Cascade)
+
+  @@index([aiRunId])
 }
 
 model DocumentMembership {
@@ -179,6 +426,10 @@ model CommentThread {
   documentId    String
   // Null when the thread was started by an anonymous share-link visitor.
   createdById   String?
+  // "studio" threads are anchored to document text (anchorText required and
+  // enforced at creation). "forum" threads are top-level forum comments with
+  // no anchor — anchorText is "" and the anchor-saved guard is skipped.
+  origin        String    @default("studio")
   anchorText    String
   anchorContext String?
   status        String    @default("OPEN")
@@ -189,6 +440,7 @@ model CommentThread {
   createdBy     User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
   comments      Comment[]
   reads         CommentThreadRead[]
+  slackNotifications SlackCommentNotification[]
 }
 
 model CommentThreadRead {
@@ -206,6 +458,9 @@ model CommentThreadRead {
 model Comment {
   id          String        @id @default(cuid())
   threadId    String
+  // Forum-view nesting: a reply to another comment in the same thread. Studio
+  // rendering stays flat (ignores this); the forum view renders the tree.
+  parentId    String?
   authorId    String?
   // Display name for anonymous share-link commenters (authorId null, no aiModel).
   guestName   String?
@@ -218,10 +473,13 @@ model Comment {
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
   thread      CommentThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  parent      Comment?      @relation("CommentReplies", fields: [parentId], references: [id], onDelete: SetNull)
+  replies     Comment[]     @relation("CommentReplies")
   author      User?         @relation(fields: [authorId], references: [id], onDelete: SetNull)
   aiRun       AiRun?        @relation(fields: [aiRunId], references: [id], onDelete: SetNull)
   reactions   CommentReaction[]
   mentions    CommentMention[]
+  votes       CommentVote[]
 }
 
 // Emoji reactions on a comment. One row per (comment, user, emoji); toggling a
@@ -296,6 +554,10 @@ model AiRun {
   documentId    String
   triggerType   String
   triggerId     String?
+  // The user whose request started this run (and whose credentials it ran
+  // with). Null for legacy rows and share-link visitors. Powers the activity
+  // overview ("who did what where").
+  createdById   String?
   parentRunId   String?
   instruction   String
   status        String            @default("RUNNING")
@@ -312,6 +574,27 @@ model AiRun {
   // executes. Distinguishes "quiet but alive" (long tool waits emit no
   // AiRunEvents) from "owning server died" for the stale-run reaper.
   heartbeatAt   DateTime?
+  // The Claude Agent SDK session id of this run's transcript (recorded at SDK
+  // init, so even failed/cancelled runs are resumable). Follow-up runs in the
+  // same conversation resume this session — the model then sees all its prior
+  // messages AND tool calls, not a replayed plain-text transcript.
+  sdkSessionId  String?
+  // --- detached session container (lib/agent-runner/container-session.ts) ---
+  // A detached run lives in a container that outlives the app process which
+  // started it, so these four fields are the ONLY thing a newer deployment needs
+  // in order to take the run over: where to reach it, how to authenticate, and
+  // how far its frame log has already been persisted into AiRunEvent.
+  // Null on in-process runs and on the legacy piped-container path.
+  containerId     String?
+  // "http://127.0.0.1:<ephemeral host port>" — the published loopback mapping of
+  // the container's session port, discovered with `docker port` at spawn.
+  sessionEndpoint String?
+  // Per-container Bearer secret. Not a user credential: it authorizes talking to
+  // this one container, and dies with it.
+  sessionSecret   String?
+  // Last frame sequence number already replayed into AiRunEvent. Advanced as
+  // frames are persisted, so a re-attach resumes without duplicating events.
+  frameCursor     Int               @default(0)
   selectionId        String?
   // The document text that was selected when a SELECTION_EDIT run started
   // (truncated). The live marker can vanish long before anyone reads the run
@@ -326,11 +609,13 @@ model AiRun {
   suggestOnly        Boolean           @default(false)
   appliedAt          DateTime?
   document      Document          @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  createdBy     User?             @relation("AiRunCreator", fields: [createdById], references: [id], onDelete: SetNull)
   parentRun     AiRun?            @relation("AiRunFollowUps", fields: [parentRunId], references: [id], onDelete: SetNull)
   followUps     AiRun[]           @relation("AiRunFollowUps")
   comments      Comment[]
   versions      DocumentVersion[]
   events        AiRunEvent[]
+  brokerKeys    AgentBrokerKey[]
 
   @@index([documentId, startedAt])
   @@index([documentId, status])
@@ -346,6 +631,40 @@ model AiRunEvent {
   aiRun     AiRun    @relation(fields: [aiRunId], references: [id], onDelete: Cascade)
 
   @@index([aiRunId, createdAt])
+}
+
+// A recurring or one-shot agent task scheduled from Slack (schedule_task
+// tool). Fired by the poll loop in lib/scheduler.ts: each firing starts a
+// normal conversation AiRun in the stored context (a Slack thread by default,
+// or the channel top-level) with the CREATOR's identity/credentials. Creation
+// is announced in the channel and any channel member can cancel — a recurring
+// task silently burning someone's API key is the failure mode this guards.
+model ScheduledTask {
+  id             String    @id @default(cuid())
+  documentId     String
+  createdById    String?
+  createdByRunId String?
+  instruction    String
+  // "slack_thread" (reply into the stored thread) or "slack_channel" (post
+  // top-level, starting a fresh thread per firing).
+  contextType    String
+  slackTeamId    String
+  slackChannelId String
+  slackThreadTs  String?
+  // Recurring: a 5-field cron expression. One-shot: null cron, nextRunAt only.
+  cron           String?
+  timezone       String?
+  nextRunAt      DateTime
+  lastFiredAt    DateTime?
+  lastRunId      String?
+  disabledAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  document       Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  createdBy      User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([nextRunAt, disabledAt])
+  @@index([documentId])
 }
 
 model EmbeddedWidget {

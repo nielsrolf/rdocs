@@ -61,10 +61,6 @@ export async function saveAttachmentToStore(documentId: string, fileName: string
   return { storedName, workspacePath: getAttachmentWorkspacePath(storedName) };
 }
 
-export async function deleteAttachmentFromStore(documentId: string, storedName: string) {
-  await fs.rm(getAttachmentStorePath(documentId, storedName), { force: true }).catch(() => undefined);
-}
-
 async function listStoredAttachmentFiles(documentId: string) {
   try {
     const entries = await fs.readdir(getAttachmentsStoreDir(documentId), { withFileTypes: true });

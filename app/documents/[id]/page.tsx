@@ -15,7 +15,7 @@ import { getCollaborationVersion } from "@/lib/collaboration";
 import { hasDocumentEnvKey } from "@/lib/document-env";
 import { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
 import { db } from "@/lib/db";
-import { resolveDocumentAccess } from "@/lib/permissions";
+import { ensureShareLinkMembership, resolveDocumentAccess } from "@/lib/permissions";
 import {
   anthropicRunUsesFreeFallback,
   freeLocalAgentModel,
@@ -29,6 +29,7 @@ type PageProps = {
   }>;
   searchParams?: Promise<{
     share?: string;
+    comment?: string;
   }>;
 };
 
@@ -47,6 +48,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
   const resolvedSearchParams = searchParams ? await searchParams : undefined;
   const user = await getCurrentUser();
   const shareToken = resolvedSearchParams?.share ?? null;
+  const focusThreadId = resolvedSearchParams?.comment ?? null;
 
   if (!user && !shareToken) {
     redirect("/sign-in");
@@ -55,6 +57,18 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
   const access = await resolveDocumentAccess(id, user?.id, shareToken);
   if (!access) {
     notFound();
+  }
+
+  // Quicktakes never render in the studio — their home is the forum.
+  if (access.document.kind === "quicktake") {
+    redirect(`/forum/quicktakes/${id}`);
+  }
+
+  // Opening a share link while signed in makes the doc appear on the user's
+  // dashboard, as if they were added as a collaborator by email. Best-effort:
+  // never block the page render on it.
+  if (user && access.viaShareLink) {
+    await ensureShareLinkMembership(access, user.id).catch(() => undefined);
   }
 
   // The list of who can be @mentioned (owner + collaborators) is shown to every
@@ -133,26 +147,46 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
   const [
     envHasOpenRouterKey,
     envHasLiteLlmKey,
+    envHasOpenAiKey,
     ownerHasOpenRouterKeyOnly,
     ownerHasLiteLlmKeyOnly,
     viewerHasOpenRouterKey,
-    viewerHasLiteLlmKey
+    viewerHasLiteLlmKey,
+    ownerHasOpenAiKeyOnly,
+    viewerHasOpenAiKey
   ] = await Promise.all([
     hasDocumentEnvKey(id, "OPENROUTER_API_KEY"),
     hasDocumentEnvKey(id, "LITELLM_API_KEY"),
+    hasDocumentEnvKey(id, "OPENAI_API_KEY"),
     hasUserCredential(access.document.ownerId, "openrouter"),
     hasUserCredential(access.document.ownerId, "litellm"),
     viewerId ? hasUserCredential(viewerId, "openrouter") : Promise.resolve(false),
-    viewerId ? hasUserCredential(viewerId, "litellm") : Promise.resolve(false)
+    viewerId ? hasUserCredential(viewerId, "litellm") : Promise.resolve(false),
+    hasUserCredential(access.document.ownerId, "openai"),
+    viewerId ? hasUserCredential(viewerId, "openai") : Promise.resolve(false)
   ]);
   // Whether an Anthropic-model run started by this viewer would actually run
   // on the free local model (no credential anywhere) — surfaced in the UI so
   // "Sonnet 5" is never displayed while qwen does the work.
   const anthropicFreeFallback = await anthropicRunUsesFreeFallback(id, user?.id ?? null);
+  // The agent panel shows the config a run started by THIS viewer would use:
+  // doc agent-panel config -> viewer's personal default -> app default. Runs
+  // resolve the same chain server-side (lib/agent-defaults.ts), so the panel
+  // never claims "Sonnet 5" while the user's personal default does the work.
+  const viewerDefaults = user
+    ? await db.user.findUnique({
+        where: { id: user.id },
+        select: { defaultAgentModel: true, defaultAgentEffort: true }
+      })
+    : null;
+  const effectiveAgentModel = access.document.agentModel ?? viewerDefaults?.defaultAgentModel ?? null;
+  const effectiveAgentEffort = access.document.agentEffort ?? viewerDefaults?.defaultAgentEffort ?? null;
   const credentialHasOpenRouterKey = ownerHasOpenRouterKeyOnly || viewerHasOpenRouterKey;
   const credentialHasLiteLlmKey = ownerHasLiteLlmKeyOnly || viewerHasLiteLlmKey;
+  const credentialHasOpenAiKey = ownerHasOpenAiKeyOnly || viewerHasOpenAiKey;
   const initialHasOpenRouterKey = envHasOpenRouterKey || credentialHasOpenRouterKey;
   const initialHasLiteLlmKey = envHasLiteLlmKey || credentialHasLiteLlmKey;
+  const initialHasOpenAiKey = envHasOpenAiKey || credentialHasOpenAiKey;
   const initialCollaborationVersion = await getCollaborationVersion(
     access.document.id,
     access.document.content,
@@ -175,22 +209,30 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         initialMentionedCommentIds={initialMentionedCommentIds}
         initialRepoBranch={access.document.repoBranch}
         initialRepoUrl={access.document.repoUrl}
-        initialAgentModel={access.document.agentModel}
-        initialAgentEffort={access.document.agentEffort}
+        initialAgentModel={effectiveAgentModel}
+        initialAgentEffort={effectiveAgentEffort}
+        initialRunnerMode={access.document.runnerMode}
         initialHasOpenRouterKey={initialHasOpenRouterKey}
         initialHasLiteLlmKey={initialHasLiteLlmKey}
+        initialHasOpenAiKey={initialHasOpenAiKey}
         localAgentModel={freeLocalAgentModel()}
         anthropicFreeFallback={anthropicFreeFallback}
         credentialHasOpenRouterKey={credentialHasOpenRouterKey}
         credentialHasLiteLlmKey={credentialHasLiteLlmKey}
+        credentialHasOpenAiKey={credentialHasOpenAiKey}
         initialThreads={normalizedThreads}
+        initialFocusThreadId={focusThreadId}
         initialTitle={access.document.title}
+        documentKind={access.document.kind}
         isAuthenticated={Boolean(user)}
         isOwner={user?.id === access.document.ownerId}
         shareToken={access.shareToken}
-        viaShareLink={access.viaShareLink}
+        viaShareLink={access.viaShareLink || access.viaForumPublic}
+        initialForumPostedAt={access.document.forumPostedAt?.toISOString() ?? null}
+        initialForumPublic={access.document.forumPublic}
       />
-      {access.permission !== "EDIT" && !(access.viaShareLink && access.permission === "VIEW") && (
+      {access.permission !== "EDIT" &&
+        !((access.viaShareLink || access.viaForumPublic) && access.permission === "VIEW") && (
         <div className="read-only-banner">
           {access.permission === "COMMENT"
             ? "You can comment, but not edit, in this document."

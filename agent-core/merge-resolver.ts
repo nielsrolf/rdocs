@@ -4,7 +4,12 @@ import { resolve as resolvePath } from "node:path";
 import { type HookCallback, query } from "@anthropic-ai/claude-agent-sdk";
 
 import { parseMaxTurns, resolveAgentSdkConfig } from "./agent-config";
-import { type DocumentEnv, applyProviderEnv, buildAgentEnv } from "./agent-env";
+import {
+  type DocumentEnv,
+  applyAgentConfigDirEnv,
+  applyProviderEnv,
+  buildAgentEnv
+} from "./agent-env";
 import { evaluateToolPathAccess } from "./agent-sandbox";
 import { CLAUDE_AGENT_TOOLS } from "./ai-tools";
 
@@ -24,6 +29,8 @@ export async function runMergeConflictResolver(input: {
   agentEnv?: DocumentEnv;
   /** See ClaudeAgentRunOptions.isolatedRuntime — true inside the container. */
   isolatedRuntime?: boolean;
+  /** See ClaudeAgentRunOptions.sessionConfigDir. */
+  sessionConfigDir?: string;
 }): Promise<void> {
   // Callers today don't pass a model, so this resolves to the default
   // Anthropic model; resolving through the shared config keeps the resolver
@@ -83,7 +90,16 @@ Return only JSON:
       maxTurns: parseMaxTurns(input.maxTurns != null ? String(input.maxTurns) : process.env.CLAUDE_MERGE_MAX_TURNS),
       model: sdkConfig.model,
       thinking: { type: "disabled" },
-      env: applyProviderEnv(buildAgentEnv(process.env, input.agentEnv), sdkConfig.provider),
+      // Pinned config root: never let the CLI fall back to the host ~/.claude
+      // session for credentials (see resolveAgentConfigDir).
+      env: applyAgentConfigDirEnv(
+        applyProviderEnv(buildAgentEnv(process.env, input.agentEnv), sdkConfig.provider),
+        {
+          harness: "claude",
+          sessionConfigDir: input.sessionConfigDir,
+          runKey: `merge-${input.commitSha}`
+        }
+      ),
       // In-process: kernel sandbox + guard are the boundary. Inside the container
       // (isolatedRuntime) the mount namespace already is — skip both so the
       // resolver isn't blocked from legitimate paths outside /workspace.
