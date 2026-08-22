@@ -35,3 +35,4 @@ scripts/_*
 demo-video/
 claudex.env
 .env.bak*
+.claude/

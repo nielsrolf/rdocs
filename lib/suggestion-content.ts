@@ -186,10 +186,14 @@ function transformNode(input: unknown, reject: boolean): unknown {
   return stripped;
 }
 
+// Re-export the tolerant anchor matcher so lib/client code has one import site.
+// The implementation lives in agent-core because the agent container images ship
+// ONLY agent-core (lib/ is not copied in) and the submission validator runs there.
+export { findAnchorMatch, type AnchorMatchResult } from "../agent-core/anchor-text";
+
 // Concatenates the raw text of every text node in document order, with NO
-// separators between blocks. The client anchor resolver builds the identical
-// string (plus an offset→position map) when locating an agent's findText, so the
-// server-side uniqueness check and the client-side resolution stay in lockstep.
+// separators between blocks. Kept for callers that need the historical basis;
+// anchor validation/resolution now uses flattenDocumentAnchorText below.
 export function flattenDocumentTextNodes(content: unknown): string {
   let out = "";
   const visit = (node: unknown) => {
@@ -206,5 +210,45 @@ export function flattenDocumentTextNodes(content: unknown): string {
     if (Array.isArray(typed.content)) typed.content.forEach(visit);
   };
   visit(content);
+  return out;
+}
+
+// The ANCHOR basis for agent findText validation and resolution: the raw text of
+// every text node in document order, with a single "\n" separating text that
+// belongs to different parent nodes (i.e. at block/list-item boundaries) and
+// hardBreak rendered as "\n". This mirrors what the agent actually sees in its
+// prompt/markdown renditions closely enough that, combined with the tolerant
+// matcher in agent-core/anchor-text.ts, faithful copies match. The client
+// resolver (components/document-workspace/ai-suggestions.ts buildFlatIndex)
+// builds the IDENTICAL string plus an offset→position map — keep them in
+// lockstep (tests/anchor-matching.test.ts).
+export function flattenDocumentAnchorText(content: unknown): string {
+  let out = "";
+  let lastParent: unknown = null;
+  const visit = (node: unknown, parent: unknown) => {
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child, parent);
+      return;
+    }
+    if (!node || typeof node !== "object") return;
+    const typed = node as JsonNode;
+    if (typed.type === "text" && typeof typed.text === "string") {
+      if (out.length > 0 && lastParent !== parent && !out.endsWith("\n")) {
+        out += "\n";
+      }
+      out += typed.text;
+      lastParent = parent;
+      return;
+    }
+    if (typed.type === "hardBreak") {
+      if (out.length > 0 && !out.endsWith("\n")) out += "\n";
+      lastParent = parent;
+      return;
+    }
+    if (Array.isArray(typed.content)) {
+      for (const child of typed.content) visit(child, typed);
+    }
+  };
+  visit(content, null);
   return out;
 }

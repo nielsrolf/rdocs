@@ -216,7 +216,7 @@ export function ShareGroupsSection({
       <div className="share-modal-section">
         <div className="share-modal-header">
           <h3>Groups</h3>
-          <a className="ghost-button" href="/groups" rel="noreferrer" target="_blank">
+          <a className="ghost-button" href="/settings/groups" rel="noreferrer" target="_blank">
             Manage groups
           </a>
         </div>

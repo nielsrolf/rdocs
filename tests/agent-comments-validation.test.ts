@@ -19,7 +19,7 @@ test("validateAgentComments rejects a missing anchor", () => {
 
 test("validateAgentComments rejects a non-unique anchor", () => {
   const err = validateAgentComments([{ findText: "The ", body: "x" }], DOC);
-  assert.ok(err && /appears|multiple/i.test(err));
+  assert.ok(err && /matches \d+ places|appears|multiple/i.test(err));
 });
 
 test("validateAgentComments reports the offending index", () => {

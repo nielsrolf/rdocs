@@ -19,7 +19,7 @@ import type { AgentAccessMode, ClaudeResearchAgentInput } from "@/agent-core";
 import type { AgentComment } from "@/agent-core/ai-edit-submission";
 import { normalizeAgentImages } from "@/lib/ai-edit-submission";
 import { createLiveCommentRecorder } from "@/lib/agent-comments";
-import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
+import { flattenDocumentAnchorText } from "@/lib/suggestion-content";
 import { getWorkspaceOverview } from "@/lib/research-workspace";
 import { persistRefreshedCodexAuth } from "@/lib/user-credentials";
 
@@ -215,7 +215,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
 
       const parsedContent = parseDocumentContent(documentContent);
       const documentText = getDocumentPlainText(parsedContent);
-      const suggestionAnchorText = flattenDocumentTextNodes(parsedContent);
+      const suggestionAnchorText = flattenDocumentAnchorText(parsedContent);
       const documentBlocks = getDocumentAiBlocks(parsedContent);
       const unresolvedThreads = await db.commentThread.findMany({
         where: {

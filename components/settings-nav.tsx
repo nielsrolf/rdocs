@@ -11,6 +11,7 @@ import { useEffect, useState } from "react";
 // lightweight scroll-spy highlighting the section currently in view.
 //   /settings/agent — AI credentials, default model, custom instructions,
 //                     MCP, skills, self-hosted worker
+//   /settings/groups — collaborator group management
 //   /settings/forum — forum preferences (default quicktake audience)
 //   /settings/notifications — Slack DM comment notifications
 const SECTIONS: ReadonlyArray<{
@@ -30,6 +31,7 @@ const SECTIONS: ReadonlyArray<{
       { id: "self-hosted", label: "Self-hosted worker" }
     ]
   },
+  { href: "/settings/groups", label: "Groups", anchors: [] },
   { href: "/settings/forum", label: "Forum", anchors: [] },
   { href: "/settings/notifications", label: "Notifications", anchors: [] }
 ];

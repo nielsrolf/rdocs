@@ -1,16 +1,19 @@
 import type { Node as PMNode } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 
-import { SUGGESTED_DELETION_MARK, SUGGESTED_INSERTION_MARK } from "@/lib/suggestion-content";
+import { SUGGESTED_DELETION_MARK, SUGGESTED_INSERTION_MARK, findAnchorMatch } from "@/lib/suggestion-content";
 import type { SuggestionAuthor } from "./suggestions";
 
 // Applies an AGENT's anchored find/replace suggestions to the live editor as
 // tracked-change marks. The agent only emits document text, so each suggestion
-// is resolved here: findText is located in the document's flattened text (the
-// same basis the server validated against — see lib/suggestion-content.
-// flattenDocumentTextNodes), and the matched range is struck (suggestedDeletion)
-// while the replacement is inserted right after it (suggestedInsertion). A human
-// then accepts or rejects via the suggestions module.
+// is resolved here: findText is located in the document's flattened ANCHOR text
+// — the same basis the server validated against (lib/suggestion-content.
+// flattenDocumentAnchorText: text nodes joined with "\n" at parent-node
+// boundaries, hardBreak as "\n") using the same tolerant matcher
+// (findAnchorMatch) — and the matched range is struck (suggestedDeletion) while
+// the replacement is inserted right after it (suggestedInsertion). A human then
+// accepts or rejects via the suggestions module. Lockstep is guarded by
+// tests/anchor-matching.test.ts.
 
 export type AgentSuggestionInput = {
   findText: string;
@@ -20,44 +23,59 @@ export type AgentSuggestionInput = {
 
 type FlatIndex = {
   flat: string;
-  segments: Array<{ flatStart: number; pos: number; length: number }>;
+  // For each character of `flat`: the document position of that character, or
+  // -1 for synthetic block-separator newlines that have no document position.
+  posMap: number[];
 };
 
 function buildFlatIndex(doc: PMNode): FlatIndex {
   let flat = "";
-  const segments: FlatIndex["segments"] = [];
-  doc.descendants((node, pos) => {
+  const posMap: number[] = [];
+  let lastParent: PMNode | null = null;
+  doc.descendants((node, pos, parent) => {
     if (node.isText && typeof node.text === "string") {
-      segments.push({ flatStart: flat.length, pos, length: node.text.length });
-      flat += node.text;
+      if (flat.length > 0 && parent !== lastParent && !flat.endsWith("\n")) {
+        flat += "\n";
+        posMap.push(-1);
+      }
+      for (let k = 0; k < node.text.length; k += 1) {
+        flat += node.text[k];
+        posMap.push(pos + k);
+      }
+      lastParent = parent;
+      return;
+    }
+    if (node.type.name === "hardBreak") {
+      if (flat.length > 0 && !flat.endsWith("\n")) {
+        flat += "\n";
+        posMap.push(pos);
+      }
+      lastParent = parent;
     }
   });
-  return { flat, segments };
+  return { flat, posMap };
 }
 
-function flatOffsetToPos(index: FlatIndex, offset: number): number | null {
-  for (const seg of index.segments) {
-    if (offset >= seg.flatStart && offset <= seg.flatStart + seg.length) {
-      return seg.pos + (offset - seg.flatStart);
-    }
-  }
-  return null;
-}
-
-// Locates findText in the document. Returns null when it is absent OR not unique
-// (the document drifted since the agent ran) — the caller skips and reports it
-// rather than risk editing the wrong place.
+// Locates findText in the document via the shared tolerant matcher. Returns null
+// when it is absent OR not unique (the document drifted since the agent ran) —
+// the caller skips and reports it rather than risk editing the wrong place.
 export function resolveSuggestionRange(
   doc: PMNode,
   findText: string
 ): { from: number; to: number } | null {
   if (!findText) return null;
   const index = buildFlatIndex(doc);
-  const first = index.flat.indexOf(findText);
-  if (first === -1) return null;
-  if (index.flat.indexOf(findText, first + findText.length) !== -1) return null;
-  const from = flatOffsetToPos(index, first);
-  const to = flatOffsetToPos(index, first + findText.length);
+  const match = findAnchorMatch(index.flat, findText);
+  if (match.count !== 1) return null;
+  // Skip synthetic separators at the boundaries: the range must start and end on
+  // real document characters.
+  let startIdx = match.start;
+  while (startIdx < match.end && index.posMap[startIdx] === -1) startIdx += 1;
+  let endIdx = match.end - 1;
+  while (endIdx >= startIdx && index.posMap[endIdx] === -1) endIdx -= 1;
+  if (endIdx < startIdx) return null;
+  const from = index.posMap[startIdx];
+  const to = index.posMap[endIdx] + 1;
   if (from == null || to == null || to < from) return null;
   return { from, to };
 }

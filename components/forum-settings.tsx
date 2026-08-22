@@ -87,7 +87,7 @@ export function ForumSettings({
       {groups.length === 0 ? (
         <p className="muted-copy">
           You are not in any groups yet — create one from a document&apos;s Share dialog
-          or on the <a href="/groups">groups page</a> to publish to a team.
+          or on the <a href="/settings/groups">groups page</a> to publish to a team.
         </p>
       ) : null}
       {saving ? <p className="muted-copy">Saving…</p> : null}

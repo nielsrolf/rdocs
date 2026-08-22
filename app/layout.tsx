@@ -29,7 +29,21 @@ export default async function RootLayout({
   const user = await getCurrentUser();
 
   return (
-    <html lang="en">
+    // suppressHydrationWarning: the inline script below may add the
+    // `studio-scale` class to <html> before React hydrates.
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        {/* Studio density: apply the compact root font size (see
+            `html.studio-scale` in globals.css) before first paint on every
+            non-forum route, so Studio pages don't flash at 100% and shrink.
+            TopbarModeSwitch keeps the class in sync on client navigations. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              "(function(){var p=location.pathname;if(!(p==='/forum'||p.indexOf('/forum/')===0)){document.documentElement.classList.add('studio-scale');}})();"
+          }}
+        />
+      </head>
       <body>
         <ChunkReloadRecovery />
         <div className="app-frame">

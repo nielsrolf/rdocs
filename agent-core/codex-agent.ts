@@ -396,7 +396,7 @@ export async function runCodexSubmissionLoop(input: {
     prompt =
       `Your structured response was rejected by the application:\n${lastError}\n\n` +
       "Correct exactly this issue and return the complete JSON response again. " +
-      "Use exact verbatim document substrings for findText anchors; if an optional suggestion or comment cannot be anchored exactly, remove it.";
+      "For findText anchors, use short distinctive snippets of the document's visible text (matching tolerates newline/whitespace differences and markdown syntax, but the words must be present and unique); if an optional suggestion or comment still cannot be anchored, remove it.";
   }
   throw new Error(`Codex submission rejected: ${lastError}`);
 }

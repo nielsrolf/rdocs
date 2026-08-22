@@ -34,6 +34,7 @@ import {
   type AgentComment,
   type AgentSuggestion
 } from "./ai-edit-submission";
+import { findAnchorMatch } from "./anchor-text";
 import { evaluateToolPathAccess } from "./agent-sandbox";
 import type { AgentInputChannel } from "./input-channel";
 import {
@@ -302,17 +303,6 @@ const SCHEDULE_TOOL_NAMES = [
   "mcp__gdocs__cancel_scheduled_task"
 ];
 
-function countOccurrences(haystack: string, needle: string): number {
-  if (!needle) return 0;
-  let count = 0;
-  let index = haystack.indexOf(needle);
-  while (index !== -1 && count < 10) {
-    count += 1;
-    index = haystack.indexOf(needle, index + 1);
-  }
-  return count;
-}
-
 // A safety-classifier block is an HTTP 200 with stop_reason "refusal" (not an
 // HTTP error), which the Claude Code runtime turns into a fixed user-facing
 // message: "Claude Code is unable to respond to this request, which appears to
@@ -426,7 +416,7 @@ export const submitResponseSchema = {
           .string()
           .min(1)
           .describe(
-            "An EXACT, UNIQUE substring of the CURRENT document text shown above. Must match verbatim (including punctuation) and occur exactly once — extend it until unique."
+            "A UNIQUE snippet of the CURRENT document text shown above. Matching is against the document's plain text (newline/whitespace differences and markdown syntax like [text](url) links are tolerated) and must locate exactly one place — extend the snippet with surrounding words until unique. Prefer a short, distinctive snippet within one paragraph or list item."
           ),
         replacementText: z
           .string()
@@ -447,7 +437,7 @@ export const submitResponseSchema = {
           .string()
           .min(1)
           .describe(
-            "An EXACT, UNIQUE substring of the current document text to anchor this comment on. Verbatim, occurring exactly once — extend it until unique."
+            "A UNIQUE snippet of the current document text to anchor this comment on. Matching is against the document's plain text (newline/whitespace differences and markdown syntax are tolerated) and must locate exactly one place — extend it until unique."
           ),
         body: z.string().min(1).describe("The comment text to leave on that anchor (concise Markdown).")
       })
@@ -669,13 +659,13 @@ Finishing your turn:
 
 Suggesting edits (available in every mode):
 - You can propose tracked-change edits to the document via the optional suggestions array on submit_response. Each suggestion is { findText, replacementText, reason? }.
-- findText MUST be an exact substring of the current document text shown below and MUST occur EXACTLY ONCE. Copy it verbatim, including punctuation and capitalization; if a phrase is not unique, extend it (add surrounding words) until it is. An empty replacementText suggests deleting findText.
+- findText MUST locate EXACTLY ONE place in the document. Matching is against the document's plain text: newline/whitespace differences and markdown syntax (links like [text](url), escaped punctuation, list markers) are tolerated, but the visible words must match. Prefer a short, distinctive snippet within one paragraph or list item; if a phrase is not unique, extend it (add surrounding words) until it is. An empty replacementText suggests deleting findText.
 - replacementText is rendered as Markdown with full formatting (bold/italic, lists, headings, code, tables, LaTeX). You may include a repo-local image as a Markdown figure — ![caption](assets/plot.png) — provided you commit the file; it resolves the same way as in an edit. (Interactive widgets are not yet supported inside suggestions.)
 - Suggestions are shown to a human who accepts or rejects each one — they are NEVER applied automatically. Do not claim in a reply that you changed the document; you only proposed suggestions.
 - Do not use suggestions to restate the selection you were asked to replace — use the top-level replacementText for that. Use suggestions for changes elsewhere in the document.
 
 Leaving comments (available in every mode):
-- You can leave standalone review comments anchored on sections of the document. Each is { findText, body }: findText is an exact, unique substring to anchor on (same rules as above), body is your comment (concise Markdown). A new comment thread is created there, authored by you.
+- You can leave standalone review comments anchored on sections of the document. Each is { findText, body }: findText is a unique snippet to anchor on (same matching rules as above), body is your comment (concise Markdown). A new comment thread is created there, authored by you.
 - PREFER the add_comment tool: call it the moment you have formed a piece of feedback. The comment appears for collaborators immediately, so they can follow your review while you keep working — do not save comments up for the end.
 - The comments array on submit_response also works, but only use it for feedback you did not already leave via add_comment. Never repeat a comment you left with add_comment.
 - Use comments when asked to review the document and leave feedback in place. You may leave as many as warranted. This is separate from any reply you post to the triggering comment thread — leave in-document comments via add_comment, then summarize in your reply.
@@ -1218,7 +1208,7 @@ async function runClaudeResearchAgentOnce(
         .string()
         .min(1)
         .describe(
-          "An EXACT, UNIQUE substring of the current document text to anchor this comment on. Verbatim, occurring exactly once — extend it until unique."
+          "A UNIQUE snippet of the current document text to anchor this comment on. Matching is against the document's plain text (newline/whitespace differences and markdown syntax are tolerated) and must locate exactly one place — extend it until unique."
         ),
       body: z.string().min(1).describe("The comment text to leave on that anchor (concise Markdown).")
     },
@@ -1230,16 +1220,16 @@ async function runClaudeResearchAgentOnce(
           isError: true
         };
       }
-      const occurrences = countOccurrences(input.documentText, comment.findText);
-      if (occurrences !== 1) {
+      const match = findAnchorMatch(input.documentText, comment.findText);
+      if (match.count !== 1) {
         return {
           content: [
             {
               type: "text" as const,
               text:
-                occurrences === 0
-                  ? "findText was not found in the current document text. Copy an exact substring verbatim (including punctuation and capitalization) and try again."
-                  : `findText occurs ${occurrences} times in the document. Extend it with surrounding words until it is unique, then try again.`
+                match.count === 0
+                  ? "findText was not found in the document. Matching runs against the document's plain text (formatting is stripped, blocks separated by newlines). Anchor on a short, distinctive snippet of visible text — ideally within one paragraph or list item — and try again."
+                  : `findText matches ${match.count} places in the document. Extend it with surrounding words until it identifies exactly one location, then try again.`
             }
           ],
           isError: true

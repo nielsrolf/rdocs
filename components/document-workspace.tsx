@@ -2078,6 +2078,53 @@ export function DocumentWorkspace({
     setWorkspaceLinkBusy(false);
   }
 
+  function handleToggleLink() {
+    if (!editor || !canWriteDocument) {
+      return;
+    }
+    if (editor.isActive("link")) {
+      editor.chain().focus().extendMarkRange("link").unsetLink().run();
+      return;
+    }
+    const url = window.prompt("Link URL", "https://");
+    if (url === null) {
+      return;
+    }
+    const trimmed = url.trim();
+    if (!trimmed || trimmed === "https://") {
+      return;
+    }
+    editor.chain().focus().extendMarkRange("link").setLink({ href: trimmed }).run();
+  }
+
+  function handleInsertLatex(displayMode: boolean) {
+    if (!editor || !canWriteDocument) {
+      return;
+    }
+    const delimiter = displayMode ? "$$" : "$";
+    const { from, to, empty } = editor.state.selection;
+    if (!empty) {
+      // Wrap the selected text in math delimiters and keep the content selected,
+      // so the equation stays in source view for further editing.
+      const text = editor.state.doc.textBetween(from, to, " ");
+      editor
+        .chain()
+        .focus()
+        .insertContentAt({ from, to }, { type: "text", text: `${delimiter}${text}${delimiter}` })
+        .setTextSelection({ from: from + delimiter.length, to: from + delimiter.length + text.length })
+        .run();
+      return;
+    }
+    // Empty selection: insert the delimiter pair with the cursor in between.
+    // The latex renderer ignores empty equations, so nothing flashes while typing.
+    editor
+      .chain()
+      .focus()
+      .insertContentAt(from, { type: "text", text: `${delimiter}${delimiter}` })
+      .setTextSelection(from + delimiter.length)
+      .run();
+  }
+
   async function handleInsertWidget() {
     if (!editor || !canManageAutomation) {
       return;
@@ -4425,6 +4472,12 @@ export function DocumentWorkspace({
                   onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}
                 />
                 <ToolbarButton
+                  active={editor?.isActive("heading", { level: 3 }) ?? false}
+                  disabled={!canWriteDocument || !editor}
+                  label="H3"
+                  onClick={() => editor?.chain().focus().toggleHeading({ level: 3 }).run()}
+                />
+                <ToolbarButton
                   active={editor?.isActive("paragraph") ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="Text"
@@ -4451,6 +4504,33 @@ export function DocumentWorkspace({
                   label="U"
                   onClick={() => editor?.chain().focus().toggleUnderline().run()}
                 />
+                <ToolbarButton
+                  active={editor?.isActive("strike") ?? false}
+                  disabled={!canWriteDocument || !editor}
+                  label="S"
+                  title="Strikethrough"
+                  onClick={() => editor?.chain().focus().toggleStrike().run()}
+                />
+                <ToolbarButton
+                  active={editor?.isActive("code") ?? false}
+                  disabled={!canWriteDocument || !editor}
+                  label="</>"
+                  title="Inline code"
+                  onClick={() => editor?.chain().focus().toggleCode().run()}
+                />
+                <ToolbarButton
+                  active={editor?.isActive("link") ?? false}
+                  disabled={!canWriteDocument || !editor}
+                  label="Link"
+                  title="Add or remove link"
+                  onClick={handleToggleLink}
+                />
+                <ToolbarButton
+                  disabled={!canWriteDocument || !editor}
+                  label="$x$"
+                  title="Inline math (LaTeX)"
+                  onClick={() => handleInsertLatex(false)}
+                />
               </div>
 
               <div className="editor-toolbar-group">
@@ -4467,10 +4547,36 @@ export function DocumentWorkspace({
                   onClick={() => editor?.chain().focus().toggleOrderedList().run()}
                 />
                 <ToolbarButton
+                  active={editor?.isActive("taskList") ?? false}
+                  disabled={!canWriteDocument || !editor}
+                  label="Tasks"
+                  title="Task list"
+                  onClick={() => editor?.chain().focus().toggleTaskList().run()}
+                />
+                <ToolbarButton
                   active={editor?.isActive("blockquote") ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="Quote"
                   onClick={() => editor?.chain().focus().toggleBlockquote().run()}
+                />
+                <ToolbarButton
+                  active={editor?.isActive("codeBlock") ?? false}
+                  disabled={!canWriteDocument || !editor}
+                  label="Code"
+                  title="Code block"
+                  onClick={() => editor?.chain().focus().toggleCodeBlock().run()}
+                />
+                <ToolbarButton
+                  disabled={!canWriteDocument || !editor}
+                  label="$$x$$"
+                  title="Math block (LaTeX)"
+                  onClick={() => handleInsertLatex(true)}
+                />
+                <ToolbarButton
+                  disabled={!canWriteDocument || !editor}
+                  label="—"
+                  title="Horizontal rule"
+                  onClick={() => editor?.chain().focus().setHorizontalRule().run()}
                 />
                 <ToolbarButton
                   disabled={!canManageAutomation || !editor}

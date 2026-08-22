@@ -194,15 +194,28 @@ export function EnvironmentMenu({
         <div className="env-add-row">
           <input
             aria-label="Variable name"
+            autoComplete="off"
+            data-1p-ignore="true"
+            data-lpignore="true"
+            data-bwignore="true"
+            data-form-type="other"
             onChange={(event) => setKeyDraft(event.target.value)}
             placeholder="OPENAI_API_KEY"
             value={keyDraft}
           />
           <input
             aria-label="Variable value"
+            autoComplete="off"
+            className="secret-input"
+            data-1p-ignore="true"
+            data-lpignore="true"
+            data-bwignore="true"
+            data-form-type="other"
+            name="env-var-value"
             onChange={(event) => setValueDraft(event.target.value)}
             placeholder="value"
-            type="password"
+            spellCheck={false}
+            type="text"
             value={valueDraft}
           />
           <button className="ghost-button" disabled={busy || !keyDraft.trim()} onClick={handleAdd} type="button">

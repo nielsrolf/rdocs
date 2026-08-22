@@ -22,7 +22,7 @@ import type { AgentAccessMode } from "@/agent-core";
 import { normalizeAgentImages } from "@/lib/ai-edit-submission";
 import { createLiveCommentRecorder } from "@/lib/agent-comments";
 import { notifyCommentPosted } from "@/lib/comment-notifications";
-import { flattenDocumentTextNodes } from "@/lib/suggestion-content";
+import { flattenDocumentAnchorText } from "@/lib/suggestion-content";
 import { normalizeSourceLinks, serializeSourceLinks } from "@/lib/sources";
 import { getWorkspaceOverview } from "@/lib/research-workspace";
 import { persistRefreshedCodexAuth } from "@/lib/user-credentials";
@@ -151,7 +151,7 @@ export async function runAskAiInBackground(input: {
     async (ctx) => {
       const documentContent = parseDocumentContent(thread.document.content);
       const documentText = getDocumentPlainText(documentContent);
-      const suggestionAnchorText = flattenDocumentTextNodes(documentContent);
+      const suggestionAnchorText = flattenDocumentAnchorText(documentContent);
       const documentBlocks = getDocumentAiBlocks(documentContent);
       const derivedAnchorContext =
         thread.anchorContext || getContextAroundMatch(documentText, thread.anchorText);

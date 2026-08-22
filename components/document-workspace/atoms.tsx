@@ -9,15 +9,17 @@ export type ToolbarButtonProps = {
   active?: boolean;
   disabled?: boolean;
   label: string;
+  title?: string;
   onClick: () => void;
 };
 
-export function ToolbarButton({ active = false, disabled = false, label, onClick }: ToolbarButtonProps) {
+export function ToolbarButton({ active = false, disabled = false, label, title, onClick }: ToolbarButtonProps) {
   return (
     <button
       className={`editor-toolbar-button ${active ? "editor-toolbar-button-active" : ""}`}
       disabled={disabled}
       onClick={onClick}
+      title={title}
       type="button"
     >
       {label}

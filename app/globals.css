@@ -17,6 +17,15 @@
   box-sizing: border-box;
 }
 
+/* Studio density: Studio routes (everything except /forum*) render at a
+   compact root font size, so rem-based type and spacing shrink to roughly
+   what two browser zoom-out steps used to give. The class is set before
+   first paint by the inline script in app/layout.tsx and kept in sync by
+   TopbarModeSwitch. The forum stays at the default 100%. */
+html.studio-scale {
+  font-size: 85%;
+}
+
 html,
 body {
   margin: 0;
@@ -3165,6 +3174,14 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   color: #d93025;
 }
 
+/* Secret inputs are type="text" masked via CSS instead of type="password":
+   built-in browser password managers (Firefox especially) ignore
+   autocomplete="off" on password fields and keep autofilling/offering to
+   save. Plain text inputs are invisible to them. */
+.secret-input {
+  -webkit-text-security: disc;
+}
+
 /* Credential-section building blocks, shared by the full-page AI settings
    screen (.slack-connect-card). .credentials-panel is kept for backwards
    compatibility but no longer mounted (the topbar popup was merged into
@@ -3864,7 +3881,9 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   min-height: 70vh;
   outline: none;
   font-family: Arial, Helvetica, sans-serif;
-  font-size: 14.6667px;
+  /* 14.6667px at a 16px root — rem so the Studio density scale
+     (html.studio-scale) applies to editor body text too. */
+  font-size: 0.9167rem;
   line-height: 1.35;
   color: var(--text);
 }

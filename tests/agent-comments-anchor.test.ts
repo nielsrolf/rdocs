@@ -5,7 +5,7 @@ import { EditorState } from "@tiptap/pm/state";
 import type { Node as PMNode } from "@tiptap/pm/model";
 
 import { createDocumentEditorSchema } from "../lib/document-editor-schema";
-import { flattenDocumentTextNodes } from "../lib/suggestion-content";
+import { flattenDocumentAnchorText } from "../lib/suggestion-content";
 import { validateAgentComments } from "../lib/ai-edit-submission";
 import { resolveSuggestionRange } from "../components/document-workspace/ai-suggestions";
 import { buildCommentAnchorTransaction } from "../components/document-workspace/comment-anchors";
@@ -21,7 +21,7 @@ const SAMPLE = {
 };
 
 test("an agent comment anchor that passes validation resolves and anchors a commentAnchor mark", () => {
-  const anchorBasis = flattenDocumentTextNodes(SAMPLE);
+  const anchorBasis = flattenDocumentAnchorText(SAMPLE);
   const comment = { findText: "aggressive but achievable", body: "Is this realistic?" };
   // Server-side validation passes.
   assert.equal(validateAgentComments([comment], anchorBasis), null);

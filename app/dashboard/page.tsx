@@ -76,9 +76,6 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
           <Link className="ghost-button" href="/forum">
             Forum
           </Link>
-          <Link className="ghost-button" href="/groups">
-            Groups
-          </Link>
           <TourRestartButton />
           <NewDocumentButton />
         </div>

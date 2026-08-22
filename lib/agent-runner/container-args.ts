@@ -203,6 +203,11 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
   // Egress is required (Anthropic API, PyPI, npm, CDNs); never --network none.
   args.push("--network", spec.network ?? "bridge");
 
+  // Docker Desktop resolves host.docker.internal implicitly; native Linux
+  // Docker does not, so the credential broker and Slack transcribe paths that
+  // containers reach over that name fail to resolve without this mapping.
+  args.push("--add-host", "host.docker.internal:host-gateway");
+
   // Secrets/tokens (host-read env-file), plus container-appropriate HOME/TMPDIR.
   args.push("--env-file", spec.envFileHostPath);
   args.push("-e", `HOME=${home}`, "-e", "TMPDIR=/tmp", "-e", `AGENT_WORKSPACE=${workspace}`);

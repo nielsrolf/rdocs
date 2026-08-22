@@ -20,9 +20,10 @@ import {
 } from "./ai-edit-submission";
 import { runWidgetBuild } from "./widget-build";
 
-// `documentText` is the flattened text-node basis (lib/suggestion-content.
-// flattenDocumentTextNodes) the client resolves anchors against — present on
-// every kind so suggestion anchors can be validated wherever the agent runs.
+// `documentText` is the flattened anchor basis (lib/suggestion-content.
+// flattenDocumentAnchorText — text nodes joined with newlines at block
+// boundaries) the client resolves anchors against — present on every kind so
+// suggestion anchors can be validated wherever the agent runs.
 export type SubmissionValidationSpec =
   | {
       kind: "edit_selection";

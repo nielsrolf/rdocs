@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { findAnchorMatch } from "./anchor-text";
+
 // Node-safe helpers for validating and normalizing an agent's edit_selection
 // submission. Extracted from the ai-edit route so the guard logic (which decides
 // whether an error is reported back to the AI for a retry vs. surfaced to the
@@ -130,10 +132,11 @@ export type EditAssetIntent = {
 };
 
 // Tracked-change edit suggestions the agent proposes via submit_response. Each is
-// an anchored find/replace: `findText` must be an exact, unique substring of the
-// document's flattened text (see lib/suggestion-content.flattenDocumentTextNodes),
-// the same basis the client resolves against — so what passes validation here
-// resolves to exactly one range there.
+// an anchored find/replace: `findText` must locate a UNIQUE match in the
+// document's flattened anchor text (lib/suggestion-content.flattenDocumentAnchorText)
+// via the tolerant matcher in ./anchor-text — the same basis and matcher the
+// client resolves against, so what passes validation here resolves to exactly
+// one range there.
 export type AgentSuggestion = {
   findText: string;
   replacementText: string;
@@ -165,8 +168,9 @@ export function normalizeSuggestions(value: unknown): AgentSuggestion[] {
 }
 
 // A standalone comment an agent anchors on a section of the document (distinct
-// from its reply to the triggering thread). `findText` is an exact, unique
-// substring to anchor on; `body` is the comment text.
+// from its reply to the triggering thread). `findText` must locate a unique
+// match in the anchor text (same tolerant matching as suggestions); `body` is
+// the comment text.
 export type AgentComment = {
   findText: string;
   body: string;
@@ -206,6 +210,32 @@ export function mergeBufferedComments(
   return [...fresh, ...submitted];
 }
 
+// Shared anchor check for one findText. Returns null when it matches exactly one
+// place, else an actionable error line the agent can act on. Uses the tolerant
+// tiered matcher (exact → newline-normalized → markdown-stripped) so an anchor
+// faithfully copied from the prompt's plain-text view or a markdown rendition
+// still validates — see ./anchor-text.
+function anchorError(label: string, findText: string, documentText: string): string | null {
+  const match = findAnchorMatch(documentText, findText);
+  if (match.count === 1) return null;
+  if (match.count === 0) {
+    return `${label}: findText ${JSON.stringify(
+      findText.slice(0, 120)
+    )} was not found in the document. Matching runs against the document's plain text (formatting like links and bold is stripped, blocks are separated by single newlines). Anchor on a short, distinctive snippet of visible text — ideally within one paragraph or list item.`;
+  }
+  return `${label}: findText ${JSON.stringify(
+    findText.slice(0, 120)
+  )} matches ${match.count} places — extend it with surrounding words until it identifies exactly one location.`;
+}
+
+// Joins per-item anchor errors so the agent can fix EVERYTHING in one resubmission
+// instead of burning one attempt per broken anchor.
+function combineAnchorErrors(errors: string[]): string | null {
+  if (errors.length === 0) return null;
+  if (errors.length === 1) return errors[0];
+  return `${errors.length} anchors failed — fix ALL of them, then resubmit once:\n${errors.join("\n")}`;
+}
+
 export function validateAgentComments(
   comments: AgentComment[] | undefined,
   documentText: string
@@ -214,39 +244,22 @@ export function validateAgentComments(
   if (comments.length > MAX_AGENT_COMMENTS) {
     return `Too many comments (${comments.length}). Leave at most ${MAX_AGENT_COMMENTS}.`;
   }
+  const errors: string[] = [];
   for (let i = 0; i < comments.length; i += 1) {
     const { findText, body } = comments[i];
     const label = `Comment #${i + 1}`;
     if (!findText) {
-      return `${label}: findText is empty. Provide an exact substring of the document to anchor the comment on.`;
+      errors.push(`${label}: findText is empty. Provide a substring of the document to anchor the comment on.`);
+      continue;
     }
     if (!body.trim()) {
-      return `${label}: body is empty. Provide the comment text.`;
+      errors.push(`${label}: body is empty. Provide the comment text.`);
+      continue;
     }
-    const occurrences = countOccurrences(documentText, findText);
-    if (occurrences === 0) {
-      return `${label}: findText ${JSON.stringify(
-        findText.slice(0, 120)
-      )} was not found in the document text. Copy an exact substring verbatim.`;
-    }
-    if (occurrences > 1) {
-      return `${label}: findText ${JSON.stringify(
-        findText.slice(0, 120)
-      )} appears ${occurrences} times — extend it until it uniquely identifies one location.`;
-    }
+    const error = anchorError(label, findText, documentText);
+    if (error) errors.push(error);
   }
-  return null;
-}
-
-function countOccurrences(haystack: string, needle: string): number {
-  if (!needle) return 0;
-  let count = 0;
-  let index = haystack.indexOf(needle);
-  while (index !== -1) {
-    count += 1;
-    index = haystack.indexOf(needle, index + needle.length);
-  }
-  return count;
+  return combineAnchorErrors(errors);
 }
 
 // Pure guard mirroring validateAiEditAssets: returns an error STRING handed back
@@ -259,28 +272,24 @@ export function validateSuggestions(
   if (suggestions.length > MAX_SUGGESTIONS) {
     return `Too many suggestions (${suggestions.length}). Submit at most ${MAX_SUGGESTIONS} focused edits.`;
   }
+  const errors: string[] = [];
   for (let i = 0; i < suggestions.length; i += 1) {
     const { findText, replacementText } = suggestions[i];
     const label = `Suggestion #${i + 1}`;
     if (!findText) {
-      return `${label}: findText is empty. Provide an exact substring of the document to anchor the edit.`;
+      errors.push(`${label}: findText is empty. Provide a substring of the document to anchor the edit.`);
+      continue;
     }
-    const occurrences = countOccurrences(documentText, findText);
-    if (occurrences === 0) {
-      return `${label}: findText ${JSON.stringify(
-        findText.slice(0, 120)
-      )} was not found in the document text. Copy an exact substring verbatim (including punctuation).`;
-    }
-    if (occurrences > 1) {
-      return `${label}: findText ${JSON.stringify(
-        findText.slice(0, 120)
-      )} appears ${occurrences} times — extend it until it uniquely identifies one location.`;
+    const error = anchorError(label, findText, documentText);
+    if (error) {
+      errors.push(error);
+      continue;
     }
     if (replacementText === findText) {
-      return `${label}: replacementText is identical to findText — no change. Edit the text or drop this suggestion.`;
+      errors.push(`${label}: replacementText is identical to findText — no change. Edit the text or drop this suggestion.`);
     }
   }
-  return null;
+  return combineAnchorErrors(errors);
 }
 
 // Pure guard: returns an error STRING (which the route hands back to the agent

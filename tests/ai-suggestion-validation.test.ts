@@ -24,7 +24,7 @@ test("validateSuggestions rejects an anchor not present in the document", () => 
 test("validateSuggestions rejects a non-unique anchor", () => {
   // "ox" appears in both "fox" and "Foxes".
   const err = validateSuggestions([{ findText: "ox", replacementText: "ax" }], DOC);
-  assert.ok(err && /multiple|appears/i.test(err));
+  assert.ok(err && /matches \d+ places|multiple|appears/i.test(err));
 });
 
 test("validateSuggestions rejects a no-op", () => {

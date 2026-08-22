@@ -5,7 +5,7 @@ import { EditorState } from "@tiptap/pm/state";
 import type { Node as PMNode } from "@tiptap/pm/model";
 
 import { createDocumentEditorSchema } from "../lib/document-editor-schema";
-import { flattenDocumentTextNodes } from "../lib/suggestion-content";
+import { flattenDocumentAnchorText } from "../lib/suggestion-content";
 import { validateSuggestions } from "../lib/ai-edit-submission";
 import {
   buildAiSuggestionsTransaction,
@@ -50,9 +50,9 @@ test("resolveSuggestionRange returns null for missing or non-unique anchors", ()
 });
 
 test("text-space parity: what passes server validation resolves to exactly one client range", () => {
-  // The server validates against flattenDocumentTextNodes(content); the client
+  // The server validates against flattenDocumentAnchorText(content); the client
   // resolves against the same basis built from the editor doc.
-  const anchorText = flattenDocumentTextNodes(SAMPLE);
+  const anchorText = flattenDocumentAnchorText(SAMPLE);
   const suggestion = { findText: "quick brown", replacementText: "swift red" };
   assert.equal(validateSuggestions([suggestion], anchorText), null);
 
