@@ -83,7 +83,7 @@ export const SESSION_HANDED_OFF_MESSAGE =
   "Another server process took over this run's agent container — it continues there, driven by another server process. This reader stepped aside.";
 
 export function hostDevRunNotice(cwd: string): string {
-  return `⚠ HOST DEV RUN: executing unsandboxed in the live deployment directory (${cwd}).`;
+  return `⚠ HOST DEV RUN: executing unsandboxed on the host in ${cwd}.`;
 }
 
 export type AgentRunLifecycleOptions = {
@@ -95,11 +95,11 @@ export type AgentRunLifecycleOptions = {
   // get a worktree managed by this app — the owner's external worker clones
   // and works in its own checkout.
   runnerMode: string;
-  // Host dev mode (allowlisted Slack dev channel): run unsandboxed in the live
-  // deployment directory — no worktree, no end-of-run commit/cleanup. Wins
-  // over selfHosted if both are somehow set, since it explicitly wants the
-  // deployment's own checkout.
-  hostDevRun?: boolean;
+  // Host dev mode (allowlisted Slack dev channel): run unsandboxed in this
+  // host directory — no worktree, no end-of-run commit/cleanup. Wins over
+  // selfHosted if both are somehow set, since it explicitly wants a live
+  // host checkout.
+  hostDevDir?: string | null;
   // Commit message used when saving workspace changes after `fn` threw.
   failureCommitMessage: string;
   // Logged (via the hook) when that failure-path commit itself fails; omit to
@@ -164,9 +164,9 @@ export async function withAgentRunLifecycle<T>(
   opts: AgentRunLifecycleOptions,
   fn: (ctx: AgentRunLifecycleContext) => Promise<T>
 ): Promise<AgentRunLifecycleResult<T>> {
-  const { aiRunId, documentId, createdById, agentAccessMode, hostDevRun } = opts;
-  const isSelfHosted = !hostDevRun && opts.runnerMode === "selfHosted";
-  const runner = hostDevRun
+  const { aiRunId, documentId, createdById, agentAccessMode, hostDevDir } = opts;
+  const isSelfHosted = !hostDevDir && opts.runnerMode === "selfHosted";
+  const runner = hostDevDir
     ? createAgentRunner("inprocess")
     : isSelfHosted
       ? getSelfHostedRunner()
@@ -205,18 +205,18 @@ export async function withAgentRunLifecycle<T>(
     },
     setupWorkspace: async () => {
       state.linkedRepo =
-        hostDevRun || isSelfHosted
+        hostDevDir || isSelfHosted
           ? null
           : await ensureLinkedRepositoryWorktree(documentId, aiRunId, createdById);
-      if (hostDevRun) {
+      if (hostDevDir) {
         await db.aiRun.update({
           where: { id: aiRunId },
-          data: { workspacePath: process.cwd() }
+          data: { workspacePath: hostDevDir }
         });
         await recordAiRunEvent({
           aiRunId,
           role: "system",
-          message: hostDevRunNotice(process.cwd())
+          message: hostDevRunNotice(hostDevDir)
         });
       }
       if (state.linkedRepo) {

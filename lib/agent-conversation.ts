@@ -44,9 +44,9 @@ export type ConversationRunInput = {
   // get a worktree managed by this app — see the lifecycle wrapper's
   // selfHosted gating, mirroring the other agent entry points.
   runnerMode: string;
-  // Host dev mode: run unsandboxed in the live deployment directory
-  // (allowlisted Slack dev channel only — see lib/slack/dev-mode.ts).
-  hostDevRun?: boolean;
+  // Host dev mode: run unsandboxed in this host directory (allowlisted Slack
+  // dev channel only — see lib/slack/dev-mode.ts).
+  hostDevDir?: string | null;
   // Set for Slack-triggered runs: prompt context + the post_slack_message tool.
   slackContext?: ClaudeResearchAgentInput["slackContext"];
   // Run-scoped HTTP callback enabling the Slack read tools.
@@ -130,7 +130,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
     agentConfig,
     agentAccessMode,
     runnerMode,
-    hostDevRun,
+    hostDevDir,
     slackContext,
     slackTools,
     onSlackMessage,
@@ -148,7 +148,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       // dev runs are an allowlisted internal debugging path); host dev wins if
       // both are somehow set, since it explicitly wants the deployment's own
       // checkout.
-      hostDevRun,
+      hostDevDir,
       // The heartbeat starts once this run holds the session lock (below), not
       // when the background function starts: a run queued behind another run of
       // the same conversation is doing nothing, and must look silent so the
@@ -257,7 +257,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
           ctx.beginHeartbeat();
           return ctx.runner.run({
         mode: "conversation",
-        hostDevRun,
+        hostDevRun: Boolean(hostDevDir),
         githubAuthAvailable: Boolean(agentEnv.GITHUB_TOKEN?.trim() || agentEnv.GH_TOKEN?.trim()),
         accessMode: agentAccessMode,
         documentTitle,
@@ -272,7 +272,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
             body: comment.body
           }))
         })),
-        workspacePath: hostDevRun ? process.cwd() : linkedRepo?.workspace ?? null,
+        workspacePath: hostDevDir ?? linkedRepo?.workspace ?? null,
         workspaceOverview,
         instruction: message,
         userInstructions: agentConfig.userInstructions ?? null,
@@ -300,7 +300,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
         onCodexAuthRefreshed: (authJson) =>
           persistRefreshedCodexAuth(documentId, createdById, authJson).then(() => undefined),
         sessionDirHostPath: sessionPlan?.sessionDir,
-        trustedHostRun: hostDevRun,
+        trustedHostRun: Boolean(hostDevDir),
         onProgress: ctx.onProgress
       });
         }

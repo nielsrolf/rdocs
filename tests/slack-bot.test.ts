@@ -863,6 +863,41 @@ test("host dev mode requires BOTH channel and user allowlists", async () => {
   );
 });
 
+test("SLACK_DEV_CHANNEL_DIRS maps channels to custom host directories", async () => {
+  const { resolveHostDevDir } = await import("../lib/slack/dev-mode");
+  const env = {
+    SLACK_DEV_CHANNEL_IDS: "C_DEV",
+    SLACK_DEV_CHANNEL_DIRS: "C_AUTO=/home/niels/agents/automator, #lenovo=/home/niels/agents/automator",
+    SLACK_DEV_ALLOWED_EMAILS: "niels@example.com"
+  };
+  assert.equal(
+    resolveHostDevDir("C_DEV", null, "niels@example.com", env),
+    process.cwd(),
+    "legacy channel-id list keeps running in the deployment cwd"
+  );
+  assert.equal(
+    resolveHostDevDir("C_AUTO", null, "niels@example.com", env),
+    "/home/niels/agents/automator",
+    "channel-id mapping resolves its configured directory"
+  );
+  assert.equal(
+    resolveHostDevDir("C_NEW", "Lenovo", "NIELS@example.com", env),
+    "/home/niels/agents/automator",
+    "#name mapping matches the channel name case-insensitively"
+  );
+  assert.equal(
+    resolveHostDevDir("C_AUTO", null, "bob@example.com", env),
+    null,
+    "unlisted user never gets a host run, even in a mapped channel"
+  );
+  assert.equal(
+    resolveHostDevDir("C_NEW", "lenovo", "niels@example.com", { ...env, SLACK_DEV_ALLOWED_EMAILS: "" }),
+    null,
+    "dir map alone never activates without the email allowlist"
+  );
+  assert.equal(resolveHostDevDir("C_OTHER", "random", "niels@example.com", env), null);
+});
+
 test("dev-channel messages from the allowlisted user run on the host; others sandboxed", async () => {
   const teamId = `T-${crypto.randomUUID()}`;
   const alice = await makeUser("slack-dev-alice");
@@ -884,14 +919,14 @@ test("dev-channel messages from the allowlisted user run on the host; others san
     const runs: ConversationRunInput[] = [];
     const aliceResult = await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
     assert.equal(aliceResult.handled, true);
-    assert.equal(runs[0].hostDevRun, true, "allowlisted user in dev channel runs on host");
+    assert.equal(runs[0].hostDevDir, process.cwd(), "allowlisted user in dev channel runs on host");
 
     const bobResult = await handleSlackAppMention(
       mention({ teamId, user: "UBOB", ts: "2000.000" }),
       depsWith(client, runs)
     );
     assert.equal(bobResult.handled, true);
-    assert.equal(runs[1].hostDevRun ?? false, false, "other users stay sandboxed");
+    assert.equal(runs[1].hostDevDir ?? null, null, "other users stay sandboxed");
   } finally {
     if (prevChannels === undefined) delete process.env.SLACK_DEV_CHANNEL_IDS;
     else process.env.SLACK_DEV_CHANNEL_IDS = prevChannels;

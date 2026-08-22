@@ -33,7 +33,7 @@ import {
   type ConversationRunInput
 } from "@/lib/agent-conversation";
 import { createSlackLinkToken, createSlackToolsToken } from "@/lib/slack/link-token";
-import { isHostDevRun } from "@/lib/slack/dev-mode";
+import { resolveHostDevDir } from "@/lib/slack/dev-mode";
 import { markdownToMrkdwn } from "@/lib/slack/mrkdwn";
 import { queuedFollowUps, steeredRunAnchors } from "@/lib/slack/thread-state";
 import { RUN_CANCELLED_MESSAGE, cancelAiRun, injectRunMessage } from "@/lib/agent-runner/run-registry";
@@ -447,8 +447,8 @@ type StartSlackRunArgs = {
   channelContext: string | null;
   /** True for drained-queue follow-ups: their anchors carry an ⏳ to clear. */
   clearPendingReaction?: boolean;
-  /** Allowlisted dev channel: run on the host in the deployment directory. */
-  hostDevRun?: boolean;
+  /** Allowlisted dev channel: run unsandboxed on the host in this directory. */
+  hostDevDir?: string | null;
 };
 
 export async function startSlackConversationRun(args: StartSlackRunArgs): Promise<string> {
@@ -494,7 +494,7 @@ export async function startSlackConversationRun(args: StartSlackRunArgs): Promis
     agentConfig,
     agentAccessMode: "workspace",
     runnerMode: document.runnerMode,
-    hostDevRun: args.hostDevRun,
+    hostDevDir: args.hostDevDir,
     slackContext: {
       surface: surface === "dm" ? "dm" : "channel",
       channelName,
@@ -693,7 +693,7 @@ export async function deliverSlackThreadMessage(args: {
     slackUserId: args.slackUserId,
     parentRunId: previousRun?.id ?? null,
     channelContext: null,
-    hostDevRun: isHostDevRun(channel, user?.email ?? "")
+    hostDevDir: resolveHostDevDir(channel, channelName, user?.email ?? "")
   });
   return { outcome: "started", aiRunId, documentId: document.id, threadTs: conversationKey };
 }
@@ -873,11 +873,12 @@ async function handleIncomingSlackMessage(
     }
   }
 
-  // Host dev mode: allowlisted channel + allowlisted user → the run executes
-  // unsandboxed in the live deployment directory (lib/slack/dev-mode.ts).
-  const hostDevRun = isHostDevRun(event.channel, link.user.email);
-
   const channelName = surface === "dm" ? null : (await deps.slack.channelInfo(event.channel))?.name ?? null;
+
+  // Host dev mode: allowlisted channel + allowlisted user → the run executes
+  // unsandboxed in a host directory (lib/slack/dev-mode.ts).
+  const hostDevDir = resolveHostDevDir(event.channel, channelName, link.user.email);
+
   const dmTitle =
     surface === "dm"
       ? `Slack DM (${(await deps.slack.userInfo(event.user))?.displayName ?? event.user})`
@@ -1084,7 +1085,7 @@ async function handleIncomingSlackMessage(
     slackUserId: event.user,
     parentRunId: previousRun?.id ?? null,
     channelContext: await buildChannelContext(deps, event),
-    hostDevRun
+    hostDevDir
   });
 
   return { handled: true as const, aiRunId, documentId: document.id };
