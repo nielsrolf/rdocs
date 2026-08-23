@@ -16,6 +16,8 @@
 import { RUN_STARTED_SLACK } from "@/agent-core/lifecycle-messages";
 import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { notifyCommentPosted } from "@/lib/comment-notifications";
+import { Prisma } from "@prisma/client";
+
 import { db } from "@/lib/db";
 import { serializeComment } from "@/lib/document-data";
 import { syncCommentMentions } from "@/lib/mention-data";
@@ -105,7 +107,10 @@ async function defaultTranscribe(args: {
 const MAX_INSTRUCTION_LENGTH = 8000;
 
 // Socket Mode redelivers events that were not acked in time; Slack also
-// retries. Best-effort in-memory dedupe (single-process deploy, see CLAUDE.md).
+// retries. In-memory dedupe is the fast path, but it is PER PROCESS — during
+// blue/green overlap (or with a zombie process) two processes each hold a
+// Slack socket, and on 2026-08-23 both started a run for the same message.
+// `claimSlackMessageIdentity` below adds the cross-process claim in the DB.
 const seenEventIds = new Map<string, number>();
 const SEEN_EVENT_TTL_MS = 10 * 60 * 1000;
 
@@ -116,6 +121,35 @@ export function hasSeenSlackEvent(eventId: string, now = Date.now()) {
   if (seenEventIds.has(eventId)) return true;
   seenEventIds.set(eventId, now);
   return false;
+}
+
+// Returns true when THIS process is the first anywhere to see the message
+// identity; false for any duplicate (same process or a sibling process). The
+// DB unique constraint on SlackEventClaim.id is the cross-process arbiter. A
+// DB failure degrades to in-memory-only dedupe (handle the message rather
+// than drop it) — losing dedupe is recoverable, losing a user message is not.
+async function claimSlackMessageIdentity(key: string, now = Date.now()): Promise<boolean> {
+  if (hasSeenSlackEvent(key, now)) return false;
+  try {
+    await db.slackEventClaim.create({ data: { id: key } });
+  } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2002" // unique constraint — another process claimed it
+    ) {
+      return false;
+    }
+    console.error("[slack] event claim write failed, in-memory dedupe only", {
+      key,
+      error: error instanceof Error ? error.message : error
+    });
+    return true;
+  }
+  // Opportunistic TTL sweep so the claim table stays small; never blocks.
+  void db.slackEventClaim
+    .deleteMany({ where: { createdAt: { lt: new Date(now - SEEN_EVENT_TTL_MS) } } })
+    .catch(() => null);
+  return true;
 }
 
 export function stripBotMention(text: string, botUserId: string) {
@@ -539,8 +573,10 @@ export async function startSlackConversationRun(args: StartSlackRunArgs): Promis
           .addReaction({ channel, ts: anchor.ts, name: succeeded ? "white_check_mark" : "x" })
           .catch(() => null);
       }
+      // `?? "Done."` alone let an EMPTY reply string through — Slack rejects
+      // chat.postMessage with `no_text` and the user silently gets no reply.
       const text = succeeded
-        ? markdownToMrkdwn(outcome.reply ?? "Done.")
+        ? markdownToMrkdwn(outcome.reply?.trim() ? outcome.reply : "Done.")
         : cancelled
           ? "Stopped."
           : `The run failed: ${outcome.error ?? "unknown error"}`;
@@ -845,8 +881,9 @@ async function handleIncomingSlackMessage(
   }
   // Dedupe on the MESSAGE identity (team:channel:ts), not the event id: the
   // same message can arrive twice (app_mention + message.channels), and Slack
-  // also redelivers unacked envelopes.
-  if (hasSeenSlackEvent(`${event.teamId}:${event.channel}:${event.ts}`)) {
+  // also redelivers unacked envelopes. The claim is DB-backed so a sibling
+  // process (blue/green overlap) cannot start a second run for the same message.
+  if (!(await claimSlackMessageIdentity(`${event.teamId}:${event.channel}:${event.ts}`))) {
     return { handled: false as const, reason: "duplicate" as const };
   }
 

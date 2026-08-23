@@ -207,6 +207,55 @@ test("the session id reported by the app-server is recorded for resume", async (
   assert.ok(sessions.includes("thread-resume-me"));
 });
 
+test("a failed thread/resume degrades to a fresh thread with a visible event, not a failed run", async () => {
+  // 2026-08-23 incident: a recorded sdkSessionId pointed at a rollout file that
+  // does not exist in this environment; `thread/resume` errored ("failed to
+  // resolve rollout path ...: file does not exist") and the whole run FAILED.
+  // The host-side existence check (planSessionResume) cannot catch every case,
+  // so the harness itself must fall back to thread/start — loudly.
+  const workspacePath = tempDir("codex-ws-");
+  const logPath = path.join(tempDir("codex-log-"), "rpc.ndjson");
+  const events: { role: string; message: string }[] = [];
+  const sessions: string[] = [];
+
+  const output = await runCodexResearchAgent(
+    { ...baseInput(workspacePath), resumeSessionId: "thread-that-is-gone" } as never,
+    {
+      agentConfig: { model: "codex/openai/gpt-5.6" },
+      onProgress: (event) => {
+        events.push(event as { role: string; message: string });
+      },
+      onSessionId: (id) => {
+        sessions.push(id);
+      },
+      agentEnv: {
+        CODEX_APP_SERVER_BIN: FAKE_SERVER,
+        FAKE_CODEX_LOG: logPath,
+        FAKE_CODEX_FAIL_RESUME: "1",
+        OPENAI_API_KEY: "test-key"
+      }
+    }
+  );
+
+  // The run completes normally on the fresh thread.
+  assert.match(String(output.replacementText), /hello from the fake codex/);
+  assert.ok(sessions.includes("thread-fake-1"), "fresh thread id must be recorded for future resume");
+
+  // The degradation is visible in the run timeline, never silent.
+  assert.ok(
+    events.some(
+      (event) =>
+        event.role === "system" && /previous session .*not|no longer/i.test(event.message)
+    ),
+    `expected a visible resume-degradation system event, got: ${JSON.stringify(events)}`
+  );
+
+  // Protocol-level proof: resume was attempted, then a fresh thread started.
+  const methods = readLog(logPath).map((message) => message.method);
+  assert.ok(methods.includes("thread/resume"), "resume must be attempted first");
+  assert.ok(methods.includes("thread/start"), "must fall back to thread/start");
+});
+
 test("v2 thread items map onto the existing timeline rows", () => {
   assert.deepEqual(
     codexV2ItemProgress({

@@ -577,12 +577,31 @@ export async function runCodexResearchAgent(
       ...(modelProvider ? { modelProvider } : {}),
       config
     };
-    const started = input.resumeSessionId
-      ? await client.request<{ thread?: { id?: string } }>("thread/resume", {
+    // A recorded session id can outlive its rollout file (GC'd, or recorded in
+    // a different environment — the host-side planSessionResume check cannot
+    // catch every case), and the app-server then rejects thread/resume. That
+    // must degrade to a fresh thread with a VISIBLE timeline event, never fail
+    // the run and never degrade silently.
+    let started: { thread?: { id?: string } } | null = null;
+    if (input.resumeSessionId) {
+      try {
+        started = await client.request<{ thread?: { id?: string } }>("thread/resume", {
           threadId: input.resumeSessionId,
           ...threadParams
-        })
-      : await client.request<{ thread?: { id?: string } }>("thread/start", threadParams);
+        });
+      } catch (error) {
+        started = null;
+        emit(options.onProgress, {
+          role: "system",
+          message:
+            "The previous Codex session could not be resumed (its transcript is no longer available), so this run continues on a fresh session — earlier tool calls and file reads are NOT in context. " +
+            `(${error instanceof Error ? error.message : String(error)})`
+        });
+      }
+    }
+    if (!started?.thread?.id) {
+      started = await client.request<{ thread?: { id?: string } }>("thread/start", threadParams);
+    }
     const threadId = started?.thread?.id;
     if (!threadId) throw new Error("Codex app-server did not return a thread id.");
     if (options.onSessionId) await options.onSessionId(threadId);

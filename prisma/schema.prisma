@@ -707,3 +707,15 @@ model ShareLink {
   document    Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
   createdBy   User      @relation(fields: [createdById], references: [id], onDelete: Cascade)
 }
+
+// Cross-process dedup claim for incoming Slack messages. The in-memory
+// `seenEventIds` map in lib/slack/events.ts only protects a single process;
+// during blue/green overlap (or a zombie process) two processes each hold a
+// Slack socket and both start a run for the same message (2026-08-23 incident).
+// Row id is the message identity `team:channel:ts`; rows are TTL-swept.
+model SlackEventClaim {
+  id        String   @id
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}

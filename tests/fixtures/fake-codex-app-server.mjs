@@ -13,6 +13,9 @@
 //   FAKE_CODEX_REPLY        text of the final agent message (default: a valid
 //                           r-docs structured submission)
 //   FAKE_CODEX_FAIL_TURN    "1" → emit turn/completed with status "failed"
+//   FAKE_CODEX_FAIL_RESUME  "1" → thread/resume replies with a JSON-RPC error
+//                           mimicking a missing rollout file (thread/start
+//                           still succeeds)
 //   FAKE_CODEX_THREAD_ID    thread id to report (default "thread-fake-1")
 
 import fs from "node:fs";
@@ -154,6 +157,17 @@ rl.on("line", (line) => {
     return;
   }
   if (method === "thread/resume") {
+    if (process.env.FAKE_CODEX_FAIL_RESUME === "1") {
+      send({
+        jsonrpc: "2.0",
+        id,
+        error: {
+          code: -32603,
+          message: `failed to resolve rollout path for thread ${params?.threadId}: file does not exist`
+        }
+      });
+      return;
+    }
     send({ jsonrpc: "2.0", id, result: { thread: { id: params?.threadId || threadId } } });
     return;
   }

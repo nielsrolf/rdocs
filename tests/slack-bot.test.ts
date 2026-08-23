@@ -188,6 +188,66 @@ test("linked user mention creates channel document + run with the mentioner's id
   assert.match(posted.at(-1)!.text, /boom/);
 });
 
+test("a message already claimed by another process is not run again (cross-process dedup)", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-dedup-alice");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+
+  const { client } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+  const ts = `${Math.floor(Date.now() / 1000)}.${crypto.randomUUID().slice(0, 6)}`;
+
+  // Simulate ANOTHER process (blue/green sibling, zombie) having already
+  // claimed this message identity in the shared DB. The in-memory map of THIS
+  // process has never seen it — before the DB claim existed, this started a
+  // duplicate run (2026-08-23: zombie green + blue both ran the same message).
+  await db.slackEventClaim.create({ data: { id: `${teamId}:C123:${ts}` } });
+
+  const result = await handleSlackAppMention(mention({ teamId, ts }), depsWith(client, runs));
+  assert.equal(result.handled, false);
+  assert.equal("reason" in result && result.reason, "duplicate");
+  assert.equal(runs.length, 0, "no run must be started for an already-claimed message");
+
+  // Normal path still works: an unclaimed message is claimed and runs once...
+  const ts2 = `${Math.floor(Date.now() / 1000)}.${crypto.randomUUID().slice(0, 6)}`;
+  const first = await handleSlackAppMention(mention({ teamId, ts: ts2 }), depsWith(client, runs));
+  assert.equal(first.handled, true);
+  assert.equal(runs.length, 1);
+  // ...and its claim row exists for the other process to see.
+  assert.ok(await db.slackEventClaim.findUnique({ where: { id: `${teamId}:C123:${ts2}` } }));
+
+  // A redelivery to the same process is also still refused.
+  const second = await handleSlackAppMention(mention({ teamId, ts: ts2 }), depsWith(client, runs));
+  assert.equal(second.handled, false);
+  assert.equal(runs.length, 1);
+});
+
+test("an empty final reply is delivered as a non-empty message (no_text guard)", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-empty-reply");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+
+  const { client, posted } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+  const result = await handleSlackAppMention(mention({ teamId, channel: "CEMPTY" }), depsWith(client, runs));
+  assert.equal(result.handled, true);
+  assert.equal(runs.length, 1);
+
+  // Agent submitted an empty reply — Slack rejects postMessage with `no_text`,
+  // so delivery must fall back to a non-empty placeholder, never "".
+  await runs[0].onFinished?.({ status: "SUCCEEDED", reply: "", error: null });
+  assert.equal(posted.length, 1, "the reply must still be delivered");
+  assert.ok(posted[0].text.trim().length > 0, `posted text must be non-empty, got ${JSON.stringify(posted[0].text)}`);
+
+  // Whitespace-only replies are just as invisible to the user.
+  await runs[0].onFinished?.({ status: "SUCCEEDED", reply: "   \n", error: null });
+  assert.ok(posted[1].text.trim().length > 0, `posted text must be non-empty, got ${JSON.stringify(posted[1].text)}`);
+});
+
 test("DM: responds without a mention, replies in a thread, threads chain", async () => {
   const teamId = `T-${crypto.randomUUID()}`;
   const alice = await makeUser("slack-dm-alice");
