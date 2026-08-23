@@ -39,8 +39,11 @@ fail() { echo "[deploy] ERROR: $*" >&2; exit 1; }
 # (2026-08-23: a zombie green held :14143, lsof reported nothing, the new green
 # died EADDRINUSE, and the health poll switched traffic to the 2-day-old
 # zombie). ss reads /proc/net directly and sees them.
+# The trailing `|| true` matters: under `set -euo pipefail` a FREE port makes
+# grep match nothing → pipeline exit 1 → the $(…) assignment kills the script
+# silently (this happened on the first run of this helper).
 port_listeners() {
-  ss -tlnpH "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u
+  ss -tlnpH "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true
 }
 
 # True if $1 is $2 or a descendant of $2 (walks the ppid chain). NOTE: do not
