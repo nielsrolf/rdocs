@@ -262,6 +262,65 @@ test("a thread-context firing injects into the thread's live run instead of stac
   await db.aiRun.update({ where: { id: active.id }, data: { status: "FAILED" } });
 });
 
+test("a scheduled firing in a host-dev channel keeps host-dev mode", async () => {
+  // Real failure (2026-08-23, #lenovo): a Codex host-dev run called
+  // check_back_later and ended its turn; the wake-up fired a fresh follow-up
+  // run WITHOUT hostDevDir, so it ran containerized and thread/resume could
+  // not find the host-side rollout file. The scheduler must resolve host-dev
+  // mode exactly like the mention handler does.
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeLinkedUser(teamId, "UALICE", "sched-hostdev");
+  const aliceRow = await db.user.findUnique({ where: { id: alice.id }, select: { email: true } });
+  const channel = `C-${teamId}`;
+  const doc = await db.document.create({
+    data: {
+      ownerId: alice.id,
+      title: "#research",
+      kind: "slack_channel",
+      content: "{}",
+      slackTeamId: teamId,
+      slackChannelId: channel
+    }
+  });
+  const runs: ConversationRunInput[] = [];
+  const { deps } = makeDeps(runs); // channelInfo reports the name "research"
+  // In-memory task row (never persisted) — no risk of leaking an enabled task.
+  const task = {
+    id: `fake-${crypto.randomUUID()}`,
+    documentId: doc.id,
+    createdById: alice.id,
+    instruction: "check whether the install finished",
+    contextType: "slack_thread",
+    slackTeamId: teamId,
+    slackChannelId: channel,
+    slackThreadTs: "7000.000",
+    cron: null,
+    timezone: null,
+    nextRunAt: new Date()
+  };
+
+  const prevDirs = process.env.SLACK_DEV_CHANNEL_DIRS;
+  const prevEmails = process.env.SLACK_DEV_ALLOWED_EMAILS;
+  process.env.SLACK_DEV_CHANNEL_DIRS = "#research=/tmp/sched-hostdev";
+  process.env.SLACK_DEV_ALLOWED_EMAILS = aliceRow!.email;
+  try {
+    const fired = await fireScheduledTask(task, deps);
+    assert.ok(fired, "the firing starts a run");
+    assert.equal(runs.length, 1);
+    assert.equal(
+      runs[0].hostDevDir,
+      "/tmp/sched-hostdev",
+      "a wake-up in a host-dev channel must stay a host-dev run"
+    );
+    await db.aiRun.update({ where: { id: fired! }, data: { status: "FAILED" } });
+  } finally {
+    if (prevDirs === undefined) delete process.env.SLACK_DEV_CHANNEL_DIRS;
+    else process.env.SLACK_DEV_CHANNEL_DIRS = prevDirs;
+    if (prevEmails === undefined) delete process.env.SLACK_DEV_ALLOWED_EMAILS;
+    else process.env.SLACK_DEV_ALLOWED_EMAILS = prevEmails;
+  }
+});
+
 test("a beat that cannot be delivered is deferred, not lost", async () => {
   // Real failure (2026-08-10): a check_back_later wake-up fired into a thread
   // whose active run could not be steered (other process after a deploy, Codex

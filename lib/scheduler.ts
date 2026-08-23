@@ -17,6 +17,7 @@ import {
   steerActiveThreadRun,
   type SlackEventDeps
 } from "@/lib/slack/events";
+import { resolveHostDevDir } from "@/lib/slack/dev-mode";
 import { createSlackWebClient, slackAuthTest } from "@/lib/slack/web";
 
 export const MIN_RECURRENCE_MS = 5 * 60 * 1000;
@@ -118,7 +119,7 @@ export async function fireScheduledTask(task: ScheduledTaskRow, deps?: SlackEven
   }
   const link = await db.slackAccountLink.findFirst({
     where: { slackTeamId: task.slackTeamId, userId: task.createdById },
-    select: { slackUserId: true }
+    select: { slackUserId: true, user: { select: { email: true } } }
   });
   if (!link) {
     await db.scheduledTask.update({ where: { id: task.id }, data: { disabledAt: new Date() } }).catch(() => null);
@@ -188,6 +189,12 @@ export async function fireScheduledTask(task: ScheduledTaskRow, deps?: SlackEven
 
   const isDm = task.slackChannelId.startsWith("D");
   const channelName = isDm ? null : (await resolvedDeps.slack.channelInfo(task.slackChannelId))?.name ?? null;
+  // Host dev mode must survive scheduled wake-ups: a check_back_later alarm set
+  // by a host-dev run fires a fresh follow-up run here, and losing hostDevDir
+  // containerized it — thread/resume then failed on the host-only rollout file
+  // (2026-08-23, #lenovo). Same resolution as the mention handler, keyed on the
+  // task CREATOR (the run executes as them).
+  const hostDevDir = resolveHostDevDir(task.slackChannelId, channelName, link.user.email);
   const aiRunId = await startSlackConversationRun({
     deps: resolvedDeps,
     surface: isDm ? "dm" : "mention",
@@ -202,7 +209,8 @@ export async function fireScheduledTask(task: ScheduledTaskRow, deps?: SlackEven
     userId: task.createdById,
     slackUserId: link.slackUserId,
     parentRunId: previousRun?.id ?? null,
-    channelContext: null
+    channelContext: null,
+    hostDevDir
   });
   await db.scheduledTask.update({
     where: { id: task.id },
