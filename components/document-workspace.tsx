@@ -259,13 +259,19 @@ export function DocumentWorkspace({
   viaShareLink,
   forumView = false,
   initialForumPostedAt = null,
-  initialForumPublic = false
+  initialForumPublic = false,
+  initialDocumentNotificationsEnabled = false,
+  canConfigureDocumentNotifications = false
 }: DocumentWorkspaceProps) {
   const isPublicView = forumView || (viaShareLink && initialPermission === "VIEW");
   const [title, setTitle] = useState(initialTitle);
   const [members, setMembers] = useState<MemberView[]>(initialMembers);
   const [threads, setThreads] = useState<ThreadView[]>(initialThreads);
   const [shareLinks, setShareLinks] = useState<ShareLinkView[]>(initialShareLinks);
+  const [documentNotificationsEnabled, setDocumentNotificationsEnabled] = useState(
+    initialDocumentNotificationsEnabled
+  );
+  const [documentNotificationsBusy, setDocumentNotificationsBusy] = useState(false);
   const [repoUrl, setRepoUrl] = useState(initialRepoUrl ?? "");
   const [repoBranch, setRepoBranch] = useState(initialRepoBranch ?? "");
   const [agentModel, setAgentModel] = useState(initialAgentModel ?? DEFAULT_AGENT_MODEL);
@@ -1321,7 +1327,7 @@ export function DocumentWorkspace({
       TaskItem.configure({ nested: true }),
       StrikeShortcut,
       LinkShortcut.configure({
-        onOpen: () => handleEditLink()
+        onOpen: (shortcutEditor) => handleEditLink(shortcutEditor)
       }),
       MoveBlock,
       TabIndentGuard,
@@ -2108,16 +2114,39 @@ export function DocumentWorkspace({
     editor.chain().focus().extendMarkRange("link").setLink({ href: trimmed }).run();
   }
 
-  function handleEditLink() {
-    if (!editor || !canWriteDocument) return;
-    const current = editor.isActive("link")
-      ? ((editor.getAttributes("link") as { href?: string }).href ?? "")
+  function handleEditLink(targetEditor: Editor) {
+    if (!canWriteDocument) return;
+    const current = targetEditor.isActive("link")
+      ? ((targetEditor.getAttributes("link") as { href?: string }).href ?? "")
       : "https://";
-    const url = window.prompt(editor.isActive("link") ? "Edit link URL" : "Link URL", current);
+    const url = window.prompt(targetEditor.isActive("link") ? "Edit link URL" : "Link URL", current);
     if (url === null) return;
     const trimmed = url.trim();
     if (!trimmed || trimmed === "https://") return;
-    editor.chain().focus().extendMarkRange("link").setLink({ href: trimmed }).run();
+    targetEditor.chain().focus().extendMarkRange("link").setLink({ href: trimmed }).run();
+  }
+
+  async function toggleDocumentNotifications() {
+    if (!canConfigureDocumentNotifications || documentNotificationsBusy) return;
+    const previous = documentNotificationsEnabled;
+    const next = !previous;
+    setDocumentNotificationsEnabled(next);
+    setDocumentNotificationsBusy(true);
+    const response = await fetch("/api/user/notification-settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        documentCommentPreference: { documentId, enabled: next }
+      })
+    }).catch(() => null);
+    if (!response?.ok) {
+      setDocumentNotificationsEnabled(previous);
+      reportClientError("Could not update document notifications.", "document-notifications", {
+        documentId,
+        status: response?.status ?? null
+      });
+    }
+    setDocumentNotificationsBusy(false);
   }
 
   function handleInsertLatex(displayMode: boolean) {
@@ -4863,6 +4892,23 @@ export function DocumentWorkspace({
                   </span>
                 ))}
               </div>
+            ) : null}
+            {canConfigureDocumentNotifications ? (
+              <button
+                aria-label={`Comment notifications ${documentNotificationsEnabled ? "on" : "off"}`}
+                aria-pressed={documentNotificationsEnabled}
+                className={`ghost-button header-toggle-button${documentNotificationsEnabled ? " active" : ""}`}
+                disabled={documentNotificationsBusy}
+                onClick={() => void toggleDocumentNotifications()}
+                title={
+                  documentNotificationsEnabled
+                    ? "Comment notifications are on for this document"
+                    : "Comment notifications are off for this document"
+                }
+                type="button"
+              >
+                {documentNotificationsEnabled ? "🔔" : "🔕"}
+              </button>
             ) : null}
             <button
               className="ghost-button"

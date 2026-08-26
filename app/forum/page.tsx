@@ -2,11 +2,13 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { QuicktakeFeed } from "@/components/forum/quicktakes";
+import { NewPostButton } from "@/components/forum/new-post-button";
 import { VoteWidget } from "@/components/forum/vote-widget";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { forumExcerpt, listForumDocumentsForUser } from "@/lib/forum-data";
 import { getQuicktakeVisibility, listQuicktakes } from "@/lib/quicktakes";
+import { listForumPostCandidates } from "@/lib/forum-posting";
 
 export const metadata: Metadata = { title: "Forum — r-docs" };
 
@@ -22,7 +24,7 @@ function formatDate(value: Date) {
 export default async function ForumPage() {
   const user = await getCurrentUser();
 
-  const [posts, quicktakes, visibility, groups] = await Promise.all([
+  const [posts, quicktakes, visibility, groups, postCandidates] = await Promise.all([
     listForumDocumentsForUser(user?.id ?? null),
     listQuicktakes(user?.id ?? null, 5),
     user ? getQuicktakeVisibility(user.id) : Promise.resolve(null),
@@ -32,7 +34,8 @@ export default async function ForumPage() {
           orderBy: { name: "asc" },
           select: { id: true, name: true }
         })
-      : Promise.resolve([])
+      : Promise.resolve([]),
+    user ? listForumPostCandidates(user.id) : Promise.resolve([])
   ]);
   const excerpts = new Map<string, string>();
   if (posts.length > 0) {
@@ -58,9 +61,12 @@ export default async function ForumPage() {
         </div>
         <nav className="forum-header-nav">
           {user ? (
-            <Link href="/dashboard" className="forum-btn-ghost">
-              Studio
-            </Link>
+            <>
+              <NewPostButton documents={postCandidates} groups={groups} />
+              <Link href="/dashboard" className="forum-btn-ghost">
+                Studio
+              </Link>
+            </>
           ) : (
             <Link href="/sign-in" className="forum-btn-ghost">
               Sign in

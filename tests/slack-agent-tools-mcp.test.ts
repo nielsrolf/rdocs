@@ -18,10 +18,25 @@ test("Slack MCP exposes the cross-thread tools available in the Claude harness",
     "check_back_later",
     "list_scheduled_tasks",
     "cancel_scheduled_task",
-    "message_thread"
+    "message_thread",
+    "set_channel_workspace",
+    "set_channel_repository"
   ]) {
     assert.ok(names.has(name), `${name} should be exposed over MCP`);
   }
+});
+
+test("Slack MCP describes set_channel_repository with repository and optional branch", () => {
+  const definition = listSlackAgentMcpToolDefinitions().find(
+    (tool) => tool.name === "set_channel_repository"
+  );
+  assert.ok(definition, "set_channel_repository must be in the Codex MCP schema list");
+  const schema = definition!.inputSchema as {
+    properties: Record<string, unknown>;
+    required: string[];
+  };
+  assert.deepEqual(Object.keys(schema.properties).sort(), ["branch", "repository"]);
+  assert.deepEqual(schema.required, ["repository"]);
 });
 
 test("Slack MCP describes message_thread with channel_id/thread_ts/text", () => {

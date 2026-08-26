@@ -1,4 +1,4 @@
-import { Extension, InputRule } from "@tiptap/core";
+import { Extension, InputRule, type Editor } from "@tiptap/core";
 import TaskItemBase from "@tiptap/extension-task-item";
 import { TextSelection } from "@tiptap/pm/state";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
@@ -14,7 +14,7 @@ export const StrikeShortcut = Extension.create({
 
 // Google Docs-compatible link shortcut. The workspace owns the actual prompt
 // so this extension remains testable and does not couple editor code to the DOM.
-export const LinkShortcut = Extension.create<{ onOpen?: () => void }>({
+export const LinkShortcut = Extension.create<{ onOpen?: (editor: Editor) => void }>({
   name: "linkShortcut",
   addOptions() {
     return { onOpen: undefined };
@@ -22,7 +22,7 @@ export const LinkShortcut = Extension.create<{ onOpen?: () => void }>({
   addKeyboardShortcuts() {
     return {
       "Mod-k": () => {
-        this.options.onOpen?.();
+        this.options.onOpen?.(this.editor);
         return Boolean(this.options.onOpen);
       }
     };

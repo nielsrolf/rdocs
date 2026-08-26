@@ -123,6 +123,10 @@ export type DocumentWorkspaceProps = {
   initialForumPostedAt?: string | null;
   // Whether the forum post is public (readable by logged-out visitors).
   initialForumPublic?: boolean;
+  // Effective comment-notification state for the current viewer. The topbar
+  // toggle writes an explicit per-document override.
+  initialDocumentNotificationsEnabled?: boolean;
+  canConfigureDocumentNotifications?: boolean;
 };
 
 export type VersionView = {

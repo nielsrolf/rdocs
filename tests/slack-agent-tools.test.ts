@@ -454,6 +454,94 @@ test("set_channel_workspace merges the channel document into the target doc", as
   await db.aiRun.update({ where: { id: run.id }, data: { status: "FAILED", error: "test cleanup" } });
 });
 
+test("set_channel_repository links the current channel document with edit access", async () => {
+  const crypto = await import("node:crypto");
+  const { db } = await import("../lib/db");
+  const teamId = `T-${crypto.randomUUID()}`;
+  const owner = await db.user.create({
+    data: { email: `scr-${crypto.randomUUID()}@example.com`, name: "scr", passwordHash: "x" }
+  });
+  const stranger = await db.user.create({
+    data: { email: `scr2-${crypto.randomUUID()}@example.com`, name: "scr2", passwordHash: "x" }
+  });
+  await db.slackAccountLink.createMany({
+    data: [
+      { slackTeamId: teamId, slackUserId: "UALICE", userId: owner.id },
+      { slackTeamId: teamId, slackUserId: "UBOB", userId: stranger.id }
+    ]
+  });
+  const channelDoc = await db.document.create({
+    data: {
+      ownerId: owner.id,
+      kind: "slack_channel",
+      slackTeamId: teamId,
+      slackChannelId: "C_BOTH",
+      title: "#both",
+      content: "{}"
+    }
+  });
+  const run = await db.aiRun.create({
+    data: { documentId: channelDoc.id, triggerType: "SLACK_MENTION", triggerId: "C_BOTH:1.0", instruction: "x" }
+  });
+  const slack = makeSlack();
+
+  const denied = await handleSlackAgentToolCall(
+    {
+      tool: "set_channel_repository",
+      args: { repository: "https://huggingface.co/datasets/example/project" }
+    },
+    {
+      claims: { slackTeamId: teamId, slackUserId: "UBOB", aiRunId: run.id },
+      slack,
+      botUserId: BOT
+    }
+  );
+  assert.equal(denied.ok, false);
+  assert.match(denied.text, /edit access/i);
+
+  const linked = await handleSlackAgentToolCall(
+    {
+      tool: "set_channel_repository",
+      args: {
+        repository:
+          "<http://huggingface.co/datasets/example/project|huggingface.co/datasets/example/project>",
+        branch: "research/v2"
+      }
+    },
+    {
+      claims: { slackTeamId: teamId, slackUserId: "UALICE", aiRunId: run.id },
+      slack,
+      botUserId: BOT
+    }
+  );
+  assert.ok(linked.ok, linked.text);
+  assert.match(linked.text, /research\/v2/);
+  const updated = await db.document.findUniqueOrThrow({
+    where: { id: channelDoc.id },
+    select: { repoUrl: true, repoBranch: true, repoWorkspace: true }
+  });
+  assert.equal(updated.repoUrl, "https://huggingface.co/datasets/example/project");
+  assert.equal(updated.repoBranch, "research/v2");
+  assert.ok(updated.repoWorkspace);
+
+  const cleared = await handleSlackAgentToolCall(
+    { tool: "set_channel_repository", args: { repository: "none" } },
+    {
+      claims: { slackTeamId: teamId, slackUserId: "UALICE", aiRunId: run.id },
+      slack,
+      botUserId: BOT
+    }
+  );
+  assert.ok(cleared.ok, cleared.text);
+  const afterClear = await db.document.findUniqueOrThrow({
+    where: { id: channelDoc.id },
+    select: { repoUrl: true, repoBranch: true, repoWorkspace: true }
+  });
+  assert.deepEqual(afterClear, { repoUrl: null, repoBranch: null, repoWorkspace: null });
+
+  await db.aiRun.update({ where: { id: run.id }, data: { status: "FAILED", error: "test cleanup" } });
+});
+
 test("post_slack_message posts only into the run's own thread", async () => {
   const crypto = await import("node:crypto");
   const { db } = await import("../lib/db");

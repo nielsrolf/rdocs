@@ -106,6 +106,17 @@ const SLACK_MCP_TOOLS: ToolDefinition[] = [
       "away, so the target document's content, environment, agent settings, workspace, and agent history apply to " +
       'the channel. Pass a document id or URL, or "none" to disconnect. Requires edit access to the target document.',
     inputSchema: objectSchema({ document: string }, ["document"])
+  },
+  {
+    name: "set_channel_repository",
+    description:
+      "Link the rdocs document backing this Slack channel to a GitHub or HuggingFace repository. " +
+      'Pass a repository URL and optional branch, or pass "none" as repository to disconnect it. ' +
+      "Requires edit access to the channel's document.",
+    inputSchema: objectSchema(
+      { repository: string, branch: string },
+      ["repository"]
+    )
   }
 ];
 

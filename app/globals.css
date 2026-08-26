@@ -6482,6 +6482,49 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   font-family: Arial, Helvetica, sans-serif;
 }
 
+.forum-new-post-modal {
+  width: min(100%, 520px);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.forum-new-post-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.forum-new-post-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  color: #444;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.forum-new-post-fields select {
+  width: 100%;
+  border: 1px solid #d5d5d5;
+  border-radius: 8px;
+  background: #fff;
+  color: #222;
+  font: inherit;
+  font-weight: 400;
+  padding: 0.6rem 0.7rem;
+}
+
+.forum-new-post-help {
+  margin: 0;
+  color: #6b6b6b;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.forum-new-post-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 /* Forum document page */
 
 .forum-document-shell {

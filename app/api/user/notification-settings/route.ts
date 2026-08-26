@@ -47,8 +47,8 @@ export async function PATCH(request: Request) {
     const document = await db.document.findFirst({
       where: {
         id: preference.documentId,
-        ownerId: { not: user.id },
         OR: [
+          { ownerId: user.id },
           { memberships: { some: { userId: user.id } } },
           { groupAccess: { some: { group: { OR: [{ ownerId: user.id }, { members: { some: { userId: user.id } } }] } } } }
         ]
@@ -56,7 +56,7 @@ export async function PATCH(request: Request) {
       select: { id: true }
     });
     if (!document) {
-      return NextResponse.json({ error: "Document not found or not shared with you." }, { status: 404 });
+      return NextResponse.json({ error: "Document not found or unavailable." }, { status: 404 });
     }
     if (preference.enabled === null) {
       await db.documentNotificationPreference.deleteMany({

@@ -8,23 +8,14 @@ type Settings = {
   forumShareSlackNotifications: boolean;
 };
 
-type SharedDocument = {
-  id: string;
-  title: string;
-  commentSlackNotifications: boolean | null;
-};
-
 export function NotificationSettings({
   initialSettings,
-  sharedDocuments: initialDocuments,
   slackLinked
 }: {
   initialSettings: Settings;
-  sharedDocuments: SharedDocument[];
   slackLinked: boolean;
 }) {
   const [settings, setSettings] = useState(initialSettings);
-  const [documents, setDocuments] = useState(initialDocuments);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -62,22 +53,6 @@ export function NotificationSettings({
     }
   }
 
-  async function updateDocument(documentId: string, enabled: boolean | null) {
-    const previous = documents.find((document) => document.id === documentId)?.commentSlackNotifications ?? null;
-    setDocuments((current) =>
-      current.map((document) =>
-        document.id === documentId ? { ...document, commentSlackNotifications: enabled } : document
-      )
-    );
-    if (!(await patch({ documentCommentPreference: { documentId, enabled } }))) {
-      setDocuments((current) =>
-        current.map((document) =>
-          document.id === documentId ? { ...document, commentSlackNotifications: previous } : document
-        )
-      );
-    }
-  }
-
   const toggles: Array<{ key: keyof Settings; title: string; description: string }> = [
     {
       key: "forumShareSlackNotifications",
@@ -91,8 +66,8 @@ export function NotificationSettings({
     },
     {
       key: "commentSlackNotifications",
-      title: "Comments and replies",
-      description: "Use this as the default for documents I own or can access."
+      title: "Default for document comments",
+      description: "Choose whether the notification button starts on or off for documents without an override."
     }
   ];
 
@@ -111,38 +86,6 @@ export function NotificationSettings({
           <span><strong>{toggle.title}</strong><br /><span className="muted-copy">{toggle.description}</span></span>
         </label>
       ))}
-
-      {documents.length > 0 ? (
-        <div className="share-modal-section">
-          <h3>Comment notifications by document</h3>
-          <p className="muted-copy">Override the comments default for documents you do not own.</p>
-          {documents.map((document) => (
-            <label className="quicktake-visibility-select" key={document.id}>
-              <span>{document.title || "Untitled document"}</span>
-              <select
-                disabled={saving || !slackLinked}
-                onChange={(event) =>
-                  void updateDocument(
-                    document.id,
-                    event.target.value === "default" ? null : event.target.value === "on"
-                  )
-                }
-                value={
-                  document.commentSlackNotifications === null
-                    ? "default"
-                    : document.commentSlackNotifications
-                      ? "on"
-                      : "off"
-                }
-              >
-                <option value="default">Use default ({settings.commentSlackNotifications ? "on" : "off"})</option>
-                <option value="on">On</option>
-                <option value="off">Off</option>
-              </select>
-            </label>
-          ))}
-        </div>
-      ) : null}
 
       {!slackLinked ? <p className="muted-copy">Connect your Slack account first to enable notifications.</p> : null}
       {saving ? <p className="muted-copy">Saving…</p> : null}

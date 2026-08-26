@@ -192,7 +192,16 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
   const viewerDefaults = user
     ? await db.user.findUnique({
         where: { id: user.id },
-        select: { defaultAgentModel: true, defaultAgentEffort: true }
+        select: {
+          defaultAgentModel: true,
+          defaultAgentEffort: true,
+          commentSlackNotifications: true,
+          documentNotificationPreferences: {
+            where: { documentId: id },
+            select: { commentSlackNotifications: true },
+            take: 1
+          }
+        }
       })
     : null;
   const effectiveAgentModel = access.document.agentModel ?? viewerDefaults?.defaultAgentModel ?? null;
@@ -251,6 +260,14 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         viaShareLink={access.viaShareLink || access.viaForumPublic}
         initialForumPostedAt={access.document.forumPostedAt?.toISOString() ?? null}
         initialForumPublic={access.document.forumPublic}
+        canConfigureDocumentNotifications={Boolean(
+          user && !access.viaShareLink && !access.viaForumPublic
+        )}
+        initialDocumentNotificationsEnabled={
+          viewerDefaults?.documentNotificationPreferences[0]?.commentSlackNotifications ??
+          viewerDefaults?.commentSlackNotifications ??
+          false
+        }
       />
       {access.permission !== "EDIT" &&
         !((access.viaShareLink || access.viaForumPublic) && access.permission === "VIEW") && (

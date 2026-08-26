@@ -2,10 +2,12 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
-import { db } from "@/lib/db";
-import { checkRepoAccess } from "@/lib/github-access";
-import { resolveGithubAuthForDocument } from "@/lib/github-auth";
-import { getWorkspacePath } from "@/lib/research-workspace";
+import {
+  DocumentRepositoryError,
+  normalizeRepositoryBranch,
+  normalizeRepositoryUrl,
+  setDocumentRepository
+} from "@/lib/document-repository";
 
 export const runtime = "nodejs";
 
@@ -42,67 +44,20 @@ export async function PATCH(request: Request, { params }: RouteContext<{ id: str
   }
   const { user } = gate;
 
-  const repoUrl = parsed.data.repoUrl?.trim() || null;
-  const repoBranch = parsed.data.repoBranch?.trim() || null;
-
-  if (
-    repoUrl &&
-    // SSH URLs are rejected: SSH would authenticate with the host's own keys,
-    // which per-user tokens can't scope. HTTPS + PAT is the supported path.
-    !/^https:\/\/github\.com\/[^/\s]+\/[^/\s]+(?:\.git)?$/.test(repoUrl) &&
-    !/^https:\/\/huggingface\.co\/(?:datasets\/|spaces\/)?[^/\s]+\/[^/\s]+(?:\.git)?$/.test(repoUrl)
-  ) {
-    return NextResponse.json(
-      {
-        error:
-          "Use a GitHub HTTPS URL (https://github.com/owner/repo) or a HuggingFace repository URL (https://huggingface.co/datasets/owner/name)."
-      },
-      { status: 400 }
-    );
-  }
-
-  // Verify the credential this document's git ops will actually run under
-  // (doc env → linking user's PAT → owner PAT → allowlisted host) can reach
-  // the repo before the first agent run trips on it. Also auto-accepts a
-  // pending collaborator invitation for exactly this repo, so "invite the
-  // account, press Save again" is the whole fix flow.
-  const githubAuth = repoUrl ? await resolveGithubAuthForDocument(id, user?.id ?? null) : null;
-  const repoAccess = repoUrl ? await checkRepoAccess(repoUrl, githubAuth?.token ?? null) : null;
-  const accessPayload = repoAccess
-    ? { ...repoAccess, tokenSource: githubAuth?.source ?? ("none" as const) }
-    : null;
-  if (accessPayload && accessPayload.reason !== "not-github") {
-    console.log(
-      "[repo-access]",
-      JSON.stringify({
-        documentId: id,
-        userId: user?.id ?? null,
-        repoUrl,
-        ok: accessPayload.ok,
-        reason: accessPayload.reason,
-        canPush: accessPayload.canPush,
-        acceptedInvitation: accessPayload.acceptedInvitation,
-        login: accessPayload.login,
-        tokenSource: accessPayload.tokenSource
-      })
-    );
-  }
-
-  const updated = await db.document.update({
-    where: { id },
-    data: {
+  const repoUrl = normalizeRepositoryUrl(parsed.data.repoUrl);
+  const repoBranch = normalizeRepositoryBranch(parsed.data.repoBranch);
+  try {
+    const result = await setDocumentRepository({
+      documentId: id,
+      userId: user?.id ?? null,
       repoUrl,
-      repoBranch,
-      repoWorkspace: repoUrl ? getWorkspacePath(id, repoUrl) : null,
-      // Linking a repo gives the doc its own workspace again — mutually
-      // exclusive with sharing a Slack channel document's workspace.
-      ...(repoUrl ? { workspaceDocumentId: null } : {})
-    },
-    select: {
-      repoUrl: true,
-      repoBranch: true
+      repoBranch
+    });
+    return NextResponse.json(result);
+  } catch (error) {
+    if (error instanceof DocumentRepositoryError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
     }
-  });
-
-  return NextResponse.json({ repository: updated, access: accessPayload });
+    throw error;
+  }
 }

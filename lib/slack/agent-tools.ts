@@ -28,7 +28,8 @@ export type SlackAgentToolRequest = {
     | "list_scheduled_tasks"
     | "cancel_scheduled_task"
     | "send_file"
-    | "set_channel_workspace";
+    | "set_channel_workspace"
+    | "set_channel_repository";
   args: Record<string, unknown>;
 };
 
@@ -314,6 +315,85 @@ export async function handleSlackAgentToolCall(
       };
     } catch (error) {
       if (error instanceof WorkspaceLinkError) {
+        return { ok: false, text: error.message };
+      }
+      throw error;
+    }
+  }
+
+  // set_channel_repository: link the document backing THIS Slack channel to a
+  // Git repository. The run id is the authority for choosing the document;
+  // the model cannot name an arbitrary document. The triggering Slack user
+  // must map to an rdocs user with EDIT access to that backing document.
+  if (request.tool === "set_channel_repository") {
+    const run = await db.aiRun.findUnique({
+      where: { id: claims.aiRunId },
+      select: { documentId: true, triggerId: true }
+    });
+    if (!run?.triggerId) {
+      return { ok: false, text: "This run has no Slack conversation." };
+    }
+    const [runChannel] = run.triggerId.split(":", 2);
+    const denied = await assertReadable(slack, botUserId, claims, runChannel);
+    if (denied) return { ok: false, text: denied };
+    const document = await db.document.findUnique({
+      where: { id: run.documentId },
+      select: { id: true, title: true, slackTeamId: true, slackChannelId: true }
+    });
+    if (!document?.slackTeamId || !document.slackChannelId) {
+      return { ok: false, text: "This conversation is not backed by a Slack channel document." };
+    }
+    const link = await db.slackAccountLink.findUnique({
+      where: {
+        slackTeamId_slackUserId: { slackTeamId: claims.slackTeamId, slackUserId: claims.slackUserId }
+      }
+    });
+    if (!link) {
+      return { ok: false, text: "This Slack account is not linked to an rdocs account." };
+    }
+    const { resolveDocumentAccess } = await import("@/lib/permissions");
+    const access = await resolveDocumentAccess(document.id, link.userId);
+    if (access?.permission !== "EDIT") {
+      return { ok: false, text: "You need edit access to the channel's document to change its repository." };
+    }
+
+    const rawRepository =
+      typeof request.args.repository === "string" ? request.args.repository.trim() : "";
+    if (!rawRepository) {
+      return { ok: false, text: 'repository is required: a repository URL (or "none" to disconnect).' };
+    }
+    const rawBranch = typeof request.args.branch === "string" ? request.args.branch : null;
+    const {
+      DocumentRepositoryError,
+      normalizeRepositoryBranch,
+      normalizeRepositoryUrl,
+      setDocumentRepository
+    } = await import("@/lib/document-repository");
+    const repoUrl = normalizeRepositoryUrl(rawRepository);
+    const repoBranch = normalizeRepositoryBranch(rawBranch);
+    try {
+      const result = await setDocumentRepository({
+        documentId: document.id,
+        userId: link.userId,
+        repoUrl,
+        repoBranch
+      });
+      if (!repoUrl) {
+        return { ok: true, text: `Removed the linked repository from "${document.title}".` };
+      }
+      const branchText = repoBranch ? ` on branch ${repoBranch}` : " using its default branch";
+      const accessWarning =
+        result.access && !result.access.ok
+          ? " Warning: the available GitHub credential could not currently read this repository."
+          : result.access?.reason === "check-failed"
+            ? " Warning: GitHub access could not be verified right now."
+            : "";
+      return {
+        ok: true,
+        text: `Linked "${document.title}" to ${repoUrl}${branchText}.${accessWarning}`
+      };
+    } catch (error) {
+      if (error instanceof DocumentRepositoryError) {
         return { ok: false, text: error.message };
       }
       throw error;
