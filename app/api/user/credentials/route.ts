@@ -22,6 +22,7 @@ const providerSchema = z.enum([
   "openai-chatgpt",
   "openrouter",
   "litellm",
+  "huggingface",
   "github"
 ]);
 

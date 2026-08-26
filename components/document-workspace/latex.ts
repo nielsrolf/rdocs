@@ -13,6 +13,41 @@ type LatexMatch = {
   displayMode: boolean;
 };
 
+export function escapeLiteralDollars(text: string) {
+  let escaped = "";
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (character !== "$") {
+      escaped += character;
+      continue;
+    }
+    let backslashes = 0;
+    for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor -= 1) {
+      backslashes += 1;
+    }
+    escaped += backslashes % 2 === 0 ? "\\$" : "$";
+  }
+  return escaped;
+}
+
+export function findEscapedDollarPositionsInDoc(doc: ProseMirrorNode) {
+  const positions: number[] = [];
+  doc.descendants((node, position) => {
+    if (!node.isTextblock) return true;
+    const text = node.textBetween(0, node.content.size, undefined, INLINE_LEAF_PLACEHOLDER);
+    for (let index = 0; index < text.length - 1; index += 1) {
+      if (text[index] !== "\\" || text[index + 1] !== "$") continue;
+      let precedingBackslashes = 0;
+      for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor -= 1) {
+        precedingBackslashes += 1;
+      }
+      if (precedingBackslashes % 2 === 0) positions.push(position + 1 + index);
+    }
+    return false;
+  });
+  return positions;
+}
+
 function findLatexMatches(text: string, basePosition: number) {
   const matches: LatexMatch[] = [];
   let index = 0;
@@ -121,6 +156,16 @@ export function createLatexRenderExtension() {
             decorations(state) {
               const decorations: Decoration[] = [];
               const { from: selectionFrom, to: selectionTo } = state.selection;
+
+              // `\$` is the portable Markdown escape for a literal dollar. Hide
+              // only the escape character while the caret is elsewhere, so the
+              // document reads naturally but remains editable source text.
+              findEscapedDollarPositionsInDoc(state.doc).forEach((position) => {
+                const isActive = selectionFrom <= position + 1 && selectionTo >= position;
+                if (!isActive) {
+                  decorations.push(Decoration.inline(position, position + 1, { class: "literal-dollar-escape" }));
+                }
+              });
 
               findLatexMatchesInDoc(state.doc).forEach((match) => {
                   const isActive = selectionFrom <= match.to && selectionTo >= match.from;

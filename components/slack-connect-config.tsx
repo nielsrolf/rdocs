@@ -46,6 +46,7 @@ function credentialLabel(credential: MaskedCredential): string {
   if (credential.provider === "openai") return "OpenAI API key";
   if (credential.provider === "openai-chatgpt") return "ChatGPT subscription (Codex)";
   if (credential.provider === "litellm") return "LiteLLM API key";
+  if (credential.provider === "huggingface") return "Hugging Face access token";
   if (credential.provider === "github") return "GitHub access token";
   return credential.kind === "oauth" ? "Claude subscription" : "Anthropic API key";
 }
@@ -56,6 +57,7 @@ const FALLBACK_PROVIDER_OPTIONS: Array<{ value: CredentialProvider; label: strin
   { value: "litellm", label: "LiteLLM API key" },
   { value: "openai", label: "OpenAI API key" },
   { value: "openrouter", label: "OpenRouter API key" },
+  { value: "huggingface", label: "Hugging Face access token" },
   { value: "github", label: "GitHub access token" }
 ];
 
@@ -95,6 +97,13 @@ const PROVIDER_HINTS: Record<CredentialProvider, ReactNode> = {
       Unlocks LiteLLM models on every document you own — pick one under Agents → Model. If this
       server doesn&apos;t provide a default, also set <code>LITELLM_BASE_URL</code> in the
       document&apos;s Env menu.
+    </>
+  ),
+  huggingface: (
+    <>
+      Exposed as <code>HF_TOKEN</code> only to agent runs that you trigger, so Hugging Face tools
+      and libraries can access private or gated resources allowed by your token. Other users&apos;
+      runs never inherit your personal token.
     </>
   ),
   github: (
@@ -455,9 +464,9 @@ export function SlackConnectConfig({
       <section className="credentials-section" id="credentials">
         <strong className="credentials-section-title">AI credentials</strong>
         <p>
-          One credential per provider, used for AI edits and replies on every document you own.
-          Values are write-only — shown masked, never in full. A key set in a document&apos;s Env
-          menu overrides these for that document.
+          One credential per provider. Values are encrypted and write-only — shown masked, never
+          in full. Personal Hugging Face tokens are available only to runs you trigger; a key set
+          in a document&apos;s Env menu is an explicit shared override for that document.
         </p>
 
         {!loaded ? (
@@ -529,7 +538,7 @@ export function SlackConnectConfig({
             data-form-type="other"
             name="credential-paste"
             onChange={(event) => setValueDraft(event.target.value)}
-            placeholder="Paste any credential: sk-ant-…, sk-or-…, github_pat_…, LiteLLM key, ~/.codex/auth.json"
+            placeholder="Paste any credential: sk-ant-…, sk-or-…, hf_…, github_pat_…, LiteLLM key, ~/.codex/auth.json"
             spellCheck={false}
             type="text"
             value={valueDraft}
@@ -577,7 +586,8 @@ export function SlackConnectConfig({
           <p className="env-note">
             One field for everything: Anthropic API keys (<code>sk-ant-…</code>), Claude
             subscription tokens (<code>sk-ant-oat…</code>, from <code>claude setup-token</code>),
-            OpenRouter keys (<code>sk-or-…</code>), GitHub tokens (<code>github_pat_…</code> /{" "}
+            OpenRouter keys (<code>sk-or-…</code>), Hugging Face tokens (<code>hf_…</code>),
+            GitHub tokens (<code>github_pat_…</code> /{" "}
             <code>ghp_…</code>) and LiteLLM keys — the type is detected as you paste.
             Subscriptions work too: run <code>claude setup-token</code> (Claude) or{" "}
             <code>codex login</code> (ChatGPT) on your own machine and paste the token — for

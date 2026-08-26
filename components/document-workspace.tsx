@@ -121,7 +121,7 @@ import { usePresence } from "./document-workspace/use-presence";
 import { FindBar } from "./document-workspace/find-bar";
 import { SearchExtension } from "./document-workspace/search";
 import { aiRunsFingerprint, buildConversations, mergeRunEventTimelines, selectionBlocksRunSync } from "./document-workspace/conversations";
-import { createLatexRenderExtension } from "./document-workspace/latex";
+import { createLatexRenderExtension, escapeLiteralDollars } from "./document-workspace/latex";
 import { AttachmentChip, EmbeddedWidget, RepoImage, TabBreak } from "./document-workspace/nodes";
 import {
   createTabId,
@@ -133,6 +133,7 @@ import {
   type TabSummary
 } from "./document-workspace/tabs";
 import { aiEditSelectionIdsAttributeSpec, commentThreadIdsAttributeSpec } from "@/lib/document-schema-nodes";
+import { HIGHLIGHT_COLORS, TextHighlight, type HighlightColor } from "@/lib/text-highlight";
 
 // Upper bound on a single collaboration push. A push that never settles (e.g.
 // the laptop sleeping mid-request) must not be allowed to wedge the in-flight
@@ -1343,6 +1344,7 @@ export function DocumentWorkspace({
       remotePresenceExtension,
       AiEditSelections,
       Suggestions,
+      TextHighlight,
       commentHighlightExtension,
       latexRenderExtension,
       SearchExtension,
@@ -2175,6 +2177,23 @@ export function DocumentWorkspace({
       .insertContentAt(from, { type: "text", text: `${delimiter}${delimiter}` })
       .setTextSelection(from + delimiter.length)
       .run();
+  }
+
+  function handleInsertLiteralDollar() {
+    if (!editor || !canWriteDocument) return;
+    const { from, to, empty } = editor.state.selection;
+    const selected = empty ? "" : editor.state.doc.textBetween(from, to, " ");
+    const replacement = empty ? "\\$" : escapeLiteralDollars(selected);
+    editor
+      .chain()
+      .focus()
+      .insertContentAt({ from, to }, { type: "text", text: replacement })
+      .setTextSelection(from + replacement.length)
+      .run();
+  }
+
+  function setHighlight(color: HighlightColor) {
+    editor?.chain().focus().setMark("textHighlight", { color }).run();
   }
 
   async function handleInsertWidget() {
@@ -4582,6 +4601,33 @@ export function DocumentWorkspace({
                   label="$x$"
                   title="Inline math (LaTeX)"
                   onClick={() => handleInsertLatex(false)}
+                />
+                <ToolbarButton
+                  disabled={!canWriteDocument || !editor}
+                  label="$"
+                  title="Insert a literal dollar sign (not LaTeX)"
+                  onClick={handleInsertLiteralDollar}
+                />
+              </div>
+
+              <div className="editor-toolbar-group editor-highlight-group" aria-label="Highlight color">
+                {HIGHLIGHT_COLORS.map((color) => (
+                  <button
+                    aria-label={`${color} highlight`}
+                    aria-pressed={editor?.isActive("textHighlight", { color }) ?? false}
+                    className={`editor-highlight-button editor-highlight-${color}`}
+                    disabled={!canWriteDocument || !editor}
+                    key={color}
+                    onClick={() => setHighlight(color)}
+                    title={`${color[0].toUpperCase()}${color.slice(1)} highlight`}
+                    type="button"
+                  />
+                ))}
+                <ToolbarButton
+                  disabled={!canWriteDocument || !editor}
+                  label="Clear"
+                  title="Remove highlight"
+                  onClick={() => editor?.chain().focus().unsetMark("textHighlight").run()}
                 />
               </div>
 

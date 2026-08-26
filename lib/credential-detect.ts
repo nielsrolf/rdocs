@@ -8,6 +8,7 @@ export type CredentialProvider =
   | "openai-chatgpt"
   | "openrouter"
   | "litellm"
+  | "huggingface"
   | "github";
 
 export type CredentialKind = "api_key" | "oauth";
@@ -32,6 +33,10 @@ const PREFIX_RULES: Array<{ prefixes: string[]; detected: DetectedCredential }> 
   {
     prefixes: ["sk-or-"],
     detected: { provider: "openrouter", kind: "api_key", label: "OpenRouter API key" }
+  },
+  {
+    prefixes: ["hf_"],
+    detected: { provider: "huggingface", kind: "api_key", label: "Hugging Face access token" }
   },
   {
     // Classic + fine-grained PATs and app/OAuth tokens.

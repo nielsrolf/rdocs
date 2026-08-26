@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { findLatexMatchesInDoc } from "../components/document-workspace/latex";
+import {
+  escapeLiteralDollars,
+  findEscapedDollarPositionsInDoc,
+  findLatexMatchesInDoc
+} from "../components/document-workspace/latex";
 import { createDocumentEditorSchema } from "../lib/document-editor-schema";
 import { renderCommentHtml } from "../lib/mention-markdown";
 
@@ -80,6 +84,18 @@ test("comment markdown leaves escaped dollars and plain text alone", () => {
   const viewer = { members: [], currentUserId: null };
   const html = renderCommentHtml("costs \\$5 today", viewer);
   assert.doesNotMatch(html, /class="katex/);
+});
+
+test("literal-dollar helper escapes prices without double-escaping existing source", () => {
+  assert.equal(escapeLiteralDollars("$5 and $10"), "\\$5 and \\$10");
+  assert.equal(escapeLiteralDollars("already \\$5"), "already \\$5");
+
+  const doc = docFromJson({
+    type: "doc",
+    content: [{ type: "paragraph", content: [{ type: "text", text: "Costs \\$5, not $x$" }] }]
+  });
+  assert.equal(findEscapedDollarPositionsInDoc(doc).length, 1);
+  assert.equal(findLatexMatchesInDoc(doc).length, 1);
 });
 
 test("AI-edit insert pipeline keeps latex as literal $...$ source text (editor renders via decorations)", async () => {

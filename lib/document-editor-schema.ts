@@ -14,6 +14,7 @@ import { AiEditRange } from "@/components/document-workspace/ai-edit-selections"
 import { CommentAnchor } from "@/components/document-workspace/comment-anchors";
 import { Mention } from "@/components/document-workspace/mention";
 import { SuggestedDeletion, SuggestedInsertion } from "@/components/document-workspace/suggestions";
+import { TextHighlight } from "@/lib/text-highlight";
 import {
   AttachmentChipSchemaNode,
   EmbeddedWidgetSchemaNode,
@@ -53,6 +54,7 @@ export function documentEditorExtensions() {
     AiEditRange,
     SuggestedInsertion,
     SuggestedDeletion,
+    TextHighlight,
     Link.configure({
       openOnClick: false,
       autolink: true,

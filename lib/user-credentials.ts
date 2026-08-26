@@ -47,6 +47,7 @@ export const CREDENTIAL_PROVIDERS: readonly CredentialProvider[] = [
   "openai-chatgpt",
   "openrouter",
   "litellm",
+  "huggingface",
   "github"
 ];
 
@@ -281,7 +282,8 @@ export const PROVIDER_ENV_KEY = {
 const TOOL_PROVIDER_ENV_KEY = {
   openai: "OPENAI_API_KEY",
   openrouter: "OPENROUTER_API_KEY",
-  litellm: "LITELLM_API_KEY"
+  litellm: "LITELLM_API_KEY",
+  huggingface: "HF_TOKEN"
 } as const;
 
 export type ToolCredentialProvider = keyof typeof TOOL_PROVIDER_ENV_KEY;
@@ -612,18 +614,21 @@ async function resolveModelCredentialEnv(
       ? await getUserCredential(doc.ownerId, provider)
       : null;
   const modelEnv = applyOwnerCredentialEnv(docEnv, runnerCredential ?? ownerCredential, agentModel);
-  // Tool credentials: EVERY provider key the triggering user (else the owner)
-  // connected goes into the run env — not just the model's provider — so the
-  // agent can call OpenAI / OpenRouter / the LiteLLM proxy directly from
-  // scripts. Doc-env values still win inside applyToolCredentialEnv.
+  // Tool credentials go into the run env independently of the selected model.
+  // LLM-provider keys retain the historical owner fallback. Hugging Face is
+  // stricter: it resolves from the ACTUAL triggering user only (not the
+  // selfHosted effective runner and never the document owner), so another
+  // collaborator cannot trigger a run that can use the owner's personal token.
+  // An explicit document-env value still wins inside applyToolCredentialEnv.
   const toolCredentials: Partial<Record<ToolCredentialProvider, string>> = {};
   await Promise.all(
     TOOL_CREDENTIAL_PROVIDERS.map(async (toolProvider) => {
-      const credential =
-        (runner ? await getUserCredential(runner.id, toolProvider) : null) ??
-        (doc?.ownerId && doc.ownerId !== runner?.id
-          ? await getUserCredential(doc.ownerId, toolProvider)
-          : null);
+      const credential = toolProvider === "huggingface"
+        ? (runnerUserId ? await getUserCredential(runnerUserId, toolProvider) : null)
+        : ((runner ? await getUserCredential(runner.id, toolProvider) : null) ??
+          (doc?.ownerId && doc.ownerId !== runner?.id
+            ? await getUserCredential(doc.ownerId, toolProvider)
+            : null));
       if (credential) toolCredentials[toolProvider] = credential.value;
     })
   );

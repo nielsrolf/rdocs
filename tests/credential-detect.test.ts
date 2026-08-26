@@ -16,6 +16,11 @@ test("detectCredential recognizes every prefixed provider", () => {
   assert.equal(detectCredential("ghp_abc123")?.provider, "github");
   assert.equal(detectCredential("github_pat_11AAA")?.provider, "github");
   assert.equal(detectCredential("gho_xyz")?.provider, "github");
+  assert.deepEqual(detectCredential("hf_abcdefghijklmnopqrstuvwxyz"), {
+    provider: "huggingface",
+    kind: "api_key",
+    label: "Hugging Face access token"
+  });
   assert.equal(detectCredential("  sk-ant-padded  ")?.provider, "anthropic");
 });
 
@@ -40,6 +45,11 @@ test("normalizeCredentialInput without a provider auto-detects from the format",
     provider: "github",
     kind: "api_key",
     value: "github_pat_11AAA"
+  });
+  assert.deepEqual(normalizeCredentialInput({ value: "hf_abcdefghijklmnopqrstuvwxyz" }), {
+    provider: "huggingface",
+    kind: "api_key",
+    value: "hf_abcdefghijklmnopqrstuvwxyz"
   });
   assert.deepEqual(normalizeCredentialInput({ value: "sk-ant-oat01-x" }), {
     provider: "anthropic",

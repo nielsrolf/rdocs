@@ -169,9 +169,9 @@ model DocumentSkill {
 
 // Per-user AI credentials, at most one per provider; every document the user
 // OWNS inherits them, and the agent runs under the owner's credential (see
-// lib/user-credentials.ts). `provider` is "anthropic" | "openrouter" |
-// "litellm". `kind` is "api_key" (a plain API key — the only kind for
-// openrouter/litellm) or "oauth" (a `claude setup-token` subscription token,
+// lib/user-credentials.ts). `provider` includes model providers plus tool
+// credentials such as "github" and "huggingface". `kind` is "api_key" (a
+// plain API key/token) or "oauth" (a provider subscription token,
 // anthropic only). `secret` is the value encrypted at rest with
 // CREDENTIAL_ENCRYPTION_KEY (AES-256-GCM) — never returned in full over the
 // API; listed back masked, like DocumentEnvVar.

@@ -38,6 +38,10 @@ async function connectAnthropicKey(userId: string, value: string) {
   await upsertUserCredential(userId, normalizeCredentialInput({ provider: "anthropic", value }));
 }
 
+async function connectHuggingFaceToken(userId: string, value: string) {
+  await upsertUserCredential(userId, normalizeCredentialInput({ provider: "huggingface", value }));
+}
+
 test.after(async () => {
   await db.document.deleteMany({ where: { id: { in: created.documents } } });
   await db.user.deleteMany({ where: { id: { in: created.users } } });
@@ -63,6 +67,29 @@ test("runner's credential wins over the owner's when both exist", async () => {
 
   const env = await loadAgentEnvForDocument(doc.id, "claude-sonnet-5", runner.id);
   assert.equal(env.ANTHROPIC_API_KEY, "sk-ant-runner-key");
+});
+
+test("a Hugging Face token is injected only for the user who triggered the run", async () => {
+  const owner = await makeUser("hf-owner");
+  const runner = await makeUser("hf-runner");
+  await connectAnthropicKey(runner.id, "sk-ant-runner-key");
+  await connectHuggingFaceToken(owner.id, "hf_owner-secret");
+  await connectHuggingFaceToken(runner.id, "hf_runner-secret");
+  const doc = await makeDoc(owner.id);
+
+  const env = await loadAgentEnvForDocument(doc.id, "claude-sonnet-5", runner.id);
+  assert.equal(env.HF_TOKEN, "hf_runner-secret");
+});
+
+test("a collaborator-triggered run never falls back to the document owner's Hugging Face token", async () => {
+  const owner = await makeUser("hf-private-owner");
+  const runner = await makeUser("hf-collaborator");
+  await connectAnthropicKey(runner.id, "sk-ant-runner-key");
+  await connectHuggingFaceToken(owner.id, "hf_owner-must-not-leak");
+  const doc = await makeDoc(owner.id);
+
+  const env = await loadAgentEnvForDocument(doc.id, "claude-sonnet-5", runner.id);
+  assert.equal(env.HF_TOKEN, undefined);
 });
 
 test("owner's credential still fills in when the runner has none", async () => {
