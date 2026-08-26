@@ -66,9 +66,9 @@ export type AgentRunOptions = {
   // only honored by the in-process runner.
   trustedHostRun?: boolean;
   // Identifiers the selfHostedPull runner needs to key its SelfHostedJob row
-  // (see ./self-hosted.ts). Not needed — and unused — by inprocess/container/
-  // http, so existing call sites are unaffected unless they opt a document
-  // into runnerMode "selfHosted".
+  // (see ./self-hosted.ts). The container runner also uses them to expose the
+  // run's identity/permalink to the agent (GDOCS_RUN_ID / GDOCS_DOCUMENT_ID /
+  // GDOCS_RUN_URL — see container-args.ts); inprocess/http ignore them.
   documentId?: string;
   aiRunId?: string;
 };

@@ -79,3 +79,19 @@ export function getPublicOrigin(headers: Headers, fallbackUrl?: string): string 
   }
   return resolveRequestOrigin(headers, fallbackUrl);
 }
+
+// Canonical public origin for background code with no request in scope (agent
+// runners, schedulers). APP_URL only — null when it is not configured, so
+// callers can omit the URL rather than emit a broken one.
+export function getConfiguredPublicOrigin(): string | null {
+  return parseAllowedHosts().canonical;
+}
+
+// Canonical permalink of an agent run: opens the document with the run's
+// conversation selected in the agent panel (?run= is resolved server-side to
+// the conversation root). Null when APP_URL is not configured.
+export function buildRunPermalink(documentId: string, aiRunId: string): string | null {
+  const origin = getConfiguredPublicOrigin();
+  if (!origin) return null;
+  return `${origin}/documents/${encodeURIComponent(documentId)}?run=${encodeURIComponent(aiRunId)}`;
+}

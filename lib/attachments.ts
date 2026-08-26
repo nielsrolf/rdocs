@@ -53,6 +53,29 @@ async function uniqueStoredName(dir: string, desired: string) {
   return candidate;
 }
 
+// Copy one stored attachment file from a document's store into another
+// document's store, picking a collision-safe name in the target. Returns the
+// final storedName (unchanged when there is no collision). Used when a Slack
+// channel document is merged into a regular doc. A missing source file is not
+// an error — the DB row simply keeps its name and the file stays absent.
+export async function copyAttachmentBetweenStores(
+  sourceDocumentId: string,
+  targetDocumentId: string,
+  storedName: string
+): Promise<string> {
+  const sourcePath = getAttachmentStorePath(sourceDocumentId, storedName);
+  const sourceExists = await fs
+    .stat(sourcePath)
+    .then((stat) => stat.isFile())
+    .catch(() => false);
+  if (!sourceExists) return storedName;
+  const targetDir = getAttachmentsStoreDir(targetDocumentId);
+  await fs.mkdir(targetDir, { recursive: true });
+  const finalName = await uniqueStoredName(targetDir, storedName);
+  await fs.copyFile(sourcePath, path.join(targetDir, finalName));
+  return finalName;
+}
+
 export async function saveAttachmentToStore(documentId: string, fileName: string, bytes: Buffer) {
   const dir = getAttachmentsStoreDir(documentId);
   await fs.mkdir(dir, { recursive: true });

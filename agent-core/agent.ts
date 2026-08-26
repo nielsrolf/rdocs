@@ -292,7 +292,10 @@ const SLACK_READ_TOOL_NAMES = [
   "mcp__gdocs__read_slack_channel",
   "mcp__gdocs__read_slack_thread",
   "mcp__gdocs__message_thread",
-  "mcp__gdocs__send_slack_file"
+  "mcp__gdocs__send_slack_file",
+  // Not a read tool, but it rides the same slackTools gate: link this
+  // channel's workspace to a document (server enforces edit access).
+  "mcp__gdocs__set_channel_workspace"
 ];
 const RECENT_ACTIVITY_TOOL_NAME = "mcp__gdocs__recent_activity";
 const SCHEDULE_TOOL_NAMES = [
@@ -730,7 +733,7 @@ function buildUserPromptRaw(input: ClaudeResearchAgentInput) {
         }). Your submit_response reply is posted to the Slack thread — write it as a chat message: concise Markdown, no long report unless asked (it is converted to Slack formatting for you).
 While you work you may post short interim updates to the thread with the post_slack_message tool (e.g. what you found so far, or that a step will take a while). Default to ONE message per round of conversation: every unnecessary interim message fragments the thread. Never use post_slack_message for the final answer, which always goes through submit_response. Everything you post goes to the CURRENT thread only — never attempt to reach other channels or threads via shell/curl; use only the provided tools.${
           input.slackTools
-            ? "\nYou can also inspect other Slack content with list_slack_channels / read_slack_channel / read_slack_thread. Access is enforced server-side: only channels that both you (the bot) and the requesting user are members of are readable.\nYou can also SUPERVISE agents working in other threads with message_thread(channel_id, thread_ts?, text): the message is posted to that thread (labelled as coming from you) and treated exactly like a message from a person there — it steers the agent already working in that thread, or starts a new agent run there. Omit thread_ts to open a NEW top-level thread in that channel. Use it to unblock, redirect or delegate to another agent; the answer comes back in THAT thread, so read it later with read_slack_thread. Same membership rule as the read tools, and never for your own conversation.\nYou can schedule (recurring) work with schedule_task / list_scheduled_tasks / cancel_scheduled_task — each firing runs as a fresh agent run in this conversation with the scheduling user's credentials. Only schedule when explicitly asked; always confirm the schedule you set in your reply.\nFor work that takes longer than a couple of minutes (training runs, builds, long scripts, waiting on someone else), do NOT sit in a sleep/poll loop — waiting burns your context window. Instead: (1) start the work in the background (e.g. `nohup <cmd> > /tmp/job.log 2>&1 &`), (2) call check_back_later with a delay (up to " + MAX_KEEP_ALIVE_MINUTES + " minutes keeps THIS session, its container and your background processes alive; longer delays end the session and wake you in a fresh run with a clean workspace) and a self-contained note to your future self (what you started, where the logs are, how to tell whether it finished, what to do next), (3) if the user should know what is running, post ONE short post_slack_message, and then END your turn WITHOUT calling submit_response — submitting ends the run and kills the background work. When the alarm fires you get your note as a message in this thread and continue right where you were: if the work is still running, check_back_later again; if it is done, report the result with submit_response. Prefer a few longer waits over many short ones.\nWhen the timing of background work is OPEN-ENDED (you cannot say when to check back) or you want the session to stay alive regardless of messages arriving in between, call keep_alive_after_turn with enabled=true instead: the session then survives every turn end — including turns where you reply to a user message mid-wait — until you call it with enabled=false and submit. The host checks in with you periodically while it is on. Answering a user's question mid-wait does NOT protect your background work by itself: only a pending check_back_later or keep-alive on does.\nThe rdocs MCP server (tools starting with mcp__rdocs__) gives you the requesting user's rdocs documents: list, read, edit, comment — you act with exactly their document access.\nFiles the user attaches in Slack appear in your workspace under attachments/; share files back into the thread with send_slack_file."
+            ? "\nYou can also inspect other Slack content with list_slack_channels / read_slack_channel / read_slack_thread. Access is enforced server-side: only channels that both you (the bot) and the requesting user are members of are readable.\nYou can also SUPERVISE agents working in other threads with message_thread(channel_id, thread_ts?, text): the message is posted to that thread (labelled as coming from you) and treated exactly like a message from a person there — it steers the agent already working in that thread, or starts a new agent run there. Omit thread_ts to open a NEW top-level thread in that channel. Use it to unblock, redirect or delegate to another agent; the answer comes back in THAT thread, so read it later with read_slack_thread. Same membership rule as the read tools, and never for your own conversation.\nYou can schedule (recurring) work with schedule_task / list_scheduled_tasks / cancel_scheduled_task — each firing runs as a fresh agent run in this conversation with the scheduling user's credentials. Only schedule when explicitly asked; always confirm the schedule you set in your reply.\nFor work that takes longer than a couple of minutes (training runs, builds, long scripts, waiting on someone else), do NOT sit in a sleep/poll loop — waiting burns your context window. Instead: (1) start the work in the background (e.g. `nohup <cmd> > /tmp/job.log 2>&1 &`), (2) call check_back_later with a delay (up to " + MAX_KEEP_ALIVE_MINUTES + " minutes keeps THIS session, its container and your background processes alive; longer delays end the session and wake you in a fresh run with a clean workspace) and a self-contained note to your future self (what you started, where the logs are, how to tell whether it finished, what to do next), (3) if the user should know what is running, post ONE short post_slack_message, and then END your turn WITHOUT calling submit_response — submitting ends the run and kills the background work. When the alarm fires you get your note as a message in this thread and continue right where you were: if the work is still running, check_back_later again; if it is done, report the result with submit_response. Prefer a few longer waits over many short ones.\nWhen the timing of background work is OPEN-ENDED (you cannot say when to check back) or you want the session to stay alive regardless of messages arriving in between, call keep_alive_after_turn with enabled=true instead: the session then survives every turn end — including turns where you reply to a user message mid-wait — until you call it with enabled=false and submit. The host checks in with you periodically while it is on. Answering a user's question mid-wait does NOT protect your background work by itself: only a pending check_back_later or keep-alive on does.\nThe rdocs MCP server (tools starting with mcp__rdocs__) gives you the requesting user's rdocs documents: list, read, edit, comment — you act with exactly their document access.\nFiles the user attaches in Slack appear in your workspace under attachments/; share files back into the thread with send_slack_file.\nWhen a user asks to connect this channel to a document (\"set the workspace of this channel to <doc link>\"), call set_channel_workspace with the document id or URL — the channel then shares that document's workspace and its content is included in this channel's context on every run; pass \"none\" to disconnect. The server enforces that the requesting user has edit access to the target document."
             : ""
         }
 ${
@@ -1596,6 +1599,18 @@ async function runClaudeResearchAgentOnce(
     }
   );
 
+  const setChannelWorkspaceTool = tool(
+    "set_channel_workspace",
+    "Make an rdocs document the backing document of THIS Slack channel. The separate channel document is merged away, so the target document's content, environment, agent settings, workspace, and agent history apply to the channel. Pass a document id or URL, or \"none\" to disconnect. The server enforces that the requesting user has edit access to the target document.",
+    {
+      document: z
+        .string()
+        .min(1)
+        .describe('Document id or URL to share the workspace of, or "none" to disconnect.')
+    },
+    async (args) => callSlackTool("set_channel_workspace", args)
+  );
+
   const isDmOverview = input.slackContext?.surface === "dm";
   const mcpServer = createSdkMcpServer({
     name: "gdocs",
@@ -1611,6 +1626,7 @@ async function runClaudeResearchAgentOnce(
             readSlackThreadTool,
             messageThreadTool,
             sendSlackFileTool,
+            setChannelWorkspaceTool,
             scheduleTaskTool,
             checkBackLaterTool,
             keepAliveTool,

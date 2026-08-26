@@ -80,6 +80,10 @@ export type DocumentWorkspaceProps = {
   // Thread to open and scroll to on mount, e.g. arriving from the cross-document
   // comment inbox via ?comment=<threadId>.
   initialFocusThreadId?: string | null;
+  // Agent conversation to open on mount, e.g. arriving from a run permalink
+  // (?run=<aiRunId>, resolved server-side to the conversation ROOT run id).
+  // A root that isn't in the polled run list falls back to default selection.
+  initialFocusRunId?: string | null;
   initialShareLinks: ShareLinkView[];
   initialRepoUrl: string | null;
   initialRepoBranch: string | null;

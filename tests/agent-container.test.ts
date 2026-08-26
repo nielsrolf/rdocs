@@ -6,7 +6,9 @@ import {
   buildContainerRunArgs,
   resolveContainerPidsLimit,
   resolveContainerUser,
-  serializeEnvFile
+  serializeEnvFile,
+  sysboxAvailableFromRuntimes,
+  SYSBOX_RUNTIME
 } from "../lib/agent-runner/container-args";
 import { classifyContainerFailure } from "../lib/agent-runner/container";
 import { DEFAULT_AUTO_COMPACT_WINDOW } from "../agent-core/agent-env";
@@ -105,6 +107,20 @@ test("Claude session storage remains mounted as CLAUDE_CONFIG_DIR", () => {
   assert.ok(!a.join(" ").includes("CODEX_HOME"));
 });
 
+test("run identity (id, document, permalink) is exported into the container env", () => {
+  const a = args({
+    aiRunId: "run-1",
+    documentId: "doc-1",
+    runUrl: "https://docs.example.com/documents/doc-1?run=run-1"
+  });
+  const envArgs = a.filter((_, i) => a[i - 1] === "-e");
+  assert.ok(envArgs.includes("GDOCS_RUN_ID=run-1"));
+  assert.ok(envArgs.includes("GDOCS_DOCUMENT_ID=doc-1"));
+  assert.ok(envArgs.includes("GDOCS_RUN_URL=https://docs.example.com/documents/doc-1?run=run-1"));
+  // Runs without an AiRun row (e.g. merge resolution) get none of them.
+  assert.ok(!args().join(" ").includes("GDOCS_"));
+});
+
 test("egress is allowed (never --network none)", () => {
   const network = args()[args().indexOf("--network") + 1];
   assert.equal(network, "bridge");
@@ -119,6 +135,58 @@ test("ociRuntime selects --runtime when set (e.g. gVisor), and is absent otherwi
   assert.equal(a[i + 1], "runsc");
   // It must come before the image (a run flag, not an arg to the container).
   assert.ok(i < a.indexOf("gdocs-agent:local"));
+});
+
+test("the Sysbox profile swaps userns isolation for the runc-profile flags (docker-in-container)", () => {
+  const a = args({ sysbox: true });
+  const joined = a.join(" ");
+  // The runtime that makes the container a "system container".
+  const i = a.indexOf("--runtime");
+  assert.ok(i >= 0 && a[i + 1] === SYSBOX_RUNTIME);
+  // These flags would break the inner dockerd; the userns replaces them.
+  assert.ok(!a.includes("--user"), "inner dockerd needs container root; the entrypoint starts it");
+  assert.ok(!joined.includes("--cap-drop"), "userns root needs its in-namespace capabilities");
+  assert.ok(!joined.includes("no-new-privileges"));
+  assert.ok(!a.includes("--read-only"), "sysbox mounts writable dirs over /var/lib/docker");
+  assert.ok(!joined.includes("--tmpfs"));
+  // Everything else is unchanged: ceilings bound the whole nested tree, and the
+  // mounts/env/network story stays identical.
+  assert.ok(joined.includes("--pids-limit 512"));
+  assert.ok(joined.includes("--memory 4g"));
+  assert.equal(a[a.indexOf("--network") + 1], "bridge");
+  assert.ok(joined.includes(`--env-file ${ENVFILE}`));
+  assert.ok(joined.includes(`-v ${WS}:/workspace`));
+  assert.ok(a.includes("IS_SANDBOX=1"), "Claude still runs as (namespaced) root");
+  // The entrypoint's dockerd-start gate: only Sysbox runs get the marker
+  // (container root alone also happens on Docker Desktop, where dockerd can
+  // never start and probing would waste 20s per run).
+  assert.ok(a.some((v, i) => v === "AGENT_INNER_DOCKER=1" && a[i - 1] === "-e"));
+  assert.ok(!args().includes("AGENT_INNER_DOCKER=1"));
+  // Still no host docker socket — the agent gets its OWN daemon, not ours.
+  assert.ok(!joined.includes("docker.sock"));
+});
+
+test("an explicit ociRuntime never combines with the sysbox profile", () => {
+  // container.ts only sets sysbox when AGENT_CONTAINER_OCI_RUNTIME is unset,
+  // but the arg builder must also be safe if both ever arrive: sysbox wins and
+  // exactly one --runtime is emitted.
+  const a = args({ sysbox: true, ociRuntime: "runsc" });
+  assert.deepEqual(
+    a.filter((v, i) => a[i - 1] === "--runtime"),
+    [SYSBOX_RUNTIME]
+  );
+});
+
+test("sysboxAvailableFromRuntimes parses `docker info` runtimes JSON defensively", () => {
+  assert.equal(
+    sysboxAvailableFromRuntimes('{"io.containerd.runc.v2":{"path":"runc"},"sysbox-runc":{"path":"/usr/bin/sysbox-runc"},"runc":{"path":"runc"}}'),
+    true
+  );
+  assert.equal(sysboxAvailableFromRuntimes('{"runc":{"path":"runc"}}'), false);
+  assert.equal(sysboxAvailableFromRuntimes(""), false);
+  assert.equal(sysboxAvailableFromRuntimes("not json"), false);
+  assert.equal(sysboxAvailableFromRuntimes("null"), false);
+  assert.equal(sysboxAvailableFromRuntimes('"sysbox-runc"'), false);
 });
 
 test("read-only can be disabled but tmpfs scratch only appears when read-only", () => {

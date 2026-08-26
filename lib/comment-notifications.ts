@@ -80,9 +80,15 @@ export async function resolveCommentNotificationRecipients(input: {
   for (const id of excluded) candidateIds.delete(id);
   if (candidateIds.size === 0) return [];
   const users = await db.user.findMany({
-    where: { id: { in: [...candidateIds] }, commentSlackNotifications: true },
+    where: { id: { in: [...candidateIds] } },
     select: {
       id: true,
+      commentSlackNotifications: true,
+      documentNotificationPreferences: {
+        where: { documentId: input.documentId },
+        select: { commentSlackNotifications: true },
+        take: 1
+      },
       slackLinks: {
         select: { slackTeamId: true, slackUserId: true },
         orderBy: { createdAt: "asc" },
@@ -91,6 +97,10 @@ export async function resolveCommentNotificationRecipients(input: {
     }
   });
   return users.flatMap((user) => {
+    const enabled =
+      user.documentNotificationPreferences[0]?.commentSlackNotifications ??
+      user.commentSlackNotifications;
+    if (!enabled) return [];
     const link = user.slackLinks[0];
     if (!link) return [];
     return [{ userId: user.id, slackTeamId: link.slackTeamId, slackUserId: link.slackUserId }];

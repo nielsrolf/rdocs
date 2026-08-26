@@ -361,6 +361,99 @@ test("check_back_later schedules a silent one-shot wake-up in the run's own thre
   assert.match(tooLong.text, /after_minutes/);
 });
 
+// set_channel_workspace: "start with a doc, then create the Slack channel" —
+// the agent MERGES the channel document into an existing doc: the doc becomes
+// the channel's backing document (env/agent settings apply, runs land in its
+// agent tab) and the separate channel doc is deleted. Access: bot + user in
+// the channel, AND the linked rdocs user needs edit access on the target doc.
+test("set_channel_workspace merges the channel document into the target doc", async () => {
+  const crypto = await import("node:crypto");
+  const { db } = await import("../lib/db");
+  const teamId = `T-${crypto.randomUUID()}`;
+  const user = await db.user.create({
+    data: { email: `scw-${crypto.randomUUID()}@example.com`, name: "scw", passwordHash: "x" }
+  });
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: user.id }
+  });
+  const channelDoc = await db.document.create({
+    data: {
+      ownerId: user.id,
+      kind: "slack_channel",
+      slackTeamId: teamId,
+      slackChannelId: "C_BOTH",
+      title: "#both",
+      content: "{}"
+    }
+  });
+  const targetDoc = await db.document.create({
+    data: { ownerId: user.id, title: "Project doc", content: "{}" }
+  });
+  const run = await db.aiRun.create({
+    data: { documentId: channelDoc.id, triggerType: "SLACK_MENTION", triggerId: "C_BOTH:1.0", instruction: "x" }
+  });
+  const claims = { slackTeamId: teamId, slackUserId: "UALICE", aiRunId: run.id };
+  const slack = makeSlack();
+
+  // An unlinked Slack account cannot use it.
+  const unlinked = await handleSlackAgentToolCall(
+    { tool: "set_channel_workspace", args: { document: targetDoc.id } },
+    { claims: { slackTeamId: teamId, slackUserId: "UNOBODY", aiRunId: run.id }, slack, botUserId: BOT }
+  );
+  assert.equal(unlinked.ok, false);
+
+  // A linked user WITHOUT edit access on the target doc is refused.
+  const stranger = await db.user.create({
+    data: { email: `scw2-${crypto.randomUUID()}@example.com`, name: "scw2", passwordHash: "x" }
+  });
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UBOB", userId: stranger.id }
+  });
+  const deniedTarget = await handleSlackAgentToolCall(
+    { tool: "set_channel_workspace", args: { document: targetDoc.id } },
+    { claims: { slackTeamId: teamId, slackUserId: "UBOB", aiRunId: run.id }, slack, botUserId: BOT }
+  );
+  assert.equal(deniedTarget.ok, false);
+  assert.match(deniedTarget.text, /edit access/i);
+
+  // Accepts a document URL, not just a bare id. Linking MERGES the channel
+  // doc into the target: the channel doc is deleted, the target carries the
+  // Slack binding, and the run's history moves to the target.
+  const linked = await handleSlackAgentToolCall(
+    { tool: "set_channel_workspace", args: { document: `https://docs.example.com/documents/${targetDoc.id}` } },
+    { claims, slack, botUserId: BOT }
+  );
+  assert.ok(linked.ok, linked.text);
+  assert.match(linked.text, /Project doc/);
+  assert.equal(await db.document.findUnique({ where: { id: channelDoc.id } }), null);
+  const after = await db.document.findUniqueOrThrow({
+    where: { id: targetDoc.id },
+    select: { slackTeamId: true, slackChannelId: true }
+  });
+  assert.equal(after.slackTeamId, teamId);
+  assert.equal(after.slackChannelId, "C_BOTH");
+  const movedRun = await db.aiRun.findUniqueOrThrow({
+    where: { id: run.id },
+    select: { documentId: true }
+  });
+  assert.equal(movedRun.documentId, targetDoc.id);
+
+  // "none" detaches the channel from the merged doc (the doc stays).
+  const cleared = await handleSlackAgentToolCall(
+    { tool: "set_channel_workspace", args: { document: "none" } },
+    { claims, slack, botUserId: BOT }
+  );
+  assert.ok(cleared.ok, cleared.text);
+  const afterClear = await db.document.findUniqueOrThrow({
+    where: { id: targetDoc.id },
+    select: { slackTeamId: true, slackChannelId: true }
+  });
+  assert.equal(afterClear.slackTeamId, null);
+  assert.equal(afterClear.slackChannelId, null);
+
+  await db.aiRun.update({ where: { id: run.id }, data: { status: "FAILED", error: "test cleanup" } });
+});
+
 test("post_slack_message posts only into the run's own thread", async () => {
   const crypto = await import("node:crypto");
   const { db } = await import("../lib/db");

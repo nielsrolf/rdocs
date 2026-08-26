@@ -133,6 +133,43 @@ test("recipients: owner + members + group members with a Slack link, minus autho
   }
 });
 
+test("recipients: per-document comment preferences override the global default", async (t) => {
+  const owner = await makeUser("cn-pref-owner");
+  const globallyOff = await makeUser("cn-pref-enable", { commentSlackNotifications: false });
+  const globallyOn = await makeUser("cn-pref-disable", { commentSlackNotifications: true });
+  const document = await db.document.create({
+    data: {
+      title: "notification preferences",
+      content: "{}",
+      ownerId: owner.id,
+      memberships: {
+        create: [
+          { userId: globallyOff.id, permission: "VIEW" },
+          { userId: globallyOn.id, permission: "VIEW" }
+        ]
+      },
+      notificationPreferences: {
+        create: [
+          { userId: globallyOff.id, commentSlackNotifications: true },
+          { userId: globallyOn.id, commentSlackNotifications: false }
+        ]
+      }
+    }
+  });
+  for (const user of [globallyOff, globallyOn]) {
+    await db.slackAccountLink.create({
+      data: { slackTeamId: "T-pref", slackUserId: `U-${user.id}`, userId: user.id }
+    });
+  }
+  t.after(async () => {
+    await db.document.delete({ where: { id: document.id } });
+    await db.user.deleteMany({ where: { id: { in: [owner.id, globallyOff.id, globallyOn.id] } } });
+  });
+
+  const recipients = await resolveCommentNotificationRecipients({ documentId: document.id });
+  assert.deepEqual(recipients.map((recipient) => recipient.userId), [globallyOff.id]);
+});
+
 test("notify: first comment posts a root DM + persists the row; the next threads under it", async (t) => {
   const teamId = `T-${crypto.randomUUID()}`;
   const owner = await makeUser("cn-dm-owner");

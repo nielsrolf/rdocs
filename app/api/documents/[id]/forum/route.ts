@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { db } from "@/lib/db";
+import { notifyForumItemShared } from "@/lib/activity-notifications";
 
 const postSchema = z.object({
   posted: z.boolean().optional(),
@@ -39,5 +40,11 @@ export async function POST(request: Request, { params }: RouteContext<{ id: stri
     posted,
     isPublic: forumPublic
   });
+  if (posted && !access.document.forumPostedAt) {
+    void notifyForumItemShared({
+      documentId: id,
+      sharedByLabel: user.name
+    });
+  }
   return NextResponse.json({ forumPostedAt, forumPublic });
 }

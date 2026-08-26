@@ -20,7 +20,8 @@ const toolRequestSchema = z.object({
     "check_back_later",
     "list_scheduled_tasks",
     "cancel_scheduled_task",
-    "send_file"
+    "send_file",
+    "set_channel_workspace"
   ]),
   args: z.record(z.string(), z.unknown()).default({})
 });

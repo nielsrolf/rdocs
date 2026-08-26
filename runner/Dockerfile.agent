@@ -24,6 +24,22 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
  && apt-get install -y --no-install-recommends gh \
  && rm -rf /var/lib/apt/lists/*
 
+# Docker CE — for docker-in-container under the Sysbox profile (the runner's
+# entrypoint starts the inner dockerd when the container runs as root under
+# sysbox-runc; under the hardened runc profile these binaries are inert).
+# The baked daemon.json moves the inner bridge pools off 172.17.0.0/16 so they
+# never collide with the OUTER docker bridge the container itself lives on.
+RUN curl -fsSL https://download.docker.com/linux/debian/gpg \
+      -o /usr/share/keyrings/docker-archive-keyring.asc \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.asc] https://download.docker.com/linux/debian bookworm stable" \
+      > /etc/apt/sources.list.d/docker.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /etc/docker \
+ && printf '{\n  "default-address-pools": [{"base": "10.88.0.0/16", "size": 24}]\n}\n' > /etc/docker/daemon.json
+
 # A home dir usable by an arbitrary --user uid (the runner runs the container as
 # the host user so bind-mounted files stay host-owned). Mounted over by a tmpfs
 # at runtime; created here so HOME resolves even without the tmpfs.

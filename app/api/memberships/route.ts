@@ -4,6 +4,7 @@ import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth";
 import { permissionLevels } from "@/lib/contracts";
 import { db } from "@/lib/db";
+import { notifyDocumentShared } from "@/lib/activity-notifications";
 
 const createMembershipSchema = z.object({
   documentId: z.string().min(1),
@@ -56,6 +57,12 @@ export async function POST(request: Request) {
     );
   }
 
+  const existingMembership = await db.documentMembership.findUnique({
+    where: {
+      documentId_userId: { documentId: parsed.data.documentId, userId: collaborator.id }
+    },
+    select: { id: true }
+  });
   const membership = await db.documentMembership.upsert({
     where: {
       documentId_userId: {
@@ -83,6 +90,14 @@ export async function POST(request: Request) {
       }
     }
   });
+
+  if (!existingMembership) {
+    void notifyDocumentShared({
+      documentId: parsed.data.documentId,
+      recipientUserIds: [collaborator.id],
+      sharedByLabel: user.name
+    });
+  }
 
   return NextResponse.json({ membership });
 }

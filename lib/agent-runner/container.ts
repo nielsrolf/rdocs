@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -19,7 +19,8 @@ import {
   buildContainerRunArgs,
   resolveContainerPidsLimit,
   resolveContainerUser,
-  serializeEnvFile
+  serializeEnvFile,
+  sysboxAvailableFromRuntimes
 } from "./container-args";
 import {
   CONNECT_ANTHROPIC_CREDENTIAL_MESSAGE,
@@ -41,6 +42,7 @@ import {
   SessionAbortedError
 } from "./container-session";
 import { createAiRunSessionStore, detachedContainersEnabled } from "./session-store";
+import { buildRunPermalink } from "@/lib/request-origin";
 
 // Transient container-level failures (spawn / exit-without-result) get one
 // bounded backoff retry here. In-agent-loop API errors (429/500/overloaded) are
@@ -49,6 +51,34 @@ import { createAiRunSessionStore, detachedContainersEnabled } from "./session-st
 // error.
 const CONTAINER_TRANSIENT_DELAYS_MS = [2_000, 8_000];
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// Sysbox availability is a property of the Docker engine, probed once per
+// process (`docker info`) and cached. When the sysbox-runc runtime is
+// registered, EVERY agent container defaults to the Sysbox system-container
+// profile (docker-in-container enabled — see container-args.ts); when it is
+// not installed, the hardened runc profile applies unchanged. There is no
+// feature flag: setting AGENT_CONTAINER_OCI_RUNTIME (e.g. to "runc") is the
+// explicit override / kill-switch that disables the sysbox default.
+let sysboxDetection: Promise<boolean> | undefined;
+function detectSysboxRuntime(runtime: string): Promise<boolean> {
+  if (!sysboxDetection) {
+    sysboxDetection = new Promise<boolean>((resolve) => {
+      execFile(runtime, ["info", "--format", "{{json .Runtimes}}"], { timeout: 10_000 }, (error, stdout) => {
+        if (error) {
+          console.warn(`[agent-runner] sysbox detection failed (assuming unavailable): ${error.message}`);
+          resolve(false);
+          return;
+        }
+        const available = sysboxAvailableFromRuntimes(stdout.trim());
+        if (available) {
+          console.log("[agent-runner] sysbox-runc detected: agent containers run as system containers with inner docker enabled");
+        }
+        resolve(available);
+      });
+    });
+  }
+  return sysboxDetection;
+}
 
 export type ContainerFailureDecision =
   | { action: "auth-retry" }
@@ -126,7 +156,10 @@ export class ContainerRunner implements AgentRunner {
       steerRunId: options?.aiRunId,
       // Detached runs record their container handle on this row, which is the
       // whole handover surface between deployments.
-      aiRunId: options?.aiRunId
+      aiRunId: options?.aiRunId,
+      // Together with aiRunId this puts GDOCS_RUN_ID / GDOCS_DOCUMENT_ID /
+      // GDOCS_RUN_URL in the container env (see buildContainerRunArgs).
+      documentId: options?.documentId
     });
     return output as ClaudeResearchAgentOutput;
   }
@@ -162,6 +195,7 @@ export class ContainerRunner implements AgentRunner {
     containerName?: string;
     steerRunId?: string;
     aiRunId?: string;
+    documentId?: string;
   }): Promise<Record<string, unknown>> {
     const runtime = process.env.AGENT_CONTAINER_RUNTIME || "docker";
     const harness = agentHarnessForModel(opts.agentModel);
@@ -241,6 +275,10 @@ export class ContainerRunner implements AgentRunner {
       };
 
       const containerUser = resolveContainerUser(process.platform, process.getuid?.(), process.getgid?.());
+      // An explicit OCI runtime choice always wins and disables the sysbox
+      // default (AGENT_CONTAINER_OCI_RUNTIME=runc forces the hardened profile).
+      const explicitOciRuntime = process.env.AGENT_CONTAINER_OCI_RUNTIME || undefined;
+      const sysbox = !explicitOciRuntime && (await detectSysboxRuntime(runtime));
       const args = buildContainerRunArgs({
         image,
         name: opts.containerName,
@@ -254,10 +292,19 @@ export class ContainerRunner implements AgentRunner {
         pidsLimit: resolveContainerPidsLimit(process.env),
         readOnly,
         // e.g. AGENT_CONTAINER_OCI_RUNTIME=runsc to run under gVisor (Linux).
-        ociRuntime: process.env.AGENT_CONTAINER_OCI_RUNTIME || undefined,
+        ociRuntime: explicitOciRuntime,
+        sysbox,
         detached,
         sessionPort: detached ? AGENT_SESSION_PORT : undefined,
-        sessionSecret
+        sessionSecret,
+        // Run identity env vars (GDOCS_RUN_ID / GDOCS_DOCUMENT_ID /
+        // GDOCS_RUN_URL) so the agent can reference its own session.
+        aiRunId: opts.aiRunId,
+        documentId: opts.documentId,
+        runUrl:
+          opts.aiRunId && opts.documentId
+            ? buildRunPermalink(opts.documentId, opts.aiRunId) ?? undefined
+            : undefined
       });
 
       let authRetried = false;

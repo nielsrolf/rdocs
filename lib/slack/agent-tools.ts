@@ -27,7 +27,8 @@ export type SlackAgentToolRequest = {
     | "check_back_later"
     | "list_scheduled_tasks"
     | "cancel_scheduled_task"
-    | "send_file";
+    | "send_file"
+    | "set_channel_workspace";
   args: Record<string, unknown>;
 };
 
@@ -226,6 +227,97 @@ export async function handleSlackAgentToolCall(
         `Posted, and started a new agent run in ${where} (run ${delivery.aiRunId}). ` +
         `It replies in that thread — read it later with read_slack_thread if you need the answer.`
     };
+  }
+
+  // set_channel_workspace: make a regular document the backing document of
+  // THIS Slack channel. The temporary slack_channel document is merged away,
+  // so the target doc supplies content, env and agent settings and owns future
+  // run history. Authorization is three-layered: channel membership, a linked
+  // rdocs account, and EDIT access to the target document.
+  if (request.tool === "set_channel_workspace") {
+    const run = await db.aiRun.findUnique({
+      where: { id: claims.aiRunId },
+      select: { documentId: true, triggerId: true }
+    });
+    if (!run?.triggerId) {
+      return { ok: false, text: "This run has no Slack conversation." };
+    }
+    const [runChannel] = run.triggerId.split(":", 2);
+    const denied = await assertReadable(slack, botUserId, claims, runChannel);
+    if (denied) return { ok: false, text: denied };
+    const channelDoc = await db.document.findUnique({
+      where: { id: run.documentId },
+      select: { id: true, kind: true, slackTeamId: true, slackChannelId: true }
+    });
+    if (!channelDoc?.slackTeamId || !channelDoc.slackChannelId) {
+      return { ok: false, text: "This conversation is not backed by a Slack channel document." };
+    }
+    const link = await db.slackAccountLink.findUnique({
+      where: {
+        slackTeamId_slackUserId: { slackTeamId: claims.slackTeamId, slackUserId: claims.slackUserId }
+      }
+    });
+    if (!link) {
+      return { ok: false, text: "This Slack account is not linked to an rdocs account." };
+    }
+    const raw = typeof request.args.document === "string" ? request.args.document.trim() : "";
+    if (!raw) {
+      return {
+        ok: false,
+        text: 'document is required: a document id or URL (or "none" to disconnect).'
+      };
+    }
+    const urlMatch = raw.match(/\/documents\/([A-Za-z0-9_-]+)/);
+    const targetId = raw.toLowerCase() === "none" ? null : urlMatch ? urlMatch[1] : raw;
+    const { setSlackChannelDocument, WorkspaceLinkError } = await import("@/lib/workspace-link");
+    try {
+      const result = await setSlackChannelDocument({
+        documentId: channelDoc.id,
+        targetDocumentId: targetId,
+        userId: link.userId
+      });
+      if (result.action === "merged") {
+        return {
+          ok: true,
+          text:
+            `This channel now uses "${result.target.title}" (${result.target.id}) as its document. ` +
+            `The separate Slack channel document was merged into it and deleted. The document's ` +
+            `content, environment, agent settings, workspace, and agent history now apply here.`
+        };
+      }
+      if (result.action === "moved") {
+        return {
+          ok: true,
+          text:
+            `This channel now uses "${result.target.title}" (${result.target.id}) as its document. ` +
+            `Future channel runs use that document's content, environment, agent settings, workspace, ` +
+            `and agent history.`
+        };
+      }
+      if (result.action === "unchanged") {
+        return {
+          ok: true,
+          text: `This channel already uses "${result.target.title}" (${result.target.id}) as its document.`
+        };
+      }
+      if (result.action === "unbound") {
+        return {
+          ok: true,
+          text:
+            "Channel disconnected from this document. The document remains unchanged; the next Slack " +
+            "message in this channel creates a separate channel document again."
+        };
+      }
+      return {
+        ok: true,
+        text: "Legacy workspace link disconnected; this channel uses its own channel document again."
+      };
+    } catch (error) {
+      if (error instanceof WorkspaceLinkError) {
+        return { ok: false, text: error.message };
+      }
+      throw error;
+    }
   }
 
   if (request.tool === "recent_activity") {

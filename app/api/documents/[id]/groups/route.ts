@@ -4,6 +4,7 @@ import { z } from "zod";
 import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { permissionLevels } from "@/lib/contracts";
 import { db } from "@/lib/db";
+import { notifyDocumentShared } from "@/lib/activity-notifications";
 
 const grantSchema = z.object({
   groupId: z.string().min(1),
@@ -66,11 +67,20 @@ export async function POST(request: Request, { params }: RouteContext<{ id: stri
       id: parsed.data.groupId,
       OR: [{ ownerId: check.user.id }, { members: { some: { userId: check.user.id } } }]
     },
-    select: { id: true, name: true }
+    select: {
+      id: true,
+      name: true,
+      ownerId: true,
+      members: { select: { userId: true } }
+    }
   });
   if (!group) {
     return NextResponse.json({ error: "Group not found." }, { status: 404 });
   }
+  const existingGrant = await db.documentGroupAccess.findUnique({
+    where: { documentId_groupId: { documentId: id, groupId: group.id } },
+    select: { id: true }
+  });
   await db.documentGroupAccess.upsert({
     where: { documentId_groupId: { documentId: id, groupId: group.id } },
     create: { documentId: id, groupId: group.id, permission: parsed.data.permission },
@@ -82,6 +92,15 @@ export async function POST(request: Request, { params }: RouteContext<{ id: stri
     permission: parsed.data.permission,
     userId: check.user.id
   });
+  if (!existingGrant) {
+    const recipients = new Set([group.ownerId, ...group.members.map((member) => member.userId)]);
+    recipients.delete(check.user.id);
+    void notifyDocumentShared({
+      documentId: id,
+      recipientUserIds: [...recipients],
+      sharedByLabel: check.user.name
+    });
+  }
   return NextResponse.json({ ok: true });
 }
 

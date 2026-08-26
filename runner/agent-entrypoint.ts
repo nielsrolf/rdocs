@@ -28,7 +28,8 @@
 // untrusted widget build) is reconstructed from the serializable spec and runs
 // HERE, in the sandbox — never on the app host.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, openSync } from "node:fs";
 
 import {
   buildSubmissionValidator,
@@ -62,6 +63,55 @@ console.debug = toStderr as typeof console.debug;
 
 function emit(frame: Record<string, unknown>) {
   rawStdoutWrite(JSON.stringify(frame) + "\n");
+}
+
+// Inner Docker daemon for docker-in-container (Sysbox system-container runs).
+// Applies only when ALL of: the runner marked this a Sysbox run
+// (AGENT_INNER_DOCKER — container root alone is NOT a reliable signal, Docker
+// Desktop's hardened profile is also root and dockerd can never start there),
+// we actually are root, the image ships dockerd, and no daemon is already up.
+// Non-fatal on every path: an agent without docker is degraded, not broken.
+async function maybeStartInnerDockerd(): Promise<void> {
+  if (process.env.AGENT_INNER_DOCKER !== "1") return;
+  if (typeof process.getuid !== "function" || process.getuid() !== 0) return;
+  if (!existsSync("/usr/bin/dockerd")) return;
+  if (existsSync("/var/run/docker.sock")) return;
+  try {
+    // dockerd is chatty; keep the run's stderr clean and leave its logs in the
+    // container's writable rootfs for in-sandbox debugging (the Sysbox profile
+    // has no --read-only). Fall back to discarding if the log can't be opened.
+    let logFd: number | "ignore" = "ignore";
+    try {
+      logFd = openSync("/var/log/dockerd.log", "a");
+    } catch {
+      // keep "ignore"
+    }
+    const child = spawn("/usr/bin/dockerd", [], {
+      detached: true,
+      stdio: ["ignore", logFd, logFd]
+    });
+    child.on("error", (error) => {
+      process.stderr.write(`[agent-entrypoint] inner dockerd failed to start: ${error.message}\n`);
+    });
+    child.unref();
+  } catch (error) {
+    process.stderr.write(
+      `[agent-entrypoint] inner dockerd spawn threw: ${error instanceof Error ? error.message : String(error)}\n`
+    );
+    return;
+  }
+  // Wait (bounded) for the socket so the agent's very first `docker` call works.
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    if (existsSync("/var/run/docker.sock")) {
+      process.stderr.write("[agent-entrypoint] inner dockerd is up (/var/run/docker.sock)\n");
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  process.stderr.write(
+    "[agent-entrypoint] inner dockerd socket did not appear within 20s; continuing without docker\n"
+  );
 }
 
 // Reads the job (first line) and then keeps consuming stdin, routing steering
@@ -354,7 +404,8 @@ const main = sessionPortEnv
   ? () => sessionMain(numberEnv(AGENT_SESSION_PORT_ENV) ?? AGENT_SESSION_PORT)
   : stdioMain;
 
-main()
+maybeStartInnerDockerd()
+  .then(() => main())
   .catch((error) => {
     emit({ type: "error", message: error instanceof Error ? error.message : String(error) });
     process.exitCode = 1;

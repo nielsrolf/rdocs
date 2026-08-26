@@ -229,10 +229,15 @@ export function getGithubCommitUrl(repoUrl: string | null | undefined, commitSha
 
 // Resolve the document whose directory holds the base workspace. A document
 // with `workspaceDocumentId` set shares the workspace of that target document
-// (a slack_channel doc) instead of having one of its own. Resolution is
-// exactly ONE level deep — the target's own workspaceDocumentId is ignored —
-// so links can never form cycles. A dangling target falls back to the
-// document's own workspace (logged, never fatal).
+// instead of having one of its own. Two link shapes exist: doc -> channel
+// (the doc joins the channel's workspace) and channel -> doc (the channel
+// joins the doc's workspace, so "start with a doc, then create the channel"
+// works). Resolution follows the chain up to TWO hops (doc -> channel -> doc)
+// with a visited set, so a cycle written directly to the DB degrades to the
+// last resolved member instead of looping. A dangling target falls back to
+// the last resolvable document (logged, never fatal).
+const MAX_WORKSPACE_LINK_HOPS = 2;
+
 export async function resolveWorkspaceDocumentId(documentId: string): Promise<string | null> {
   const document = await db.document.findUnique({
     where: { id: documentId },
@@ -241,21 +246,33 @@ export async function resolveWorkspaceDocumentId(documentId: string): Promise<st
   if (!document) {
     return null;
   }
-  if (!document.workspaceDocumentId || document.workspaceDocumentId === documentId) {
-    return documentId;
+  const visited = new Set<string>([documentId]);
+  let resolved = documentId;
+  let nextId = document.workspaceDocumentId;
+  for (let hop = 0; hop < MAX_WORKSPACE_LINK_HOPS && nextId; hop += 1) {
+    if (visited.has(nextId)) {
+      console.warn("[research-workspace] workspace link cycle detected; using last resolved", {
+        documentId,
+        cycleAt: nextId
+      });
+      break;
+    }
+    const target = await db.document.findUnique({
+      where: { id: nextId },
+      select: { id: true, workspaceDocumentId: true }
+    });
+    if (!target) {
+      console.warn(
+        "[research-workspace] linked workspace document is gone; using last resolved workspace",
+        { documentId, workspaceDocumentId: nextId }
+      );
+      break;
+    }
+    visited.add(target.id);
+    resolved = target.id;
+    nextId = target.workspaceDocumentId;
   }
-  const target = await db.document.findUnique({
-    where: { id: document.workspaceDocumentId },
-    select: { id: true }
-  });
-  if (!target) {
-    console.warn(
-      "[research-workspace] linked workspace document is gone; using own workspace",
-      { documentId, workspaceDocumentId: document.workspaceDocumentId }
-    );
-    return documentId;
-  }
-  return target.id;
+  return resolved;
 }
 
 export async function ensureLinkedRepository(

@@ -76,7 +76,7 @@ import {
 import { CommentRail } from "./document-workspace/comment-rail";
 import { layoutCommentRail } from "./document-workspace/comment-rail-layout";
 import { DocOutline, OUTLINE_MAX_WIDTH, OUTLINE_MIN_WIDTH } from "./document-workspace/doc-outline";
-import { MoveBlock, SlashTab, StrikeShortcut, TabIndentGuard, TaskItem } from "./document-workspace/editor-extras";
+import { LinkShortcut, MoveBlock, SlashTab, StrikeShortcut, TabIndentGuard, TaskItem } from "./document-workspace/editor-extras";
 import { EnvironmentMenu } from "./document-workspace/environment-menu";
 import { SkillsMenu } from "./document-workspace/skills-menu";
 import { ExportMenu } from "./document-workspace/export-menu";
@@ -236,6 +236,7 @@ export function DocumentWorkspace({
   initialMentionedCommentIds,
   initialThreads,
   initialFocusThreadId,
+  initialFocusRunId,
   initialShareLinks,
   initialRepoUrl,
   initialRepoBranch,
@@ -395,8 +396,15 @@ export function DocumentWorkspace({
   const mountedAtRef = useRef<number>(Date.now());
   // Slack-channel documents exist FOR the agent: land on the agent panel
   // (config + run history) instead of the mostly-empty notebook body.
-  const [agentPanelOpen, setAgentPanelOpen] = useState(documentKind === "slack_channel");
-  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  // A run permalink (?run=) opens the agent panel with that conversation
+  // selected; if the root run isn't in the polled list (older than the list
+  // window), the selection effect below falls back to the newest conversation.
+  const [agentPanelOpen, setAgentPanelOpen] = useState(
+    documentKind === "slack_channel" || Boolean(initialFocusRunId)
+  );
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(
+    initialFocusRunId ?? null
+  );
   // Full timelines lazily fetched from the run-detail route: for older runs
   // the poll returns without events (`eventsOmitted`) and for long runs whose
   // earliest events fell out of the poll's tail window (`eventsClipped`).
@@ -1312,6 +1320,9 @@ export function DocumentWorkspace({
       TaskList,
       TaskItem.configure({ nested: true }),
       StrikeShortcut,
+      LinkShortcut.configure({
+        onOpen: () => handleEditLink()
+      }),
       MoveBlock,
       TabIndentGuard,
       slashTabExtension,
@@ -2094,6 +2105,18 @@ export function DocumentWorkspace({
     if (!trimmed || trimmed === "https://") {
       return;
     }
+    editor.chain().focus().extendMarkRange("link").setLink({ href: trimmed }).run();
+  }
+
+  function handleEditLink() {
+    if (!editor || !canWriteDocument) return;
+    const current = editor.isActive("link")
+      ? ((editor.getAttributes("link") as { href?: string }).href ?? "")
+      : "https://";
+    const url = window.prompt(editor.isActive("link") ? "Edit link URL" : "Link URL", current);
+    if (url === null) return;
+    const trimmed = url.trim();
+    if (!trimmed || trimmed === "https://") return;
     editor.chain().focus().extendMarkRange("link").setLink({ href: trimmed }).run();
   }
 

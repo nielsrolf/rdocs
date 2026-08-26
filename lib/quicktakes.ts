@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { notifyForumItemShared } from "@/lib/activity-notifications";
 import { defaultDocumentContent, serializeDocumentContent } from "@/lib/content";
 
 // Quicktakes are short twitter-like forum posts. Each one is a Document row
@@ -151,6 +152,10 @@ export async function createQuicktake(userId: string, body: string): Promise<Qui
     },
     select: { id: true, quicktakeBody: true, forumPostedAt: true }
   });
+
+  if (group) {
+    void notifyForumItemShared({ documentId: document.id, sharedByLabel: user.name });
+  }
 
   return {
     id: document.id,

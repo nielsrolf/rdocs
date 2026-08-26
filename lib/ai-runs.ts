@@ -317,6 +317,35 @@ export const AI_RUN_LIST_LIMIT = 200;
 export const AI_RUN_EVENT_RUNS = 12;
 export const AI_RUN_EVENT_WINDOW = 80;
 
+// Cap on the ?run= deep-link parent walk below — a corrupt parent chain
+// (cycle, absurd depth) degrades to the deepest run reached, never loops.
+const ROOT_RUN_WALK_LIMIT = 50;
+
+// Resolve a deep-linked run id (?run=<aiRunId>) to its conversation ROOT run
+// id: conversation selection in the agent panel is keyed by the root
+// (buildConversations in components/document-workspace/conversations.ts).
+// Returns null when the run doesn't exist or belongs to a different document.
+export async function resolveConversationRootRunId(
+  documentId: string,
+  runId: string
+): Promise<string | null> {
+  const start = await db.aiRun.findUnique({
+    where: { id: runId },
+    select: { id: true, parentRunId: true, documentId: true }
+  });
+  if (!start || start.documentId !== documentId) return null;
+  let cursor: { id: string; parentRunId: string | null } = start;
+  for (let hops = 0; cursor.parentRunId && hops < ROOT_RUN_WALK_LIMIT; hops += 1) {
+    const parent = await db.aiRun.findUnique({
+      where: { id: cursor.parentRunId },
+      select: { id: true, parentRunId: true, documentId: true }
+    });
+    if (!parent || parent.documentId !== documentId) break;
+    cursor = parent;
+  }
+  return cursor.id;
+}
+
 // The run list the document poll (and the agent view) is built from. Shared
 // with tests so the event-window behavior is pinned by a regression test.
 export async function fetchDocumentAiRuns(documentId: string) {

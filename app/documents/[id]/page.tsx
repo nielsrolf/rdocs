@@ -22,6 +22,7 @@ import {
   hasUserCredential
 } from "@/lib/user-credentials";
 import { getPublicOrigin } from "@/lib/request-origin";
+import { resolveConversationRootRunId } from "@/lib/ai-runs";
 
 type PageProps = {
   params: Promise<{
@@ -30,6 +31,7 @@ type PageProps = {
   searchParams?: Promise<{
     share?: string;
     comment?: string;
+    run?: string;
   }>;
 };
 
@@ -49,6 +51,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
   const user = await getCurrentUser();
   const shareToken = resolvedSearchParams?.share ?? null;
   const focusThreadId = resolvedSearchParams?.comment ?? null;
+  const focusRunId = resolvedSearchParams?.run ?? null;
 
   if (!user && !shareToken) {
     redirect("/sign-in");
@@ -70,6 +73,13 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
   if (user && access.viaShareLink) {
     await ensureShareLinkMembership(access, user.id).catch(() => undefined);
   }
+
+  // Run permalink (?run=<aiRunId>): resolve to the conversation ROOT run id —
+  // the agent panel keys conversation selection by the root. A stale or
+  // foreign run id resolves to null and the panel keeps its default selection.
+  const initialFocusRunId = focusRunId
+    ? await resolveConversationRootRunId(id, focusRunId).catch(() => null)
+    : null;
 
   // The list of who can be @mentioned (owner + collaborators) is shown to every
   // viewer for autocomplete + highlighting.
@@ -232,6 +242,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         credentialHasChatgptAuth={credentialHasChatgptAuth}
         initialThreads={normalizedThreads}
         initialFocusThreadId={focusThreadId}
+        initialFocusRunId={initialFocusRunId}
         initialTitle={access.document.title}
         documentKind={access.document.kind}
         isAuthenticated={Boolean(user)}

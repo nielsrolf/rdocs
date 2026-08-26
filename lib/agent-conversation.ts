@@ -21,6 +21,7 @@ import { normalizeAgentImages } from "@/lib/ai-edit-submission";
 import { createLiveCommentRecorder } from "@/lib/agent-comments";
 import { flattenDocumentAnchorText } from "@/lib/suggestion-content";
 import { getWorkspaceOverview } from "@/lib/research-workspace";
+import { getLinkedWorkspaceDocContext } from "@/lib/workspace-link";
 import { persistRefreshedCodexAuth } from "@/lib/user-credentials";
 
 export type ConversationRunOutcome = {
@@ -215,6 +216,13 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
 
       const parsedContent = parseDocumentContent(documentContent);
       const documentText = getDocumentPlainText(parsedContent);
+      // A Slack channel linked to a doc's workspace always reads that doc:
+      // its content rides along in the run context. Anchoring surfaces
+      // (comments, suggestions) stay on the channel doc's own text.
+      const linkedWorkspaceDoc = await getLinkedWorkspaceDocContext(documentId);
+      const runDocumentText = linkedWorkspaceDoc
+        ? `${documentText}\n\n===== Linked project document: "${linkedWorkspaceDoc.title}" (this channel shares its workspace) =====\n${linkedWorkspaceDoc.text}`
+        : documentText;
       const suggestionAnchorText = flattenDocumentAnchorText(parsedContent);
       const documentBlocks = getDocumentAiBlocks(parsedContent);
       const unresolvedThreads = await db.commentThread.findMany({
@@ -261,7 +269,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
         githubAuthAvailable: Boolean(agentEnv.GITHUB_TOKEN?.trim() || agentEnv.GH_TOKEN?.trim()),
         accessMode: agentAccessMode,
         documentTitle,
-        documentText,
+        documentText: runDocumentText,
         documentBlocks,
         unresolvedThreads: unresolvedThreads.map((thread) => ({
           id: thread.id,

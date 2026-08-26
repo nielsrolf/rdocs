@@ -38,6 +38,19 @@ export type ContainerRunSpec = {
   // Linux-only; register the runtime with the engine before using it.
   ociRuntime?: string;
   /**
+   * Sysbox "system container" profile (`--runtime sysbox-runc`): the container
+   * gets a Linux user namespace (container root ≠ host root, /proc and /sys are
+   * virtualized) and can run a full inner Docker daemon with ZERO visibility
+   * into the host daemon — this is what gives agents `docker build`/`docker run`
+   * inside their sandbox. The userns replaces the runc-profile flags, which
+   * would break the inner dockerd: no --user (dockerd needs container root; the
+   * runner's entrypoint starts it), no --cap-drop ALL / no-new-privileges
+   * (userns root needs its capabilities *within the namespace*), no --read-only
+   * rootfs (sysbox mounts writable host-backed dirs over /var/lib/docker etc.).
+   * Resource ceilings (pids/memory/cpus) still bound everything nested inside.
+   */
+  sysbox?: boolean;
+  /**
    * Detached session container (`docker run -d`): its lifetime is NOT tied to
    * the app process that started it, so a deploy/crash no longer kills the run.
    * Requires sessionPort — without a published port there is no way to reach it.
@@ -55,9 +68,38 @@ export type ContainerRunSpec = {
    * the argv (visible via `ps`) — the caller must put it in the env file.
    */
   sessionSecret?: string;
+  /** AiRun id of this run; exported as GDOCS_RUN_ID. */
+  aiRunId?: string;
+  /** Document the run belongs to; exported as GDOCS_DOCUMENT_ID. */
+  documentId?: string;
+  /**
+   * Canonical permalink of this run (`${APP_URL}/documents/<id>?run=<aiRunId>`,
+   * built by the caller via lib/request-origin.ts buildRunPermalink); exported
+   * as GDOCS_RUN_URL so the agent can hand its own session link to third
+   * parties without an API round-trip.
+   */
+  runUrl?: string;
 };
 
 export const DEFAULT_CONTAINER_PIDS_LIMIT = 512;
+
+/** Runtime name Sysbox registers with the Docker engine. */
+export const SYSBOX_RUNTIME = "sysbox-runc";
+
+/**
+ * Parse `docker info --format '{{json .Runtimes}}'` output and report whether
+ * Sysbox is registered with the engine. Pure so it is unit-testable; the
+ * caller does the (cached) docker invocation. Any parse failure → false, i.e.
+ * the hardened runc profile stays in effect.
+ */
+export function sysboxAvailableFromRuntimes(runtimesJson: string): boolean {
+  try {
+    const parsed = JSON.parse(runtimesJson);
+    return Boolean(parsed && typeof parsed === "object" && SYSBOX_RUNTIME in parsed);
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Process/thread ceiling for an agent container. 512 is plenty for normal repo
@@ -172,27 +214,34 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
     args.push("--name", spec.name);
   }
 
-  // Stronger isolation runtime (e.g. gVisor's runsc) when configured. An extra
-  // layer on top of the flags below, not a replacement for them.
-  if (spec.ociRuntime) {
-    args.push("--runtime", spec.ociRuntime);
-  }
+  if (spec.sysbox) {
+    // Sysbox system-container profile (see the `sysbox` field docs): the user
+    // namespace is the isolation boundary, and the runc-profile flags below
+    // would break the inner dockerd, so they are intentionally absent here.
+    args.push("--runtime", SYSBOX_RUNTIME);
+  } else {
+    // Stronger isolation runtime (e.g. gVisor's runsc) when configured. An extra
+    // layer on top of the flags below, not a replacement for them.
+    if (spec.ociRuntime) {
+      args.push("--runtime", spec.ociRuntime);
+    }
 
-  // Run as the host user so bind-mounted files stay host-owned (lets the app
-  // commit/serve them afterward).
-  if (typeof spec.uid === "number" && typeof spec.gid === "number") {
-    args.push("--user", `${spec.uid}:${spec.gid}`);
-  }
+    // Run as the host user so bind-mounted files stay host-owned (lets the app
+    // commit/serve them afterward).
+    if (typeof spec.uid === "number" && typeof spec.gid === "number") {
+      args.push("--user", `${spec.uid}:${spec.gid}`);
+    }
 
-  // Drop every Linux capability; forbid privilege escalation.
-  args.push("--cap-drop", "ALL", "--security-opt", "no-new-privileges");
+    // Drop every Linux capability; forbid privilege escalation.
+    args.push("--cap-drop", "ALL", "--security-opt", "no-new-privileges");
 
-  // Read-only rootfs with tmpfs scratch for /tmp and HOME, so the agent cannot
-  // tamper with the image and writes go nowhere persistent except the workspace.
-  if (readOnly) {
-    args.push("--read-only");
-    args.push("--tmpfs", "/tmp:rw,nosuid,nodev,exec");
-    args.push("--tmpfs", `${home}:rw,nosuid,nodev,exec`);
+    // Read-only rootfs with tmpfs scratch for /tmp and HOME, so the agent cannot
+    // tamper with the image and writes go nowhere persistent except the workspace.
+    if (readOnly) {
+      args.push("--read-only");
+      args.push("--tmpfs", "/tmp:rw,nosuid,nodev,exec");
+      args.push("--tmpfs", `${home}:rw,nosuid,nodev,exec`);
+    }
   }
 
   // Resource ceilings.
@@ -211,10 +260,23 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
   // Secrets/tokens (host-read env-file), plus container-appropriate HOME/TMPDIR.
   args.push("--env-file", spec.envFileHostPath);
   args.push("-e", `HOME=${home}`, "-e", "TMPDIR=/tmp", "-e", `AGENT_WORKSPACE=${workspace}`);
+  // Run identity: lets the agent reference its own run/session (e.g.
+  // `echo $GDOCS_RUN_URL`) — not secret, so riding the argv is fine.
+  if (spec.aiRunId) args.push("-e", `GDOCS_RUN_ID=${spec.aiRunId}`);
+  if (spec.documentId) args.push("-e", `GDOCS_DOCUMENT_ID=${spec.documentId}`);
+  if (spec.runUrl) args.push("-e", `GDOCS_RUN_URL=${spec.runUrl}`);
   if (spec.detached && spec.sessionPort) {
     // The entrypoint selects session mode on the presence of this variable.
     // The matching secret goes in the env file, never here.
     args.push("-e", `${AGENT_SESSION_PORT_ENV}=${spec.sessionPort}`);
+  }
+  if (spec.sysbox) {
+    // Internal wire (not a user-facing flag): tells the entrypoint it is inside
+    // a Sysbox system container, where starting the inner dockerd is expected
+    // to work. Without it the entrypoint stays passive — container root alone
+    // is not a reliable signal (Docker Desktop's hardened profile is also root,
+    // and dockerd can never start there; probing would waste 20s per run).
+    args.push("-e", "AGENT_INNER_DOCKER=1");
   }
   if (spec.agentHarness === "claude-code") {
     // Docker Desktop must run as container root so its root-owned bind mounts

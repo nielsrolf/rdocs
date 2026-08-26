@@ -98,6 +98,14 @@ const SLACK_MCP_TOOLS: ToolDefinition[] = [
       { filename: string, title: string, content_base64: string },
       ["filename", "content_base64"]
     )
+  },
+  {
+    name: "set_channel_workspace",
+    description:
+      "Make an rdocs document the backing document of this Slack channel. The separate channel document is merged " +
+      "away, so the target document's content, environment, agent settings, workspace, and agent history apply to " +
+      'the channel. Pass a document id or URL, or "none" to disconnect. Requires edit access to the target document.',
+    inputSchema: objectSchema({ document: string }, ["document"])
   }
 ];
 

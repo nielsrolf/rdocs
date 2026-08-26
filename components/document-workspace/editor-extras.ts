@@ -12,6 +12,23 @@ export const StrikeShortcut = Extension.create({
   }
 });
 
+// Google Docs-compatible link shortcut. The workspace owns the actual prompt
+// so this extension remains testable and does not couple editor code to the DOM.
+export const LinkShortcut = Extension.create<{ onOpen?: () => void }>({
+  name: "linkShortcut",
+  addOptions() {
+    return { onOpen: undefined };
+  },
+  addKeyboardShortcuts() {
+    return {
+      "Mod-k": () => {
+        this.options.onOpen?.();
+        return Boolean(this.options.onOpen);
+      }
+    };
+  }
+});
+
 function tryMoveBlockAtDepth(
   state: EditorState,
   dispatch: ((tr: Transaction) => void) | undefined,

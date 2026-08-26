@@ -8,9 +8,10 @@ type AuthFormProps = {
   mode: "sign-in" | "sign-up";
   title: string;
   subtitle: string;
+  returnTo?: string;
 };
 
-export function AuthForm({ mode, title, subtitle }: AuthFormProps) {
+export function AuthForm({ mode, title, subtitle, returnTo = "/dashboard" }: AuthFormProps) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -49,7 +50,10 @@ export function AuthForm({ mode, title, subtitle }: AuthFormProps) {
       return;
     }
 
-    router.push("/dashboard");
+    // Preserve a one-time credential carried in the URL fragment. Fragments are
+    // never sent to either server, but browser-driven setup flows need it after
+    // authentication.
+    router.push(`${returnTo}${window.location.hash || ""}`);
     router.refresh();
   }
 
@@ -88,7 +92,9 @@ export function AuthForm({ mode, title, subtitle }: AuthFormProps) {
       </form>
       <p className="inline-note">
         {mode === "sign-up" ? "Already have an account?" : "Need an account?"}{" "}
-        <Link href={mode === "sign-up" ? "/sign-in" : "/sign-up"}>
+        <Link href={`${mode === "sign-up" ? "/sign-in" : "/sign-up"}${
+          returnTo === "/dashboard" ? "" : `?next=${encodeURIComponent(returnTo)}`
+        }`}>
           {mode === "sign-up" ? "Sign in" : "Create one"}
         </Link>
       </p>
