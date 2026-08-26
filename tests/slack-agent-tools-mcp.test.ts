@@ -16,6 +16,7 @@ test("Slack MCP exposes the cross-thread tools available in the Claude harness",
     "send_slack_file",
     "schedule_task",
     "check_back_later",
+    "keep_alive_after_turn",
     "list_scheduled_tasks",
     "cancel_scheduled_task",
     "message_thread",
@@ -24,6 +25,19 @@ test("Slack MCP exposes the cross-thread tools available in the Claude harness",
   ]) {
     assert.ok(names.has(name), `${name} should be exposed over MCP`);
   }
+});
+
+test("Slack MCP exposes keep_alive_after_turn as an explicit boolean runtime control", () => {
+  const definition = listSlackAgentMcpToolDefinitions().find(
+    (tool) => tool.name === "keep_alive_after_turn"
+  );
+  assert.ok(definition);
+  const schema = definition!.inputSchema as {
+    properties: Record<string, unknown>;
+    required: string[];
+  };
+  assert.deepEqual(Object.keys(schema.properties).sort(), ["enabled", "note"]);
+  assert.deepEqual(schema.required, ["enabled"]);
 });
 
 test("Slack MCP describes set_channel_repository with repository and optional branch", () => {

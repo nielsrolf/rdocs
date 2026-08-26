@@ -25,6 +25,7 @@ export type SlackAgentToolRequest = {
     | "recent_activity"
     | "schedule_task"
     | "check_back_later"
+    | "keep_alive_after_turn"
     | "list_scheduled_tasks"
     | "cancel_scheduled_task"
     | "send_file"
@@ -492,6 +493,25 @@ export async function handleSlackAgentToolCall(
       content
     });
     return { ok: true, text: `Uploaded ${filename} (${content.length} bytes) to the thread.` };
+  }
+
+  // Runtime control for the Codex harness. Claude implements this as an
+  // in-process SDK tool; Codex reaches tools over MCP and observes this
+  // successful result to hold its own app-server/container open. There is no
+  // durable server-side flag: the live harness is the state owner.
+  if (request.tool === "keep_alive_after_turn") {
+    if (typeof request.args.enabled !== "boolean") {
+      return { ok: false, text: "enabled must be a boolean." };
+    }
+    const note = typeof request.args.note === "string" ? request.args.note.trim().slice(0, 2000) : "";
+    return {
+      ok: true,
+      text: request.args.enabled
+        ? `KEEP-ALIVE ON: this runtime stays alive across turn ends until you call keep_alive_after_turn with enabled=false.${
+            note ? ` Note: ${note}` : ""
+          } Do not submit a final response while it is on.`
+        : "KEEP-ALIVE OFF: this runtime may end after the turn. Submit the final response only when background work is finished or disposable."
+    };
   }
 
   if (

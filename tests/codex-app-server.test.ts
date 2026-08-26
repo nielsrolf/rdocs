@@ -175,6 +175,83 @@ test("a message pushed onto the input channel is steered into the RUNNING turn",
   assert.ok(events.some((event) => event.message.startsWith("TodoWrite: ")));
 });
 
+test("check_back_later parks a Codex run and the wake-up starts another turn in the same session", async () => {
+  // Regression for the 2026-08-26 experiment run: Codex called
+  // check_back_later successfully, then its mandatory structured response was
+  // treated as final three seconds later. The container and /tmp state were
+  // destroyed, and the alarm had to start a fresh run.
+  const workspacePath = tempDir("codex-park-ws-");
+  const logPath = path.join(tempDir("codex-park-log-"), "rpc.ndjson");
+  const inputChannel = createAgentInputChannel();
+  const events: { role: string; message: string }[] = [];
+  let settled = false;
+  const run = runCodexResearchAgent(baseInput(workspacePath) as never, {
+    agentConfig: { model: "codex/openai/gpt-5.6" },
+    inputChannel,
+    onProgress: (event) => {
+      events.push(event as { role: string; message: string });
+    },
+    agentEnv: {
+      CODEX_APP_SERVER_BIN: FAKE_SERVER,
+      FAKE_CODEX_LOG: logPath,
+      FAKE_CODEX_PARK_SEQUENCE: "check_back_later",
+      OPENAI_API_KEY: "test-key"
+    }
+  }).finally(() => {
+    settled = true;
+  });
+
+  for (let i = 0; i < 200 && !events.some((event) => /Waiting for the check-back wake-up/.test(event.message)); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.ok(events.some((event) => /Waiting for the check-back wake-up/.test(event.message)));
+  assert.equal(settled, false, "the first structured response must not finalize an armed run");
+  assert.equal(inputChannel.push("[Scheduled task firing] wake up now"), true);
+
+  const output = await run;
+  assert.match(String(output.replacementText), /hello from the fake codex/);
+  const starts = readLog(logPath).filter((message) => message.method === "turn/start");
+  assert.equal(starts.length, 2, "the wake-up must start a second turn on the same app-server thread");
+  assert.equal(
+    (starts[1]?.params as { threadId?: string })?.threadId,
+    (starts[0]?.params as { threadId?: string })?.threadId
+  );
+});
+
+test("keep_alive_after_turn survives messages until Codex explicitly disables it", async () => {
+  const workspacePath = tempDir("codex-keep-alive-ws-");
+  const logPath = path.join(tempDir("codex-keep-alive-log-"), "rpc.ndjson");
+  const inputChannel = createAgentInputChannel();
+  const events: { role: string; message: string }[] = [];
+  let settled = false;
+  const run = runCodexResearchAgent(baseInput(workspacePath) as never, {
+    agentConfig: { model: "codex/openai/gpt-5.6" },
+    inputChannel,
+    onProgress: (event) => {
+      events.push(event as { role: string; message: string });
+    },
+    agentEnv: {
+      CODEX_APP_SERVER_BIN: FAKE_SERVER,
+      FAKE_CODEX_LOG: logPath,
+      FAKE_CODEX_PARK_SEQUENCE: "keep_alive_on,keep_alive_off",
+      OPENAI_API_KEY: "test-key"
+    }
+  }).finally(() => {
+    settled = true;
+  });
+
+  for (let i = 0; i < 200 && !events.some((event) => /Codex keep-alive is on/.test(event.message)); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.ok(events.some((event) => /Codex keep-alive is on/.test(event.message)));
+  assert.equal(settled, false, "keep-alive must hold the run open after the first turn");
+  assert.equal(inputChannel.push("how is the background job going?"), true);
+
+  await run;
+  const starts = readLog(logPath).filter((message) => message.method === "turn/start");
+  assert.equal(starts.length, 2);
+});
+
 test("a failed turn surfaces the server's error instead of an empty submission", async () => {
   const workspacePath = tempDir("codex-ws-");
   await assert.rejects(

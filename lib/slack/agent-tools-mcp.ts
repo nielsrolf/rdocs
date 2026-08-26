@@ -20,6 +20,7 @@ const objectSchema = (properties: Record<string, unknown>, required: string[] = 
   additionalProperties: false
 });
 const string = { type: "string" };
+const boolean = { type: "boolean" };
 const limit = { type: "integer", minimum: 1, maximum: 100 };
 
 const SLACK_MCP_TOOLS: ToolDefinition[] = [
@@ -80,6 +81,13 @@ const SLACK_MCP_TOOLS: ToolDefinition[] = [
       },
       ["after_minutes", "instruction"]
     )
+  },
+  {
+    name: "keep_alive_after_turn",
+    description:
+      "Keep this agent runtime, its files, and background processes alive across turn ends until explicitly disabled. " +
+      "Use enabled=true for open-ended background work and enabled=false before the final response.",
+    inputSchema: objectSchema({ enabled: boolean, note: string }, ["enabled"])
   },
   {
     name: "list_scheduled_tasks",

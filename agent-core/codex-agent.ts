@@ -22,6 +22,15 @@ import {
 import { applyAgentConfigDirEnv, buildAgentEnv } from "./agent-env";
 import { resolveCodexAgentConfig } from "./agent-config";
 import { CodexAppServerClient, type CodexNotification } from "./codex-app-server";
+import {
+  createTurnPark,
+  KEEP_ALIVE_EXPIRED_NUDGE,
+  KEEP_ALIVE_RECHECK_MS,
+  KEEP_ALIVE_RECHECK_NUDGE,
+  MAX_KEEP_ALIVE_MINUTES,
+  PARK_TIMEOUT_NUDGE,
+  type TurnPark
+} from "./turn-park";
 
 export type CodexResearchAgentOptions = ClaudeAgentRunOptions;
 export const MAX_SUBMISSION_ATTEMPTS = SHARED_MAX_SUBMISSION_ATTEMPTS;
@@ -167,7 +176,76 @@ type CodexTurnState = {
   activeTurnId: string | null;
   /** Steering messages that arrived while no turn was active. */
   buffered: string[];
+  /** A parked turn waits here for the scheduler/user to inject the next turn. */
+  parkedResolve: ((text: string) => void) | null;
+  parkedReject: ((error: Error) => void) | null;
 };
+
+function asObject(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function completedMcpCallFailed(item: CodexV2Item): boolean {
+  if ((item.error as { message?: string } | undefined)?.message) return true;
+  return asObject(item.result).isError === true;
+}
+
+/**
+ * Codex reaches Slack tools through the remote MCP server, unlike Claude's
+ * in-process SDK tools. Observe the completed call so lifecycle control is a
+ * runtime fact, not something we hope the model remembers after the tool says
+ * "end your turn".
+ */
+function applyCodexRuntimeControl(
+  item: CodexV2Item,
+  turnPark: TurnPark,
+  onProgress: CodexResearchAgentOptions["onProgress"]
+): void {
+  if (
+    item.type !== "mcpToolCall" ||
+    asString(item.server) !== "gdocs" ||
+    completedMcpCallFailed(item)
+  ) {
+    return;
+  }
+  const toolName = asString(item.tool);
+  const args = asObject(item.arguments);
+  if (toolName === "check_back_later") {
+    const minutes = Number(args.after_minutes);
+    const kept = turnPark.arm(minutes);
+    emit(onProgress, {
+      role: "system",
+      message: kept
+        ? `Codex turn parked: this session stays alive for the check-back wake-up (up to ${MAX_KEEP_ALIVE_MINUTES} minutes).`
+        : `Codex check-back scheduled without session parking because the delay exceeds ${MAX_KEEP_ALIVE_MINUTES} minutes.`
+    });
+    return;
+  }
+  if (toolName === "keep_alive_after_turn" && typeof args.enabled === "boolean") {
+    turnPark.setKeepAlive(args.enabled);
+    emit(onProgress, {
+      role: "system",
+      message: args.enabled
+        ? `Keep-alive enabled: the Codex session stays alive after each turn for background work.${
+            typeof args.note === "string" && args.note.trim() ? ` Note: ${args.note.trim()}` : ""
+          }`
+        : "Keep-alive disabled: the Codex session ends normally when the turn finishes."
+    });
+  }
+}
 
 /**
  * Run ONE app-server turn and return the final assistant message.
@@ -180,7 +258,8 @@ async function runCodexAppServerTurn(
   client: CodexAppServerClient,
   state: CodexTurnState,
   prompt: string,
-  options: CodexResearchAgentOptions
+  options: CodexResearchAgentOptions,
+  onCompletedItem?: (item: CodexV2Item) => void
 ): Promise<string> {
   let finalResponse = "";
   let settle: ((error: Error | null) => void) | null = null;
@@ -224,6 +303,7 @@ async function runCodexAppServerTurn(
           if (method === "item/completed") finalResponse = asString(item.text);
           return;
         }
+        if (method === "item/completed") onCompletedItem?.(item);
         emit(options.onProgress, codexV2ItemProgress(item));
         return;
       }
@@ -319,6 +399,13 @@ async function deliverSteering(
 ): Promise<void> {
   const expectedTurnId = state.activeTurnId;
   if (!expectedTurnId) {
+    if (state.parkedResolve) {
+      const resolve = state.parkedResolve;
+      state.parkedResolve = null;
+      state.parkedReject = null;
+      resolve(text);
+      return;
+    }
     state.buffered.push(text);
     return;
   }
@@ -351,10 +438,84 @@ function startSteeringPump(
       for await (const text of channel) {
         await deliverSteering(client, state, text, options);
       }
-    } catch {
-      // The channel closing is the normal end of this loop.
+      state.parkedReject?.(new Error("Codex steering channel closed while the turn was parked."));
+    } catch (error) {
+      state.parkedReject?.(error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      state.parkedResolve = null;
+      state.parkedReject = null;
     }
   })();
+}
+
+function waitForParkedInput(
+  state: CodexTurnState,
+  options: CodexResearchAgentOptions,
+  timeoutMs: number
+): Promise<string | null> {
+  if (state.buffered.length > 0) return Promise.resolve(state.buffered.shift() as string);
+  if (!options.inputChannel || options.inputChannel.isClosed()) {
+    return Promise.reject(new Error("Codex cannot park without a live steering channel."));
+  }
+  return new Promise<string | null>((resolve, reject) => {
+    let timer: NodeJS.Timeout | null = null;
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
+      state.parkedResolve = null;
+      state.parkedReject = null;
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(new Error("Codex run was cancelled."));
+    };
+    state.parkedResolve = (text) => {
+      cleanup();
+      resolve(text);
+    };
+    state.parkedReject = (error) => {
+      cleanup();
+      reject(error);
+    };
+    timer = setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, Math.max(0, timeoutMs));
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) onAbort();
+  });
+}
+
+async function nextCodexTurnAfterPark(
+  turnPark: TurnPark,
+  state: CodexTurnState,
+  options: CodexResearchAgentOptions
+): Promise<string | null> {
+  if (turnPark.isArmed()) {
+    emit(options.onProgress, {
+      role: "system",
+      message: "Waiting for the check-back wake-up; the Codex session, container, and background jobs remain alive."
+    });
+    const message = await waitForParkedInput(state, options, turnPark.remainingMs());
+    turnPark.disarm();
+    return message ?? PARK_TIMEOUT_NUDGE;
+  }
+  if (!turnPark.keepAliveEnabled()) return null;
+  if (turnPark.keepAliveExpired()) {
+    turnPark.setKeepAlive(false);
+    return KEEP_ALIVE_EXPIRED_NUDGE;
+  }
+  emit(options.onProgress, {
+    role: "system",
+    message: "Codex keep-alive is on; the session, container, and background jobs remain alive after this turn."
+  });
+  const message = await waitForParkedInput(state, options, KEEP_ALIVE_RECHECK_MS);
+  if (message != null) return message;
+  if (turnPark.keepAliveExpired()) {
+    turnPark.setKeepAlive(false);
+    return KEEP_ALIVE_EXPIRED_NUDGE;
+  }
+  return KEEP_ALIVE_RECHECK_NUDGE;
 }
 
 export async function runCodexSubmissionLoop(input: {
@@ -362,11 +523,20 @@ export async function runCodexSubmissionLoop(input: {
   runTurn: (prompt: string) => Promise<string>;
   validateSubmission?: ClaudeAgentRunOptions["validateSubmission"];
   onRejected?: (error: string) => void | Promise<void>;
+  /** Return a prompt to continue this same session; null accepts the response. */
+  nextPromptAfterTurn?: () => Promise<string | null>;
 }): Promise<Partial<ClaudeResearchAgentOutput>> {
   let prompt = input.initialPrompt;
   let lastError = "Submission was invalid.";
-  for (let attempt = 1; attempt <= MAX_SUBMISSION_ATTEMPTS; attempt += 1) {
+  let attempt = 0;
+  while (attempt < MAX_SUBMISSION_ATTEMPTS) {
     const finalResponse = await input.runTurn(prompt);
+    const continuation = await input.nextPromptAfterTurn?.();
+    if (continuation != null) {
+      prompt = continuation;
+      continue;
+    }
+    attempt += 1;
     let parsed: Partial<ClaudeResearchAgentOutput>;
     try {
       parsed = normalizeSubmittedOutput(JSON.parse(finalResponse));
@@ -606,12 +776,23 @@ export async function runCodexResearchAgent(
     if (!threadId) throw new Error("Codex app-server did not return a thread id.");
     if (options.onSessionId) await options.onSessionId(threadId);
 
-    const state: CodexTurnState = { threadId, activeTurnId: null, buffered: [] };
+    const state: CodexTurnState = {
+      threadId,
+      activeTurnId: null,
+      buffered: [],
+      parkedResolve: null,
+      parkedReject: null
+    };
+    const turnPark = createTurnPark();
     startSteeringPump(client, state, options);
 
     const parsed = await runCodexSubmissionLoop({
       initialPrompt: codexPrompt(input),
-      runTurn: (prompt) => runCodexAppServerTurn(client, state, prompt, options),
+      runTurn: (prompt) =>
+        runCodexAppServerTurn(client, state, prompt, options, (item) =>
+          applyCodexRuntimeControl(item, turnPark, options.onProgress)
+        ),
+      nextPromptAfterTurn: () => nextCodexTurnAfterPark(turnPark, state, options),
       validateSubmission: options.validateSubmission,
       onRejected: (error) =>
         emit(options.onProgress, { role: "system", message: submissionRejectedMessage(error) })
@@ -678,7 +859,13 @@ export async function runCodexMergeConflictResolver(input: {
     });
     const threadId = started?.thread?.id;
     if (!threadId) throw new Error("Codex app-server did not return a thread id.");
-    const state: CodexTurnState = { threadId, activeTurnId: null, buffered: [] };
+    const state: CodexTurnState = {
+      threadId,
+      activeTurnId: null,
+      buffered: [],
+      parkedResolve: null,
+      parkedReject: null
+    };
     const result = await runCodexAppServerTurn(client, state, mergePrompt, { signal: controller.signal });
     if (!result.trim()) throw new Error("Codex merge conflict resolver returned no result.");
   } catch (error) {

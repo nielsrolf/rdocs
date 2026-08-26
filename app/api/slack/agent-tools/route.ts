@@ -18,6 +18,7 @@ const toolRequestSchema = z.object({
     "recent_activity",
     "schedule_task",
     "check_back_later",
+    "keep_alive_after_turn",
     "list_scheduled_tasks",
     "cancel_scheduled_task",
     "send_file",

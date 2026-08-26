@@ -361,6 +361,31 @@ test("check_back_later schedules a silent one-shot wake-up in the run's own thre
   assert.match(tooLong.text, /after_minutes/);
 });
 
+test("keep_alive_after_turn is an explicit, non-durable runtime control", async () => {
+  const slack = makeSlack();
+  const enabled = await handleSlackAgentToolCall(
+    { tool: "keep_alive_after_turn", args: { enabled: true, note: "training process" } },
+    { claims: asAlice, slack, botUserId: BOT }
+  );
+  assert.equal(enabled.ok, true);
+  assert.match(enabled.text, /keep-alive on/i);
+  assert.match(enabled.text, /training process/);
+
+  const disabled = await handleSlackAgentToolCall(
+    { tool: "keep_alive_after_turn", args: { enabled: false } },
+    { claims: asAlice, slack, botUserId: BOT }
+  );
+  assert.equal(disabled.ok, true);
+  assert.match(disabled.text, /keep-alive off/i);
+
+  const invalid = await handleSlackAgentToolCall(
+    { tool: "keep_alive_after_turn", args: { enabled: "yes" } },
+    { claims: asAlice, slack, botUserId: BOT }
+  );
+  assert.equal(invalid.ok, false);
+  assert.match(invalid.text, /boolean/i);
+});
+
 // set_channel_workspace: "start with a doc, then create the Slack channel" —
 // the agent MERGES the channel document into an existing doc: the doc becomes
 // the channel's backing document (env/agent settings apply, runs land in its

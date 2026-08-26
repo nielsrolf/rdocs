@@ -17,6 +17,9 @@
 //                           mimicking a missing rollout file (thread/start
 //                           still succeeds)
 //   FAKE_CODEX_THREAD_ID    thread id to report (default "thread-fake-1")
+//   FAKE_CODEX_PARK_SEQUENCE comma-separated runtime-control calls emitted on
+//                           successive turns: check_back_later, keep_alive_on,
+//                           keep_alive_off
 
 import fs from "node:fs";
 import readline from "node:readline";
@@ -25,6 +28,10 @@ const logPath = process.env.FAKE_CODEX_LOG;
 const awaitSteer = process.env.FAKE_CODEX_AWAIT_STEER === "1";
 const failTurn = process.env.FAKE_CODEX_FAIL_TURN === "1";
 const threadId = process.env.FAKE_CODEX_THREAD_ID || "thread-fake-1";
+const parkSequence = (process.env.FAKE_CODEX_PARK_SEQUENCE || "")
+  .split(",")
+  .map((part) => part.trim())
+  .filter(Boolean);
 const defaultReply = JSON.stringify({
   summary: "fake run",
   replacementText: "hello from the fake codex app-server",
@@ -130,6 +137,41 @@ function startTurn(id, params) {
     completedAtMs: 3,
     item: { type: "reasoning", id: "r-1", content: ["thinking about it"], summary: [] }
   });
+  const parkAction = parkSequence[turnCounter - 1];
+  if (parkAction) {
+    const isCheckBack = parkAction === "check_back_later";
+    const tool = isCheckBack ? "check_back_later" : "keep_alive_after_turn";
+    const args = isCheckBack
+      ? { after_minutes: 1, instruction: "check the fake background job" }
+      : { enabled: parkAction === "keep_alive_on", note: "fake background job" };
+    notify("item/started", {
+      threadId,
+      turnId,
+      startedAtMs: 4,
+      item: {
+        type: "mcpToolCall",
+        id: `park-${turnCounter}`,
+        server: "gdocs",
+        tool,
+        arguments: args,
+        status: "inProgress"
+      }
+    });
+    notify("item/completed", {
+      threadId,
+      turnId,
+      completedAtMs: 5,
+      item: {
+        type: "mcpToolCall",
+        id: `park-${turnCounter}`,
+        server: "gdocs",
+        tool,
+        arguments: args,
+        result: { content: [{ type: "text", text: "runtime control accepted" }] },
+        status: "completed"
+      }
+    });
+  }
   if (!awaitSteer) {
     setTimeout(() => completeTurn(turnId), 5);
   }
