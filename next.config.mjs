@@ -10,6 +10,20 @@ const nextConfig = {
     serverActions: {
       bodySizeLimit: "2mb"
     }
+  },
+  // EXPERIMENT (NEXT_SKIP_FILE_TRACE=1): drop Next's output-file-tracing plugin.
+  // A build trace showed node-file-trace-plugin taking 668s of a 776s build
+  // (86%) over 186 route entrypoints, and no cache touches it. Its only output
+  // is .nft.json metadata consumed by `output: "standalone"` / serverless — this
+  // deployment runs plain `next start` with node_modules on disk, so it is dead
+  // weight. MUST be revisited before ever switching to standalone output.
+  webpack: (config) => {
+    if (process.env.NEXT_SKIP_FILE_TRACE === "1") {
+      config.plugins = config.plugins.filter(
+        (p) => p?.constructor?.name !== "TraceEntryPointsPlugin"
+      );
+    }
+    return config;
   }
 };
 

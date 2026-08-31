@@ -58,6 +58,16 @@ pid_has_ancestor() {
   return 1
 }
 
+# ---------------------------------------------------------------- single-flight
+# Deploys now share ONE build cache (see "build cache" below) as well as one
+# pair of ports and one $STATE_FILE, so two at once corrupt the cache and race
+# over the same color. 2026-08-31: an agent fired three deploys in 13 minutes
+# while diagnosing a failure. Fail fast instead of interleaving.
+exec 9>".deploy.lock"
+if ! flock -n 9; then
+  fail "another deploy is already running (holding .deploy.lock)"
+fi
+
 # ---------------------------------------------------------------- env
 if [ -f .env ]; then
   set -a
@@ -154,13 +164,20 @@ npm run db:migrate-security
 
 # ---------------------------------------------------------------- build + start
 export NEXT_DIST_DIR=".next-$NEW"
+
 log "building into $NEXT_DIST_DIR"
-npm run build
+# The default node heap OOMs this build (2026-08-18: SIGABRT "Reached heap
+# limit", failed deploy, worked on retry with a bigger heap). Bake it in;
+# an explicit NODE_OPTIONS from the caller still wins.
+NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=8192}" npm run build
 
 mkdir -p logs
 APP_LOG="logs/service_${NEW}_$(date +%Y%m%d_%H%M%S).log"
 log "starting $NEW on :$NEW_PORT (log: $APP_LOG)"
-PORT=$NEW_PORT NEXT_DIST_DIR=".next-$NEW" nohup npm run start > "$APP_LOG" 2>&1 &
+# 9>&- closes the .deploy.lock fd: a long-lived child inherits it and would
+# otherwise hold the single-flight lock for its entire lifetime, making
+# every subsequent deploy fail with "another deploy is already running".
+PORT=$NEW_PORT NEXT_DIST_DIR=".next-$NEW" nohup npm run start 9>&- > "$APP_LOG" 2>&1 &
 NEW_PID=$!
 echo "$NEW_PID" > ".service_${NEW}.pid"
 
@@ -251,7 +268,7 @@ else
   fi
   write_caddy_config "$NEW_PORT"
   CADDY_LOG="logs/caddy_$(date +%Y%m%d_%H%M%S).log"
-  nohup caddy run --config "$CADDY_CONFIG" > "$CADDY_LOG" 2>&1 &
+  nohup caddy run --config "$CADDY_CONFIG" 9>&- > "$CADDY_LOG" 2>&1 &
   echo $! > .lb.pid
   log "started Caddy (log: $CADDY_LOG)"
   DEADLINE=$(( $(date +%s) + 30 ))

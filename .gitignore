@@ -36,3 +36,4 @@ demo-video/
 claudex.env
 .env.bak*
 .claude/
+.deploy.lock
