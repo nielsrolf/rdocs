@@ -45,6 +45,7 @@ export type ConversationRunInput = {
   // get a worktree managed by this app — see the lifecycle wrapper's
   // selfHosted gating, mirroring the other agent entry points.
   runnerMode: string;
+  documentEditMode?: "suggest" | "edit";
   // Host dev mode: run unsandboxed in this host directory (allowlisted Slack
   // dev channel only — see lib/slack/dev-mode.ts).
   hostDevDir?: string | null;
@@ -131,6 +132,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
     agentConfig,
     agentAccessMode,
     runnerMode,
+    documentEditMode,
     hostDevDir,
     slackContext,
     slackTools,
@@ -265,6 +267,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
           ctx.beginHeartbeat();
           return ctx.runner.run({
         mode: "conversation",
+        documentEditMode: documentEditMode ?? "suggest",
         hostDevRun: Boolean(hostDevDir),
         githubAuthAvailable: Boolean(agentEnv.GITHUB_TOKEN?.trim() || agentEnv.GH_TOKEN?.trim()),
         accessMode: agentAccessMode,

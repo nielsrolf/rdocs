@@ -29,6 +29,28 @@ export const LinkShortcut = Extension.create<{ onOpen?: (editor: Editor) => void
   }
 });
 
+// With a selection, `$` is an intentional formatting command: it wraps the
+// selected source in inline-math delimiters. With a caret, returning false lets
+// the browser insert an ordinary dollar sign as usual.
+export const LatexShortcut = Extension.create({
+  name: "latexShortcut",
+  addKeyboardShortcuts() {
+    return {
+      "$": () => {
+        const { from, to, empty } = this.editor.state.selection;
+        if (empty) return false;
+        const text = this.editor.state.doc.textBetween(from, to, " ");
+        return this.editor
+          .chain()
+          .focus()
+          .insertContentAt({ from, to }, { type: "text", text: `$${text}$` })
+          .setTextSelection({ from: from + 1, to: from + 1 + text.length })
+          .run();
+      }
+    };
+  }
+});
+
 function tryMoveBlockAtDepth(
   state: EditorState,
   dispatch: ((tr: Transaction) => void) | undefined,

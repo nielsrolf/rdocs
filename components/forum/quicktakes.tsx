@@ -8,6 +8,7 @@ import { MarkdownBody } from "@/components/document-workspace/markdown";
 
 import { ForumComments, type ForumCommentView } from "./forum-comments";
 import { VoteWidget } from "./vote-widget";
+import { MentionTextarea } from "./mention-textarea";
 
 // Serialized QuicktakeSummary (lib/quicktakes.ts) — dates as ISO strings.
 export type QuicktakeView = {
@@ -246,9 +247,9 @@ function QuicktakeComposer({
         }
       }}
     >
-      <textarea
+      <MentionTextarea
         value={body}
-        onChange={(event) => setBody(event.target.value)}
+        onChange={setBody}
         placeholder="Share a quick take… (markdown + LaTeX supported)"
         rows={3}
         disabled={busy}

@@ -79,6 +79,51 @@ export const aiEditSelectionIdsAttributeSpec = {
   }
 };
 
+export const imageCaptionAttributeSpec = {
+  caption: {
+    default: null as string | null,
+    parseHTML: (element: HTMLElement) =>
+      element.getAttribute("caption") || element.getAttribute("title") || null,
+    renderHTML: (attributes: { caption?: unknown }) => {
+      const caption = typeof attributes.caption === "string" ? attributes.caption.trim() : "";
+      return caption ? { caption, title: caption } : {};
+    }
+  }
+};
+
+export const ToggleBlockSchemaNode = Node.create({
+  name: "toggleBlock",
+  group: "block",
+  content: "block+",
+  defining: true,
+  addAttributes() {
+    return {
+      summary: {
+        default: "Details",
+        parseHTML: (element: HTMLElement) => element.getAttribute("data-toggle-summary") || "Details",
+        renderHTML: (attributes: { summary?: unknown }) => ({
+          "data-toggle-summary":
+            typeof attributes.summary === "string" && attributes.summary.trim()
+              ? attributes.summary.trim()
+              : "Details"
+        })
+      }
+    };
+  },
+  parseHTML() {
+    return [{ tag: "details[data-toggle-block]", contentElement: "[data-toggle-content]" }];
+  },
+  renderHTML({ HTMLAttributes, node }) {
+    const summary = typeof node.attrs.summary === "string" ? node.attrs.summary : "Details";
+    return [
+      "details",
+      mergeAttributes(HTMLAttributes, { "data-toggle-block": "" }),
+      ["summary", summary],
+      ["div", { "data-toggle-content": "" }, 0]
+    ];
+  }
+});
+
 export const RepoImageSchemaNode = Node.create({
   name: "repoImage",
   group: "block",

@@ -34,7 +34,9 @@ export async function POST(request: Request, { params }: RouteContext<{ threadId
   const thread = await db.commentThread.findUnique({
     where: { id: threadId },
     select: {
-      documentId: true
+      documentId: true,
+      origin: true,
+      document: { select: { kind: true, forumPostedAt: true } }
     }
   });
 
@@ -114,11 +116,14 @@ export async function POST(request: Request, { params }: RouteContext<{ threadId
     });
   }
 
-  await syncCommentMentions({
+  const mentionedUserIds = await syncCommentMentions({
     commentId: comment.id,
     documentId: thread.documentId,
     body: parsed.data.body,
-    authorId: user?.id ?? null
+    authorId: user?.id ?? null,
+    audience: thread.origin === "forum" || thread.document.kind === "quicktake" || Boolean(thread.document.forumPostedAt)
+      ? "forum"
+      : "document"
   });
 
   const serialized = serializeComment(comment);
@@ -135,7 +140,8 @@ export async function POST(request: Request, { params }: RouteContext<{ threadId
     documentId: thread.documentId,
     commentBody: parsed.data.body,
     authorLabel: user?.name ?? comment.guestName ?? "Guest",
-    excludeUserIds: [user?.id]
+    excludeUserIds: [user?.id],
+    includeUserIds: mentionedUserIds
   });
 
   console.log("[comment-reply]", {

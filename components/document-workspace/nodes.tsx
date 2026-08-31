@@ -1,11 +1,15 @@
 import { Node, mergeAttributes } from "@tiptap/core";
-import { NodeViewProps, NodeViewWrapper, ReactNodeViewRenderer } from "@tiptap/react";
+import ImageExtension from "@tiptap/extension-image";
+import { NodeViewContent, NodeViewProps, NodeViewWrapper, ReactNodeViewRenderer } from "@tiptap/react";
 import { useEffect, useRef, useState } from "react";
 
 import {
   aiEditSelectionIdsAttributeSpec,
   attachmentChipAttributesSpec,
-  commentThreadIdsAttributeSpec
+  commentThreadIdsAttributeSpec,
+  imageCaptionAttributeSpec,
+  suggestionRecordsAttributesSpec,
+  ToggleBlockSchemaNode
 } from "@/lib/document-schema-nodes";
 
 import { resolveShareToken, withShareToken } from "./share-url";
@@ -212,7 +216,83 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
   );
 }
 
-function RepoImageView({ node }: NodeViewProps) {
+function ImageCaptionEditor({
+  caption,
+  editable,
+  onCommit
+}: {
+  caption: string;
+  editable: boolean;
+  onCommit: (caption: string | null) => void;
+}) {
+  const [draft, setDraft] = useState(caption);
+  useEffect(() => setDraft(caption), [caption]);
+
+  if (!editable) {
+    return caption ? <figcaption className="repo-image-caption">{caption}</figcaption> : null;
+  }
+
+  const commit = () => onCommit(draft.trim() || null);
+  return (
+    <input
+      aria-label="Image caption"
+      className="image-caption-input"
+      contentEditable={false}
+      onBlur={commit}
+      onChange={(event) => setDraft(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commit();
+          event.currentTarget.blur();
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          setDraft(caption);
+          event.currentTarget.blur();
+        }
+      }}
+      onMouseDown={(event) => event.stopPropagation()}
+      placeholder="Add caption"
+      tabIndex={-1}
+      value={draft}
+    />
+  );
+}
+
+function CaptionedImageView({ editor, node, selected, updateAttributes }: NodeViewProps) {
+  const src = (node.attrs.src as string) || "";
+  const alt = (node.attrs.alt as string) || "Image";
+  const caption = (node.attrs.caption as string | null) || "";
+
+  return (
+    <NodeViewWrapper className={`captioned-image-node${selected ? " captioned-image-node-selected" : ""}`}>
+      <img alt={alt} src={src} title={caption || alt} />
+      <ImageCaptionEditor
+        caption={caption}
+        editable={editor.isEditable}
+        onCommit={(nextCaption) => updateAttributes({ caption: nextCaption })}
+      />
+    </NodeViewWrapper>
+  );
+}
+
+export const CaptionedImage = ImageExtension.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      ...imageCaptionAttributeSpec,
+      ...commentThreadIdsAttributeSpec,
+      ...aiEditSelectionIdsAttributeSpec,
+      ...suggestionRecordsAttributesSpec
+    };
+  },
+  addNodeView() {
+    return ReactNodeViewRenderer(CaptionedImageView);
+  }
+});
+
+function RepoImageView({ editor, node, selected, updateAttributes }: NodeViewProps) {
   const rawSrc = (node.attrs.src as string) || "";
   const alt = (node.attrs.alt as string) || "Repository image";
   const caption = (node.attrs.caption as string | null) || null;
@@ -222,9 +302,13 @@ function RepoImageView({ node }: NodeViewProps) {
   const src = withShareToken(rawSrc, shareToken);
 
   return (
-    <NodeViewWrapper className="repo-image-node">
+    <NodeViewWrapper className={`repo-image-node${selected ? " repo-image-node-selected" : ""}`}>
       <img alt={alt} src={src} title={caption ?? alt} />
-      {caption ? <div className="repo-image-caption">{caption}</div> : null}
+      <ImageCaptionEditor
+        caption={caption ?? ""}
+        editable={editor.isEditable}
+        onCommit={(nextCaption) => updateAttributes({ caption: nextCaption })}
+      />
     </NodeViewWrapper>
   );
 }
@@ -259,6 +343,50 @@ export const RepoImage = Node.create({
   },
   addNodeView() {
     return ReactNodeViewRenderer(RepoImageView);
+  }
+});
+
+function ToggleBlockView({ editor, node, selected, updateAttributes }: NodeViewProps) {
+  const summary = (node.attrs.summary as string) || "Details";
+  const [draft, setDraft] = useState(summary);
+  useEffect(() => setDraft(summary), [summary]);
+  const commit = () => updateAttributes({ summary: draft.trim() || "Details" });
+
+  return (
+    <NodeViewWrapper className={`toggle-block${selected ? " toggle-block-selected" : ""}`}>
+      <details>
+        <summary contentEditable={false}>
+          {editor.isEditable ? (
+            <input
+              aria-label="Toggle title"
+              className="toggle-block-title"
+              onBlur={commit}
+              onChange={(event) => setDraft(event.target.value)}
+              onClick={(event) => event.stopPropagation()}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  commit();
+                  event.currentTarget.blur();
+                }
+              }}
+              onMouseDown={(event) => event.stopPropagation()}
+              tabIndex={-1}
+              value={draft}
+            />
+          ) : (
+            summary
+          )}
+        </summary>
+        <NodeViewContent className="toggle-block-content" />
+      </details>
+    </NodeViewWrapper>
+  );
+}
+
+export const ToggleBlock = ToggleBlockSchemaNode.extend({
+  addNodeView() {
+    return ReactNodeViewRenderer(ToggleBlockView);
   }
 });
 

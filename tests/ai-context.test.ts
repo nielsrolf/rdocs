@@ -136,6 +136,21 @@ test("comment user prompt routes the reply through submit_response", () => {
   assert.match(prompt, /Anchor: Intro text/);
 });
 
+test("document conversations default to suggestions and require explicit edit mode for direct changes", () => {
+  const conversation = {
+    ...baseInput,
+    mode: "conversation" as const,
+    instruction: "Improve the introduction."
+  };
+  const safePrompt = buildUserPrompt(conversation);
+  assert.match(safePrompt, /By default, do not edit the document text directly/);
+  assert.match(safePrompt, /human can accept or reject/);
+
+  const editPrompt = buildUserPrompt({ ...conversation, documentEditMode: "edit" as const });
+  assert.match(editPrompt, /application will apply those changes directly/);
+  assert.doesNotMatch(editPrompt, /By default, do not edit/);
+});
+
 test("asset intent accepts either asset for figure-or-widget requests", () => {
   assert.deepEqual(
     detectEditAssetIntent("Add a figure or widget to schematically illustrate the content of those prompts"),

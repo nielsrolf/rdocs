@@ -89,3 +89,37 @@ test("forum frontpage lists public posts for anonymous viewers and strangers", a
     await cleanup([publicPost.id, privatePost.id], [owner.id, stranger.id]);
   }
 });
+
+test("forum post comment counts exclude resolved threads", async () => {
+  const owner = await makeUser("owner");
+  const post = await makeDocument(owner.id, {
+    forumPostedAt: new Date(),
+    forumPublic: true
+  });
+  await db.commentThread.create({
+    data: {
+      documentId: post.id,
+      createdById: owner.id,
+      anchorText: "",
+      origin: "forum",
+      comments: { create: [{ body: "open root", authorId: owner.id }, { body: "open reply", authorId: owner.id }] }
+    }
+  });
+  await db.commentThread.create({
+    data: {
+      documentId: post.id,
+      createdById: owner.id,
+      anchorText: "",
+      origin: "forum",
+      status: "RESOLVED",
+      comments: { create: { body: "hidden resolved comment", authorId: owner.id } }
+    }
+  });
+
+  try {
+    const summary = (await listForumDocumentsForUser(owner.id)).find((item) => item.id === post.id);
+    assert.equal(summary?.commentCount, 2);
+  } finally {
+    await cleanup([post.id], [owner.id]);
+  }
+});

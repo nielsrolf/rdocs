@@ -8,6 +8,8 @@ import {
   QUICKTAKE_MAX_LENGTH,
   QuicktakeError
 } from "@/lib/quicktakes";
+import { syncForumDocumentMentions } from "@/lib/mention-data";
+import { notifyForumMentioned } from "@/lib/activity-notifications";
 
 const createSchema = z.object({
   body: z.string().min(1).max(QUICKTAKE_MAX_LENGTH)
@@ -32,6 +34,17 @@ export async function POST(request: Request) {
   }
   try {
     const quicktake = await createQuicktake(user.id, parsed.data.body);
+    const mentionedUserIds = await syncForumDocumentMentions({
+      documentId: quicktake.id,
+      body: parsed.data.body,
+      authorId: user.id
+    });
+    void notifyForumMentioned({
+      documentId: quicktake.id,
+      recipientUserIds: mentionedUserIds,
+      authorLabel: user.name,
+      kind: "quicktake"
+    });
     console.log("[quicktake] created", {
       quicktakeId: quicktake.id,
       userId: user.id,

@@ -211,6 +211,8 @@ export type CommentTagFilterValue = "yes" | "no" | "all";
 
 export type HighlightThread = {
   id: string;
+  tags?: string[];
+  status?: string;
 };
 
 export type CommentAnchorRange = {

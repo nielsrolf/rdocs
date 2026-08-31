@@ -65,6 +65,19 @@ test("an inline markdown image resolves to a repo-image figure with the asset sr
   assert.match(html, /After figure\./);
 });
 
+test("a markdown image title becomes its visible caption", () => {
+  const content = buildAiEditInsertContent({
+    replacementText: '![Accuracy chart](assets/plot.png "Validation accuracy")',
+    sourceLinks: [],
+    images: [],
+    widgets: [],
+    documentId: "doc-1",
+    shareToken: null
+  });
+
+  assert.match(content, /caption="Validation accuracy"/);
+});
+
 test("an unused images-array entry is still appended as a figure", () => {
   const html = buildAiEditInsertContent({
     replacementText: "Just some prose with no inline image.",

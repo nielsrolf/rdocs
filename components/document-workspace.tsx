@@ -6,7 +6,6 @@ import {
   RUN_STARTED_CODEX,
   RUN_STARTED_LOCAL_FALLBACK
 } from "@/agent-core/lifecycle-messages";
-import ImageExtension from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
 import Table from "@tiptap/extension-table";
@@ -76,7 +75,7 @@ import {
 import { CommentRail } from "./document-workspace/comment-rail";
 import { layoutCommentRail } from "./document-workspace/comment-rail-layout";
 import { DocOutline, OUTLINE_MAX_WIDTH, OUTLINE_MIN_WIDTH } from "./document-workspace/doc-outline";
-import { LinkShortcut, MoveBlock, SlashTab, StrikeShortcut, TabIndentGuard, TaskItem } from "./document-workspace/editor-extras";
+import { LatexShortcut, LinkShortcut, MoveBlock, SlashTab, StrikeShortcut, TabIndentGuard, TaskItem } from "./document-workspace/editor-extras";
 import { EnvironmentMenu } from "./document-workspace/environment-menu";
 import { SkillsMenu } from "./document-workspace/skills-menu";
 import { ExportMenu } from "./document-workspace/export-menu";
@@ -122,7 +121,7 @@ import { FindBar } from "./document-workspace/find-bar";
 import { SearchExtension } from "./document-workspace/search";
 import { aiRunsFingerprint, buildConversations, mergeRunEventTimelines, selectionBlocksRunSync } from "./document-workspace/conversations";
 import { createLatexRenderExtension, escapeLiteralDollars } from "./document-workspace/latex";
-import { AttachmentChip, EmbeddedWidget, RepoImage, TabBreak } from "./document-workspace/nodes";
+import { AttachmentChip, CaptionedImage, EmbeddedWidget, RepoImage, TabBreak, ToggleBlock } from "./document-workspace/nodes";
 import {
   createTabId,
   createTabsVisibilityExtension,
@@ -132,7 +131,6 @@ import {
   setActiveTab,
   type TabSummary
 } from "./document-workspace/tabs";
-import { aiEditSelectionIdsAttributeSpec, commentThreadIdsAttributeSpec } from "@/lib/document-schema-nodes";
 import { HIGHLIGHT_COLORS, TextHighlight, type HighlightColor } from "@/lib/text-highlight";
 
 // Upper bound on a single collaboration push. A push that never settles (e.g.
@@ -144,15 +142,6 @@ const COLLAB_PUSH_TIMEOUT_MS = 45_000;
 // transient outage recovers on its own without hammering the server.
 const COLLAB_PUSH_RETRY_DELAY_MS = 3_000;
 
-const Image = ImageExtension.extend({
-  addAttributes() {
-    return {
-      ...this.parent?.(),
-      ...commentThreadIdsAttributeSpec,
-      ...aiEditSelectionIdsAttributeSpec
-    };
-  }
-});
 import { ShareModal } from "./document-workspace/share-modal";
 import { TableInlineControls } from "./document-workspace/table-inline-controls";
 import { useAgentNotifications } from "./document-workspace/use-agent-notifications";
@@ -423,6 +412,7 @@ export function DocumentWorkspace({
   const [composeMode, setComposeMode] = useState<"selected" | "new">("selected");
   const [agentMessage, setAgentMessage] = useState("");
   const [agentBusy, setAgentBusy] = useState(false);
+  const [agentEditMode, setAgentEditMode] = useState<"suggest" | "edit">("suggest");
   const [inviteEmail, setInviteEmail] = useState("");
   const [invitePermission, setInvitePermission] = useState<PermissionLevelValue>("COMMENT");
   const [inviteBusy, setInviteBusy] = useState(false);
@@ -1327,13 +1317,14 @@ export function DocumentWorkspace({
       TaskList,
       TaskItem.configure({ nested: true }),
       StrikeShortcut,
+      LatexShortcut,
       LinkShortcut.configure({
         onOpen: (shortcutEditor) => handleEditLink(shortcutEditor)
       }),
       MoveBlock,
       TabIndentGuard,
       slashTabExtension,
-      Image.configure({
+      CaptionedImage.configure({
         allowBase64: true,
         inline: false
       }),
@@ -1368,6 +1359,7 @@ export function DocumentWorkspace({
       EmbeddedWidget,
       AttachmentChip,
       TabBreak,
+      ToggleBlock,
       tabsVisibilityExtension
     ],
     immediatelyRender: false,
@@ -2978,7 +2970,8 @@ export function DocumentWorkspace({
     replacementText: string,
     author: SuggestionAuthor,
     runImages: AiEditImage[],
-    runSources: string[]
+    runSources: string[],
+    applyDirectly = false
   ): boolean {
     if (!editor) return false;
     const record = {
@@ -3021,6 +3014,10 @@ export function DocumentWorkspace({
     });
     if (!tr) return false;
     editor.view.dispatch(tr);
+    if (applyDirectly) {
+      const accepted = acceptSuggestion(editor.state, record.suggestionId);
+      if (accepted) editor.view.dispatch(accepted);
+    }
     return true;
   }
 
@@ -3029,7 +3026,8 @@ export function DocumentWorkspace({
     suggestions: AgentSuggestionInput[],
     model: unknown,
     runImages: AiEditImage[] = [],
-    runSources: string[] = []
+    runSources: string[] = [],
+    applyDirectly = false
   ) {
     if (!editor || suggestions.length === 0) return;
     const author: SuggestionAuthor = {
@@ -3055,7 +3053,8 @@ export function DocumentWorkspace({
         op.suggestion.replacementText,
         author,
         runImages,
-        runSources
+        runSources,
+        applyDirectly
       );
     }
     if (skipped.length > 0) {
@@ -3481,7 +3480,8 @@ export function DocumentWorkspace({
       body: JSON.stringify({
         message,
         shareToken,
-        previousRunId
+        previousRunId,
+        editMode: canWriteDocument ? agentEditMode : "suggest"
       })
     });
 
@@ -3512,6 +3512,26 @@ export function DocumentWorkspace({
     // until the run terminates — the completion effect clears agentBusy when the
     // polled run reaches a terminal state.
     agentRunIdRef.current = data.aiRun.id;
+  }
+
+  async function handleSteerAgentRun(runId: string) {
+    const message = agentMessage.trim();
+    if (!message) return;
+    const response = await fetch(`/api/documents/${documentId}/agents`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runId, message, shareToken })
+    }).catch(() => null);
+    const data = await response?.json().catch(() => null);
+    if (!response?.ok) {
+      reportClientError(data?.error ?? "Could not send the update to the running agent.", "agent-steer", {
+        documentId,
+        runId,
+        status: response?.status ?? null
+      });
+      return;
+    }
+    setAgentMessage("");
   }
 
   async function handleCreateShareLink(permission: PermissionLevelValue) {
@@ -4222,7 +4242,8 @@ export function DocumentWorkspace({
             suggestions,
             fetched?.model,
             Array.isArray(fetched?.images) ? (fetched.images as AiEditImage[]) : [],
-            Array.isArray(fetched?.sources) ? (fetched.sources as string[]) : []
+            Array.isArray(fetched?.sources) ? (fetched.sources as string[]) : [],
+            fetched?.suggestOnly === false
           );
         }
         if (agentComments.length > 0) {
@@ -4656,6 +4677,13 @@ export function DocumentWorkspace({
                   disabled={!canWriteDocument || !editor}
                   label="Quote"
                   onClick={() => editor?.chain().focus().toggleBlockquote().run()}
+                />
+                <ToolbarButton
+                  active={editor?.isActive("toggleBlock") ?? false}
+                  disabled={!canWriteDocument || !editor}
+                  label="Toggle"
+                  title="Collapsible details"
+                  onClick={() => editor?.chain().focus().toggleWrap("toggleBlock").run()}
                 />
                 <ToolbarButton
                   active={editor?.isActive("codeBlock") ?? false}
@@ -5216,6 +5244,9 @@ export function DocumentWorkspace({
           }}
           onAgentMessageChange={setAgentMessage}
           onSendAgentMessage={(options) => void handleAgentConversation(options)}
+          onSendLiveAgentMessage={(runId) => void handleSteerAgentRun(runId)}
+          agentEditMode={agentEditMode}
+          onAgentEditModeChange={setAgentEditMode}
           onStopRun={(runId) => void handleStopAgentRun(runId)}
         />
       ) : null}

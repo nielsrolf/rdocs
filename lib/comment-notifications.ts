@@ -56,6 +56,7 @@ export type CommentNotificationRecipient = {
 export async function resolveCommentNotificationRecipients(input: {
   documentId: string;
   excludeUserIds?: Array<string | null | undefined>;
+  includeUserIds?: string[];
 }): Promise<CommentNotificationRecipient[]> {
   const document = await db.document.findUnique({
     where: { id: input.documentId },
@@ -77,6 +78,7 @@ export async function resolveCommentNotificationRecipients(input: {
     candidateIds.add(access.group.ownerId);
     for (const member of access.group.members) candidateIds.add(member.userId);
   }
+  for (const id of input.includeUserIds ?? []) candidateIds.add(id);
   for (const id of excluded) candidateIds.delete(id);
   if (candidateIds.size === 0) return [];
   const users = await db.user.findMany({
@@ -122,6 +124,8 @@ export async function notifyCommentPosted(input: {
   // The author + anyone else who must not be notified (e.g. the Slack user
   // whose DM reply created this comment — they are literally looking at it).
   excludeUserIds?: Array<string | null | undefined>;
+  /** Explicitly tagged forum users, even when they lack standing membership. */
+  includeUserIds?: string[];
   // Injectable for tests and for reuse of an existing Slack event context.
   deps?: CommentNotifierDeps;
 }): Promise<{ notified: number }> {
@@ -138,7 +142,8 @@ export async function notifyCommentPosted(input: {
     if (!thread) return { notified: 0 };
     const recipients = await resolveCommentNotificationRecipients({
       documentId: input.documentId,
-      excludeUserIds: input.excludeUserIds
+      excludeUserIds: input.excludeUserIds,
+      includeUserIds: input.includeUserIds
     });
     if (recipients.length === 0) return { notified: 0 };
 

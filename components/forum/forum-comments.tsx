@@ -5,6 +5,7 @@ import { useState } from "react";
 import { MarkdownBody } from "@/components/document-workspace/markdown";
 
 import { VoteWidget } from "./vote-widget";
+import { MentionTextarea } from "./mention-textarea";
 
 export type ForumCommentView = {
   id: string;
@@ -62,9 +63,9 @@ function ReplyForm({
         setBody("");
       }}
     >
-      <textarea
+      <MentionTextarea
         value={body}
-        onChange={(event) => setBody(event.target.value)}
+        onChange={setBody}
         placeholder="Write a comment…"
         rows={3}
         disabled={busy}

@@ -174,3 +174,34 @@ test("quicktake body validation and title clipping", async () => {
     await cleanup({ documentIds: docIds, userIds: [owner.id] });
   }
 });
+
+test("quicktake comment counts exclude resolved threads", async () => {
+  const owner = await makeUser("owner");
+  const take = await createQuicktake(owner.id, "Count only open comments");
+  await db.commentThread.create({
+    data: {
+      documentId: take.id,
+      createdById: owner.id,
+      anchorText: "",
+      origin: "forum",
+      comments: { create: { body: "visible", authorId: owner.id } }
+    }
+  });
+  await db.commentThread.create({
+    data: {
+      documentId: take.id,
+      createdById: owner.id,
+      anchorText: "",
+      origin: "forum",
+      status: "RESOLVED",
+      comments: { create: { body: "hidden", authorId: owner.id } }
+    }
+  });
+
+  try {
+    const summary = (await listQuicktakes(owner.id)).find((item) => item.id === take.id);
+    assert.equal(summary?.commentCount, 1);
+  } finally {
+    await cleanup({ documentIds: [take.id], userIds: [owner.id] });
+  }
+});

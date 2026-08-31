@@ -4,6 +4,7 @@ import { permissionLabel } from "@/lib/utils";
 import { ShareGroupsSection } from "./share-groups-section";
 import type { MemberView, ShareLinkView } from "./types";
 import { useDialogDismiss } from "./use-dialog-dismiss";
+import { useEffect, useState } from "react";
 
 export function ShareModal({
   documentId,
@@ -39,6 +40,15 @@ export function ShareModal({
   onClose: () => void;
 }) {
   const dialogRef = useDialogDismiss<HTMLDivElement>(onClose);
+  const [suggestedPeople, setSuggestedPeople] = useState<Array<{ id: string; name: string; email: string; count: number }>>([]);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/memberships", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((data) => { if (alive && Array.isArray(data?.suggestions)) setSuggestedPeople(data.suggestions); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
   return (
     <div className="share-modal-backdrop" onClick={onClose} role="presentation">
       <div
@@ -62,11 +72,26 @@ export function ShareModal({
 
         <div className="member-invite-form">
           <input
+            list="frequent-collaborators"
             onChange={(event) => onChangeInviteEmail(event.target.value)}
             placeholder="Collaborator email"
             type="email"
             value={inviteEmail}
           />
+          <datalist id="frequent-collaborators">
+            {suggestedPeople.map((person) => (
+              <option key={person.id} value={person.email}>{person.name} · {person.count} shared doc{person.count === 1 ? "" : "s"}</option>
+            ))}
+          </datalist>
+          {suggestedPeople.length > 0 ? (
+            <div className="frequent-collaborators" aria-label="Frequent collaborators">
+              {suggestedPeople.slice(0, 5).map((person) => (
+                <button className="subtle-pill" key={person.id} onClick={() => onChangeInviteEmail(person.email)} type="button">
+                  {person.name || person.email}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <div className="comment-composer-actions">
             <select
               onChange={(event) => onChangeInvitePermission(event.target.value as PermissionLevelValue)}

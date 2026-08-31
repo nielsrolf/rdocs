@@ -55,6 +55,7 @@ export function aiEditRunHasApplicableContent(input: {
 function resolveMarkdownImage(input: {
   src: string;
   alt: string;
+  caption?: string;
   imagesByPath: Map<string, AiEditImage>;
   documentId: string;
   shareToken: string | null;
@@ -80,7 +81,7 @@ function resolveMarkdownImage(input: {
     path,
     src,
     alt: input.alt || path.split("/").pop() || "Figure",
-    caption: input.alt || null
+    caption: input.caption || input.alt || null
   };
 }
 
@@ -181,7 +182,7 @@ export function buildAiEditInsertContent(input: {
   const usedImagePaths = new Set<string>();
   const content: string[] = [];
   const text = input.replacementText;
-  const markdownImagePattern = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)|(?<!\!)\[([^\]]+)\]\(([^)\s]+)\)/g;
+  const markdownImagePattern = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)|(?<!\!)\[([^\]]+)\]\(([^)\s]+)\)/g;
   let cursor = 0;
   let match: RegExpExecArray | null;
 
@@ -192,8 +193,9 @@ export function buildAiEditInsertContent(input: {
 
   while ((match = markdownImagePattern.exec(text)) !== null) {
     const isImageSyntax = match[1] !== undefined || match[2] !== undefined;
-    const alt = match[1] ?? match[3] ?? "";
-    const src = match[2] ?? match[4] ?? "";
+    const alt = match[1] ?? match[4] ?? "";
+    const src = match[2] ?? match[5] ?? "";
+    const caption = isImageSyntax ? match[3] ?? "" : "";
     const matchEnd = match.index + match[0].length;
 
     // Widget placeholder: ![widget: <label>](widget://<ref>)
@@ -225,6 +227,7 @@ export function buildAiEditInsertContent(input: {
     const image = resolveMarkdownImage({
       src,
       alt,
+      caption,
       imagesByPath,
       documentId: input.documentId,
       shareToken: null

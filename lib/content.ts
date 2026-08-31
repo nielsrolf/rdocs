@@ -152,6 +152,15 @@ function extractTextFromNode(node: unknown): string {
     return `[Attachment: ${fileName}]\n\n`;
   }
 
+  if (typedNode.type === "toggleBlock") {
+    const attrs = (typedNode as { attrs?: { summary?: unknown } }).attrs;
+    const summary = typeof attrs?.summary === "string" ? attrs.summary : "Details";
+    const body = Array.isArray(typedNode.content)
+      ? typedNode.content.map((child) => extractTextFromNode(child)).join("")
+      : "";
+    return `${summary}\n${body}\n`;
+  }
+
   // Preserve table structure as GFM so the plain-text haystack (used for
   // findText / anchor matching) stays consistent with what the agent sees.
   if (typedNode.type === "table") {
@@ -474,6 +483,15 @@ function visitNodeForAiBlocks(node: unknown, blocks: AiDocumentBlock[]) {
     return;
   }
 
+  if (nodeType === "toggleBlock") {
+    const attrs = getNodeAttrs(node) as { summary?: unknown } | null;
+    const summary = typeof attrs?.summary === "string" ? attrs.summary : "Details";
+    appendTextBlock(blocks, `${summary}\n`);
+    getNodeContent(node).forEach((child) => visitNodeForAiBlocks(child, blocks));
+    appendTextBlock(blocks, "\n");
+    return;
+  }
+
   // Emit tables as GFM so the agent sees real table structure (matching the
   // plain-text haystack) rather than tab-joined cells.
   if (nodeType === "table") {
@@ -587,10 +605,12 @@ function serializeNodeToMarkdown(node: unknown, context: MarkdownContext): strin
   }
 
   if (nodeType === "image") {
-    const attrs = getNodeAttrs(node) as { src?: unknown; alt?: unknown } | null;
+    const attrs = getNodeAttrs(node) as { src?: unknown; alt?: unknown; caption?: unknown } | null;
     const src = typeof attrs?.src === "string" ? attrs.src : "";
     const alt = typeof attrs?.alt === "string" ? attrs.alt : "";
-    return src ? `![${alt}](${src})\n\n` : "";
+    const caption = typeof attrs?.caption === "string" ? attrs.caption : "";
+    const title = caption ? ` "${caption.replace(/"/g, '\\"')}"` : "";
+    return src ? `![${alt}](${src}${title})\n\n` : "";
   }
 
   if (nodeType === "repoImage") {
@@ -639,6 +659,19 @@ function serializeNodeToMarkdown(node: unknown, context: MarkdownContext): strin
     return body
       ? `${body.split("\n").map((line) => `> ${line}`).join("\n")}\n\n`
       : "";
+  }
+
+  if (nodeType === "toggleBlock") {
+    const attrs = getNodeAttrs(node) as { summary?: unknown } | null;
+    const summary = typeof attrs?.summary === "string" && attrs.summary.trim()
+      ? attrs.summary.trim()
+      : "Details";
+    const body = serializeChildrenToMarkdown(node, context).trim();
+    const escapedSummary = summary
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+    return `<details>\n<summary>${escapedSummary}</summary>\n\n${body}\n\n</details>\n\n`;
   }
 
   if (nodeType === "codeBlock") {

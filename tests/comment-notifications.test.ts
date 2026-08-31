@@ -170,6 +170,28 @@ test("recipients: per-document comment preferences override the global default",
   assert.deepEqual(recipients.map((recipient) => recipient.userId), [globallyOff.id]);
 });
 
+test("recipients: an explicitly tagged forum user is notified without document membership", async (t) => {
+  const owner = await makeUser("cn-forum-owner");
+  const tagged = await makeUser("cn-forum-tagged");
+  const document = await db.document.create({
+    data: { title: "public forum post", content: "{}", ownerId: owner.id, forumPostedAt: new Date(), forumPublic: true }
+  });
+  await db.slackAccountLink.create({
+    data: { slackTeamId: "T-forum", slackUserId: `U-${tagged.id}`, userId: tagged.id }
+  });
+  t.after(async () => {
+    await db.document.delete({ where: { id: document.id } });
+    await db.user.deleteMany({ where: { id: { in: [owner.id, tagged.id] } } });
+  });
+
+  const recipients = await resolveCommentNotificationRecipients({
+    documentId: document.id,
+    includeUserIds: [tagged.id],
+    excludeUserIds: [owner.id]
+  });
+  assert.deepEqual(recipients.map((recipient) => recipient.userId), [tagged.id]);
+});
+
 test("notify: first comment posts a root DM + persists the row; the next threads under it", async (t) => {
   const teamId = `T-${crypto.randomUUID()}`;
   const owner = await makeUser("cn-dm-owner");

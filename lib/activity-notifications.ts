@@ -18,7 +18,7 @@ function deps(): ActivityNotificationDeps | null {
 
 async function linkedRecipients(
   userIds: string[],
-  setting: "documentShareSlackNotifications" | "forumShareSlackNotifications"
+  setting: "documentShareSlackNotifications" | "forumShareSlackNotifications" | "commentSlackNotifications"
 ) {
   if (userIds.length === 0) return [];
   const users = await db.user.findMany({
@@ -35,7 +35,7 @@ async function linkedRecipients(
 
 async function postActivity(input: {
   userIds: string[];
-  setting: "documentShareSlackNotifications" | "forumShareSlackNotifications";
+  setting: "documentShareSlackNotifications" | "forumShareSlackNotifications" | "commentSlackNotifications";
   text: (appUrl: string) => string;
   deps?: ActivityNotificationDeps;
 }) {
@@ -64,6 +64,25 @@ async function postActivity(input: {
     });
     return { notified: 0 };
   }
+}
+
+export async function notifyForumMentioned(input: {
+  documentId: string;
+  recipientUserIds: string[];
+  authorLabel: string;
+  kind: "quicktake" | "comment";
+  deps?: ActivityNotificationDeps;
+}) {
+  if (input.recipientUserIds.length === 0) return { notified: 0 };
+  const path = input.kind === "quicktake"
+    ? `/forum/quicktakes/${input.documentId}`
+    : `/forum/${input.documentId}`;
+  return postActivity({
+    userIds: input.recipientUserIds,
+    setting: "commentSlackNotifications",
+    deps: input.deps,
+    text: (appUrl) => `🔔 *${input.authorLabel}* mentioned you in a forum ${input.kind === "quicktake" ? "quick take" : "comment"}: <${appUrl}${path}|Open it>.`
+  });
 }
 
 export async function notifyDocumentShared(input: {

@@ -5,6 +5,7 @@ import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type { MutableRefObject } from "react";
 
 import type { CommentAnchorRange, HighlightThread, ProseMirrorDocWithDescendants } from "./types";
+import { footnoteNumberByThreadId, isFootnoteThread } from "./comment-footnotes";
 
 export const CommentAnchor = Mark.create({
   name: "commentAnchor",
@@ -78,6 +79,10 @@ export function resolveCommentAnchorRange(
   return collectCommentAnchorRanges(doc).get(thread.id) ?? null;
 }
 
+export function shouldHighlightCommentThread(thread: HighlightThread): boolean {
+  return thread.status !== "RESOLVED";
+}
+
 // Builds a transaction that anchors `threadId` over the given range, handling
 // the mixed-content case that the old inline-only / single-node-only logic
 // could not: a selection (e.g. "select all") spanning text *and* block atoms.
@@ -146,16 +151,27 @@ export function createCommentHighlightExtension(
           key: new PluginKey("commentHighlight"),
           props: {
             decorations(state) {
-              const decorations = threadsRef.current.flatMap((thread) => {
-                const range = resolveCommentAnchorRange(state.doc, thread);
+              const resolvedThreads = threadsRef.current.filter(shouldHighlightCommentThread).map((thread) => ({
+                thread,
+                range: resolveCommentAnchorRange(state.doc, thread)
+              }));
+              const footnoteNumbers = footnoteNumberByThreadId(
+                resolvedThreads.flatMap(({ thread, range }) =>
+                  range ? [{ ...thread, id: thread.id, position: range.fromPos }] : []
+                )
+              );
+              const decorations = resolvedThreads.flatMap(({ thread, range }) => {
                 if (!range) {
                   return [];
                 }
 
                 const isActive = thread.id === activeThreadIdRef.current;
-                const className = isActive
-                  ? "comment-anchor-highlight comment-anchor-highlight-active"
-                  : "comment-anchor-highlight";
+                const isFootnote = isFootnoteThread(thread);
+                const className = isFootnote
+                  ? `footnote-anchor${isActive ? " footnote-anchor-active" : ""}`
+                  : isActive
+                    ? "comment-anchor-highlight comment-anchor-highlight-active"
+                    : "comment-anchor-highlight";
 
                 const node = state.doc.nodeAt(range.fromPos);
                 const isBlockAnchor =
@@ -163,11 +179,31 @@ export function createCommentHighlightExtension(
                   BLOCK_ANCHOR_NODE_TYPES.has(node.type?.name ?? "") &&
                   range.toPos === range.fromPos + node.nodeSize;
 
-                return [
+                const anchors = [
                   isBlockAnchor
                     ? Decoration.node(range.fromPos, range.toPos, { class: className })
                     : Decoration.inline(range.fromPos, range.toPos, { class: className })
                 ];
+                const number = footnoteNumbers.get(thread.id);
+                if (isFootnote && number) {
+                  anchors.push(
+                    Decoration.widget(
+                      range.toPos,
+                      () => {
+                        const marker = document.createElement("sup");
+                        marker.className = `footnote-marker${isActive ? " footnote-marker-active" : ""}`;
+                        marker.textContent = String(number);
+                        marker.setAttribute("aria-label", `Footnote ${number}`);
+                        marker.setAttribute("role", "button");
+                        marker.addEventListener("mousedown", (event) => event.preventDefault());
+                        marker.addEventListener("click", () => onActivateThread(thread.id));
+                        return marker;
+                      },
+                      { key: `footnote-marker:${thread.id}:${number}` }
+                    )
+                  );
+                }
+                return anchors;
               });
 
               return DecorationSet.create(state.doc, decorations);

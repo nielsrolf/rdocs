@@ -2048,6 +2048,17 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   gap: 0.9rem;
 }
 
+.frequent-collaborators {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.frequent-collaborators button {
+  border: 0;
+  cursor: pointer;
+}
+
 .stack-form label {
   display: grid;
   gap: 0.5rem;
@@ -4021,6 +4032,18 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   box-shadow: 0 10px 24px rgba(60, 64, 67, 0.12);
 }
 
+.gdocs-prosemirror blockquote {
+  margin: 1rem 0;
+  border-left: 2px solid #5f6368;
+  padding: 0.35rem 0 0.35rem 1.1rem;
+  color: var(--text);
+  font-size: 1.04em;
+}
+
+.gdocs-prosemirror blockquote p {
+  margin: 0.35rem 0;
+}
+
 .ProseMirror td,
 .ProseMirror th {
   border: 1px solid #c9cccf;
@@ -4092,6 +4115,30 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   box-shadow:
     inset 0 0 0 1px rgba(232, 180, 0, 0.22),
     0 0 0 1px rgba(232, 180, 0, 0.14);
+}
+
+.footnote-anchor {
+  border-bottom: 1px dotted rgba(75, 85, 99, 0.65);
+}
+
+.footnote-anchor-active {
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.footnote-marker {
+  margin-left: 0.12em;
+  color: #4f46e5;
+  cursor: pointer;
+  font-size: 0.72em;
+  font-weight: 700;
+  line-height: 0;
+  user-select: none;
+}
+
+.footnote-marker:hover,
+.footnote-marker-active {
+  color: #312e81;
+  text-decoration: underline;
 }
 
 .selection-bubble-wrap {
@@ -4403,6 +4450,15 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   margin: 1.15rem 0;
 }
 
+.captioned-image-node {
+  margin: 1.15rem 0;
+}
+
+.captioned-image-node img,
+.repo-image-node img {
+  margin: 0 auto;
+}
+
 .repo-image-node img {
   display: block;
   width: 100%;
@@ -4418,6 +4474,101 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   color: var(--muted);
   font-size: 0.92rem;
   font-style: italic;
+}
+
+.image-caption-input {
+  display: block;
+  width: min(100%, 680px);
+  margin: 0.45rem auto 0;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 0.92rem;
+  font-style: italic;
+  line-height: 1.4;
+  text-align: center;
+  outline: none;
+}
+
+.image-caption-input::placeholder {
+  color: transparent;
+}
+
+.captioned-image-node:hover .image-caption-input::placeholder,
+.repo-image-node:hover .image-caption-input::placeholder,
+.image-caption-input:focus::placeholder {
+  color: rgba(60, 64, 67, 0.48);
+}
+
+.image-caption-input:focus {
+  border-bottom-color: rgba(26, 115, 232, 0.45);
+}
+
+.captioned-image-node-selected,
+.repo-image-node-selected {
+  outline: 3px solid rgba(26, 115, 232, 0.24);
+  outline-offset: 5px;
+  border-radius: 8px;
+}
+
+.toggle-block {
+  margin: 0.65rem 0;
+  border-radius: 8px;
+}
+
+.toggle-block-selected {
+  background: rgba(26, 115, 232, 0.045);
+}
+
+.toggle-block details {
+  padding: 0.2rem 0;
+}
+
+.toggle-block summary {
+  display: flex;
+  align-items: center;
+  min-height: 1.8rem;
+  cursor: pointer;
+  font-weight: 650;
+  list-style: none;
+}
+
+.toggle-block summary::-webkit-details-marker {
+  display: none;
+}
+
+.toggle-block summary::before {
+  content: "›";
+  display: inline-block;
+  width: 1.3rem;
+  color: var(--muted);
+  font-size: 1.35rem;
+  line-height: 1;
+  transform-origin: 45% 52%;
+  transition: transform 120ms ease;
+}
+
+.toggle-block details[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.toggle-block-title {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  outline: none;
+  padding: 0;
+}
+
+.toggle-block-content {
+  margin-left: 1.3rem;
+  padding: 0.15rem 0 0.2rem 0.7rem;
+  border-left: 1px solid var(--border);
 }
 
 .attachment-chip-node {
@@ -4741,6 +4892,76 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   border-color: rgba(26, 115, 232, 0.36);
   box-shadow: 0 10px 24px rgba(26, 115, 232, 0.12);
   z-index: 5;
+}
+
+.footnote-thread-card {
+  border: 0;
+  border-left: 2px solid #a5b4fc;
+  border-radius: 0 10px 10px 0;
+  background: rgba(248, 250, 252, 0.9);
+  box-shadow: none;
+  padding: 0.55rem 0.7rem;
+}
+
+.footnote-thread-card.comment-thread-card-active {
+  border-left-color: #4f46e5;
+  box-shadow: 0 5px 16px rgba(79, 70, 229, 0.1);
+}
+
+.footnote-thread-card .comment-thread-anchor {
+  margin-bottom: 0.2rem;
+}
+
+.footnote-card-label {
+  color: #4f46e5;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.footnote-thread-card .comment-bubble-list {
+  margin: 0;
+}
+
+.footnote-thread-card .comment-bubble {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.footnote-thread-card:not(.comment-thread-card-active) .comment-bubble-body {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.footnote-thread-card:hover .comment-bubble-body,
+.footnote-thread-card:focus-within .comment-bubble-body {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+}
+
+.footnote-card-actions {
+  display: flex;
+  gap: 0.65rem;
+  justify-content: flex-end;
+  margin-top: 0.35rem;
+}
+
+.footnote-card-actions button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.78rem;
+  padding: 0;
+}
+
+.footnote-card-actions button:last-child {
+  color: var(--danger);
 }
 
 .comment-thread-card-unread {
@@ -6813,6 +7034,50 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   font: inherit;
   font-size: 0.95rem;
   resize: vertical;
+}
+
+.forum-mention-input {
+  position: relative;
+  width: 100%;
+}
+
+.forum-mention-input textarea {
+  width: 100%;
+}
+
+.forum-mention-menu {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface, white);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+}
+
+.forum-mention-menu button {
+  display: flex;
+  width: 100%;
+  gap: 8px;
+  align-items: baseline;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+}
+
+.forum-mention-menu button:hover,
+.forum-mention-menu button.active {
+  background: var(--surface-muted, #f3f4f6);
+}
+
+.forum-mention-menu span {
+  color: var(--muted-foreground, #6b7280);
+  font-size: 12px;
 }
 
 .quicktake-composer-footer {

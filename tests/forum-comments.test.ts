@@ -59,6 +59,40 @@ test("studio threads appear in forum listing with anchor quote; forum threads wi
   }
 });
 
+test("resolved threads do not appear in forum comments", async () => {
+  const owner = await makeUser("owner");
+  const doc = await db.document.create({
+    data: { ownerId: owner.id, title: "Doc", content: "{}", forumPostedAt: new Date() }
+  });
+  const openThread = await db.commentThread.create({
+    data: {
+      documentId: doc.id,
+      createdById: owner.id,
+      origin: "forum",
+      anchorText: "",
+      comments: { create: { body: "still open", authorId: owner.id } }
+    }
+  });
+  const resolvedThread = await db.commentThread.create({
+    data: {
+      documentId: doc.id,
+      createdById: owner.id,
+      origin: "forum",
+      anchorText: "",
+      status: "RESOLVED",
+      comments: { create: { body: "already resolved", authorId: owner.id } }
+    }
+  });
+
+  try {
+    const comments = await listForumComments(doc.id, owner.id);
+    assert.ok(comments.some((comment) => comment.threadId === openThread.id));
+    assert.ok(!comments.some((comment) => comment.threadId === resolvedThread.id));
+  } finally {
+    await cleanup([doc.id], [owner.id]);
+  }
+});
+
 test("replies nest under parentId, unknown parent degrades to root child", async () => {
   const owner = await makeUser("owner");
   const replier = await makeUser("replier");

@@ -19,6 +19,15 @@ export async function loadMentionCandidates(documentId: string): Promise<Mention
   return [...byId.values()];
 }
 
+/** Forum posts are community surfaces, so signed-in users may tag any account,
+ * not only people already granted direct document access. */
+export async function loadForumMentionCandidates(): Promise<MentionCandidate[]> {
+  return db.user.findMany({
+    orderBy: [{ name: "asc" }, { email: "asc" }],
+    select: { id: true, name: true, email: true }
+  });
+}
+
 /**
  * Detect @mentions in a (just created or edited) comment body and record a
  * CommentMention for each mentioned member, skipping the author (no self-pings)
@@ -30,8 +39,11 @@ export async function syncCommentMentions(input: {
   documentId: string;
   body: string;
   authorId: string | null;
+  audience?: "document" | "forum";
 }): Promise<string[]> {
-  const candidates = await loadMentionCandidates(input.documentId);
+  const candidates = input.audience === "forum"
+    ? await loadForumMentionCandidates()
+    : await loadMentionCandidates(input.documentId);
   const mentionedIds = extractMentionedUserIds(input.body, candidates).filter(
     (id) => id !== input.authorId
   );
@@ -52,6 +64,24 @@ export async function syncCommentMentions(input: {
     newlyNotified.push(mentionedUserId);
   }
   return newlyNotified;
+}
+
+/** Record tags in a quicktake body using DocumentMention rows. */
+export async function syncForumDocumentMentions(input: {
+  documentId: string;
+  body: string;
+  authorId: string;
+}): Promise<string[]> {
+  const candidates = await loadForumMentionCandidates();
+  const ids = extractMentionedUserIds(input.body, candidates).filter((id) => id !== input.authorId);
+  for (const mentionedUserId of ids) {
+    await db.documentMention.upsert({
+      where: { documentId_mentionedUserId: { documentId: input.documentId, mentionedUserId } },
+      create: { documentId: input.documentId, mentionedUserId, acknowledged: false },
+      update: { acknowledged: false }
+    });
+  }
+  return ids;
 }
 
 /**

@@ -6,6 +6,7 @@ import { getSourceLabel } from "@/lib/sources";
 import { formatDateTime, truncate } from "@/lib/utils";
 
 import { ClaudeWorkingInline, CommentAvatar } from "./atoms";
+import { isFootnoteThread } from "./comment-footnotes";
 import { MarkdownBody } from "./markdown";
 import { MentionTextarea } from "./mention-textarea";
 import {
@@ -249,6 +250,10 @@ export function CommentRail({
           const visibleComments = isActive ? allComments : allComments.slice(0, 1);
           const hiddenReplyCount = allComments.length - visibleComments.length;
           const unread = !isActive && isThreadUnread(thread, currentUserId);
+          const isFootnote = isFootnoteThread(thread);
+          const footnoteNumber = isFootnote
+            ? orderedThreads.filter(isFootnoteThread).findIndex((candidate) => candidate.id === thread.id) + 1
+            : 0;
           const canDeleteCommentFor = (comment: typeof allComments[number]) =>
             isOwner || comment.author?.id === currentUserId || Boolean(comment.aiModel);
           // Only the author can edit their own (non-AI) comment.
@@ -257,7 +262,7 @@ export function CommentRail({
 
           return (
             <article
-              className={`comment-thread-card${isActive ? " comment-thread-card-active" : ""}${unread ? " comment-thread-card-unread" : ""}`}
+              className={`comment-thread-card${isFootnote ? " footnote-thread-card" : ""}${isActive ? " comment-thread-card-active" : ""}${unread ? " comment-thread-card-unread" : ""}`}
               data-thread-id={thread.id}
               key={thread.id}
               onMouseDown={() => {
@@ -266,7 +271,11 @@ export function CommentRail({
               style={{ top: threadOffsets[thread.id] ?? 16 }}
             >
               <button className="comment-thread-anchor" onClick={() => onFocusThread(thread)} type="button">
-                <span className="comment-anchor-quote">“{truncate(thread.anchorText, 52)}”</span>
+                {isFootnote ? (
+                  <span className="footnote-card-label">{footnoteNumber}. Footnote</span>
+                ) : (
+                  <span className="comment-anchor-quote">“{truncate(thread.anchorText, 52)}”</span>
+                )}
               </button>
 
               <div className="comment-bubble-list">
@@ -275,7 +284,7 @@ export function CommentRail({
                     className={`comment-bubble${flashCommentIds.has(comment.id) ? " comment-bubble-mention-flash" : ""}`}
                     key={comment.id}
                   >
-                    <div className="comment-bubble-header">
+                    {!isFootnote ? <div className="comment-bubble-header">
                       <div className="comment-author-chip">
                         <CommentAvatar comment={comment} />
                         <strong>{comment.author?.name ?? comment.guestName ?? "Claude"}</strong>
@@ -311,7 +320,7 @@ export function CommentRail({
                           </button>
                         ) : null}
                       </div>
-                    </div>
+                    </div> : null}
                     {editingCommentId === comment.id ? (
                       <div className="thread-actions" onMouseDown={(event) => event.stopPropagation()}>
                         <MentionTextarea
@@ -353,7 +362,31 @@ export function CommentRail({
                         }
                       />
                     )}
-                    {editingCommentId !== comment.id ? (
+                    {isFootnote && isActive && editingCommentId !== comment.id ? (
+                      <div className="footnote-card-actions" onMouseDown={(event) => event.stopPropagation()}>
+                        {canEditCommentFor(comment) ? (
+                          <button
+                            onClick={() => {
+                              setEditingCommentId(comment.id);
+                              setEditDraft(comment.body);
+                            }}
+                            type="button"
+                          >
+                            Edit
+                          </button>
+                        ) : null}
+                        {canDeleteCommentFor(comment) ? (
+                          <button
+                            disabled={deleteBusyCommentId === comment.id}
+                            onClick={() => onDeleteComment(comment.id)}
+                            type="button"
+                          >
+                            {deleteBusyCommentId === comment.id ? "Deleting..." : "Delete"}
+                          </button>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {!isFootnote && editingCommentId !== comment.id ? (
                       <CommentReactions
                         comment={comment}
                         // Reactions are stored per user, so anonymous share-link
@@ -362,7 +395,7 @@ export function CommentRail({
                         onToggleReaction={onToggleReaction}
                       />
                     ) : null}
-                    {isActive && comment.aiModel ? (
+                    {!isFootnote && isActive && comment.aiModel ? (
                       <div className="comment-ai-meta">
                         <span className="subtle-pill">{comment.aiModel}</span>
                         {comment.sourceLinks.length > 0 ? (
@@ -481,7 +514,7 @@ export function CommentRail({
                 </div>
               ) : null}
 
-              {isActive && canWriteComments ? (
+              {isActive && canWriteComments && !isFootnote ? (
                 <div className="thread-actions">
                   <MentionTextarea
                     value={getReplyDraft(thread.id)}

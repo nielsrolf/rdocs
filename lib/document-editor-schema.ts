@@ -20,8 +20,10 @@ import {
   EmbeddedWidgetSchemaNode,
   RepoImageSchemaNode,
   TabBreakSchemaNode,
+  ToggleBlockSchemaNode,
   aiEditSelectionIdsAttributeSpec,
   commentThreadIdsAttributeSpec,
+  imageCaptionAttributeSpec,
   suggestionRecordsAttributesSpec
 } from "@/lib/document-schema-nodes";
 
@@ -29,6 +31,7 @@ const Image = ImageExtension.extend({
   addAttributes() {
     return {
       ...this.parent?.(),
+      ...imageCaptionAttributeSpec,
       ...commentThreadIdsAttributeSpec,
       ...aiEditSelectionIdsAttributeSpec,
       ...suggestionRecordsAttributesSpec
@@ -69,7 +72,8 @@ export function documentEditorExtensions() {
     RepoImageSchemaNode,
     EmbeddedWidgetSchemaNode,
     AttachmentChipSchemaNode,
-    TabBreakSchemaNode
+    TabBreakSchemaNode,
+    ToggleBlockSchemaNode
   ];
 }
 

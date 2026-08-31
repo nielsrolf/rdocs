@@ -221,7 +221,7 @@ export async function listQuicktakes(
       select: { documentId: true, userId: true, value: true }
     }),
     db.commentThread.findMany({
-      where: { documentId: { in: takeIds } },
+      where: { documentId: { in: takeIds }, status: "OPEN" },
       select: { documentId: true, _count: { select: { comments: true } } }
     })
   ]);

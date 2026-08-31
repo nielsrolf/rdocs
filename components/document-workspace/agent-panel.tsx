@@ -298,6 +298,9 @@ export function AgentPanel({
   onStartNewConversation,
   onAgentMessageChange,
   onSendAgentMessage,
+  onSendLiveAgentMessage,
+  agentEditMode,
+  onAgentEditModeChange,
   onStopRun
 }: {
   title: string;
@@ -342,6 +345,9 @@ export function AgentPanel({
   onStartNewConversation: () => void;
   onAgentMessageChange: (next: string) => void;
   onSendAgentMessage: (options?: AgentConversationOptions) => void;
+  onSendLiveAgentMessage: (runId: string) => void;
+  agentEditMode: "suggest" | "edit";
+  onAgentEditModeChange: (mode: "suggest" | "edit") => void;
   onStopRun: (runId: string) => void;
 }) {
   // Optimistic "Stopping…" state; cleared when the polled status leaves RUNNING.
@@ -615,6 +621,20 @@ export function AgentPanel({
               ))}
             </select>
           </label>
+          {canWriteDocument ? (
+            <label className="agent-config-field">
+              <span className="agent-config-label">Document changes</span>
+              <select
+                className="agent-config-select"
+                onChange={(event) => onAgentEditModeChange(event.target.value as "suggest" | "edit")}
+                title="Choose whether document changes need review"
+                value={agentEditMode}
+              >
+                <option value="suggest">Suggest (default)</option>
+                <option value="edit">Edit directly</option>
+              </select>
+            </label>
+          ) : null}
           {customMode ? (
             <div className="agent-config-field agent-config-custom-model">
               <input
@@ -803,14 +823,18 @@ export function AgentPanel({
               {canWriteComments ? (
                 (() => {
                   const isEditSession = selectedConversation.runs[0]?.triggerType === "SELECTION_EDIT";
-                  const composerBlocked = agentBusy || selectedIsRunning;
+                  const composerBlocked = selectedIsRunning ? false : agentBusy;
                   const placeholder = selectedIsRunning
-                    ? "The agent is still running — stop it to send a follow-up."
+                    ? "Send an update to the running agent… (⌘/Ctrl + Enter)"
                     : isEditSession
                       ? "Send a follow-up — the agent continues this edit from its previous work… (⌘/Ctrl + Enter)"
                       : "Reply to the agent… (⌘/Ctrl + Enter to send)";
                   const send = () => {
                     if (!composerBlocked && agentMessage.trim()) {
+                      if (selectedIsRunning) {
+                        onSendLiveAgentMessage(selectedConversation.latestRun.id);
+                        return;
+                      }
                       onSendAgentMessage({
                         previousRunId: selectedConversation.latestRun.id,
                         rootId: selectedConversation.rootId
@@ -826,7 +850,6 @@ export function AgentPanel({
                       }}
                     >
                       <textarea
-                        disabled={selectedIsRunning}
                         onChange={(event) => onAgentMessageChange(event.target.value)}
                         onKeyDown={(event) => {
                           if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
@@ -843,7 +866,7 @@ export function AgentPanel({
                         disabled={composerBlocked || !agentMessage.trim()}
                         type="submit"
                       >
-                        {agentBusy ? "Sending…" : isEditSession ? "Continue" : "Reply"}
+                        {selectedIsRunning ? "Send update" : agentBusy ? "Sending…" : isEditSession ? "Continue" : "Reply"}
                       </button>
                     </form>
                   );
@@ -855,38 +878,40 @@ export function AgentPanel({
               <h3>Start a new conversation</h3>
               <p>Ask Claude to inspect the document, run code in the linked repo, or answer a question. Each thread keeps its own history so you can follow up.</p>
               {canWriteComments ? (
-                <form
-                  className="agent-compose agent-compose-standalone"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    if (!agentBusy && agentMessage.trim()) {
-                      onSendAgentMessage();
-                    }
-                  }}
-                >
-                  <textarea
-                    autoFocus
-                    onChange={(event) => onAgentMessageChange(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-                        event.preventDefault();
-                        if (!agentBusy && agentMessage.trim()) {
-                          onSendAgentMessage();
-                        }
+                <>
+                  <form
+                    className="agent-compose agent-compose-standalone"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      if (!agentBusy && agentMessage.trim()) {
+                        onSendAgentMessage();
                       }
                     }}
-                    placeholder="What should Claude do? (⌘/Ctrl + Enter to send)"
-                    rows={3}
-                    value={agentMessage}
-                  />
-                  <button
-                    className="primary-button"
-                    disabled={agentBusy || !agentMessage.trim()}
-                    type="submit"
                   >
-                    {agentBusy ? "Sending…" : "Send"}
-                  </button>
-                </form>
+                    <textarea
+                      autoFocus
+                      onChange={(event) => onAgentMessageChange(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                          event.preventDefault();
+                          if (!agentBusy && agentMessage.trim()) {
+                            onSendAgentMessage();
+                          }
+                        }
+                      }}
+                      placeholder="What should Claude do? (⌘/Ctrl + Enter to send)"
+                      rows={3}
+                      value={agentMessage}
+                    />
+                    <button
+                      className="primary-button"
+                      disabled={agentBusy || !agentMessage.trim()}
+                      type="submit"
+                    >
+                      {agentBusy ? "Sending…" : "Send"}
+                    </button>
+                  </form>
+                </>
               ) : null}
             </div>
           )}

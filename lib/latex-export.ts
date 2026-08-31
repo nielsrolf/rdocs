@@ -235,6 +235,12 @@ function serializeNode(node: unknown, ctx: Ctx): string {
     return body ? `\\begin{quote}\n${body}\n\\end{quote}\n\n` : "";
   }
 
+  if (type === "toggleBlock") {
+    const summary = str(getNodeAttrs(node)?.summary) || "Details";
+    const body = serializeChildren(node, ctx).trim();
+    return `\\textbf{${escapeLatex(summary)}}\n\n${body}\n\n`;
+  }
+
   if (type === "codeBlock") {
     const body = serializeChildren(node, { ...ctx, inCode: true }).replace(/\n$/, "");
     return `\\begin{verbatim}\n${body}\n\\end{verbatim}\n\n`;

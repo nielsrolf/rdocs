@@ -5,12 +5,19 @@ import { getCurrentUser } from "@/lib/auth";
 import { permissionLevels } from "@/lib/contracts";
 import { db } from "@/lib/db";
 import { notifyDocumentShared } from "@/lib/activity-notifications";
+import { listFrequentCollaborators } from "@/lib/collaborator-suggestions";
 
 const createMembershipSchema = z.object({
   documentId: z.string().min(1),
   email: z.string().email(),
   permission: z.enum(permissionLevels)
 });
+
+export async function GET() {
+  const user = await getCurrentUser();
+  if (!user) return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+  return NextResponse.json({ suggestions: await listFrequentCollaborators(user.id) });
+}
 
 export async function POST(request: Request) {
   const user = await getCurrentUser();

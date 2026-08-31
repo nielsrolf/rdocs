@@ -153,12 +153,14 @@ export async function POST(request: Request, { params }: RouteContext<{ id: stri
   }
 
   const firstComment = thread.comments[0];
+  let mentionedUserIds: string[] = [];
   if (firstComment) {
-    await syncCommentMentions({
+    mentionedUserIds = await syncCommentMentions({
       commentId: firstComment.id,
       documentId: id,
       body: parsed.data.body,
-      authorId: user?.id ?? null
+      authorId: user?.id ?? null,
+      audience: origin === "forum" ? "forum" : "document"
     });
   }
 
@@ -183,7 +185,8 @@ export async function POST(request: Request, { params }: RouteContext<{ id: stri
       documentId: id,
       commentBody: parsed.data.body,
       authorLabel: user?.name ?? guestName ?? "Guest",
-      excludeUserIds: [user?.id]
+      excludeUserIds: [user?.id],
+      includeUserIds: mentionedUserIds
     });
 
     console.log("[comment-create]", {

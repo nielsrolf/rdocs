@@ -76,6 +76,9 @@ export function stripLoneSurrogates(value: string): string {
 
 export type ClaudeResearchAgentInput = {
   mode: "comment_reply" | "edit_selection" | "conversation";
+  /** Document conversations default to reviewable suggestions. Editors may
+   * explicitly request direct edits; Slack and older callers omit this. */
+  documentEditMode?: "suggest" | "edit";
   /** Workspace capability enforced by the SDK tool allowlist. */
   accessMode?: AgentAccessMode;
   documentTitle: string;
@@ -756,13 +759,18 @@ Critical: you run INSIDE the service you are working on. Restarting or rebuildin
       ? `GitHub access: GITHUB_TOKEN and GH_TOKEN are set in your environment with the requesting user's credentials — the gh CLI works directly, and plain https git operations against github.com are pre-authenticated. You can clone private repos the user can access.\n\n`
       : "";
 
+    const editMode = input.documentEditMode ?? "suggest";
+    const documentEditingBlock = editMode === "edit"
+      ? `You may edit the document in this run. Express each document change through the suggestions array as an anchored find/replace; the application will apply those changes directly. Use reply for your concise response to the user.`
+      : `By default, do not edit the document text directly. If changes would help, add them to the suggestions array so a human can accept or reject each one. Only make direct edits when the user explicitly selects edit mode in the Agents view.`;
+
     return `Trigger: document-level agent conversation.
 
 ${resumeBlock}${slackBlock}${hostDevBlock}${githubBlock}${historyBlock}New user message:
 ${instruction}
 
 You may inspect or modify workspace files if that helps. Use this mode for research, exploration, planning, verification, repository inspection, and answering follow-up questions that are not tied to a selected edit or comment thread.
-Do not edit the document text directly in this mode. If you want to propose changes to the document, add them to the suggestions array — a human reviews and accepts or rejects each one.
+${documentEditingBlock}
 
 When done, call submit_response with reply (the concise answer to show in the agent conversation), optional suggestions, optional sources, and a brief summary.`;
   }
