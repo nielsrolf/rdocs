@@ -9,6 +9,7 @@ import {
   acceptAllSuggestions,
   acceptSuggestion,
   buildDeletionSuggestion,
+  canEditCommittedContent,
   collectSuggestionRanges,
   createSuggestionPlugin,
   markExplicitSuggestion,
@@ -260,4 +261,42 @@ test("backspace at block start falls through (no suggestion produced)", () => {
   // block-start case.
   const sel = atStart.selection;
   assert.equal(sel.$head.parentOffset, 0);
+});
+
+test("strict mode: changing an image caption (untracked node attribute) is reverted, not committed", () => {
+  // Regression (2026-09-02): a comment-only user could type into an image
+  // caption. The change never persisted (this revert + the server's committed-view
+  // guard), but the caption input was shown and kept the typed text, so it
+  // looked as if the edit had stuck. Node views now hide attribute controls via
+  // canEditCommittedContent; this pins the underlying boundary.
+  const base = EditorState.create({
+    doc: schema.nodeFromJSON({
+      type: "doc",
+      content: [
+        { type: "image", attrs: { src: "data:image/png;base64,xxx", alt: "pic", caption: "old" } },
+        { type: "repoImage", attrs: { src: "/repo-files/x.png", alt: "pic", caption: "old", path: "x.png" } }
+      ]
+    }),
+    plugins: [createSuggestionPlugin()]
+  });
+  const strict = base.apply(setSuggestionMode(base, true, AUTHOR, true));
+  const afterImage = strict.apply(strict.tr.setNodeAttribute(0, "caption", "new"));
+  assert.equal(afterImage.doc.child(0).attrs.caption, "old");
+  const repoPos = strict.doc.child(0).nodeSize;
+  const afterRepo = strict.apply(strict.tr.setNodeAttribute(repoPos, "caption", "new"));
+  assert.equal(afterRepo.doc.child(1).attrs.caption, "old");
+
+  // An editor in (non-strict) suggesting mode may still change captions directly.
+  const lenient = base.apply(setSuggestionMode(base, true, AUTHOR, false));
+  assert.equal(lenient.apply(lenient.tr.setNodeAttribute(0, "caption", "new")).doc.child(0).attrs.caption, "new");
+});
+
+test("canEditCommittedContent: false for comment-access (strict) users, true for editors", () => {
+  const base = stateWith("Hello world.");
+  assert.equal(canEditCommittedContent(base, false), false, "read-only editor");
+  assert.equal(canEditCommittedContent(base, true), true, "editor, suggesting off");
+  const lenient = base.apply(setSuggestionMode(base, true, AUTHOR, false));
+  assert.equal(canEditCommittedContent(lenient, true), true, "editor in suggesting mode");
+  const strict = base.apply(setSuggestionMode(base, true, AUTHOR, true));
+  assert.equal(canEditCommittedContent(strict, true), false, "comment-access user");
 });

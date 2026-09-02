@@ -414,6 +414,19 @@ export function isSuggestionModeEnabled(state: EditorState): boolean {
   return suggestionPluginKey.getState(state)?.enabled ?? false;
 }
 
+// Whether the current user may change COMMITTED content directly — i.e. anything
+// the tracked-change layer does not express as a suggestion (node attributes such
+// as image captions, tab/toggle titles, widget removal). False for comment-access
+// users: their editor is `editable` (so they can type suggestions) but the plugin
+// runs in strict mode and reverts every untracked change, and the server rejects
+// it with a 403 anyway. Node views must hide their attribute controls on `false`,
+// otherwise a commenter sees an input that appears to work and silently loses the
+// edit on reload.
+export function canEditCommittedContent(state: EditorState, isEditable: boolean): boolean {
+  if (!isEditable) return false;
+  return !(suggestionPluginKey.getState(state)?.strict ?? false);
+}
+
 // --- Deletion interception --------------------------------------------------
 
 // The range a native Backspace/Delete would remove, or null when the change is

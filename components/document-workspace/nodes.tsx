@@ -1,6 +1,7 @@
 import { Node, mergeAttributes } from "@tiptap/core";
+import type { Editor } from "@tiptap/core";
 import ImageExtension from "@tiptap/extension-image";
-import { NodeViewContent, NodeViewProps, NodeViewWrapper, ReactNodeViewRenderer } from "@tiptap/react";
+import { NodeViewContent, NodeViewProps, NodeViewWrapper, ReactNodeViewRenderer, useEditorState } from "@tiptap/react";
 import { useEffect, useRef, useState } from "react";
 
 import {
@@ -13,6 +14,7 @@ import {
 } from "@/lib/document-schema-nodes";
 
 import { resolveShareToken, withShareToken } from "./share-url";
+import { canEditCommittedContent } from "./suggestions";
 
 function formatAttachmentSize(bytes: number) {
   if (!bytes || bytes < 0) return "";
@@ -28,6 +30,7 @@ function formatAttachmentSize(bytes: number) {
 }
 
 function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttributes }: NodeViewProps) {
+  const canEdit = useCanEditCommitted(editor);
   const [refreshing, setRefreshing] = useState(false);
   // The persisted attribute only distinguishes minimized vs. inline. Full-screen
   // is a transient viewing mode kept in local state — we don't want a document to
@@ -162,10 +165,10 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
               Full screen
             </button>
           </div>
-          <button className="ghost-button" disabled={refreshing || !editor.isEditable || Boolean(shareToken)} onClick={refreshWidget} type="button">
+          <button className="ghost-button" disabled={refreshing || !canEdit || Boolean(shareToken)} onClick={refreshWidget} type="button">
             {refreshing ? "Refreshing..." : "Refresh"}
           </button>
-          {editor.isEditable ? (
+          {canEdit ? (
             <button className="ghost-button danger-button" onClick={deleteNode} type="button">
               Remove
             </button>
@@ -180,7 +183,7 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
               <div className="embedded-widget-actions">
                 <button
                   className="ghost-button"
-                  disabled={refreshing || !editor.isEditable || Boolean(shareToken)}
+                  disabled={refreshing || !canEdit || Boolean(shareToken)}
                   onClick={refreshWidget}
                   type="button"
                 >
@@ -216,6 +219,16 @@ function EmbeddedWidgetView({ deleteNode, editor, node, selected, updateAttribut
   );
 }
 
+// True when this user may change committed node attributes (captions, titles,
+// removal). Reactive: the suggestion plugin is configured AFTER node views mount,
+// so read it through useEditorState instead of once at render time.
+function useCanEditCommitted(editor: Editor): boolean {
+  return useEditorState({
+    editor,
+    selector: ({ editor: current }) => canEditCommittedContent(current.state, current.isEditable)
+  });
+}
+
 function ImageCaptionEditor({
   caption,
   editable,
@@ -232,7 +245,12 @@ function ImageCaptionEditor({
     return caption ? <figcaption className="repo-image-caption">{caption}</figcaption> : null;
   }
 
-  const commit = () => onCommit(draft.trim() || null);
+  const commit = () => {
+    onCommit(draft.trim() || null);
+    // If the change did not stick (e.g. reverted by the strict suggestion plugin),
+    // the `caption` prop never changes and the effect above would not re-sync.
+    setDraft(caption);
+  };
   return (
     <input
       aria-label="Image caption"
@@ -261,6 +279,7 @@ function ImageCaptionEditor({
 }
 
 function CaptionedImageView({ editor, node, selected, updateAttributes }: NodeViewProps) {
+  const canEdit = useCanEditCommitted(editor);
   const src = (node.attrs.src as string) || "";
   const alt = (node.attrs.alt as string) || "Image";
   const caption = (node.attrs.caption as string | null) || "";
@@ -270,7 +289,7 @@ function CaptionedImageView({ editor, node, selected, updateAttributes }: NodeVi
       <img alt={alt} src={src} title={caption || alt} />
       <ImageCaptionEditor
         caption={caption}
-        editable={editor.isEditable}
+        editable={canEdit}
         onCommit={(nextCaption) => updateAttributes({ caption: nextCaption })}
       />
     </NodeViewWrapper>
@@ -293,6 +312,7 @@ export const CaptionedImage = ImageExtension.extend({
 });
 
 function RepoImageView({ editor, node, selected, updateAttributes }: NodeViewProps) {
+  const canEdit = useCanEditCommitted(editor);
   const rawSrc = (node.attrs.src as string) || "";
   const alt = (node.attrs.alt as string) || "Repository image";
   const caption = (node.attrs.caption as string | null) || null;
@@ -306,7 +326,7 @@ function RepoImageView({ editor, node, selected, updateAttributes }: NodeViewPro
       <img alt={alt} src={src} title={caption ?? alt} />
       <ImageCaptionEditor
         caption={caption ?? ""}
-        editable={editor.isEditable}
+        editable={canEdit}
         onCommit={(nextCaption) => updateAttributes({ caption: nextCaption })}
       />
     </NodeViewWrapper>
@@ -347,6 +367,7 @@ export const RepoImage = Node.create({
 });
 
 function ToggleBlockView({ editor, node, selected, updateAttributes }: NodeViewProps) {
+  const canEdit = useCanEditCommitted(editor);
   const summary = (node.attrs.summary as string) || "Details";
   const [draft, setDraft] = useState(summary);
   useEffect(() => setDraft(summary), [summary]);
@@ -356,7 +377,7 @@ function ToggleBlockView({ editor, node, selected, updateAttributes }: NodeViewP
     <NodeViewWrapper className={`toggle-block${selected ? " toggle-block-selected" : ""}`}>
       <details>
         <summary contentEditable={false}>
-          {editor.isEditable ? (
+          {canEdit ? (
             <input
               aria-label="Toggle title"
               className="toggle-block-title"
@@ -391,6 +412,7 @@ export const ToggleBlock = ToggleBlockSchemaNode.extend({
 });
 
 function AttachmentChipView({ deleteNode, editor, node, selected }: NodeViewProps) {
+  const canEdit = useCanEditCommitted(editor);
   const attachmentId = (node.attrs.attachmentId as string | null) || null;
   const documentId = (node.attrs.documentId as string | null) || null;
   const fileName = (node.attrs.fileName as string) || "Attachment";
@@ -432,7 +454,7 @@ function AttachmentChipView({ deleteNode, editor, node, selected }: NodeViewProp
           {sizeLabel ? <span className="attachment-chip-meta">{sizeLabel}</span> : null}
         </span>
       </a>
-      {editor.isEditable ? (
+      {canEdit ? (
         <button
           className="attachment-chip-remove"
           onClick={deleteNode}
@@ -473,7 +495,7 @@ export const AttachmentChip = Node.create({
 function TabBreakView({ editor, node, updateAttributes }: NodeViewProps) {
   const title = (node.attrs.title as string) || "Untitled tab";
   const tabId = typeof node.attrs.tabId === "string" ? node.attrs.tabId : "";
-  const editable = editor.isEditable;
+  const editable = useCanEditCommitted(editor);
   const [draft, setDraft] = useState(title);
   const [focused, setFocused] = useState(false);
   const [copied, setCopied] = useState(false);
