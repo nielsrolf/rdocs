@@ -146,6 +146,11 @@ channel. `/agent-setup` is the current browser flow used by forecasting; service
 prompts and callbacks belong in the integrating service, not in the channel runner.
 Manifest fetches and callbacks are server-side (so HTTPS can integrate with a
 tailnet-only HTTP service) and restricted to `AGENT_SETUP_ALLOWED_ORIGINS`.
+`GET /authorize?redirect_uri&state` + `POST /api/authorize` (`lib/integration-signin.ts`) is
+the generic **"Sign in with r-docs"** seam: a signed-in user consents, and r-docs redirects
+back with a 2-minute HS256 id token (`sub`, `email`, `name`, `aud` = redirect origin) signed
+with `INTEGRATION_SIGNIN_SECRET`. Redirect origins reuse `AGENT_SETUP_ALLOWED_ORIGINS`. The
+integrating service verifies the token and keeps its own session; r-docs stores nothing.
 
 Key invariants:
 
