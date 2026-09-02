@@ -6,6 +6,7 @@ import {
   mentionHandle,
   type MentionCandidate
 } from "@/lib/mentions";
+import { useMarkdownShortcuts } from "@/components/use-markdown-shortcuts";
 
 // A controlled <textarea> with @mention autocomplete. Mentions are stored as
 // plain "@Name" text (detected server-side by extractMentionedUserIds and
@@ -39,6 +40,7 @@ export function MentionTextarea({
   const open = range !== null && items.length > 0;
   const openRef = useRef(open);
   openRef.current = open;
+  const shortcuts = useMarkdownShortcuts(ref, onChange);
 
   function refresh(caret: number, text: string) {
     if (members.length === 0) {
@@ -128,8 +130,11 @@ export function MentionTextarea({
           if (onSubmit && event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
             onSubmit();
+            return;
           }
+          shortcuts.onKeyDown(event);
         }}
+        onPaste={shortcuts.onPaste}
         onBlur={() => {
           // Let a click on an option register before closing.
           window.setTimeout(() => setRange(null), 120);

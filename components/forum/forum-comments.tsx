@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { MarkdownBody } from "@/components/document-workspace/markdown";
+import { MARKDOWN_SHORTCUT_HINT } from "@/lib/markdown-shortcuts";
 
 import { VoteWidget } from "./vote-widget";
 import { MentionTextarea } from "./mention-textarea";
@@ -71,6 +72,7 @@ function ReplyForm({
         disabled={busy}
       />
       <div className="forum-reply-actions">
+        <span className="forum-editor-hint">{MARKDOWN_SHORTCUT_HINT}</span>
         {onCancel ? (
           <button type="button" className="forum-btn-ghost" onClick={onCancel} disabled={busy}>
             Cancel

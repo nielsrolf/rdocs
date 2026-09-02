@@ -8,6 +8,7 @@ import {
   mentionHandle,
   type MentionCandidate
 } from "@/lib/mentions";
+import { useMarkdownShortcuts } from "@/components/use-markdown-shortcuts";
 
 let candidateCache: MentionCandidate[] | null = null;
 
@@ -30,6 +31,7 @@ export function MentionTextarea({
   const [candidates, setCandidates] = useState<MentionCandidate[]>(candidateCache ?? []);
   const [caret, setCaret] = useState(0);
   const [activeIndex, setActiveIndex] = useState(0);
+  const shortcuts = useMarkdownShortcuts(ref, onChange);
 
   useEffect(() => {
     if (candidateCache) return;
@@ -76,8 +78,18 @@ export function MentionTextarea({
         }}
         onClick={(event) => setCaret(event.currentTarget.selectionStart ?? 0)}
         onKeyUp={(event) => setCaret(event.currentTarget.selectionStart ?? 0)}
+        onPaste={shortcuts.onPaste}
         onKeyDown={(event) => {
-          if (matches.length === 0) return;
+          if (matches.length === 0) {
+            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+              // Cmd/Ctrl+Enter posts, like the studio comment rail.
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+              return;
+            }
+            shortcuts.onKeyDown(event);
+            return;
+          }
           if (event.key === "ArrowDown" || event.key === "ArrowUp") {
             event.preventDefault();
             setActiveIndex((index) => (index + (event.key === "ArrowDown" ? 1 : -1) + matches.length) % matches.length);
