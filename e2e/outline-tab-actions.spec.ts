@@ -47,7 +47,23 @@ test("outline tab actions stay hidden at rest and reveal on hover/focus", async 
     await row.hover();
     await expect(actions).toHaveCSS("opacity", "1");
     await expect(actions).toHaveCSS("pointer-events", "auto");
-    await expect(actions.locator("button")).toHaveCount(4);
+    // Regression guard (reported bug): hovering the copy-link button used to
+    // land on the delete button, because the action overlay was painted on top
+    // of the inline copy button. The topmost element at the copy button's
+    // centre must be the copy button itself.
+    const copy = row.locator(".doc-outline-copy");
+    await copy.hover();
+    const hitLabel = await page.evaluate(() => {
+      const el = window.document.querySelector(".doc-tab-row .doc-outline-copy") as HTMLElement | null;
+      if (!el) return null;
+      const rect = el.getBoundingClientRect();
+      const hit = window.document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      return (hit as HTMLElement | null)?.closest("button")?.getAttribute("aria-label") ?? null;
+    });
+    expect(hitLabel).toContain("Copy link to tab");
+
+    // Copy-link + move up/down + rename + delete, all inside the same overlay.
+    await expect(actions.locator("button")).toHaveCount(5);
 
     // Regression guard: even with a very long title, the row must not overflow
     // the sidebar (which would push the action buttons off-screen to the right).

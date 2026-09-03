@@ -583,59 +583,65 @@ function TabRow({
         </button>
       )}
       {!editing ? (
-        <button
-          aria-label={`Copy link to tab ${tab.title}`}
-          className="doc-outline-copy"
-          onClick={(event) => {
-            event.stopPropagation();
-            onCopyLink();
-          }}
-          title={copied ? "Copied!" : "Copy link to tab"}
-          type="button"
-        >
-          {copied ? <CheckIcon /> : <LinkIcon />}
-        </button>
-      ) : null}
-      {canEdit && !editing ? (
+        // Copy lives INSIDE the hover overlay: the overlay is absolutely
+        // positioned over the right end of the row, so an inline copy button
+        // there ends up underneath the delete button as soon as the row is
+        // hovered (you aim at the link icon and hit ✕).
         <div className="doc-tab-actions">
           <button
-            aria-label="Move tab up"
-            className="doc-tab-action"
-            disabled={index === 0}
-            onClick={() => onReorder?.(tab.id, "up")}
-            title="Move up"
+            aria-label={`Copy link to tab ${tab.title}`}
+            className="doc-outline-copy"
+            onClick={(event) => {
+              event.stopPropagation();
+              onCopyLink();
+            }}
+            title={copied ? "Copied!" : "Copy link to tab"}
             type="button"
           >
-            ↑
+            {copied ? <CheckIcon /> : <LinkIcon />}
           </button>
-          <button
-            aria-label="Move tab down"
-            className="doc-tab-action"
-            disabled={index === totalTabs - 1}
-            onClick={() => onReorder?.(tab.id, "down")}
-            title="Move down"
-            type="button"
-          >
-            ↓
-          </button>
-          <button
-            aria-label="Rename tab"
-            className="doc-tab-action"
-            onClick={startRename}
-            title="Rename"
-            type="button"
-          >
-            ✎
-          </button>
-          <button
-            aria-label="Delete tab"
-            className="doc-tab-action doc-tab-action-danger"
-            onClick={() => onDelete?.(tab.id)}
-            title="Delete tab (merges content into previous tab)"
-            type="button"
-          >
-            ✕
-          </button>
+          {canEdit ? (
+            <>
+              <button
+                aria-label="Move tab up"
+                className="doc-tab-action"
+                disabled={index === 0}
+                onClick={() => onReorder?.(tab.id, "up")}
+                title="Move up"
+                type="button"
+              >
+                ↑
+              </button>
+              <button
+                aria-label="Move tab down"
+                className="doc-tab-action"
+                disabled={index === totalTabs - 1}
+                onClick={() => onReorder?.(tab.id, "down")}
+                title="Move down"
+                type="button"
+              >
+                ↓
+              </button>
+              <button
+                aria-label="Rename tab"
+                className="doc-tab-action"
+                onClick={startRename}
+                title="Rename"
+                type="button"
+              >
+                ✎
+              </button>
+              <button
+                aria-label="Delete tab"
+                className="doc-tab-action doc-tab-action-danger"
+                onClick={() => onDelete?.(tab.id)}
+                title="Delete tab (merges content into previous tab)"
+                type="button"
+              >
+                ✕
+              </button>
+            </>
+          ) : null}
         </div>
       ) : null}
     </div>
