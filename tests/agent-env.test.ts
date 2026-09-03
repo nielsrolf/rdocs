@@ -5,9 +5,11 @@ import {
   DEFAULT_AUTO_COMPACT_WINDOW,
   LONG_CONTEXT_AUTO_COMPACT_WINDOW,
   LONG_CONTEXT_BETA,
+  NATIVE_LONG_CONTEXT_MODELS,
   OPENROUTER_BASE_URL,
   agentEnvKeysForPrompt,
   applyLongContextEnv,
+  hasNativeLongContext,
   applyProviderEnv,
   buildAgentEnv,
   isValidEnvKey,
@@ -53,10 +55,11 @@ test("the 1M-context beta raises the compaction window to 500k on Anthropic API 
 });
 
 test("the 1M-context beta is withheld wherever it would be silently ignored", () => {
-  // OAuth/subscription auth: the CLI drops caller-provided betas outright, so a
-  // 500k window would clamp back to 200k and compaction would never fire.
+  // OAuth/subscription auth on a 200k model: the CLI drops caller-provided
+  // betas outright, so a 500k window would clamp back to 200k and compaction
+  // would never fire.
   const oauth = buildAgentEnv({}, { CLAUDE_CODE_OAUTH_TOKEN: "tok", ANTHROPIC_API_KEY: "sk-ant-1" });
-  assert.deepEqual(applyLongContextEnv(oauth, "anthropic"), []);
+  assert.deepEqual(applyLongContextEnv(oauth, "anthropic", "claude-sonnet-4-6"), []);
   assert.equal(oauth.CLAUDE_CODE_AUTO_COMPACT_WINDOW, DEFAULT_AUTO_COMPACT_WINDOW);
 
   // No Anthropic credential at all (e.g. the free local-model fallback).
@@ -70,6 +73,42 @@ test("the 1M-context beta is withheld wherever it would be silently ignored", ()
     assert.deepEqual(applyLongContextEnv(env, provider), [], provider);
     assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, DEFAULT_AUTO_COMPACT_WINDOW, provider);
   }
+});
+
+// Regression for the "Autocompact is thrashing" run kills (2026-09-03): Fable
+// 5.1 / Sonnet 5 / Opus 4.7+ have a NATIVE 1M window in the CLI, so the 150k
+// default was not headroom but a 6x smaller window than a local Claude Code
+// session on the same model — and the beta gate above (API key only) meant
+// OAuth runs never got out of it.
+test("native-1M models get the 500k window on OAuth auth, without requesting the beta", () => {
+  for (const model of NATIVE_LONG_CONTEXT_MODELS) {
+    const oauth = buildAgentEnv({}, { CLAUDE_CODE_OAUTH_TOKEN: "tok" });
+    assert.deepEqual(applyLongContextEnv(oauth, "anthropic", model), [], model);
+    assert.equal(oauth.CLAUDE_CODE_AUTO_COMPACT_WINDOW, LONG_CONTEXT_AUTO_COMPACT_WINDOW, model);
+  }
+  // The model the incident ran on, spelled exactly as resolveAgentSdkConfig
+  // produces it.
+  assert.equal(hasNativeLongContext("claude-fable-5-1"), true);
+  assert.equal(hasNativeLongContext("claude-fable-5-1[1m]"), true);
+  assert.equal(hasNativeLongContext("claude-sonnet-4-6"), false);
+  assert.equal(hasNativeLongContext(undefined), false);
+});
+
+test("native-1M models on API-key auth get the window without a redundant beta", () => {
+  const env = buildAgentEnv({}, { ANTHROPIC_API_KEY: "sk-ant-1" });
+  assert.deepEqual(applyLongContextEnv(env, "anthropic", "claude-sonnet-5"), []);
+  assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, LONG_CONTEXT_AUTO_COMPACT_WINDOW);
+});
+
+test("a native-1M model id does not widen the window without an Anthropic credential or off Anthropic", () => {
+  const anon = buildAgentEnv({});
+  assert.deepEqual(applyLongContextEnv(anon, "anthropic", "claude-fable-5-1"), []);
+  assert.equal(anon.CLAUDE_CODE_AUTO_COMPACT_WINDOW, DEFAULT_AUTO_COMPACT_WINDOW);
+  // LiteLLM serving "anthropic/claude-sonnet-5" resolves to a bare model name
+  // too, but a third-party endpoint is not proven to serve the 1M window.
+  const litellm = buildAgentEnv({}, { LITELLM_API_KEY: "k", ANTHROPIC_API_KEY: "sk-ant-1" });
+  assert.deepEqual(applyLongContextEnv(litellm, "litellm", "claude-sonnet-5"), []);
+  assert.equal(litellm.CLAUDE_CODE_AUTO_COMPACT_WINDOW, DEFAULT_AUTO_COMPACT_WINDOW);
 });
 
 test("a deliberate window override survives the long-context upgrade", () => {

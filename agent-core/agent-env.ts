@@ -111,7 +111,8 @@ export const OPENROUTER_BASE_URL = "https://openrouter.ai/api";
  *
  * Declaring a smaller window reserves that headroom: compaction fires at
  * ~117k and leaves ~80k of slack for one oversized turn. The CLI floor is
- * 100k, the ceiling is the model window (1M only with the context-1m beta).
+ * 100k, the ceiling is the model window (1M natively on Sonnet 5 / Opus 4.7+ /
+ * Fable — see NATIVE_LONG_CONTEXT_MODELS — or via the context-1m beta).
  */
 export const DEFAULT_AUTO_COMPACT_WINDOW = "150000";
 
@@ -131,10 +132,45 @@ export const LONG_CONTEXT_BETA = "context-1m-2025-08-07";
 export const LONG_CONTEXT_AUTO_COMPACT_WINDOW = "500000";
 
 /**
+ * Anthropic models whose context window is natively 1M tokens — no beta header
+ * needed, on API-key AND subscription/OAuth auth alike (read out of the bundled
+ * CLI's model table: `context: { window: 1e6, native_1m: true }`; the docs say
+ * these compact at ~967k by default). Model ids here are the canonical ids
+ * `resolveAgentSdkConfig` hands the SDK (legacy aliases already normalized).
+ *
+ * Why this matters: for these models the conservative 150k default is not
+ * "headroom below the 200k window", it is a self-inflicted 6x smaller window.
+ * With a ~65k fixed prefix (system prompt + tool schemas + document text) that
+ * left ~85k of working room, so a run that reads a package's worth of files
+ * refilled the window in a single turn, compacted 5x in 17 minutes and got
+ * killed by the CLI's thrash guard ("Autocompact is thrashing: the context
+ * refilled to the limit within 3 turns of the previous compact, 3 times in a
+ * row") — which never happens in a local Claude Code session on the same
+ * model because that one runs with the full 1M window.
+ */
+export const NATIVE_LONG_CONTEXT_MODELS: ReadonlySet<string> = new Set([
+  "claude-sonnet-5",
+  "claude-opus-4-7",
+  "claude-opus-4-8",
+  "claude-opus-5",
+  "claude-fable-5",
+  "claude-fable-5-1",
+  "claude-mythos-5",
+  "claude-mythos-5-1"
+]);
+
+/** Strip an optional `[1m]` suffix before matching a model id. */
+export function hasNativeLongContext(model: string | null | undefined): boolean {
+  if (!model) return false;
+  return NATIVE_LONG_CONTEXT_MODELS.has(model.replace(/\[1m\]$/i, "").trim());
+}
+
+/**
  * Whether the `context-1m-2025-08-07` beta will actually take effect for this
- * run — which decides both whether to pass it and which compaction window is
- * honest. Two hard constraints, both read out of the bundled CLI rather than
- * assumed:
+ * run. This is the path for models WITHOUT a native 1M window (Sonnet 4.6,
+ * Opus 4.6, …); native-1M models are handled by `hasNativeLongContext` and
+ * never need the beta. Two hard constraints, both read out of the bundled CLI
+ * rather than assumed:
  *
  *  1. **Anthropic only.** OpenRouter / LiteLLM / the local llama.cpp server are
  *     Anthropic-*compatible* endpoints, not Anthropic. The CLI forwards this
@@ -143,9 +179,9 @@ export const LONG_CONTEXT_AUTO_COMPACT_WINDOW = "500000";
  *     switch compaction off.
  *  2. **API-key auth only.** The CLI discards caller-provided betas on
  *     subscription/OAuth auth ("Custom betas are only available for API key
- *     users"). Declaring 500k on an OAuth run would clamp straight back to the
- *     200k model window and reintroduce the exact "Prompt is too long" failure
- *     this is meant to prevent.
+ *     users"). Declaring 500k on an OAuth run of a 200k model would clamp
+ *     straight back to the 200k model window and reintroduce the exact "Prompt
+ *     is too long" failure this is meant to prevent.
  *
  * A non-entitled API key is safe on its own: the CLI catches the 1M-credits
  * rejection and clamps its window back to 200k for the rest of the session.
@@ -159,21 +195,37 @@ export function usesLongContext(
   return Boolean(env.ANTHROPIC_API_KEY?.trim());
 }
 
+function hasAnthropicCredential(env: Record<string, string>): boolean {
+  return Boolean(env.ANTHROPIC_API_KEY?.trim() || env.CLAUDE_CODE_OAUTH_TOKEN?.trim());
+}
+
 /**
- * Betas to hand the SDK for this run, paired with the matching compaction
- * window. Raises the window ONLY while it still holds our own conservative
- * default — a deployment (`.env`) or document override is a deliberate choice
- * and must survive.
+ * Decide the compaction window for this run and return the betas to hand the
+ * SDK. Two ways to a 1M window:
+ *
+ *  - a native-1M Anthropic model (`hasNativeLongContext`) with any Anthropic
+ *    credential: raise the window, pass no beta (nothing to request — and OAuth
+ *    would drop it anyway);
+ *  - an older Anthropic model on API-key auth (`usesLongContext`): raise the
+ *    window and request the `context-1m` beta.
+ *
+ * Everything else keeps the conservative 150k default and gets no betas. The
+ * window is raised ONLY while it still holds our own default — a deployment
+ * (`.env`) or document override is a deliberate choice and must survive.
  */
 export function applyLongContextEnv(
   env: Record<string, string>,
-  provider: AgentModelProvider
+  provider: AgentModelProvider,
+  model?: string | null
 ): string[] {
-  if (!usesLongContext(env, provider)) return [];
+  const nativeLongContext =
+    provider === "anthropic" && hasNativeLongContext(model) && hasAnthropicCredential(env);
+  const betaLongContext = usesLongContext(env, provider);
+  if (!nativeLongContext && !betaLongContext) return [];
   if (env.CLAUDE_CODE_AUTO_COMPACT_WINDOW === DEFAULT_AUTO_COMPACT_WINDOW) {
     env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = LONG_CONTEXT_AUTO_COMPACT_WINDOW;
   }
-  return [LONG_CONTEXT_BETA];
+  return betaLongContext && !nativeLongContext ? [LONG_CONTEXT_BETA] : [];
 }
 
 /**

@@ -1721,12 +1721,13 @@ async function runClaudeResearchAgentOnce(
     buildAgentEnv(process.env, options.agentEnv),
     sdkConfig.provider
   );
-  // 1M-context beta + the 500k compaction window that depends on it. Must run
+  // 500k compaction window for 1M-context runs (native-1M models on any
+  // Anthropic credential, or the context-1m beta on API-key auth). Must run
   // AFTER applyProviderEnv, which is what decides the final credential shape
-  // (API key vs. OAuth token vs. a third-party Bearer token) the beta is gated
-  // on. Returns [] — and leaves the conservative window in place — whenever the
-  // beta would be ignored.
-  const sdkBetas = applyLongContextEnv(agentProcessEnv, sdkConfig.provider);
+  // (API key vs. OAuth token vs. a third-party Bearer token) this is gated on.
+  // Returns [] — and leaves the conservative window in place — whenever a 1M
+  // window is not actually available.
+  const sdkBetas = applyLongContextEnv(agentProcessEnv, sdkConfig.provider, sdkConfig.model);
   // Session transcripts: the SDK writes/reads them under
   // $CLAUDE_CONFIG_DIR/projects/**. Pinned to the caller's session dir (the
   // container's mounted /agent-sessions, or the host per-conversation dir) —
