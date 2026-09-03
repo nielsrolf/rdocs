@@ -131,6 +131,7 @@ import {
   setActiveTab,
   type TabSummary
 } from "./document-workspace/tabs";
+import { InlineCode } from "@/lib/inline-code-mark";
 import { HIGHLIGHT_COLORS, TextHighlight, type HighlightColor } from "@/lib/text-highlight";
 
 // Upper bound on a single collaboration push. A push that never settles (e.g.
@@ -1312,7 +1313,10 @@ export function DocumentWorkspace({
 
   const editor = useEditor({
     extensions: [
-      StarterKit,
+      // Must mirror lib/document-editor-schema.ts: inline code that lets
+      // comment/suggestion/aiEdit marks coexist with it.
+      StarterKit.configure({ code: false }),
+      InlineCode,
       Underline,
       TaskList,
       TaskItem.configure({ nested: true }),

@@ -14,6 +14,7 @@ import { AiEditRange } from "@/components/document-workspace/ai-edit-selections"
 import { CommentAnchor } from "@/components/document-workspace/comment-anchors";
 import { Mention } from "@/components/document-workspace/mention";
 import { SuggestedDeletion, SuggestedInsertion } from "@/components/document-workspace/suggestions";
+import { InlineCode } from "@/lib/inline-code-mark";
 import { TextHighlight } from "@/lib/text-highlight";
 import {
   AttachmentChipSchemaNode,
@@ -44,7 +45,9 @@ const Image = ImageExtension.extend({
 // schema as collaboration-step validation.
 export function documentEditorExtensions() {
   return [
-    StarterKit,
+    // Inline code is re-registered below so annotation marks can coexist with it.
+    StarterKit.configure({ code: false }),
+    InlineCode,
     Underline,
     TaskList,
     TaskItem.configure({ nested: true }),

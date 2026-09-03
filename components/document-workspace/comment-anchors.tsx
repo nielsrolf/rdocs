@@ -124,7 +124,12 @@ export function buildCommentAnchorTransaction(
     // addMark (unlike TextSelection-based setMark) tolerates range endpoints that
     // fall on atom boundaries; it only marks inline content, skipping block atoms.
     tr = tr.addMark(from, to, markType.create({ threadId }));
-    anchored = true;
+    // addMark silently drops the mark wherever another mark excludes it (a
+    // `excludes: "_"` code mark did exactly that), so verify it actually landed
+    // instead of pushing a no-op step and letting the server 409 on the anchor.
+    if (collectCommentAnchorRanges(tr.doc).has(threadId)) {
+      anchored = true;
+    }
   }
 
   if (!anchored) {
