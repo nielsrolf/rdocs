@@ -17,6 +17,7 @@ import {
   sanitizeSkillRelativePath,
   syncSkillsIntoWorktree,
   writeSkillToStore,
+  CODEX_WORKTREE_SKILLS_DIRNAME,
   WORKTREE_SKILLS_DIRNAME
 } from "../lib/skills";
 
@@ -138,6 +139,16 @@ test("writeSkillToStore + syncSkillsIntoWorktree materialize skills under .claud
   );
   assert.equal(nested, "palette");
 
+  // Codex discovers repo skills under `.agents/skills` (and `.codex/skills`),
+  // never `.claude/skills` — verified against `codex app-server skills/list`.
+  // The worktree is prepared before the harness is chosen, so both roots are
+  // always materialized.
+  const codexSkillMd = await fs.readFile(
+    path.join(worktree, CODEX_WORKTREE_SKILLS_DIRNAME, "data-viz", "SKILL.md"),
+    "utf8"
+  );
+  assert.match(codexSkillMd, /name: data-viz/);
+
   const status = spawnSync("git", ["status", "--porcelain"], { cwd: worktree });
   assert.equal(status.stdout.toString().trim(), "", "materialized skills must not show up as git changes");
 });
@@ -148,11 +159,13 @@ test("syncSkillsIntoWorktree is a no-op for documents without skills", async (t)
     await fs.rm(worktree, { recursive: true, force: true });
   });
   await syncSkillsIntoWorktree(`missing-${crypto.randomUUID()}`, worktree);
-  const exists = await fs
-    .stat(path.join(worktree, ".claude"))
-    .then(() => true)
-    .catch(() => false);
-  assert.equal(exists, false);
+  for (const dir of [".claude", ".agents"]) {
+    const exists = await fs
+      .stat(path.join(worktree, dir))
+      .then(() => true)
+      .catch(() => false);
+    assert.equal(exists, false, `${dir} must not be created`);
+  }
 });
 
 test("copyOwnerDefaultSkillsToDocument copies only default skills (files + rows)", async (t) => {

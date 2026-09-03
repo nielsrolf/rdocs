@@ -25,6 +25,24 @@ test("Codex Slack runs attach the same Slack and rdocs MCP surfaces Claude recei
   assert.equal(servers.rdocs?.url, "https://docs.example/api/mcp");
 });
 
+test("Codex falls back to CLAUDE.md wherever a directory has no AGENTS.md", () => {
+  // Codex only reads AGENTS.md natively. Workspaces (and the Slack notebook
+  // convention) use CLAUDE.md, so switching a document from Claude Code to
+  // Codex must not silently drop those instructions. Codex's own
+  // `project_doc_fallback_filenames` implements exactly the rule we want —
+  // "if there is a CLAUDE.md but no AGENTS.md, read CLAUDE.md" — without
+  // writing an AGENTS.md into the workspace (which would be auto-committed and
+  // would break the "harness selection never changes workspace content" rule).
+  for (const provider of ["openai", "litellm"] as const) {
+    const configured = codexProviderConfig(
+      provider,
+      { OPENAI_API_KEY: "test", LITELLM_API_KEY: "test", LITELLM_BASE_URL: "http://litellm.local" },
+      undefined
+    );
+    assert.deepEqual(configured.config.project_doc_fallback_filenames, ["CLAUDE.md"]);
+  }
+});
+
 test("Codex structured output schema requires every top-level field", () => {
   const required = new Set((CODEX_SUBMISSION_JSON_SCHEMA as { required?: string[] }).required ?? []);
   assert.deepEqual(

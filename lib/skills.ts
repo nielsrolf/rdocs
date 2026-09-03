@@ -6,9 +6,15 @@ const WORKSPACE_ROOT = path.join(process.cwd(), ".research-workspaces");
 // confused with (or GC'd like) per-document workspace state.
 const USER_SKILLS_ROOT = path.join(process.cwd(), ".user-skills");
 
-// Where skills are materialized inside an agent worktree. This is the Claude
-// Agent SDK's project-skill discovery path relative to the run's cwd.
+// Where skills are materialized inside an agent worktree. `.claude/skills` is
+// the Claude Agent SDK's project-skill discovery path; `.agents/skills` is the
+// one Codex scans (`codex app-server skills/list` reports `.agents/skills` and
+// `.codex/skills`, never `.claude/skills`). The worktree is prepared before
+// the harness is chosen, so both roots are always materialized — each with a
+// self-ignoring .gitignore so neither shows up in the run's auto-commit.
 export const WORKTREE_SKILLS_DIRNAME = path.join(".claude", "skills");
+export const CODEX_WORKTREE_SKILLS_DIRNAME = path.join(".agents", "skills");
+const WORKTREE_SKILLS_DIRNAMES = [WORKTREE_SKILLS_DIRNAME, CODEX_WORKTREE_SKILLS_DIRNAME];
 
 const MAX_SKILL_FILES = 200;
 const MAX_SKILL_TOTAL_BYTES = 20 * 1024 * 1024;
@@ -206,13 +212,15 @@ export async function syncSkillsIntoWorktree(documentId: string, worktreePath: s
   const names = await listStoredSkillDirs(documentId);
   if (names.length === 0) return;
 
-  const targetDir = path.join(worktreePath, WORKTREE_SKILLS_DIRNAME);
-  await fs.mkdir(targetDir, { recursive: true });
-  await fs.writeFile(path.join(targetDir, ".gitignore"), "*\n").catch(() => undefined);
+  for (const dirname of WORKTREE_SKILLS_DIRNAMES) {
+    const targetDir = path.join(worktreePath, dirname);
+    await fs.mkdir(targetDir, { recursive: true });
+    await fs.writeFile(path.join(targetDir, ".gitignore"), "*\n").catch(() => undefined);
 
-  for (const name of names) {
-    await fs
-      .cp(getDocumentSkillDir(documentId, name), path.join(targetDir, name), { recursive: true })
-      .catch(() => undefined);
+    for (const name of names) {
+      await fs
+        .cp(getDocumentSkillDir(documentId, name), path.join(targetDir, name), { recursive: true })
+        .catch(() => undefined);
+    }
   }
 }

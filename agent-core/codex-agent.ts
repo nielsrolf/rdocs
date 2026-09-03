@@ -578,6 +578,12 @@ export function codexProviderConfig(
 ): { config: CodexConfigObject; baseUrl?: string; apiKey?: string } {
   const config: CodexConfigObject = {
     show_raw_agent_reasoning: false,
+    // Codex natively reads only AGENTS.md. Workspaces use CLAUDE.md (the Slack
+    // notebook convention, HOST DEV MODE, linked repos), so in any directory
+    // that has no AGENTS.md Codex reads CLAUDE.md instead. This is Codex's own
+    // per-directory fallback, so nothing is written into the workspace and
+    // switching harnesses never changes workspace content.
+    project_doc_fallback_filenames: ["CLAUDE.md"],
     ...(input?.slackTools
       ? {
           mcp_servers: {
