@@ -32,10 +32,12 @@
     "**/*.d.ts",
     "**/*.ts",
     "**/*.tsx",
+    ".next-blue/types/**/*.ts",
+    ".next-cachetest/types/**/*.ts",
     ".next-green/types/**/*.ts",
     ".next/types/**/*.ts",
     "next-env.d.ts",
-    ".next-blue/types/**/*.ts"
+    ".next-tracetest/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",
