@@ -100,7 +100,8 @@ test("legacy alias values (documents and env fallback) normalize to canonical id
   assert.equal(normalizeAgentModel("opus"), "claude-opus-5");
   // Superseded canonical id: existing rows keep working, remapped on read.
   assert.equal(normalizeAgentModel("claude-opus-4-8"), "claude-opus-5");
-  assert.equal(normalizeAgentModel("claude-fable-5"), "claude-fable-5");
+  assert.equal(normalizeAgentModel("claude-fable-5"), "claude-fable-5-1");
+  assert.equal(normalizeAgentModel("claude-fable-5-1"), "claude-fable-5-1");
 
   const fromDocument = resolveAgentSdkConfig({ model: "opus", effort: "high" });
   assert.equal(fromDocument.model, "claude-opus-5");

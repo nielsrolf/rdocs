@@ -49,7 +49,7 @@ export const CODEX_CHATGPT_MODEL_PREFIX = "codex/chatgpt/";
 
 export const ANTHROPIC_AGENT_MODELS: readonly AgentModelOption[] = [
   { value: "claude-sonnet-5", label: "Sonnet 5", hint: "Fast, capable default", provider: "anthropic" },
-  { value: "claude-fable-5", label: "Fable 5", hint: "Most capable, premium", provider: "anthropic" },
+  { value: "claude-fable-5-1", label: "Fable 5.1", hint: "Most capable, premium", provider: "anthropic" },
   { value: "claude-opus-5", label: "Opus 5", hint: "Deep agentic work", provider: "anthropic" }
 ] as const;
 
@@ -57,7 +57,8 @@ export const ANTHROPIC_AGENT_MODELS: readonly AgentModelOption[] = [
 // Any other slug is reachable via the custom-slug input; this list is just the
 // sensible defaults, not a whitelist.
 export const OPENROUTER_AGENT_MODELS: readonly AgentModelOption[] = [
-  { value: "openrouter/z-ai/glm-5.2", label: "GLM 5.2", hint: "Zhipu flagship", provider: "openrouter" },
+  { value: "openrouter/z-ai/glm-5.3", label: "GLM 5.3", hint: "Zhipu flagship", provider: "openrouter" },
+  { value: "openrouter/z-ai/glm-5.3-flash", label: "GLM 5.3 Flash", hint: "Zhipu, fast", provider: "openrouter" },
   { value: "openrouter/openai/gpt-5.6-sol", label: "GPT-5.6 Sol", hint: "OpenAI flagship", provider: "openrouter" },
   { value: "openrouter/openai/gpt-5.6-terra", label: "GPT-5.6 Terra", hint: "OpenAI flagship, balanced", provider: "openrouter" },
   { value: "openrouter/openai/gpt-5.6-luna", label: "GPT-5.6 Luna", hint: "OpenAI flagship, fast", provider: "openrouter" },
@@ -120,7 +121,8 @@ export const CODEX_LITELLM_AGENT_MODELS: readonly AgentModelOption[] =
 const LEGACY_MODEL_ALIASES: Record<string, string> = {
   sonnet: "claude-sonnet-5",
   opus: "claude-opus-5",
-  "claude-opus-4-8": "claude-opus-5"
+  "claude-opus-4-8": "claude-opus-5",
+  "claude-fable-5": "claude-fable-5-1"
 };
 
 export type AgentModel = string;
@@ -457,7 +459,7 @@ export function resolveAgentSdkConfig(
   };
 }
 
-// claude-fable-5 runs behind safety classifiers with a significant false-positive
+// claude-fable-5-1 runs behind safety classifiers with a significant false-positive
 // rate on benign work (the API docs call this out for security/life-sciences
 // adjacent content). A classifier block surfaces as stop_reason "refusal" and
 // kills the whole agent run. Opus (now claude-opus-5, previously 4.8) is the
@@ -465,7 +467,7 @@ export function resolveAgentSdkConfig(
 // Opus. Other models (including OpenRouter ones) don't sit behind these
 // classifiers — no fallback.
 export const REFUSAL_FALLBACK_MODEL = "claude-opus-5";
-const REFUSAL_PRONE_MODELS = new Set(["claude-fable-5"]);
+const REFUSAL_PRONE_MODELS = new Set(["claude-fable-5-1"]);
 
 /**
  * The model a safety-classifier-refused run should be retried on, or null when
