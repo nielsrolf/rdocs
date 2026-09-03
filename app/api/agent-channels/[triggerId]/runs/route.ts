@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { RUN_STARTED_CLAUDE } from "@/agent-core/lifecycle-messages";
 import { resolveAgentConfigForUser } from "@/lib/agent-defaults";
-import { resolveAgentApiChannel } from "@/lib/agent-api-channels";
+import { resolveAgentApiChannel, resolveChannelPreviousRunId } from "@/lib/agent-api-channels";
 import { runAgentConversationInBackground } from "@/lib/agent-conversation";
 import { recordAiRunEvent, serializeAiRun } from "@/lib/ai-runs";
 import { db } from "@/lib/db";
@@ -11,7 +11,11 @@ import { buildRunPermalink } from "@/lib/request-origin";
 
 export const runtime = "nodejs";
 
-const messageSchema = z.object({ message: z.string().min(1).max(6000) });
+const messageSchema = z.object({
+  message: z.string().min(1).max(6000),
+  /** Resume the harness session of an earlier run of this channel (same document). */
+  previousRunId: z.string().min(1).max(64).optional().nullable()
+});
 
 export async function POST(request: Request, { params }: { params: Promise<{ triggerId: string }> }) {
   const { triggerId } = await params;
@@ -22,12 +26,17 @@ export async function POST(request: Request, { params }: { params: Promise<{ tri
   if (!parsed.success) return NextResponse.json({ error: "Invalid agent message payload." }, { status: 400 });
 
   const message = parsed.data.message.trim();
+  const previousRunId = await resolveChannelPreviousRunId(channel, parsed.data.previousRunId ?? null);
+  if (previousRunId === undefined) {
+    return NextResponse.json({ error: "previousRunId does not belong to this channel." }, { status: 400 });
+  }
   const aiRun = await db.aiRun.create({
     data: {
       documentId: channel.documentId,
       triggerType: "API",
       triggerId: channel.id,
       createdById: channel.createdById,
+      parentRunId: previousRunId,
       instruction: message,
       progress: RUN_STARTED_CLAUDE,
       suggestOnly: true
@@ -39,7 +48,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ tri
     documentId: channel.documentId,
     aiRunId: aiRun.id,
     message,
-    previousRunId: null,
+    previousRunId,
     documentTitle: channel.document.title,
     documentContent: channel.document.content,
     createdById: channel.createdById,

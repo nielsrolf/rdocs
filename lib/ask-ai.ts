@@ -6,6 +6,7 @@
 // directly.
 
 import { RUN_STARTED_CLAUDE } from "@/agent-core/lifecycle-messages";
+import { loadDocumentMcpServerInputs } from "@/lib/document-mcp-servers";
 import { markAiRunSucceeded, recordAiRunEvent } from "@/lib/ai-runs";
 import { withAgentRunLifecycle } from "@/lib/agent-run-lifecycle";
 import { broadcastDocumentEvent } from "@/lib/collaboration";
@@ -187,7 +188,7 @@ export async function runAskAiInBackground(input: {
       const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, thread.documentId);
       // Doc agent-panel config -> triggering user's default -> app default.
       const resolvedConfig = await resolveAgentConfigForUser(thread.document, createdById);
-      const { runAgentEnv, effectiveAgentConfig } = await ctx.loadEnv(resolvedConfig);
+      const { agentEnv, runAgentEnv, effectiveAgentConfig } = await ctx.loadEnv(resolvedConfig);
 
       // Comments the agent leaves via add_comment are created (and broadcast)
       // the moment they arrive, so collaborators see review feedback mid-run.
@@ -223,7 +224,8 @@ export async function runAskAiInBackground(input: {
         comments: thread.comments.map((comment) => ({
           author: comment.author?.name ?? comment.aiModel ?? "Claude",
           body: comment.body
-        }))
+        })),
+        mcpServers: await loadDocumentMcpServerInputs(thread.documentId, agentEnv)
       }, {
         agentConfig: effectiveAgentConfig,
         agentEnv: runAgentEnv,

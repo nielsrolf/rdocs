@@ -7,6 +7,7 @@ import { isAllowedAgentSetupUrl } from "@/lib/agent-setup-origins";
 import { defaultDocumentContent, serializeDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
 import { upsertDocumentEnv } from "@/lib/document-env";
+import { MAX_MCP_SERVERS_PER_DOCUMENT, upsertDocumentMcpServer } from "@/lib/document-mcp-servers";
 import { applyMarkdownEdit } from "@/lib/mcp/apply-edit";
 import { getDocumentSkillDir, prepareSkillUpload, writeSkillToStore } from "@/lib/skills";
 
@@ -21,7 +22,13 @@ const setupSchema = z.object({
   channelLabel: z.string().max(120).optional().nullable(),
   callbackUrl: z.string().url().max(2000),
   callbackCredential: z.string().min(1).max(1000),
-  callbackBody: z.record(z.string(), z.unknown()).optional()
+  callbackBody: z.record(z.string(), z.unknown()).optional(),
+  // HTTP MCP servers mounted into every run of the new document. `authEnvKey`
+  // names one of the `environment` keys above whose value is sent as a bearer.
+  mcpServers: z
+    .array(z.object({ name: z.string().min(1).max(64), url: z.string().min(1).max(2000), authEnvKey: z.string().max(128).optional().nullable() }))
+    .max(MAX_MCP_SERVERS_PER_DOCUMENT)
+    .optional()
 });
 
 // Generic one-click provisioning for an externally integrated agent. The browser
@@ -53,6 +60,12 @@ export async function POST(request: Request) {
     }
     for (const [key, value] of Object.entries(parsed.data.environment)) {
       await upsertDocumentEnv(document.id, key, value);
+    }
+    for (const server of parsed.data.mcpServers ?? []) {
+      if (server.authEnvKey && !(server.authEnvKey in parsed.data.environment)) {
+        throw new Error(`MCP server ${server.name} references env key ${server.authEnvKey} that is not in the manifest.`);
+      }
+      await upsertDocumentMcpServer({ documentId: document.id, ...server });
     }
     const prepared = prepareSkillUpload([{
       relativePath: `${parsed.data.skillName}/SKILL.md`,

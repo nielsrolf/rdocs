@@ -12,6 +12,7 @@ import {
   recordAiRunEvent
 } from "@/lib/ai-runs";
 import { withAgentRunLifecycle } from "@/lib/agent-run-lifecycle";
+import { loadDocumentMcpServerInputs } from "@/lib/document-mcp-servers";
 import { planSessionResume, recordRunSessionId, withConversationLock } from "@/lib/agent-sessions";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
@@ -251,6 +252,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       });
       const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, documentId);
       const { agentEnv, runAgentEnv, effectiveAgentConfig } = await ctx.loadEnv(agentConfig);
+      const mcpServers = await loadDocumentMcpServerInputs(documentId, agentEnv);
       // Comments the agent leaves via add_comment are created (and broadcast)
       // the moment they arrive, so collaborators see review feedback mid-run.
       const commentRecorder = createLiveCommentRecorder({
@@ -290,7 +292,8 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
         conversationHistory,
         resumeSessionId,
         slackContext,
-        slackTools
+        slackTools,
+        mcpServers
       }, {
         agentConfig: effectiveAgentConfig,
         agentEnv: runAgentEnv,

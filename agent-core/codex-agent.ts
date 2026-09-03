@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { codexMcpServerOptions } from "./mcp-servers";
 import path from "node:path";
 
 import {
@@ -574,8 +575,9 @@ export async function runCodexSubmissionLoop(input: {
 export function codexProviderConfig(
   provider: "openai" | "litellm" | "chatgpt",
   env: Record<string, string>,
-  input: Pick<ClaudeResearchAgentInput, "slackTools"> | undefined
+  input: Pick<ClaudeResearchAgentInput, "slackTools" | "mcpServers"> | undefined
 ): { config: CodexConfigObject; baseUrl?: string; apiKey?: string } {
+  const documentMcpServers = codexMcpServerOptions(input?.mcpServers);
   const config: CodexConfigObject = {
     show_raw_agent_reasoning: false,
     // Codex natively reads only AGENTS.md. Workspaces use CLAUDE.md (the Slack
@@ -584,9 +586,11 @@ export function codexProviderConfig(
     // per-directory fallback, so nothing is written into the workspace and
     // switching harnesses never changes workspace content.
     project_doc_fallback_filenames: ["CLAUDE.md"],
-    ...(input?.slackTools
+    ...(input?.slackTools || Object.keys(documentMcpServers).length > 0
       ? {
           mcp_servers: {
+            ...documentMcpServers,
+            ...(input?.slackTools ? {
             gdocs: {
               url: input.slackTools.url,
               http_headers: { Authorization: `Bearer ${input.slackTools.token}` },
@@ -601,6 +605,7 @@ export function codexProviderConfig(
                   }
                 }
               : {})
+            } : {})
           }
         }
       : {})

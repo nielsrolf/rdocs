@@ -7256,3 +7256,12 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 .notification-bell-option:hover {
   background: var(--accent-soft, rgba(26, 115, 232, 0.08));
 }
+
+.env-mcp-section {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+.env-mcp-section .env-add-row {
+  flex-wrap: wrap;
+}

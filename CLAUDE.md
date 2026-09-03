@@ -146,6 +146,20 @@ channel. `/agent-setup` is the current browser flow used by forecasting; service
 prompts and callbacks belong in the integrating service, not in the channel runner.
 Manifest fetches and callbacks are server-side (so HTTPS can integrate with a
 tailnet-only HTTP service) and restricted to `AGENT_SETUP_ALLOWED_ORIGINS`.
+Two generic extensions (2026-09-04) let an integrating service build a chat on top of
+this: **`previousRunId`** on `POST /api/agent-channels/:triggerId/runs` resumes the
+session of an earlier run of the *same channel* (validated by
+`resolveChannelPreviousRunId`; a foreign id is a 400), and **per-document MCP servers**
+(`DocumentMcpServer`, `lib/document-mcp-servers.ts`, UI in the environment menu,
+`GET/POST/DELETE /api/documents/:id/mcp-servers`, manifest key `mcp_servers`
+`[{name,url,authEnvKey?}]`). Each server is mounted for every run of the document as
+`mcp__<name>__*` (Claude: `mcpServers` option + allowlist; Codex: `mcp_servers` in the
+provider config, `required:false`); `authEnvKey` names a document env var whose
+plaintext value becomes `Authorization: Bearer …` (resolved from `agentEnv`, not the
+broker-substituted env — a missing key skips the server with an `[mcp-servers]` warning).
+Names `gdocs`/`rdocs` are reserved; max 10 per document. The pure builders live in
+`agent-core/mcp-servers.ts` (so a runner-image rebuild is needed when they change).
+Tests: `tests/document-mcp-servers.test.ts`.
 `GET /authorize?redirect_uri&state` + `POST /api/authorize` (`lib/integration-signin.ts`) is
 the generic **"Sign in with r-docs"** seam: a signed-in user consents, and r-docs redirects
 back with a 2-minute HS256 id token (`sub`, `email`, `name`, `aud` = redirect origin) signed

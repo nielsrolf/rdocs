@@ -224,7 +224,137 @@ export function EnvironmentMenu({
         </div>
 
         {error ? <span className="subtle-pill env-error">{error}</span> : null}
+
+        <McpServersSection documentId={documentId} shareToken={shareToken} />
       </div>
     </details>
+  );
+}
+
+type McpServer = { id: string; name: string; url: string; authEnvKey: string | null };
+
+/**
+ * HTTP MCP servers mounted into every agent run of this document (next to the
+ * built-in gdocs/rdocs servers). The optional auth key names an environment
+ * variable above whose value is sent as `Authorization: Bearer …`.
+ */
+function McpServersSection({ documentId, shareToken }: { documentId: string; shareToken: string | null }) {
+  const [servers, setServers] = useState<McpServer[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [urlDraft, setUrlDraft] = useState("");
+  const [authDraft, setAuthDraft] = useState("");
+  const shareBody = shareToken ? { shareToken } : {};
+
+  useEffect(() => {
+    const query = shareToken ? `?share=${encodeURIComponent(shareToken)}` : "";
+    fetch(`/api/documents/${documentId}/mcp-servers${query}`, { cache: "no-store" })
+      .then(async (response) => {
+        const data = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(data?.error ?? "Failed to load MCP servers.");
+        setServers(data.servers ?? []);
+      })
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed to load MCP servers."));
+  }, [documentId, shareToken]);
+
+  async function send(method: "POST" | "DELETE", body: Record<string, unknown>) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/documents/${documentId}/mcp-servers`, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...body, ...shareBody })
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        setError(data?.error ?? "Failed to update MCP servers.");
+        return false;
+      }
+      setServers(data.servers ?? []);
+      return true;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="env-mcp-section">
+      <p>
+        <strong>MCP servers</strong> — HTTP MCP servers the agent can use in every run of this document. The auth key
+        names a variable above that is sent as a bearer token.
+      </p>
+      <div className="env-var-list">
+        {servers && servers.length > 0 ? (
+          servers.map((server) => (
+            <div className="env-var-row" key={server.id}>
+              <code className="env-var-key">{server.name}</code>
+              <span className="env-var-value" title={server.url}>
+                {server.url}
+                {server.authEnvKey ? ` · auth: ${server.authEnvKey}` : ""}
+              </span>
+              <button
+                aria-label={`Delete MCP server ${server.name}`}
+                className="env-var-delete"
+                disabled={busy}
+                onClick={() => void send("DELETE", { name: server.name })}
+                title="Delete"
+                type="button"
+              >
+                ✕
+              </button>
+            </div>
+          ))
+        ) : servers ? (
+          <div className="env-empty">No MCP servers.</div>
+        ) : null}
+      </div>
+      <div className="env-add-row">
+        <input
+          aria-label="MCP server name"
+          autoComplete="off"
+          onChange={(event) => setNameDraft(event.target.value)}
+          placeholder="name"
+          value={nameDraft}
+        />
+        <input
+          aria-label="MCP server URL"
+          autoComplete="off"
+          onChange={(event) => setUrlDraft(event.target.value)}
+          placeholder="https://example.com/mcp"
+          spellCheck={false}
+          value={urlDraft}
+        />
+        <input
+          aria-label="Auth env key"
+          autoComplete="off"
+          onChange={(event) => setAuthDraft(event.target.value)}
+          placeholder="AUTH_ENV_KEY (optional)"
+          value={authDraft}
+        />
+        <button
+          className="ghost-button"
+          disabled={busy || !nameDraft.trim() || !urlDraft.trim()}
+          onClick={async () => {
+            const ok = await send("POST", {
+              name: nameDraft.trim(),
+              url: urlDraft.trim(),
+              authEnvKey: authDraft.trim() || null
+            });
+            if (ok) {
+              setNameDraft("");
+              setUrlDraft("");
+              setAuthDraft("");
+            }
+          }}
+          type="button"
+        >
+          {busy ? "Saving…" : "Add"}
+        </button>
+      </div>
+      {error ? <span className="subtle-pill env-error">{error}</span> : null}
+    </div>
   );
 }

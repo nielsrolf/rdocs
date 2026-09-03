@@ -284,8 +284,25 @@ model Document {
   forumVotes              DocumentVote[]
   apiChannels             AgentApiChannel[]
   notificationPreferences DocumentNotificationPreference[]
+  mcpServers              DocumentMcpServer[]
 
   @@unique([slackTeamId, slackChannelId])
+}
+
+// An HTTP MCP server mounted into every agent run of this document, next to
+// the built-in gdocs/rdocs servers. Generic: r-docs knows nothing about what
+// the tools do. `authEnvKey` names a document env var whose value is sent as
+// `Authorization: Bearer <value>` — the secret itself stays in DocumentEnvVar.
+model DocumentMcpServer {
+  id         String   @id @default(cuid())
+  documentId String
+  name       String
+  url        String
+  authEnvKey String?
+  createdAt  DateTime @default(now())
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, name])
 }
 
 // A narrowly scoped trigger credential for one configured document-agent.

@@ -13,6 +13,7 @@ type SetupManifest = {
   channel_label?: string;
   callback_url: string;
   callback_body?: Record<string, unknown>;
+  mcp_servers?: Array<{ name: string; url: string; authEnvKey?: string | null }>;
 };
 
 export function AgentSetupClient(props: Props) {
@@ -53,7 +54,8 @@ export function AgentSetupClient(props: Props) {
           channelLabel: manifest.channel_label,
           callbackUrl: manifest.callback_url,
           callbackCredential: credential,
-          callbackBody: manifest.callback_body
+          callbackBody: manifest.callback_body,
+          mcpServers: manifest.mcp_servers
         })
       });
       const data = await response.json().catch(() => null);

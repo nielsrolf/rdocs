@@ -68,3 +68,24 @@ export async function revokeAgentApiChannel(documentId: string, createdById: str
   });
   return result.count > 0;
 }
+
+/**
+ * Validate a follow-up's `previousRunId` for a channel run: the run must exist
+ * and belong to the same channel (and thus document). Returns `null` for a
+ * fresh conversation, the id when valid, and `undefined` when the id is
+ * unknown or foreign (the route answers 400).
+ */
+export async function resolveChannelPreviousRunId(
+  channel: { id: string; documentId: string },
+  previousRunId: string | null
+): Promise<string | null | undefined> {
+  if (!previousRunId) return null;
+  const run = await db.aiRun.findUnique({
+    where: { id: previousRunId },
+    select: { documentId: true, triggerType: true, triggerId: true }
+  });
+  if (!run || run.documentId !== channel.documentId || run.triggerType !== "API" || run.triggerId !== channel.id) {
+    return undefined;
+  }
+  return previousRunId;
+}

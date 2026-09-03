@@ -6,6 +6,7 @@
 // → respond 202).
 
 import { buildAndVerifyWidget } from "@/agent-core";
+import { loadDocumentMcpServerInputs } from "@/lib/document-mcp-servers";
 import type { AgentAccessMode } from "@/agent-core";
 import { buildConversationHistory, markAiRunSucceeded, recordAiRunEvent } from "@/lib/ai-runs";
 import { withAgentRunLifecycle } from "@/lib/agent-run-lifecycle";
@@ -158,7 +159,7 @@ export async function runAiEditInBackground(input: {
       const linkedRepo = await ctx.setupWorkspace();
       const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, documentId);
       const assetIntent = detectEditAssetIntent(parsed.instruction);
-      const { runAgentEnv, effectiveAgentConfig } = await ctx.loadEnv(agentConfig);
+      const { agentEnv, runAgentEnv, effectiveAgentConfig } = await ctx.loadEnv(agentConfig);
       // Session continuation: give the agent the prior attempts' transcript so it
       // can pick up where the previous (failed/cancelled) attempt left off. The
       // prior attempt's committed work is already merged into the base checkout,
@@ -203,7 +204,8 @@ export async function runAiEditInBackground(input: {
           selectedContext: parsed.selectedContext ?? null,
           instruction: parsed.instruction.trim(),
           userInstructions: agentConfig.userInstructions ?? null,
-          conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined
+          conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined,
+          mcpServers: await loadDocumentMcpServerInputs(documentId, agentEnv)
         },
         {
           agentConfig: effectiveAgentConfig,

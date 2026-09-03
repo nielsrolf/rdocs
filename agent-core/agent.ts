@@ -1,4 +1,5 @@
 import { readFileSync, realpathSync } from "node:fs";
+import { claudeMcpServerOptions, mcpServerAllowedTools, type AgentMcpServerInput } from "./mcp-servers";
 import fs from "node:fs/promises";
 import { basename, join as joinPath, resolve as resolvePath, sep as pathSep } from "node:path";
 
@@ -165,6 +166,12 @@ export type ClaudeResearchAgentInput = {
      */
     mcpUrl?: string;
   };
+  /**
+   * Document-configured HTTP MCP servers (DocumentMcpServer), already resolved
+   * by the app (auth headers filled in from the run env). Mounted next to
+   * gdocs/rdocs and allowed whole-server as `mcp__<name>`. Never persisted.
+   */
+  mcpServers?: AgentMcpServerInput[];
 };
 
 export type ClaudeResearchAgentOutput = {
@@ -1859,6 +1866,7 @@ async function runClaudeResearchAgentOnce(
         ...(input.slackTools ? [...SLACK_READ_TOOL_NAMES, ...SCHEDULE_TOOL_NAMES] : []),
         // Whole-server allow: every tool of the rdocs MCP bridge.
         ...(input.slackTools?.mcpUrl ? ["mcp__rdocs"] : []),
+        ...mcpServerAllowedTools(input.mcpServers),
         ...(input.slackTools && input.slackContext?.surface === "dm" ? [RECENT_ACTIVITY_TOOL_NAME] : [])
       ],
       disallowedTools: [
@@ -1888,7 +1896,9 @@ async function runClaudeResearchAgentOnce(
                 headers: { Authorization: `Bearer ${input.slackTools.token}` }
               }
             }
-          : {})
+          : {}),
+        // Document-configured servers (cannot shadow gdocs/rdocs by name).
+        ...claudeMcpServerOptions(input.mcpServers)
       },
       maxTurns: parseMaxTurns(process.env.CLAUDE_AGENT_MAX_TURNS),
       // 1M context window, so CLAUDE_CODE_AUTO_COMPACT_WINDOW=500000 is a real
