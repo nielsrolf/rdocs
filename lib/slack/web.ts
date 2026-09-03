@@ -3,6 +3,11 @@
 // token stays server-side — agent containers never see it; the agent talks to
 // Slack only through server-mediated tools.
 
+import {
+  slackDeliveryDisabledReason,
+  warnSlackDeliveryDisabledOnce
+} from "@/lib/slack/delivery";
+
 export type SlackMessage = {
   ts: string;
   user?: string;
@@ -46,6 +51,14 @@ export type SlackClient = {
 type SlackApiResponse = { ok: boolean; error?: string } & Record<string, unknown>;
 
 async function slackApi(botToken: string, method: string, body: Record<string, unknown>) {
+  // Single choke point for outbound Slack traffic, so a test run can never DM a
+  // real person (lib/slack/delivery.ts). Reads/writes alike: a test that talks
+  // to Slack at all is a test hitting the real workspace.
+  const disabled = slackDeliveryDisabledReason();
+  if (disabled) {
+    warnSlackDeliveryDisabledOnce(disabled);
+    return { ok: true } as SlackApiResponse;
+  }
   // ALWAYS form-encode. Slack accepts x-www-form-urlencoded on every Web API
   // method, but honors application/json only on a subset — GET-style methods
   // (conversations.history/replies/members, users.conversations, users.info)
@@ -181,6 +194,11 @@ export function createSlackWebClient(botToken: string): SlackClient {
       }
     },
     async uploadFile({ channel, threadTs, filename, title, content }) {
+      const disabled = slackDeliveryDisabledReason();
+      if (disabled) {
+        warnSlackDeliveryDisabledOnce(disabled);
+        return;
+      }
       const ticket = await slackApi(botToken, "files.getUploadURLExternal", {
         filename,
         length: content.length

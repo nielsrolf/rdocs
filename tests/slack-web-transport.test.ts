@@ -23,8 +23,14 @@ test("slack web client sends form-encoded params that Slack honors on GET-style 
       headers: { "Content-Type": "application/json" }
     });
   }) as typeof fetch;
+  // Test runs disable outbound Slack delivery (lib/slack/delivery.ts). This test
+  // is ABOUT the transport and its fetch is stubbed above, so it opts back in.
+  const originalDisabled = process.env.SLACK_NOTIFICATIONS_DISABLED;
+  process.env.SLACK_NOTIFICATIONS_DISABLED = "0";
   t.after(() => {
     globalThis.fetch = originalFetch;
+    if (originalDisabled === undefined) delete process.env.SLACK_NOTIFICATIONS_DISABLED;
+    else process.env.SLACK_NOTIFICATIONS_DISABLED = originalDisabled;
   });
 
   const client = createSlackWebClient("xoxb-test");
