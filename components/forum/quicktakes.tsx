@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { MarkdownBody } from "@/components/document-workspace/markdown";
+import { MARKDOWN_SHORTCUT_HINT } from "@/lib/markdown-shortcuts";
 
 import { ForumComments, type ForumCommentView } from "./forum-comments";
 import { VoteWidget } from "./vote-widget";
@@ -60,12 +61,59 @@ function CopyLinkButton({ path, label }: { path: string; label?: string }) {
   );
 }
 
+// Quicktake body capped to QUICKTAKE_CLAMP_LINES lines in feeds, with a
+// "Continue reading" toggle that expands it in place (no navigation). The
+// button only appears when the body actually overflows, measured after layout
+// — markdown height is not knowable from the source text.
+const QUICKTAKE_CLAMP_LINES = 5;
+
+function QuicktakeBody({ body, clamp }: { body: string; clamp: boolean }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+
+  useEffect(() => {
+    if (!clamp || expanded) return;
+    const element = ref.current;
+    if (!element) return;
+    const check = () => setOverflowing(element.scrollHeight - element.clientHeight > 4);
+    check();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(check);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [body, clamp, expanded]);
+
+  const clamped = clamp && !expanded;
+  return (
+    <>
+      <div
+        ref={ref}
+        className={clamped ? "quicktake-body-clamp quicktake-body-clamped" : "quicktake-body-clamp"}
+        style={clamped ? { WebkitLineClamp: QUICKTAKE_CLAMP_LINES } : undefined}
+      >
+        <MarkdownBody body={body} className="quicktake-body markdown-body" />
+      </div>
+      {clamp && (overflowing || expanded) ? (
+        <button
+          type="button"
+          className="quicktake-continue-reading"
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded ? "Show less" : "Continue reading"}
+        </button>
+      ) : null}
+    </>
+  );
+}
+
 export function QuicktakeCard({
   take,
   canVote,
   canComment = false,
   currentUserName = "Guest",
   inlineComments = false,
+  clampBody = false,
   onDeleted
 }: {
   take: QuicktakeView;
@@ -78,6 +126,9 @@ export function QuicktakeCard({
   // Expand the comment thread in place (feeds) instead of linking to the
   // permalink page (which already renders the thread below the card).
   inlineComments?: boolean;
+  // Cap the body at 5 lines with a "Continue reading" toggle (feeds only; the
+  // permalink page always shows the whole take).
+  clampBody?: boolean;
   onDeleted?: (id: string) => void;
 }) {
   const [deleting, setDeleting] = useState(false);
@@ -127,7 +178,7 @@ export function QuicktakeCard({
             {take.isPublic ? "Public" : take.groupName ? `Group: ${take.groupName}` : "Private"}
           </span>
         </div>
-        <MarkdownBody body={take.body} className="quicktake-body markdown-body" />
+        <QuicktakeBody body={take.body} clamp={clampBody} />
         <div className="quicktake-actions">
           {inlineComments ? (
             <button type="button" className="forum-copy-link" onClick={toggleComments}>
@@ -181,7 +232,7 @@ export function QuicktakeCard({
 
 // Composer + per-user visibility setting ("in my settings I can specify a
 // group") kept together so the sharing state is visible right where you post.
-function QuicktakeComposer({
+export function QuicktakeComposer({
   groups,
   initialGroupId,
   onPosted
@@ -250,7 +301,7 @@ function QuicktakeComposer({
       <MentionTextarea
         value={body}
         onChange={setBody}
-        placeholder="Share a quick take… (markdown + LaTeX supported)"
+        placeholder="Share a quick take…"
         rows={3}
         disabled={busy}
         maxLength={4000}
@@ -276,7 +327,8 @@ function QuicktakeComposer({
         </button>
       </div>
       <p className="quicktake-visibility-hint">
-        This setting applies to all your quicktakes, past and future.
+        <span className="forum-editor-hint">{MARKDOWN_SHORTCUT_HINT}</span>
+        {" · "}This visibility setting applies to all your quicktakes, past and future.
       </p>
       {error ? <p className="forum-error">{error}</p> : null}
     </form>
@@ -321,6 +373,7 @@ export function QuicktakeFeed({
           canComment={isSignedIn}
           currentUserName={currentUserName}
           inlineComments
+          clampBody
           onDeleted={(id) => setTakes((current) => current.filter((t) => t.id !== id))}
         />
       ))}

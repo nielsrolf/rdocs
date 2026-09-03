@@ -1,32 +1,28 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { QuicktakeFeed } from "@/components/forum/quicktakes";
+import { ForumFeed, type ForumFeedItemView } from "@/components/forum/forum-feed";
 import { NewPostButton } from "@/components/forum/new-post-button";
-import { VoteWidget } from "@/components/forum/vote-widget";
+import { ForumPostNotificationBell } from "@/components/notification-bell";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { forumExcerpt, listForumDocumentsForUser } from "@/lib/forum-data";
-import { getQuicktakeVisibility, listQuicktakes } from "@/lib/quicktakes";
+import { forumExcerpt, listForumFeedForUser } from "@/lib/forum-data";
+import { getQuicktakeVisibility } from "@/lib/quicktakes";
 import { listForumPostCandidates } from "@/lib/forum-posting";
 
 export const metadata: Metadata = { title: "Forum — r-docs" };
 
 export const dynamic = "force-dynamic";
 
-function formatDate(value: Date) {
-  return value.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-}
-
-// Forum frontpage: every doc the viewer can access (same access gate as the
-// studio) that carries the "posted to forum" flag, plus all PUBLIC posts —
-// which makes the page work signed-out too — ranked by hotness.
+// Forum frontpage: ONE feed of full posts and quicktakes, ranked by the same
+// hotness function. Posts are every doc the viewer can access (same access
+// gate as the studio) carrying the "posted to forum" flag, plus all PUBLIC
+// posts — which makes the page work signed-out too.
 export default async function ForumPage() {
   const user = await getCurrentUser();
 
-  const [posts, quicktakes, visibility, groups, postCandidates] = await Promise.all([
-    listForumDocumentsForUser(user?.id ?? null),
-    listQuicktakes(user?.id ?? null, 5),
+  const [feed, visibility, groups, postCandidates] = await Promise.all([
+    listForumFeedForUser(user?.id ?? null),
     user ? getQuicktakeVisibility(user.id) : Promise.resolve(null),
     user
       ? db.group.findMany({
@@ -37,16 +33,43 @@ export default async function ForumPage() {
       : Promise.resolve([]),
     user ? listForumPostCandidates(user.id) : Promise.resolve([])
   ]);
+  const notificationRow = user
+    ? await db.user.findUnique({ where: { id: user.id }, select: { forumPostSlackNotifications: true } })
+    : null;
+  const postIds = feed.filter((item) => item.kind === "post").map((item) => item.id);
   const excerpts = new Map<string, string>();
-  if (posts.length > 0) {
+  if (postIds.length > 0) {
     const contents = await db.document.findMany({
-      where: { id: { in: posts.map((p) => p.id) } },
+      where: { id: { in: postIds } },
       select: { id: true, content: true }
     });
     for (const doc of contents) {
       excerpts.set(doc.id, forumExcerpt(doc.content));
     }
   }
+
+  const items: ForumFeedItemView[] = feed.map((item) =>
+    item.kind === "quicktake"
+      ? {
+          kind: "quicktake",
+          id: item.id,
+          take: { ...item.take, createdAt: item.take.createdAt.toISOString() }
+        }
+      : {
+          kind: "post",
+          id: item.id,
+          post: {
+            id: item.post.id,
+            title: item.post.title,
+            postedAt: item.post.postedAt.toISOString(),
+            ownerName: item.post.owner.name,
+            score: item.post.score,
+            ownVote: item.post.ownVote,
+            commentCount: item.post.commentCount,
+            excerpt: excerpts.get(item.id) ?? ""
+          }
+        }
+  );
 
   return (
     <main className="forum-shell">
@@ -55,13 +78,14 @@ export default async function ForumPage() {
           <h1 className="forum-title">Forum</h1>
           <p className="forum-subtitle">
             {user
-              ? "Posts you have access to, ranked by votes and recency."
-              : "Public posts, ranked by votes and recency. Sign in to see private posts, vote, and comment."}
+              ? "Posts and quick takes you have access to, ranked by votes and recency."
+              : "Public posts and quick takes, ranked by votes and recency. Sign in to see private posts, vote, and comment."}
           </p>
         </div>
         <nav className="forum-header-nav">
           {user ? (
             <>
+              <ForumPostNotificationBell initialEnabled={notificationRow?.forumPostSlackNotifications ?? true} />
               <NewPostButton documents={postCandidates} groups={groups} />
               <Link href="/dashboard" className="forum-btn-ghost">
                 Studio
@@ -74,59 +98,14 @@ export default async function ForumPage() {
           )}
         </nav>
       </header>
-      <section className="quicktake-section" aria-label="Quicktakes">
-        <div className="quicktake-section-header">
-          <h2 className="forum-section-title">Quicktakes</h2>
-          <Link href="/forum/quicktakes" className="forum-btn-ghost">
-            View all →
-          </Link>
-        </div>
-        <QuicktakeFeed
-          initialQuicktakes={quicktakes.map((take) => ({
-            ...take,
-            createdAt: take.createdAt.toISOString()
-          }))}
+      <section className="forum-post-list" aria-label="Feed">
+        <ForumFeed
+          initialItems={items}
           groups={groups}
           initialGroupId={visibility?.groupId ?? null}
           isSignedIn={Boolean(user)}
           currentUserName={user?.name ?? "Guest"}
         />
-      </section>
-      <section className="forum-post-list">
-        <h2 className="forum-section-title">Posts</h2>
-        {posts.map((post) => (
-          <article key={post.id} className="forum-post-card">
-            <VoteWidget
-              targetType="document"
-              targetId={post.id}
-              initialScore={post.score}
-              initialOwnVote={post.ownVote}
-              canVote={Boolean(user)}
-            />
-            <div className="forum-post-body">
-              <Link href={`/forum/${post.id}`} className="forum-post-title">
-                {post.title || "Untitled"}
-              </Link>
-              <div className="forum-post-meta">
-                <span>{post.owner.name}</span>
-                <span>·</span>
-                <span>{formatDate(post.postedAt)}</span>
-                <span>·</span>
-                <span>
-                  {post.commentCount} comment{post.commentCount === 1 ? "" : "s"}
-                </span>
-              </div>
-              {excerpts.get(post.id) ? (
-                <p className="forum-post-excerpt">{excerpts.get(post.id)}</p>
-              ) : null}
-            </div>
-          </article>
-        ))}
-        {posts.length === 0 ? (
-          <p className="forum-empty">
-            Nothing here yet. Post a document to the forum from its share menu in the studio.
-          </p>
-        ) : null}
       </section>
     </main>
   );

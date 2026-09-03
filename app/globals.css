@@ -6880,10 +6880,28 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   border-radius: 0 4px 4px 0;
 }
 
+/* Rendered markdown: block spacing comes from the <p>/<ul> margins below —
+   never `white-space: pre-wrap` here, it would also render markdown-it's
+   inter-tag newlines as blank lines (tests/forum-comment-layout.test.ts). */
 .forum-comment-body {
-  white-space: pre-wrap;
-  line-height: 1.55;
+  line-height: 1.5;
   font-size: 0.98rem;
+}
+
+.forum-comment-body p,
+.forum-comment-body ul,
+.forum-comment-body ol,
+.forum-comment-body blockquote,
+.forum-comment-body pre {
+  margin: 0.35rem 0;
+}
+
+.forum-comment-body li + li {
+  margin-top: 0.15rem;
+}
+
+.forum-comment-body li > p {
+  margin: 0;
 }
 
 .forum-comment-actions {
@@ -6904,26 +6922,41 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   gap: 0.5rem;
 }
 
-.forum-reply-form textarea {
+.forum-reply-form textarea,
+.quicktake-composer textarea {
   width: 100%;
-  border: 1px solid #d5d0c6;
-  border-radius: 6px;
-  padding: 0.55rem 0.7rem;
-  font-family: inherit;
+  border: 1px solid #ddd8ce;
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  font: inherit;
   font-size: 0.95rem;
+  line-height: 1.5;
   resize: vertical;
   box-sizing: border-box;
+  background: #fff;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
-.forum-reply-form textarea:focus {
+.forum-reply-form textarea:focus,
+.quicktake-composer textarea:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft, rgb(0 0 0 / 6%));
 }
 
 .forum-reply-actions {
   display: flex;
   gap: 0.5rem;
+  align-items: center;
   justify-content: flex-end;
+}
+
+/* Keyboard-shortcut hint under composers (lib/markdown-shortcuts.ts). */
+.forum-editor-hint {
+  margin-right: auto;
+  color: #b5b0a6;
+  font-size: 0.75rem;
+  font-family: Arial, Helvetica, sans-serif;
 }
 
 /* Quicktakes */
@@ -7004,6 +7037,31 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   color: #333;
 }
 
+/* Feed cards cap the body at 5 lines; "Continue reading" expands it in
+   place. The clamp lives on the wrapper so the rendered markdown inside is
+   untouched. */
+.quicktake-body-clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+  overflow: hidden;
+}
+
+.quicktake-continue-reading {
+  margin-top: 0.35rem;
+  padding: 0;
+  background: none;
+  border: none;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 0.82rem;
+  color: var(--accent-strong, #7a5c1e);
+  cursor: pointer;
+}
+
+.quicktake-continue-reading:hover {
+  text-decoration: underline;
+}
+
 .quicktake-actions {
   display: flex;
   gap: 0.9rem;
@@ -7024,16 +7082,6 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   border: 1px solid #e8e4dc;
   border-radius: 8px;
   margin-bottom: 0.5rem;
-}
-
-.quicktake-composer textarea {
-  width: 100%;
-  border: 1px solid #e8e4dc;
-  border-radius: 6px;
-  padding: 0.5rem 0.65rem;
-  font: inherit;
-  font-size: 0.95rem;
-  resize: vertical;
 }
 
 .forum-mention-input {
@@ -7108,6 +7156,7 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .quicktake-visibility-hint {
   margin: 0;
+  line-height: 1.5;
   color: #b5b0a6;
   font-size: 0.78rem;
   font-family: Arial, Helvetica, sans-serif;
@@ -7170,4 +7219,40 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 .quicktake-comments .forum-comments-heading {
   font-size: 0.95rem;
   margin-top: 0;
+}
+
+/* Comment-notification bell (documents, forum posts, quick takes). */
+.notification-bell {
+  position: relative;
+  display: inline-flex;
+}
+
+.notification-bell-menu {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  right: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  min-width: 13rem;
+  padding: 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface, #fff);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14);
+}
+
+.notification-bell-option {
+  padding: 0.4rem 0.55rem;
+  border: 0;
+  border-radius: 0.35rem;
+  background: transparent;
+  font-size: 0.82rem;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.notification-bell-option:hover {
+  background: var(--accent-soft, rgba(26, 115, 232, 0.08));
 }

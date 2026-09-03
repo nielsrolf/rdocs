@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import test from "node:test";
 
 import { db } from "../lib/db";
-import { listForumDocumentsForUser } from "../lib/forum-data";
+import { listForumDocumentsForUser, listForumFeedForUser } from "../lib/forum-data";
 import { canCommentOnDocument, resolveDocumentAccess } from "../lib/permissions";
 import {
   createQuicktake,
@@ -203,5 +203,50 @@ test("quicktake comment counts exclude resolved threads", async () => {
     assert.equal(summary?.commentCount, 1);
   } finally {
     await cleanup({ documentIds: [take.id], userIds: [owner.id] });
+  }
+});
+
+test("forum frontpage feed interleaves posts and quicktakes by hotness", async () => {
+  const owner = await makeUser("owner");
+  const now = new Date();
+  const hourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+  const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+  const oldPost = await db.document.create({
+    data: {
+      ownerId: owner.id,
+      title: "Old post",
+      content: "{}",
+      forumPostedAt: dayAgo,
+      forumPublic: true
+    }
+  });
+  const freshPost = await db.document.create({
+    data: {
+      ownerId: owner.id,
+      title: "Fresh post",
+      content: "{}",
+      forumPostedAt: now,
+      forumPublic: true
+    }
+  });
+  const take = await createQuicktake(owner.id, "A take posted an hour ago");
+  await db.document.update({ where: { id: take.id }, data: { forumPostedAt: hourAgo } });
+
+  try {
+    const feed = await listForumFeedForUser(owner.id, { now });
+    const ids = feed.map((item) => item.id);
+    assert.ok(ids.includes(take.id), "quicktakes appear in the same feed as posts");
+    assert.ok(ids.includes(freshPost.id) && ids.includes(oldPost.id));
+    assert.deepEqual(
+      [ids.indexOf(freshPost.id) < ids.indexOf(take.id), ids.indexOf(take.id) < ids.indexOf(oldPost.id)],
+      [true, true],
+      "ranked by hotness across both item kinds"
+    );
+    const takeItem = feed.find((item) => item.id === take.id);
+    assert.equal(takeItem?.kind, "quicktake");
+    assert.equal(feed.find((item) => item.id === freshPost.id)?.kind, "post");
+  } finally {
+    await cleanup({ documentIds: [oldPost.id, freshPost.id, take.id], userIds: [owner.id] });
   }
 });

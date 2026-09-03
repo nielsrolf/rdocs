@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { listAccessibleDocumentsForUser } from "@/lib/document-data";
 import { getDocumentPlainText, parseDocumentContent } from "@/lib/content";
+import { listQuicktakes, type QuicktakeSummary } from "@/lib/quicktakes";
 
 export type ForumDocumentSummary = {
   id: string;
@@ -102,6 +103,45 @@ export async function listForumDocumentsForUser(
   return summaries.sort(
     (a, b) => forumHotness(b.score, b.postedAt) - forumHotness(a.score, a.postedAt)
   );
+}
+
+// One entry of the unified forum frontpage feed: full posts and quicktakes
+// interleaved and ranked by the same hotness function, so the frontpage is a
+// single stream instead of two separate sections.
+export type ForumFeedItem =
+  | { kind: "post"; id: string; hotness: number; post: ForumDocumentSummary }
+  | { kind: "quicktake"; id: string; hotness: number; take: QuicktakeSummary };
+
+export async function listForumFeedForUser(
+  userId: string | null,
+  options: { quicktakeLimit?: number; now?: Date } = {}
+): Promise<ForumFeedItem[]> {
+  const now = options.now ?? new Date();
+  const [posts, takes] = await Promise.all([
+    listForumDocumentsForUser(userId),
+    listQuicktakes(userId, options.quicktakeLimit ?? 100)
+  ]);
+
+  const items: ForumFeedItem[] = [
+    ...posts.map(
+      (post): ForumFeedItem => ({
+        kind: "post",
+        id: post.id,
+        hotness: forumHotness(post.score, post.postedAt, now),
+        post
+      })
+    ),
+    ...takes.map(
+      (take): ForumFeedItem => ({
+        kind: "quicktake",
+        id: take.id,
+        hotness: forumHotness(take.score, take.createdAt, now),
+        take
+      })
+    )
+  ];
+
+  return items.sort((a, b) => b.hotness - a.hotness);
 }
 
 export type ForumComment = {
