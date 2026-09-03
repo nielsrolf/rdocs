@@ -4,6 +4,8 @@ import { notFound, redirect } from "next/navigation";
 
 import { ForumComments, type ForumCommentView } from "@/components/forum/forum-comments";
 import { QuicktakeCard } from "@/components/forum/quicktakes";
+import { CommentNotificationBell } from "@/components/notification-bell";
+import { resolveCommentBellState } from "@/lib/comment-notifications";
 import { getCurrentUser } from "@/lib/auth";
 import { listForumComments, type ForumComment } from "@/lib/forum-data";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
@@ -42,9 +44,10 @@ export default async function QuicktakePage({ params }: PageProps) {
     notFound();
   }
 
-  const [take, forumComments] = await Promise.all([
+  const [take, forumComments, bell] = await Promise.all([
     getQuicktake(id, user?.id ?? null),
-    listForumComments(id, user?.id ?? null)
+    listForumComments(id, user?.id ?? null),
+    resolveCommentBellState(user?.id ?? null, id)
   ]);
   if (!take) {
     notFound();
@@ -59,7 +62,9 @@ export default async function QuicktakePage({ params }: PageProps) {
           </Link>
         </nav>
         <nav className="forum-header-nav">
-          {user ? null : (
+          {user ? (
+            <CommentNotificationBell defaultScope={bell.defaultScope} documentId={id} initialScope={bell.scope} />
+          ) : (
             <Link href="/sign-in" className="forum-btn-ghost">
               Sign in
             </Link>

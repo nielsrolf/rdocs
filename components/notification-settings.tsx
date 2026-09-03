@@ -2,11 +2,22 @@
 
 import { useState } from "react";
 
+import type { CommentNotificationScope } from "@/lib/notification-preferences";
+
 type Settings = {
-  commentSlackNotifications: boolean;
+  commentNotificationScope: CommentNotificationScope;
   documentShareSlackNotifications: boolean;
   forumShareSlackNotifications: boolean;
+  forumPostSlackNotifications: boolean;
 };
+
+type ToggleKey = Exclude<keyof Settings, "commentNotificationScope">;
+
+const SCOPE_OPTIONS: Array<{ value: CommentNotificationScope; label: string }> = [
+  { value: "participating", label: "Only threads I'm involved in" },
+  { value: "all", label: "Every comment I can see" },
+  { value: "none", label: "None" }
+];
 
 export function NotificationSettings({
   initialSettings,
@@ -45,7 +56,7 @@ export function NotificationSettings({
     }
   }
 
-  async function updateSetting(key: keyof Settings, enabled: boolean) {
+  async function updateSetting(key: ToggleKey, enabled: boolean) {
     const previous = settings[key];
     setSettings((current) => ({ ...current, [key]: enabled }));
     if (!(await patch({ [key]: enabled }))) {
@@ -53,21 +64,29 @@ export function NotificationSettings({
     }
   }
 
-  const toggles: Array<{ key: keyof Settings; title: string; description: string }> = [
+  async function updateScope(scope: CommentNotificationScope) {
+    const previous = settings.commentNotificationScope;
+    setSettings((current) => ({ ...current, commentNotificationScope: scope }));
+    if (!(await patch({ commentNotificationScope: scope }))) {
+      setSettings((current) => ({ ...current, commentNotificationScope: previous }));
+    }
+  }
+
+  const toggles: Array<{ key: ToggleKey; title: string; description: string }> = [
+    {
+      key: "forumPostSlackNotifications",
+      title: "New forum posts and quick takes",
+      description: "Notify me when someone posts a new forum post or quick take I can read."
+    },
     {
       key: "forumShareSlackNotifications",
-      title: "Forum posts and quick takes",
-      description: "Notify me when a new forum post or quick take is shared with a group I belong to."
+      title: "Forum items shared with a group",
+      description: "Notify me when an existing document is shared to the forum with a group I belong to."
     },
     {
       key: "documentShareSlackNotifications",
       title: "Documents shared with me",
       description: "Notify me when someone gives me direct or group access to a document."
-    },
-    {
-      key: "commentSlackNotifications",
-      title: "Default for document comments",
-      description: "Choose whether the notification button starts on or off for documents without an override."
     }
   ];
 
@@ -75,6 +94,30 @@ export function NotificationSettings({
     <section className="credentials-section">
       <strong className="credentials-section-title">Slack direct messages</strong>
       <p className="muted-copy">Choose which activity should send you a Slack DM.</p>
+
+      <label className="quicktake-visibility-select">
+        <span>
+          <strong>Default for comments</strong>
+          <br />
+          <span className="muted-copy">
+            Applies to documents and quick takes without their own setting. &quot;Only threads I&apos;m involved
+            in&quot; means comments on my own items, threads I started or replied in, and mentions of me. The bell on a
+            document or quick take overrides this for that item.
+          </span>
+        </span>{" "}
+        <select
+          disabled={saving || !slackLinked}
+          onChange={(event) => void updateScope(event.target.value as CommentNotificationScope)}
+          value={settings.commentNotificationScope}
+        >
+          {SCOPE_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
       {toggles.map((toggle) => (
         <label className="quicktake-visibility-select" key={toggle.key}>
           <input

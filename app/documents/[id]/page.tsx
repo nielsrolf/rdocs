@@ -11,6 +11,7 @@ import {
   loadMentionCandidates
 } from "@/lib/mention-data";
 import { parseDocumentContent } from "@/lib/content";
+import { effectiveCommentScope } from "@/lib/notification-preferences";
 import { getCollaborationVersion } from "@/lib/collaboration";
 import { hasDocumentEnvKey } from "@/lib/document-env";
 import { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
@@ -196,9 +197,10 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
           defaultAgentModel: true,
           defaultAgentEffort: true,
           commentSlackNotifications: true,
+          commentNotificationScope: true,
           documentNotificationPreferences: {
             where: { documentId: id },
-            select: { commentSlackNotifications: true },
+            select: { commentScope: true, commentSlackNotifications: true },
             take: 1
           }
         }
@@ -264,9 +266,12 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
           user && !access.viaShareLink && !access.viaForumPublic
         )}
         initialDocumentNotificationsEnabled={
-          viewerDefaults?.documentNotificationPreferences[0]?.commentSlackNotifications ??
-          viewerDefaults?.commentSlackNotifications ??
-          false
+          viewerDefaults
+            ? effectiveCommentScope({
+                user: viewerDefaults,
+                preference: viewerDefaults.documentNotificationPreferences[0] ?? null
+              }) !== "none"
+            : false
         }
       />
       {access.permission !== "EDIT" &&

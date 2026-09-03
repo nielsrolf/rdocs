@@ -29,9 +29,19 @@ model User {
   quicktakeGroupId                String?
   // Slack DM notifications for new comments/replies on documents this user can
   // see (owner/member/group member). Only effective with a SlackAccountLink.
+  // LEGACY mirror of commentNotificationScope ("none" = false), kept so a
+  // draining blue/green sibling on the old code still behaves sanely. Read
+  // through lib/notification-preferences.ts, never directly.
   commentSlackNotifications       Boolean                          @default(true)
+  // Default reach of comment DMs: "all" (every comment on anything I can see),
+  // "participating" (threads I started/commented in, comments on my own docs
+  // and quick takes, and @-mentions) or "none".
+  commentNotificationScope        String                           @default("participating")
   documentShareSlackNotifications Boolean                          @default(false)
   forumShareSlackNotifications    Boolean                          @default(false)
+  // New forum posts and quick takes published to an audience this user is in.
+  // On by default; the bell on the forum/quicktakes pages toggles it.
+  forumPostSlackNotifications     Boolean                          @default(true)
   createdAt                       DateTime                         @default(now())
   updatedAt                       DateTime                         @updatedAt
   ownedDocuments                  Document[]                       @relation("DocumentOwner")
@@ -366,12 +376,15 @@ model SlackCommentNotification {
   @@index([documentId])
 }
 
-// Per-document override for comment DMs. Without a row, the user's global
-// commentSlackNotifications setting applies.
+// Per-document (or per-quicktake) override for comment DMs. Without a row, the
+// user's global commentNotificationScope applies. `commentScope` is the real
+// setting ("all" | "participating" | "none"); `commentSlackNotifications` is
+// its legacy boolean mirror, kept in sync for the blue/green drain window.
 model DocumentNotificationPreference {
   id                        String   @id @default(cuid())
   documentId                String
   userId                    String
+  commentScope              String?
   commentSlackNotifications Boolean
   createdAt                 DateTime @default(now())
   updatedAt                 DateTime @updatedAt

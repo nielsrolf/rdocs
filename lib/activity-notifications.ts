@@ -1,9 +1,18 @@
 import { db } from "@/lib/db";
-import { createSlackWebClient, type SlackClient } from "@/lib/slack/web";
+import { userDefaultCommentScope } from "@/lib/notification-preferences";
+import { createSlackWebClient, slackAuthTest, type SlackClient } from "@/lib/slack/web";
 
-export type ActivityNotificationDeps = { slack: SlackClient; appUrl: string };
+export type ActivityNotificationDeps = {
+  slack: SlackClient;
+  appUrl: string;
+  /** Workspace the bot is installed in; bounds the public-post broadcast. */
+  botTeamId?: string | null;
+};
 
 let cachedDeps: ActivityNotificationDeps | null = null;
+
+// Safety valve for the one fan-out that is not bounded by document access.
+const FORUM_BROADCAST_LIMIT = 500;
 
 function deps(): ActivityNotificationDeps | null {
   if (cachedDeps) return cachedDeps;
@@ -16,26 +25,58 @@ function deps(): ActivityNotificationDeps | null {
   return cachedDeps;
 }
 
+// The bot's own workspace id, resolved once. Only Slack links in that workspace
+// can actually receive a DM, so it is also the right filter for the broadcast.
+let cachedBotTeamId: string | null | undefined;
+
+async function resolveBotTeamId(): Promise<string | null> {
+  if (cachedBotTeamId !== undefined) return cachedBotTeamId;
+  const token = process.env.SLACK_BOT_TOKEN?.trim();
+  const auth = token ? await slackAuthTest(token).catch(() => null) : null;
+  cachedBotTeamId = auth?.teamId ?? null;
+  return cachedBotTeamId;
+}
+
 async function linkedRecipients(
   userIds: string[],
-  setting: "documentShareSlackNotifications" | "forumShareSlackNotifications" | "commentSlackNotifications"
+  setting:
+    | "documentShareSlackNotifications"
+    | "forumShareSlackNotifications"
+    | "forumPostSlackNotifications"
+    | "commentSlackNotifications"
 ) {
   if (userIds.length === 0) return [];
   const users = await db.user.findMany({
-    where: { id: { in: [...new Set(userIds)] }, [setting]: true },
+    where: { id: { in: [...new Set(userIds)] } },
     select: {
       id: true,
+      commentSlackNotifications: true,
+      commentNotificationScope: true,
+      documentShareSlackNotifications: true,
+      forumShareSlackNotifications: true,
+      forumPostSlackNotifications: true,
       slackLinks: { select: { slackUserId: true }, orderBy: { createdAt: "asc" }, take: 1 }
     }
   });
-  return users.flatMap((user) =>
-    user.slackLinks[0] ? [{ userId: user.id, slackUserId: user.slackLinks[0].slackUserId }] : []
-  );
+  return users.flatMap((user) => {
+    // Mentions ride the comment scope: anything but "none" wants them, because
+    // being @-mentioned is participation.
+    const enabled =
+      setting === "commentSlackNotifications"
+        ? userDefaultCommentScope(user) !== "none"
+        : user[setting];
+    if (!enabled) return [];
+    return user.slackLinks[0] ? [{ userId: user.id, slackUserId: user.slackLinks[0].slackUserId }] : [];
+  });
 }
 
 async function postActivity(input: {
   userIds: string[];
-  setting: "documentShareSlackNotifications" | "forumShareSlackNotifications" | "commentSlackNotifications";
+  setting:
+    | "documentShareSlackNotifications"
+    | "forumShareSlackNotifications"
+    | "forumPostSlackNotifications"
+    | "commentSlackNotifications";
   text: (appUrl: string) => string;
   deps?: ActivityNotificationDeps;
 }) {
@@ -124,6 +165,44 @@ export async function resolveStandingAccessUserIds(documentId: string, excludeUs
   return [...ids];
 }
 
+// Who should hear about a NEW forum item. A public item reaches everyone with a
+// Slack link in the bot's own workspace (that is who can read it and who the bot
+// can DM at all); a group-scoped one only reaches the people it was actually
+// shared with. The author never gets their own post.
+export async function resolveForumAudienceUserIds(
+  documentId: string,
+  options: { excludeUserIds?: string[]; slackTeamId?: string | null } = {}
+) {
+  const document = await db.document.findUnique({
+    where: { id: documentId },
+    select: { ownerId: true, forumPublic: true }
+  });
+  if (!document) return [];
+  const excluded = new Set([document.ownerId, ...(options.excludeUserIds ?? [])]);
+  if (!document.forumPublic) {
+    return (await resolveStandingAccessUserIds(documentId)).filter((id) => !excluded.has(id));
+  }
+  const users = await db.user.findMany({
+    where: { slackLinks: { some: options.slackTeamId ? { slackTeamId: options.slackTeamId } : {} } },
+    select: { id: true },
+    orderBy: { createdAt: "asc" },
+    take: FORUM_BROADCAST_LIMIT + 1
+  });
+  const ids = users.map((user) => user.id).filter((id) => !excluded.has(id));
+  if (ids.length > FORUM_BROADCAST_LIMIT) {
+    console.warn("[activity-notify] public forum broadcast truncated", {
+      documentId,
+      limit: FORUM_BROADCAST_LIMIT,
+      dropped: ids.length - FORUM_BROADCAST_LIMIT
+    });
+    return ids.slice(0, FORUM_BROADCAST_LIMIT);
+  }
+  return ids;
+}
+
+// A new forum post or quick take became visible to people. Gated on
+// `forumPostSlackNotifications` (on by default; the bell on the forum and
+// quick-takes pages turns it off).
 export async function notifyForumItemShared(input: {
   documentId: string;
   sharedByLabel: string;
@@ -132,17 +211,25 @@ export async function notifyForumItemShared(input: {
 }) {
   const document = await db.document.findUnique({
     where: { id: input.documentId },
-    select: { title: true, kind: true }
+    select: { title: true, kind: true, quicktakeBody: true }
   });
   if (!document) return { notified: 0 };
-  const userIds = input.recipientUserIds ?? (await resolveStandingAccessUserIds(input.documentId));
+  const userIds =
+    input.recipientUserIds ??
+    (await resolveForumAudienceUserIds(input.documentId, {
+      slackTeamId: input.deps ? input.deps.botTeamId ?? null : await resolveBotTeamId()
+    }));
   const quicktake = document.kind === "quicktake";
   const path = quicktake ? `/forum/quicktakes/${input.documentId}` : `/forum/${input.documentId}`;
+  const label = quicktake
+    ? (document.quicktakeBody ?? document.title ?? "Quick take").replace(/\s+/g, " ").trim().slice(0, 120) ||
+      "Quick take"
+    : document.title || "Forum post";
   return postActivity({
     userIds,
-    setting: "forumShareSlackNotifications",
+    setting: "forumPostSlackNotifications",
     deps: input.deps,
     text: (appUrl) =>
-      `📰 *${input.sharedByLabel}* shared ${quicktake ? "a quick take" : "a forum post"} with you: <${appUrl}${path}|${document.title || (quicktake ? "Quick take" : "Forum post")}>.`
+      `📰 *${input.sharedByLabel}* posted ${quicktake ? "a quick take" : "a forum post"}: <${appUrl}${path}|${label}>.`
   });
 }

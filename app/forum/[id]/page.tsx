@@ -5,6 +5,8 @@ import { notFound, redirect } from "next/navigation";
 import { DocumentWorkspace } from "@/components/document-workspace";
 import { ForumComments, type ForumCommentView } from "@/components/forum/forum-comments";
 import { VoteWidget } from "@/components/forum/vote-widget";
+import { CommentNotificationBell } from "@/components/notification-bell";
+import { resolveCommentBellState } from "@/lib/comment-notifications";
 import { getCurrentUser } from "@/lib/auth";
 import { getCollaborationVersion } from "@/lib/collaboration";
 import { parseDocumentContent } from "@/lib/content";
@@ -68,10 +70,10 @@ export default async function ForumDocumentPage({ params }: PageProps) {
     status: thread.status as ThreadStatusValue
   }));
 
-  const owner = await db.user.findUnique({
-    where: { id: access.document.ownerId },
-    select: { name: true }
-  });
+  const [owner, bell] = await Promise.all([
+    db.user.findUnique({ where: { id: access.document.ownerId }, select: { name: true } }),
+    resolveCommentBellState(user?.id ?? null, id)
+  ]);
 
   return (
     <main className="forum-shell forum-document-shell">
@@ -83,9 +85,12 @@ export default async function ForumDocumentPage({ params }: PageProps) {
         </nav>
         <nav className="forum-header-nav">
           {user ? (
-            <Link href={`/documents/${id}`} className="forum-btn-ghost">
-              Open in studio
-            </Link>
+            <>
+              <CommentNotificationBell defaultScope={bell.defaultScope} documentId={id} initialScope={bell.scope} />
+              <Link href={`/documents/${id}`} className="forum-btn-ghost">
+                Open in studio
+              </Link>
+            </>
           ) : (
             <Link href="/sign-in" className="forum-btn-ghost">
               Sign in

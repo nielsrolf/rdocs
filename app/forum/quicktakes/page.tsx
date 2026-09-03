@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { QuicktakeFeed, type QuicktakeView } from "@/components/forum/quicktakes";
+import { ForumPostNotificationBell } from "@/components/notification-bell";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { getQuicktakeVisibility, listQuicktakes, type QuicktakeSummary } from "@/lib/quicktakes";
@@ -30,6 +31,9 @@ export default async function QuicktakesPage() {
         })
       : Promise.resolve([])
   ]);
+  const notificationRow = user
+    ? await db.user.findUnique({ where: { id: user.id }, select: { forumPostSlackNotifications: true } })
+    : null;
 
   return (
     <main className="forum-shell">
@@ -43,6 +47,9 @@ export default async function QuicktakesPage() {
           </p>
         </div>
         <nav className="forum-header-nav">
+          {user ? (
+            <ForumPostNotificationBell initialEnabled={notificationRow?.forumPostSlackNotifications ?? true} />
+          ) : null}
           <Link href="/forum" className="forum-btn-ghost">
             ← Forum
           </Link>

@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   notifyCommentPosted,
+  resolveCommentBellState,
   resolveCommentNotificationRecipients
 } from "../lib/comment-notifications";
 import { db } from "../lib/db";
@@ -62,7 +63,10 @@ function makeFakeSlack() {
   return { client, posted, reactions };
 }
 
-async function makeUser(prefix: string, overrides?: { commentSlackNotifications?: boolean }) {
+async function makeUser(
+  prefix: string,
+  overrides?: { commentSlackNotifications?: boolean; commentNotificationScope?: string }
+) {
   return db.user.create({
     data: {
       email: `${prefix}-${crypto.randomUUID()}@example.com`,
@@ -79,12 +83,18 @@ function notifierDeps(client: SlackClient) {
 
 test("recipients: owner + members + group members with a Slack link, minus author/opt-outs/unlinked", async (t) => {
   const teamId = `T-${crypto.randomUUID()}`;
-  const owner = await makeUser("cn-owner");
-  const author = await makeUser("cn-author"); // excluded: wrote the comment
-  const member = await makeUser("cn-member");
-  const optedOut = await makeUser("cn-optout", { commentSlackNotifications: false });
-  const unlinked = await makeUser("cn-unlinked"); // no Slack link
-  const groupMember = await makeUser("cn-group-member");
+  // These subscribe to every comment; the default "participating" scope is
+  // covered by its own test below.
+  const all = { commentNotificationScope: "all" };
+  const owner = await makeUser("cn-owner", all);
+  const author = await makeUser("cn-author", all); // excluded: wrote the comment
+  const member = await makeUser("cn-member", all);
+  const optedOut = await makeUser("cn-optout", {
+    commentNotificationScope: "none",
+    commentSlackNotifications: false
+  });
+  const unlinked = await makeUser("cn-unlinked", all); // no Slack link
+  const groupMember = await makeUser("cn-group-member", all);
 
   const group = await db.group.create({
     data: {
@@ -190,6 +200,126 @@ test("recipients: an explicitly tagged forum user is notified without document m
     excludeUserIds: [owner.id]
   });
   assert.deepEqual(recipients.map((recipient) => recipient.userId), [tagged.id]);
+});
+
+test("recipients: the default scope notifies participants only, and a per-item override subscribes", async (t) => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const owner = await makeUser("cn-scope-owner"); // owns the doc → participant
+  const author = await makeUser("cn-scope-author"); // excluded: wrote the comment
+  const starter = await makeUser("cn-scope-starter"); // started the thread
+  const bystander = await makeUser("cn-scope-bystander"); // access, but not involved
+  const mentioned = await makeUser("cn-scope-mentioned"); // @-mentioned
+  const subscriber = await makeUser("cn-scope-subscriber"); // per-item "all"
+
+  const document = await db.document.create({
+    data: {
+      title: "scoped comments",
+      content: "{}",
+      ownerId: owner.id,
+      memberships: {
+        create: [author.id, starter.id, bystander.id, mentioned.id, subscriber.id].map((userId) => ({
+          userId,
+          permission: "EDIT" as const
+        }))
+      },
+      notificationPreferences: {
+        create: [{ userId: subscriber.id, commentScope: "all", commentSlackNotifications: true }]
+      }
+    }
+  });
+  const thread = await db.commentThread.create({
+    data: {
+      documentId: document.id,
+      createdById: starter.id,
+      anchorText: "scoped anchor",
+      comments: { create: { body: "root", authorId: author.id } }
+    }
+  });
+  const users = [owner, author, starter, bystander, mentioned, subscriber];
+  for (const [i, user] of users.entries()) {
+    await db.slackAccountLink.create({
+      data: { slackTeamId: teamId, slackUserId: `U-SC-${i}-${user.id.slice(-6)}`, userId: user.id }
+    });
+  }
+  t.after(async () => {
+    await db.document.delete({ where: { id: document.id } });
+    await db.user.deleteMany({ where: { id: { in: users.map((u) => u.id) } } });
+  });
+
+  const recipients = await resolveCommentNotificationRecipients({
+    documentId: document.id,
+    threadId: thread.id,
+    excludeUserIds: [author.id],
+    includeUserIds: [mentioned.id]
+  });
+  assert.deepEqual(
+    recipients.map((r) => r.userId).sort(),
+    [owner.id, starter.id, mentioned.id, subscriber.id].sort(),
+    "a bystander on the default scope is not notified; owner/starter/mentioned/subscriber are"
+  );
+});
+
+test("recipients: a per-item 'none' override mutes a thread the user takes part in", async (t) => {
+  const owner = await makeUser("cn-mute-owner");
+  const muted = await makeUser("cn-mute-user");
+  const document = await db.document.create({
+    data: {
+      title: "muted thread",
+      content: "{}",
+      ownerId: owner.id,
+      memberships: { create: { userId: muted.id, permission: "EDIT" } },
+      notificationPreferences: {
+        create: [{ userId: muted.id, commentScope: "none", commentSlackNotifications: false }]
+      }
+    }
+  });
+  const thread = await db.commentThread.create({
+    data: { documentId: document.id, createdById: muted.id, anchorText: "muted anchor" }
+  });
+  for (const [i, user] of [owner, muted].entries()) {
+    await db.slackAccountLink.create({
+      data: { slackTeamId: "T-mute", slackUserId: `U-MU-${i}-${user.id.slice(-6)}`, userId: user.id }
+    });
+  }
+  t.after(async () => {
+    await db.document.delete({ where: { id: document.id } });
+    await db.user.deleteMany({ where: { id: { in: [owner.id, muted.id] } } });
+  });
+
+  const recipients = await resolveCommentNotificationRecipients({
+    documentId: document.id,
+    threadId: thread.id,
+    excludeUserIds: [owner.id]
+  });
+  assert.deepEqual(recipients.map((r) => r.userId), []);
+});
+
+test("bell state: null until the user sets a per-item override", async (t) => {
+  const owner = await makeUser("cn-bell-owner");
+  const document = await db.document.create({
+    data: { title: "bell doc", content: "{}", ownerId: owner.id }
+  });
+  t.after(async () => {
+    await db.document.delete({ where: { id: document.id } });
+    await db.user.delete({ where: { id: owner.id } });
+  });
+
+  const before = await resolveCommentBellState(owner.id, document.id);
+  assert.deepEqual(before, { scope: null, defaultScope: "participating" });
+
+  await db.documentNotificationPreference.create({
+    data: {
+      documentId: document.id,
+      userId: owner.id,
+      commentScope: "all",
+      commentSlackNotifications: true
+    }
+  });
+  const after = await resolveCommentBellState(owner.id, document.id);
+  assert.deepEqual(after, { scope: "all", defaultScope: "participating" });
+
+  const anonymous = await resolveCommentBellState(null, document.id);
+  assert.equal(anonymous.scope, null);
 });
 
 test("notify: first comment posts a root DM + persists the row; the next threads under it", async (t) => {

@@ -153,9 +153,9 @@ export async function createQuicktake(userId: string, body: string): Promise<Qui
     select: { id: true, quicktakeBody: true, forumPostedAt: true }
   });
 
-  if (group) {
-    void notifyForumItemShared({ documentId: document.id, sharedByLabel: user.name });
-  }
+  // Both public and group-scoped takes announce themselves; the audience is
+  // resolved from the take's own visibility (lib/activity-notifications.ts).
+  void notifyForumItemShared({ documentId: document.id, sharedByLabel: user.name });
 
   return {
     id: document.id,

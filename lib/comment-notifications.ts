@@ -1,9 +1,12 @@
 // Slack DM notifications for document comments.
 //
 // Whenever a comment lands in a document thread (human reply, new thread, AI
-// reply, MCP tool), every user who can see the document — owner, direct
-// members, group members — and has BOTH a linked Slack account AND
-// User.commentSlackNotifications enabled gets a DM. One Slack thread per
+// reply, MCP tool), users who can see the document — owner, direct members,
+// group members — with a linked Slack account get a DM, filtered by their
+// comment-notification SCOPE (lib/notification-preferences.ts): "all" (every
+// comment), "participating" (the default: threads they started or commented in,
+// comments on their own documents/quick takes, and @-mentions) or "none". The
+// per-document bell writes a DocumentNotificationPreference override. One Slack thread per
 // (comment thread, recipient): the first notification is a root DM message
 // (persisted as a SlackCommentNotification row); later comments in the same
 // doc thread arrive as Slack thread replies under it. Replying in that Slack
@@ -15,6 +18,13 @@
 // `[comment-notify]` scope, never thrown into the comment write path.
 
 import { db } from "@/lib/db";
+import {
+  DEFAULT_COMMENT_NOTIFICATION_SCOPE,
+  effectiveCommentScope,
+  scopeWantsNotification,
+  userDefaultCommentScope,
+  type CommentNotificationScope
+} from "@/lib/notification-preferences";
 import { markdownToMrkdwn } from "@/lib/slack/mrkdwn";
 import { createSlackWebClient, slackAuthTest, type SlackClient } from "@/lib/slack/web";
 
@@ -48,13 +58,34 @@ export type CommentNotificationRecipient = {
   slackUserId: string;
 };
 
+// Who already took part in this thread: whoever started it plus every comment
+// author in it. Together with the document owner these are the "participants"
+// the default scope notifies.
+async function resolveThreadParticipantIds(threadId: string | undefined): Promise<Set<string>> {
+  const ids = new Set<string>();
+  if (!threadId) return ids;
+  const thread = await db.commentThread.findUnique({
+    where: { id: threadId },
+    select: { createdById: true, comments: { select: { authorId: true } } }
+  });
+  if (!thread) return ids;
+  if (thread.createdById) ids.add(thread.createdById);
+  for (const comment of thread.comments) {
+    if (comment.authorId) ids.add(comment.authorId);
+  }
+  return ids;
+}
+
 // Everyone with standing access to the document (owner + direct memberships +
 // members of groups the document is shared with), minus the author/excluded
-// users, filtered to users who opted in (default on) and have a Slack link.
+// users, filtered by each user's comment-notification scope (per-document
+// override first, then their global default) and a Slack link.
 // Share-link visitors and forum-public readers are deliberately not notified —
 // there is no bounded user set behind those.
 export async function resolveCommentNotificationRecipients(input: {
   documentId: string;
+  /** Thread the comment landed in — drives the "participating" scope. */
+  threadId?: string;
   excludeUserIds?: Array<string | null | undefined>;
   includeUserIds?: string[];
 }): Promise<CommentNotificationRecipient[]> {
@@ -78,17 +109,21 @@ export async function resolveCommentNotificationRecipients(input: {
     candidateIds.add(access.group.ownerId);
     for (const member of access.group.members) candidateIds.add(member.userId);
   }
-  for (const id of input.includeUserIds ?? []) candidateIds.add(id);
+  const mentionedIds = new Set(input.includeUserIds ?? []);
+  for (const id of mentionedIds) candidateIds.add(id);
   for (const id of excluded) candidateIds.delete(id);
   if (candidateIds.size === 0) return [];
+  const participantIds = await resolveThreadParticipantIds(input.threadId);
+  participantIds.add(document.ownerId);
   const users = await db.user.findMany({
     where: { id: { in: [...candidateIds] } },
     select: {
       id: true,
       commentSlackNotifications: true,
+      commentNotificationScope: true,
       documentNotificationPreferences: {
         where: { documentId: input.documentId },
-        select: { commentSlackNotifications: true },
+        select: { commentScope: true, commentSlackNotifications: true },
         take: 1
       },
       slackLinks: {
@@ -99,14 +134,41 @@ export async function resolveCommentNotificationRecipients(input: {
     }
   });
   return users.flatMap((user) => {
-    const enabled =
-      user.documentNotificationPreferences[0]?.commentSlackNotifications ??
-      user.commentSlackNotifications;
-    if (!enabled) return [];
+    const scope = effectiveCommentScope({
+      user,
+      preference: user.documentNotificationPreferences[0] ?? null
+    });
+    const wanted = scopeWantsNotification(scope, {
+      participant: participantIds.has(user.id),
+      mentioned: mentionedIds.has(user.id)
+    });
+    if (!wanted) return [];
     const link = user.slackLinks[0];
     if (!link) return [];
     return [{ userId: user.id, slackTeamId: link.slackTeamId, slackUserId: link.slackUserId }];
   });
+}
+
+// What the bell on one document / quick take should show: the per-item
+// override (null = follow the default) plus the user's current default.
+export async function resolveCommentBellState(
+  userId: string | null | undefined,
+  documentId: string
+): Promise<{ scope: CommentNotificationScope | null; defaultScope: CommentNotificationScope }> {
+  if (!userId) return { scope: null, defaultScope: DEFAULT_COMMENT_NOTIFICATION_SCOPE };
+  const [user, preference] = await Promise.all([
+    db.user.findUnique({
+      where: { id: userId },
+      select: { commentNotificationScope: true, commentSlackNotifications: true }
+    }),
+    db.documentNotificationPreference.findUnique({
+      where: { documentId_userId: { documentId, userId } },
+      select: { commentScope: true, commentSlackNotifications: true }
+    })
+  ]);
+  const defaultScope = userDefaultCommentScope(user ?? {});
+  if (!preference) return { scope: null, defaultScope };
+  return { scope: effectiveCommentScope({ user: user ?? {}, preference }), defaultScope };
 }
 
 function clip(text: string, max: number) {
@@ -142,6 +204,7 @@ export async function notifyCommentPosted(input: {
     if (!thread) return { notified: 0 };
     const recipients = await resolveCommentNotificationRecipients({
       documentId: input.documentId,
+      threadId: input.threadId,
       excludeUserIds: input.excludeUserIds,
       includeUserIds: input.includeUserIds
     });

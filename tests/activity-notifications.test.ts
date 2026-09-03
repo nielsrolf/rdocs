@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
 
-import { notifyDocumentShared, notifyForumItemShared } from "../lib/activity-notifications";
+import {
+  notifyDocumentShared,
+  notifyForumItemShared,
+  resolveForumAudienceUserIds
+} from "../lib/activity-notifications";
 import { db } from "../lib/db";
 import type { SlackClient } from "../lib/slack/web";
 
@@ -52,9 +56,9 @@ test("document-share DMs respect the dedicated opt-in", async (t) => {
   assert.match(posted[0].text, /Shared research/);
 });
 
-test("forum notifications go only to standing-access users who opted in", async (t) => {
-  const owner = await user("forum-owner", { forumShareSlackNotifications: true });
-  const member = await user("forum-member", { forumShareSlackNotifications: true });
+test("forum notifications for a private post go only to standing-access users", async (t) => {
+  const owner = await user("forum-owner");
+  const member = await user("forum-member");
   const document = await db.document.create({
     data: {
       title: "Forum research",
@@ -76,4 +80,45 @@ test("forum notifications go only to standing-access users who opted in", async 
   });
   assert.equal(result.notified, 1);
   assert.equal(posted[0].channel.startsWith("U-"), true);
+});
+
+test("a new public quick take DMs Slack-linked users in the bot workspace, minus the author and opt-outs", async (t) => {
+  const teamId = `T-QT-${crypto.randomUUID()}`;
+  const author = await user("qt-author");
+  const reader = await user("qt-reader");
+  const optedOut = await user("qt-optout", { forumPostSlackNotifications: false });
+  for (const u of [author, reader, optedOut]) {
+    await db.slackAccountLink.create({
+      data: { slackTeamId: teamId, slackUserId: `U-QT-${u.id.slice(-8)}`, userId: u.id }
+    });
+  }
+  const take = await db.document.create({
+    data: {
+      title: "",
+      content: "{}",
+      kind: "quicktake",
+      quicktakeBody: "a short take about scaling laws",
+      ownerId: author.id,
+      forumPostedAt: new Date(),
+      forumPublic: true
+    }
+  });
+  t.after(async () => {
+    await db.document.delete({ where: { id: take.id } });
+    await db.user.deleteMany({ where: { id: { in: [author.id, reader.id, optedOut.id] } } });
+  });
+
+  const audience = await resolveForumAudienceUserIds(take.id, { slackTeamId: teamId });
+  assert.deepEqual(audience.sort(), [reader.id, optedOut.id].sort(), "the author is never in their own audience");
+
+  const { slack, posted } = fakeSlack();
+  const result = await notifyForumItemShared({
+    documentId: take.id,
+    sharedByLabel: author.name,
+    deps: { slack, appUrl: "https://docs.example", botTeamId: teamId }
+  });
+  assert.equal(result.notified, 1, "only the reader who left the default on");
+  assert.match(posted[0].text, /posted a quick take/);
+  assert.match(posted[0].text, /a short take about scaling laws/);
+  assert.match(posted[0].text, /\/forum\/quicktakes\//);
 });
