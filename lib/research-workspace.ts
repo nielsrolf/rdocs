@@ -427,10 +427,16 @@ export async function ensureLinkedRepositoryWorktree(
       // also receives its freshest non-conflicting content.
       // Do not use `git worktree add`: its .git file contains an absolute
       // pointer into the base checkout, which is deliberately outside the
-      // container mount. A no-local clone copies the objects and metadata into
-      // this one mounted directory, keeping git status/diff/commit functional
-      // without exposing the base clone or sibling runs.
-      await runCommand("git", ["clone", "--no-local", linked.workspace, worktree], {
+      // container mount. A plain local clone gives this directory its own real
+      // .git with a complete object store, so git status/diff/commit work when
+      // it is mounted alone. Objects are HARDLINKED from the base rather than
+      // copied (`--no-local` used to force a byte copy: ~8 s vs ~1 s on a
+      // 400 MB repo). Hardlinks are inode-level, so they survive the bind
+      // mount, and git objects are immutable (written-then-renamed), so the
+      // base and its runs can never corrupt each other through them. Never
+      // add `--shared`/`--reference`: an alternates pointer outside the mount
+      // is exactly the failure the gitfile has.
+      await runCommand("git", ["clone", linked.workspace, worktree], {
         cwd: path.dirname(worktree),
         timeoutMs: 300_000
       });

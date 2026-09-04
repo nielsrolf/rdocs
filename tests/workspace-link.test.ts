@@ -112,6 +112,12 @@ test("managed run checkout follows the fetched remote default branch and has sel
       "the isolated checkout must remain a git repository when mounted without the base clone"
     );
     assert.equal(git(refreshed.worktree, "status", "--short"), "");
+    // The clone borrows the base's object FILES via hardlinks (cheap), but must
+    // never borrow its object STORE via alternates — a `.git/objects/info/alternates`
+    // pointing outside the mounted directory breaks every git command in the
+    // container, and so would a gitfile `.git`.
+    await assert.rejects(fs.stat(path.join(refreshed.worktree, ".git", "objects", "info", "alternates")));
+    assert.equal(git(refreshed.worktree, "fsck", "--connectivity-only"), "");
     await removeRunWorktree(refreshed);
   } finally {
     await fs.rm(fixture, { recursive: true, force: true });
