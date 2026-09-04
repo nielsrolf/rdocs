@@ -1,40 +1,24 @@
 import { db } from "@/lib/db";
-import { userDefaultCommentScope } from "@/lib/notification-preferences";
-import { createSlackWebClient, slackAuthTest, type SlackClient } from "@/lib/slack/web";
+import { pickNotificationSlackLink, userDefaultCommentScope } from "@/lib/notification-preferences";
+import type { SlackClient } from "@/lib/slack/web";
+import { hasAnySlackInstallation, installedSlackTeamIds, slackTeamContext } from "@/lib/slack/installations";
 
 export type ActivityNotificationDeps = {
   slack: SlackClient;
   appUrl: string;
-  /** Workspace the bot is installed in; bounds the public-post broadcast. */
+  /** Workspace this client posts into; bounds the public-post broadcast. */
   botTeamId?: string | null;
 };
-
-let cachedDeps: ActivityNotificationDeps | null = null;
 
 // Safety valve for the one fan-out that is not bounded by document access.
 const FORUM_BROADCAST_LIMIT = 500;
 
-function deps(): ActivityNotificationDeps | null {
-  if (cachedDeps) return cachedDeps;
-  const token = process.env.SLACK_BOT_TOKEN?.trim();
-  if (!token) return null;
-  cachedDeps = {
-    slack: createSlackWebClient(token),
-    appUrl: process.env.APP_URL?.trim() || "http://localhost:14141"
-  };
-  return cachedDeps;
-}
-
-// The bot's own workspace id, resolved once. Only Slack links in that workspace
-// can actually receive a DM, so it is also the right filter for the broadcast.
-let cachedBotTeamId: string | null | undefined;
-
-async function resolveBotTeamId(): Promise<string | null> {
-  if (cachedBotTeamId !== undefined) return cachedBotTeamId;
-  const token = process.env.SLACK_BOT_TOKEN?.trim();
-  const auth = token ? await slackAuthTest(token).catch(() => null) : null;
-  cachedBotTeamId = auth?.teamId ?? null;
-  return cachedBotTeamId;
+// Bot client for one recipient's workspace (multi-workspace installs). Tests
+// inject `deps` instead, which then serves every recipient.
+async function depsForTeam(teamId: string): Promise<ActivityNotificationDeps | null> {
+  const context = await slackTeamContext(teamId);
+  if (!context) return null;
+  return { slack: context.slack, appUrl: context.appUrl, botTeamId: teamId };
 }
 
 async function linkedRecipients(
@@ -55,7 +39,8 @@ async function linkedRecipients(
       documentShareSlackNotifications: true,
       forumShareSlackNotifications: true,
       forumPostSlackNotifications: true,
-      slackLinks: { select: { slackUserId: true }, orderBy: { createdAt: "asc" }, take: 1 }
+      notificationSlackTeamId: true,
+      slackLinks: { select: { slackTeamId: true, slackUserId: true }, orderBy: { createdAt: "asc" } }
     }
   });
   return users.flatMap((user) => {
@@ -66,7 +51,8 @@ async function linkedRecipients(
         ? userDefaultCommentScope(user) !== "none"
         : user[setting];
     if (!enabled) return [];
-    return user.slackLinks[0] ? [{ userId: user.id, slackUserId: user.slackLinks[0].slackUserId }] : [];
+    const link = pickNotificationSlackLink(user.slackLinks, user.notificationSlackTeamId);
+    return link ? [{ userId: user.id, slackTeamId: link.slackTeamId, slackUserId: link.slackUserId }] : [];
   });
 }
 
@@ -81,12 +67,18 @@ async function postActivity(input: {
   deps?: ActivityNotificationDeps;
 }) {
   try {
-    const runtime = input.deps ?? deps();
-    if (!runtime) return { notified: 0 };
+    if (!input.deps && !(await hasAnySlackInstallation())) return { notified: 0 };
     const recipients = await linkedRecipients(input.userIds, input.setting);
     let notified = 0;
+    const depsByTeam = new Map<string, ActivityNotificationDeps | null>();
     for (const recipient of recipients) {
       try {
+        let runtime = input.deps ?? depsByTeam.get(recipient.slackTeamId);
+        if (runtime === undefined) {
+          runtime = await depsForTeam(recipient.slackTeamId);
+          depsByTeam.set(recipient.slackTeamId, runtime);
+        }
+        if (!runtime) continue;
         await runtime.slack.postMessage({ channel: recipient.slackUserId, text: input.text(runtime.appUrl) });
         notified++;
       } catch (error) {
@@ -171,7 +163,7 @@ export async function resolveStandingAccessUserIds(documentId: string, excludeUs
 // shared with. The author never gets their own post.
 export async function resolveForumAudienceUserIds(
   documentId: string,
-  options: { excludeUserIds?: string[]; slackTeamId?: string | null } = {}
+  options: { excludeUserIds?: string[]; slackTeamIds?: string[] | null } = {}
 ) {
   const document = await db.document.findUnique({
     where: { id: documentId },
@@ -183,7 +175,11 @@ export async function resolveForumAudienceUserIds(
     return (await resolveStandingAccessUserIds(documentId)).filter((id) => !excluded.has(id));
   }
   const users = await db.user.findMany({
-    where: { slackLinks: { some: options.slackTeamId ? { slackTeamId: options.slackTeamId } : {} } },
+    where: {
+      slackLinks: {
+        some: options.slackTeamIds && options.slackTeamIds.length > 0 ? { slackTeamId: { in: options.slackTeamIds } } : {}
+      }
+    },
     select: { id: true },
     orderBy: { createdAt: "asc" },
     take: FORUM_BROADCAST_LIMIT + 1
@@ -217,7 +213,7 @@ export async function notifyForumItemShared(input: {
   const userIds =
     input.recipientUserIds ??
     (await resolveForumAudienceUserIds(input.documentId, {
-      slackTeamId: input.deps ? input.deps.botTeamId ?? null : await resolveBotTeamId()
+      slackTeamIds: input.deps ? (input.deps.botTeamId ? [input.deps.botTeamId] : null) : await installedSlackTeamIds()
     }));
   const quicktake = document.kind === "quicktake";
   const path = quicktake ? `/forum/quicktakes/${input.documentId}` : `/forum/${input.documentId}`;

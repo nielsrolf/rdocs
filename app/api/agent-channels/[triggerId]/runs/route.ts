@@ -1,11 +1,9 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { RUN_STARTED_CLAUDE } from "@/agent-core/lifecycle-messages";
-import { resolveAgentConfigForUser } from "@/lib/agent-defaults";
 import { resolveAgentApiChannel, resolveChannelPreviousRunId } from "@/lib/agent-api-channels";
-import { runAgentConversationInBackground } from "@/lib/agent-conversation";
-import { recordAiRunEvent, serializeAiRun } from "@/lib/ai-runs";
+import { startAgentChannelRun } from "@/lib/agent-channel-runs";
+import { serializeAiRun } from "@/lib/ai-runs";
 import { db } from "@/lib/db";
 import { buildRunPermalink } from "@/lib/request-origin";
 
@@ -30,46 +28,15 @@ export async function POST(request: Request, { params }: { params: Promise<{ tri
   if (previousRunId === undefined) {
     return NextResponse.json({ error: "previousRunId does not belong to this channel." }, { status: 400 });
   }
-  const aiRun = await db.aiRun.create({
-    data: {
-      documentId: channel.documentId,
-      triggerType: "API",
-      triggerId: channel.id,
-      createdById: channel.createdById,
-      parentRunId: previousRunId,
-      instruction: message,
-      progress: RUN_STARTED_CLAUDE,
-      suggestOnly: true
-    }
-  });
-  await recordAiRunEvent({ aiRunId: aiRun.id, role: "user", message });
-
-  void runAgentConversationInBackground({
-    documentId: channel.documentId,
-    aiRunId: aiRun.id,
-    message,
-    previousRunId,
-    documentTitle: channel.document.title,
-    documentContent: channel.document.content,
-    createdById: channel.createdById,
-    agentConfig: await resolveAgentConfigForUser(channel.document, channel.createdById),
-    agentAccessMode: "workspace",
-    runnerMode: channel.document.runnerMode
-  }).catch((error) => {
-    console.error("[agent-api] background run threw", {
-      triggerId,
-      aiRunId: aiRun.id,
-      error: error instanceof Error ? error.message : error
-    });
-  });
+  const aiRunId = await startAgentChannelRun({ channel, message, previousRunId });
 
   const created = await db.aiRun.findUnique({
-    where: { id: aiRun.id },
+    where: { id: aiRunId },
     include: { events: { orderBy: { createdAt: "asc" } } }
   });
   return NextResponse.json({
-    aiRun: created ? serializeAiRun(created) : { id: aiRun.id, status: aiRun.status },
-    runUrl: buildRunPermalink(channel.documentId, aiRun.id),
-    statusUrl: `/api/agent-channels/${triggerId}/runs/${aiRun.id}`
+    aiRun: created ? serializeAiRun(created) : { id: aiRunId, status: "PENDING" },
+    runUrl: buildRunPermalink(channel.documentId, aiRunId),
+    statusUrl: `/api/agent-channels/${triggerId}/runs/${aiRunId}`
   }, { status: 202 });
 }

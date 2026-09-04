@@ -9,9 +9,13 @@ type Settings = {
   documentShareSlackNotifications: boolean;
   forumShareSlackNotifications: boolean;
   forumPostSlackNotifications: boolean;
+  // Which linked Slack workspace receives the DMs; null = the oldest link.
+  notificationSlackTeamId: string | null;
 };
 
-type ToggleKey = Exclude<keyof Settings, "commentNotificationScope">;
+type LinkedWorkspace = { teamId: string; teamName: string | null };
+
+type ToggleKey = Exclude<keyof Settings, "commentNotificationScope" | "notificationSlackTeamId">;
 
 const SCOPE_OPTIONS: Array<{ value: CommentNotificationScope; label: string }> = [
   { value: "participating", label: "Only threads I'm involved in" },
@@ -21,9 +25,12 @@ const SCOPE_OPTIONS: Array<{ value: CommentNotificationScope; label: string }> =
 
 export function NotificationSettings({
   initialSettings,
+  linkedWorkspaces = [],
   slackLinked
 }: {
   initialSettings: Settings;
+  /** Oldest link first — the first entry is the default DM target. */
+  linkedWorkspaces?: LinkedWorkspace[];
   slackLinked: boolean;
 }) {
   const [settings, setSettings] = useState(initialSettings);
@@ -71,6 +78,19 @@ export function NotificationSettings({
       setSettings((current) => ({ ...current, commentNotificationScope: previous }));
     }
   }
+
+  async function updateWorkspace(teamId: string) {
+    const previous = settings.notificationSlackTeamId;
+    setSettings((current) => ({ ...current, notificationSlackTeamId: teamId }));
+    if (!(await patch({ notificationSlackTeamId: teamId }))) {
+      setSettings((current) => ({ ...current, notificationSlackTeamId: previous }));
+    }
+  }
+
+  const effectiveWorkspaceTeamId =
+    linkedWorkspaces.find((workspace) => workspace.teamId === settings.notificationSlackTeamId)?.teamId ??
+    linkedWorkspaces[0]?.teamId ??
+    null;
 
   const toggles: Array<{ key: ToggleKey; title: string; description: string }> = [
     {
@@ -129,6 +149,31 @@ export function NotificationSettings({
           <span><strong>{toggle.title}</strong><br /><span className="muted-copy">{toggle.description}</span></span>
         </label>
       ))}
+
+      {linkedWorkspaces.length > 1 ? (
+        <fieldset className="quicktake-visibility-select">
+          <legend>
+            <strong>Send my DMs in</strong>
+            <br />
+            <span className="muted-copy">
+              Your Slack account is linked in several workspaces where claudex is installed. Notifications go to
+              exactly one of them.
+            </span>
+          </legend>
+          {linkedWorkspaces.map((workspace) => (
+            <label key={workspace.teamId}>
+              <input
+                checked={effectiveWorkspaceTeamId === workspace.teamId}
+                disabled={saving}
+                name="notification-slack-workspace"
+                onChange={() => void updateWorkspace(workspace.teamId)}
+                type="radio"
+              />{" "}
+              {workspace.teamName ?? workspace.teamId}
+            </label>
+          ))}
+        </fieldset>
+      ) : null}
 
       {!slackLinked ? <p className="muted-copy">Connect your Slack account first to enable notifications.</p> : null}
       {saving ? <p className="muted-copy">Saving…</p> : null}

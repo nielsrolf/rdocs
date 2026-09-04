@@ -317,7 +317,7 @@ test("a run already being adopted in this process is not adopted twice", async (
 test("an adopted Slack run's reply is delivered from the persisted trigger id", async () => {
   const { user, document } = await makeDoc("slack");
   const container = await startFakeContainer();
-  const delivered: Array<{ channel: string; threadTs: string; text: string }> = [];
+  const delivered: Array<{ channel: string; threadTs: string; text: string; teamId: string | null }> = [];
   try {
     const run = await makeOrphan({
       documentId: document.id,
@@ -336,7 +336,7 @@ test("an adopted Slack run's reply is delivered from the persisted trigger id", 
     await result.settled;
 
     assert.deepEqual(delivered, [
-      { channel: "C123", threadTs: "1700000000.000100", text: "slack answer" }
+      { channel: "C123", threadTs: "1700000000.000100", text: "slack answer", teamId: null }
     ]);
     const fresh = await db.aiRun.findUnique({ where: { id: run.id }, select: { status: true } });
     assert.equal(fresh?.status, "SUCCEEDED");

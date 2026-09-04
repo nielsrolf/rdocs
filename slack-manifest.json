@@ -1,0 +1,47 @@
+{
+  "_comment": "Slack app manifest for claudex (r-docs Slack bot). Import at api.slack.com/apps → Create New App → From a manifest. Replace APP_URL with the deployment's public origin. Scopes must match SLACK_BOT_SCOPES in lib/slack/installations.ts. Then: enable Socket Mode and create an app-level token (connections:write) → SLACK_APP_TOKEN; install to the home workspace → SLACK_BOT_TOKEN; Basic Information → Client ID/Secret → SLACK_CLIENT_ID/SLACK_CLIENT_SECRET (needed only for installing into OTHER workspaces via /api/slack/install; keep 'Public Distribution' unactivated / not submitted to the App Directory — the OAuth link alone lets an invited workspace admin install it).",
+  "display_information": {
+    "name": "claudex",
+    "description": "AI research agent for r-docs documents",
+    "background_color": "#1f1f1f"
+  },
+  "features": {
+    "app_home": {
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "bot_user": {
+      "display_name": "claudex",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "redirect_urls": ["APP_URL/api/slack/oauth/callback"],
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "files:read",
+        "files:write",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "im:read",
+        "im:write",
+        "reactions:write",
+        "users:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": ["app_mention", "message.channels", "message.groups", "message.im"]
+    },
+    "interactivity": { "is_enabled": false },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}

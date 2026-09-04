@@ -58,6 +58,8 @@ export type SlackReplyDelivery = (args: {
   channel: string;
   threadTs: string;
   text: string;
+  /** Slack workspace of the run's channel document (multi-workspace installs). */
+  teamId: string | null;
 }) => Promise<void>;
 
 export type SessionAdoptionDeps = {
@@ -395,16 +397,23 @@ async function deliverSlackReply(run: AdoptedRun, text: string, deps?: SessionAd
   const target = slackTargetFromTriggerId(run.triggerId);
   if (!target) return;
   const deliver = deps?.deliverSlackReply ?? defaultSlackDelivery;
-  await deliver({ channel: target.channel, threadTs: target.threadTs, text });
+  const document = await db.document.findUnique({
+    where: { id: run.documentId },
+    select: { slackTeamId: true }
+  });
+  await deliver({ channel: target.channel, threadTs: target.threadTs, text, teamId: document?.slackTeamId ?? null });
 }
 
-const defaultSlackDelivery: SlackReplyDelivery = async ({ channel, threadTs, text }) => {
-  const botToken = process.env.SLACK_BOT_TOKEN?.trim();
-  if (!botToken) {
-    throw new Error("SLACK_BOT_TOKEN is not configured");
+const defaultSlackDelivery: SlackReplyDelivery = async ({ channel, threadTs, text, teamId }) => {
+  const { slackTeamContext, envSlackInstallation } = await import("@/lib/slack/installations");
+  // Runs predating multi-workspace support may lack a team on the document;
+  // fall back to the .env workspace for them.
+  const context = teamId ? await slackTeamContext(teamId) : null;
+  const fallback = context ?? (await envSlackInstallation().then((env) => (env ? slackTeamContext(env.teamId) : null)));
+  if (!fallback) {
+    throw new Error(`Slack is not configured for workspace ${teamId ?? "(unknown)"}`);
   }
-  const { createSlackWebClient } = await import("@/lib/slack/web");
-  await createSlackWebClient(botToken).postMessage({
+  await fallback.slack.postMessage({
     channel,
     threadTs,
     text: markdownToMrkdwn(text)

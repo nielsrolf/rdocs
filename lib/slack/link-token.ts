@@ -88,3 +88,31 @@ export async function verifySlackLinkToken(token: string): Promise<SlackLinkClai
     return null;
   }
 }
+
+// OAuth `state` for installing claudex into another Slack workspace
+// (app/api/slack/install → Slack → app/api/slack/oauth/callback). Binds the
+// callback to the signed-in rdocs user who started the install, so a callback
+// URL cannot be replayed by someone else and the installation records who did it.
+const INSTALL_PURPOSE = "slack-app-install";
+
+export type SlackInstallStateClaims = {
+  userId: string;
+};
+
+export async function createSlackInstallStateToken(claims: SlackInstallStateClaims) {
+  return new SignJWT({ purpose: INSTALL_PURPOSE, ...claims })
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuedAt()
+    .setExpirationTime("15m")
+    .sign(getSecret());
+}
+
+export async function verifySlackInstallStateToken(token: string): Promise<SlackInstallStateClaims | null> {
+  try {
+    const { payload } = await jwtVerify(token, getSecret());
+    if (payload.purpose !== INSTALL_PURPOSE || typeof payload.userId !== "string") return null;
+    return { userId: payload.userId };
+  } catch {
+    return null;
+  }
+}

@@ -1,5 +1,6 @@
 // Socket Mode transport for the Slack bot. Started once at boot from
-// instrumentation.ts when SLACK_BOT_TOKEN + SLACK_APP_TOKEN are configured.
+// instrumentation.ts when SLACK_APP_TOKEN plus at least one workspace
+// (SLACK_BOT_TOKEN or a stored SlackInstallation) are configured.
 // All actual event logic lives in lib/slack/events.ts; this file only wires
 // the websocket, acks envelopes fast, and supplies real dependencies.
 
@@ -9,7 +10,13 @@ import {
   handleSlackThreadReply,
   type SlackIncomingMessage
 } from "@/lib/slack/events";
-import { createSlackWebClient, slackAuthTest } from "@/lib/slack/web";
+import {
+  envSlackInstallation,
+  hasAnySlackInstallation,
+  listSlackInstallations,
+  slackAppUrl,
+  slackTeamContext
+} from "@/lib/slack/installations";
 
 let started = false;
 let activeSocket: { disconnect: () => Promise<void> } | null = null;
@@ -35,29 +42,43 @@ export async function stopSlackSocketService() {
 
 export async function startSlackSocketService() {
   if (started) return;
-  const botToken = process.env.SLACK_BOT_TOKEN?.trim();
   const appToken = process.env.SLACK_APP_TOKEN?.trim();
-  if (!botToken || !appToken) {
+  if (!appToken) {
     return;
   }
-  const appUrl = process.env.APP_URL?.trim() || "http://localhost:14141";
+  // Multi-workspace: the socket is per APP (app token); the bot token is per
+  // team and resolved per event (lib/slack/installations.ts). The .env
+  // workspace is optional once OAuth installations exist.
+  const envInstallation = await envSlackInstallation();
+  if (!envInstallation && !(await hasAnySlackInstallation())) {
+    return;
+  }
+  if (process.env.SLACK_BOT_TOKEN?.trim() && !envInstallation) {
+    console.error("[slack] auth.test for SLACK_BOT_TOKEN returned no bot user/team id; Slack service not started.");
+    return;
+  }
+  const appUrl = slackAppUrl();
   started = true;
 
   const { SocketModeClient } = await import("@slack/socket-mode");
-  const slack = createSlackWebClient(botToken);
-  const auth = await slackAuthTest(botToken);
-  if (!auth.userId) {
-    console.error("[slack] auth.test returned no bot user id; Slack service not started.");
-    started = false;
-    return;
-  }
-  const botUserId = auth.userId;
+
+  // Per-team {slack, botUserId} for a Socket Mode envelope. null = a workspace
+  // the app is (no longer) installed in — Slack keeps sending events for a short
+  // while after an uninstall.
+  const teamDeps = async (teamId: string) => {
+    const context = await slackTeamContext(teamId);
+    if (!context) {
+      console.warn("[slack] event from a workspace without an installation; ignored", { teamId });
+      return null;
+    }
+    return { slack: context.slack, appUrl, botUserId: context.botUserId };
+  };
 
   const socket = new SocketModeClient({ appToken });
 
   const toIncoming = (event: Record<string, any>, body: Record<string, any>): SlackIncomingMessage => ({
     eventId: typeof body?.event_id === "string" ? body.event_id : `${event.channel}:${event.ts}`,
-    teamId: body?.team_id ?? event.team ?? auth.teamId ?? "unknown",
+    teamId: body?.team_id ?? event.team ?? envInstallation?.teamId ?? "unknown",
     channel: event.channel,
     user: event.user,
     botId: event.bot_id,
@@ -82,7 +103,9 @@ export async function startSlackSocketService() {
     if (typeof event.channel === "string" && event.channel.startsWith("D")) return;
     try {
       const mention = toIncoming(event, body);
-      const result = await handleSlackAppMention(mention, { slack, appUrl, botUserId });
+      const deps = await teamDeps(mention.teamId);
+      if (!deps) return;
+      const result = await handleSlackAppMention(mention, deps);
       console.log("[slack] app_mention", {
         channel: mention.channel,
         user: mention.user,
@@ -106,9 +129,11 @@ export async function startSlackSocketService() {
     if (!isDm && !(isChannel && event.thread_ts)) return;
     try {
       const message = toIncoming(event, body);
+      const deps = await teamDeps(message.teamId);
+      if (!deps) return;
       const result = isDm
-        ? await handleSlackDirectMessage(message, { slack, appUrl, botUserId })
-        : await handleSlackThreadReply(message, { slack, appUrl, botUserId });
+        ? await handleSlackDirectMessage(message, deps)
+        : await handleSlackThreadReply(message, deps);
       // Our own replies echo back as message events, and most channel thread
       // replies have no claudex session — don't log that noise.
       if (result.handled || (result.reason !== "bot-message" && result.reason !== "no-session")) {
@@ -137,5 +162,8 @@ export async function startSlackSocketService() {
   }
   await socket.start();
   activeSocket = socket;
-  console.log("[slack] Socket Mode connected", { botUserId, teamId: auth.teamId });
+  console.log("[slack] Socket Mode connected", {
+    envTeamId: envInstallation?.teamId ?? null,
+    installedTeamIds: (await listSlackInstallations()).map((installation) => installation.teamId)
+  });
 }

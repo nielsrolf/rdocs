@@ -160,6 +160,13 @@ broker-substituted env — a missing key skips the server with an `[mcp-servers]
 Names `gdocs`/`rdocs` are reserved; max 10 per document. The pure builders live in
 `agent-core/mcp-servers.ts` (so a runner-image rebuild is needed when they change).
 Tests: `tests/document-mcp-servers.test.ts`.
+A channel can also hold **standing jobs**: `GET/POST /api/agent-channels/:triggerId/schedules`
+and `DELETE .../schedules/:taskId` (channel token) manage `ScheduledTask` rows with
+`contextType: "api_channel"` (no Slack fields — `slackTeamId`/`slackChannelId` are nullable
+for this reason). The same poll loop fires them, as ordinary channel runs via
+`startAgentChannelRun` (`lib/agent-channel-runs.ts`, shared with the runs route), and a
+revoked channel disables its jobs on the next firing. `lib/agent-channel-schedules.ts`,
+tests `tests/agent-channel-schedules.test.ts`.
 `GET /authorize?redirect_uri&state` + `POST /api/authorize` (`lib/integration-signin.ts`) is
 the generic **"Sign in with r-docs"** seam: a signed-in user consents, and r-docs redirects
 back with a 2-minute HS256 id token (`sub`, `email`, `name`, `aud` = redirect origin) signed

@@ -108,7 +108,7 @@ test("a new public quick take DMs Slack-linked users in the bot workspace, minus
     await db.user.deleteMany({ where: { id: { in: [author.id, reader.id, optedOut.id] } } });
   });
 
-  const audience = await resolveForumAudienceUserIds(take.id, { slackTeamId: teamId });
+  const audience = await resolveForumAudienceUserIds(take.id, { slackTeamIds: [teamId] });
   assert.deepEqual(audience.sort(), [reader.id, optedOut.id].sort(), "the author is never in their own audience");
 
   const { slack, posted } = fakeSlack();
@@ -121,4 +121,61 @@ test("a new public quick take DMs Slack-linked users in the bot workspace, minus
   assert.match(posted[0].text, /posted a quick take/);
   assert.match(posted[0].text, /a short take about scaling laws/);
   assert.match(posted[0].text, /\/forum\/quicktakes\//);
+});
+
+test("a user linked in two workspaces is DM'd only in the workspace they picked", async (t) => {
+  const teamA = `T-A-${crypto.randomUUID()}`;
+  const teamB = `T-B-${crypto.randomUUID()}`;
+  const owner = await user("owner-pick");
+  const recipient = await db.user.create({
+    data: {
+      email: `pick-${crypto.randomUUID()}@example.com`,
+      name: "pick",
+      passwordHash: "x",
+      documentShareSlackNotifications: true,
+      slackLinks: {
+        create: [
+          { slackTeamId: teamA, slackUserId: "U-IN-A", createdAt: new Date("2026-01-01") },
+          { slackTeamId: teamB, slackUserId: "U-IN-B", createdAt: new Date("2026-02-01") }
+        ]
+      }
+    }
+  });
+  const doc = await db.document.create({ data: { title: "pick", content: "{}", ownerId: owner.id } });
+  t.after(async () => {
+    await db.document.delete({ where: { id: doc.id } });
+    await db.user.deleteMany({ where: { id: { in: [owner.id, recipient.id] } } });
+  });
+
+  // No pick → oldest link (workspace A).
+  const first = fakeSlack();
+  await notifyDocumentShared({
+    documentId: doc.id,
+    recipientUserIds: [recipient.id],
+    sharedByLabel: "owner",
+    deps: { slack: first.slack, appUrl: "https://app.test" }
+  });
+  assert.deepEqual(first.posted.map((message) => message.channel), ["U-IN-A"]);
+
+  // Picked workspace B → only the B identity is DM'd.
+  await db.user.update({ where: { id: recipient.id }, data: { notificationSlackTeamId: teamB } });
+  const second = fakeSlack();
+  await notifyDocumentShared({
+    documentId: doc.id,
+    recipientUserIds: [recipient.id],
+    sharedByLabel: "owner",
+    deps: { slack: second.slack, appUrl: "https://app.test" }
+  });
+  assert.deepEqual(second.posted.map((message) => message.channel), ["U-IN-B"]);
+
+  // A pick pointing at a workspace the user is no longer linked in falls back to the oldest link.
+  await db.user.update({ where: { id: recipient.id }, data: { notificationSlackTeamId: "T-GONE" } });
+  const third = fakeSlack();
+  await notifyDocumentShared({
+    documentId: doc.id,
+    recipientUserIds: [recipient.id],
+    sharedByLabel: "owner",
+    deps: { slack: third.slack, appUrl: "https://app.test" }
+  });
+  assert.deepEqual(third.posted.map((message) => message.channel), ["U-IN-A"]);
 });

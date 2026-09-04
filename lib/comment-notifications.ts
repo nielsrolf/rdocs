@@ -21,12 +21,14 @@ import { db } from "@/lib/db";
 import {
   DEFAULT_COMMENT_NOTIFICATION_SCOPE,
   effectiveCommentScope,
+  pickNotificationSlackLink,
   scopeWantsNotification,
   userDefaultCommentScope,
   type CommentNotificationScope
 } from "@/lib/notification-preferences";
 import { markdownToMrkdwn } from "@/lib/slack/mrkdwn";
-import { createSlackWebClient, slackAuthTest, type SlackClient } from "@/lib/slack/web";
+import type { SlackClient } from "@/lib/slack/web";
+import { hasAnySlackInstallation, slackTeamContext } from "@/lib/slack/installations";
 
 export type CommentNotifierDeps = {
   slack: SlackClient;
@@ -34,22 +36,13 @@ export type CommentNotifierDeps = {
   botUserId: string;
 };
 
-// Cached bot client for dispatches outside a Slack event context (HTTP comment
-// routes, ask-ai background runs, MCP) — same pattern as lib/scheduler.ts.
-let cachedDeps: CommentNotifierDeps | null = null;
-
-async function buildNotifierDeps(): Promise<CommentNotifierDeps | null> {
-  if (cachedDeps) return cachedDeps;
-  const botToken = process.env.SLACK_BOT_TOKEN?.trim();
-  if (!botToken) return null;
-  const auth = await slackAuthTest(botToken).catch(() => null);
-  if (!auth?.userId) return null;
-  cachedDeps = {
-    slack: createSlackWebClient(botToken),
-    appUrl: process.env.APP_URL?.trim() || "http://localhost:14141",
-    botUserId: auth.userId
-  };
-  return cachedDeps;
+// Bot client for the RECIPIENT's workspace when no Slack event context is
+// injected (HTTP comment routes, ask-ai background runs, MCP). Multi-workspace
+// installs: each recipient is DM'd by the bot installed in their team.
+async function notifierDepsForTeam(teamId: string): Promise<CommentNotifierDeps | null> {
+  const context = await slackTeamContext(teamId);
+  if (!context) return null;
+  return { slack: context.slack, appUrl: context.appUrl, botUserId: context.botUserId };
 }
 
 export type CommentNotificationRecipient = {
@@ -126,10 +119,10 @@ export async function resolveCommentNotificationRecipients(input: {
         select: { commentScope: true, commentSlackNotifications: true },
         take: 1
       },
+      notificationSlackTeamId: true,
       slackLinks: {
         select: { slackTeamId: true, slackUserId: true },
-        orderBy: { createdAt: "asc" },
-        take: 1
+        orderBy: { createdAt: "asc" }
       }
     }
   });
@@ -143,7 +136,7 @@ export async function resolveCommentNotificationRecipients(input: {
       mentioned: mentionedIds.has(user.id)
     });
     if (!wanted) return [];
-    const link = user.slackLinks[0];
+    const link = pickNotificationSlackLink(user.slackLinks, user.notificationSlackTeamId);
     if (!link) return [];
     return [{ userId: user.id, slackTeamId: link.slackTeamId, slackUserId: link.slackUserId }];
   });
@@ -192,8 +185,7 @@ export async function notifyCommentPosted(input: {
   deps?: CommentNotifierDeps;
 }): Promise<{ notified: number }> {
   try {
-    const deps = input.deps ?? (await buildNotifierDeps());
-    if (!deps) return { notified: 0 };
+    if (!input.deps && !(await hasAnySlackInstallation())) return { notified: 0 };
     const thread = await db.commentThread.findUnique({
       where: { id: input.threadId },
       select: {
@@ -210,22 +202,29 @@ export async function notifyCommentPosted(input: {
     });
     if (recipients.length === 0) return { notified: 0 };
 
-    const docUrl = `${deps.appUrl}/documents/${thread.document.id}`;
     const body = clip(markdownToMrkdwn(input.commentBody), 1500);
     const quoted = body
       .split("\n")
       .map((line) => `> ${line}`)
       .join("\n");
     const anchorNote = thread.anchorText ? `\nOn: “${clip(thread.anchorText, 160)}”` : "";
-    const rootText =
-      `💬 *${input.authorLabel}* commented on <${docUrl}|${clip(thread.document.title, 120) || "a document"}>` +
+    const rootTextFor = (deps: CommentNotifierDeps) =>
+      `💬 *${input.authorLabel}* commented on <${deps.appUrl}/documents/${thread.document.id}|${clip(thread.document.title, 120) || "a document"}>` +
       `${anchorNote}\n${quoted}\n` +
       `_Reply in this thread to answer in the document — mention <@${deps.botUserId}> to bring in the AI._`;
     const replyText = `*${input.authorLabel}* replied:\n${quoted}`;
 
     let notified = 0;
+    const depsByTeam = new Map<string, CommentNotifierDeps | null>();
     for (const recipient of recipients) {
       try {
+        let deps = input.deps ?? depsByTeam.get(recipient.slackTeamId);
+        if (deps === undefined) {
+          deps = await notifierDepsForTeam(recipient.slackTeamId);
+          depsByTeam.set(recipient.slackTeamId, deps);
+        }
+        if (!deps) continue;
+        const rootText = rootTextFor(deps);
         const existing = await db.slackCommentNotification.findUnique({
           where: { threadId_userId: { threadId: input.threadId, userId: recipient.userId } },
           select: { slackChannelId: true, messageTs: true }

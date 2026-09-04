@@ -686,7 +686,7 @@ export async function handleSlackAgentToolCall(
       if (tasks.length === 0) return { ok: true, text: "No active scheduled tasks in this channel." };
       const lines = tasks.map(
         (t) =>
-          `${t.id} • ${t.cron ? `cron ${t.cron}${t.timezone ? ` (${t.timezone})` : ""}` : "one-shot"} • next ${t.nextRunAt.toISOString()} • by ${t.createdBy?.name ?? "unknown"} • ${t.contextType === "slack_channel" ? "channel" : "thread"}\n  ${t.instruction.slice(0, 160)}`
+          `${t.id} • ${t.cron ? `cron ${t.cron}${t.timezone ? ` (${t.timezone})` : ""}` : "one-shot"} • next ${t.nextRunAt.toISOString()} • by ${t.createdBy?.name ?? "unknown"} • ${t.contextType === "slack_channel" ? "channel" : t.contextType === "api_channel" ? "api channel" : "thread"}\n  ${t.instruction.slice(0, 160)}`
       );
       return { ok: true, text: `Active scheduled tasks:\n${lines.join("\n")}` };
     }
@@ -697,6 +697,7 @@ export async function handleSlackAgentToolCall(
     if (!taskId) return { ok: false, text: "task_id is required." };
     const task = await db.scheduledTask.findUnique({ where: { id: taskId } });
     if (!task || task.disabledAt) return { ok: false, text: "No active task with that id." };
+    if (!task.slackChannelId) return { ok: false, text: "That task was not scheduled from Slack; cancel it where it was created." };
     const denied = await assertReadable(slack, botUserId, claims, task.slackChannelId);
     if (denied) return { ok: false, text: denied };
     await db.scheduledTask.update({ where: { id: taskId }, data: { disabledAt: new Date() } });

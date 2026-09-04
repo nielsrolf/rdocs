@@ -10,6 +10,7 @@
 
 import { CronExpressionParser } from "cron-parser";
 
+import { API_CHANNEL_CONTEXT, fireApiChannelTask, type ApiChannelTaskHooks } from "@/lib/agent-channel-schedules";
 import { db } from "@/lib/db";
 import {
   buildSteeringMessage,
@@ -18,7 +19,7 @@ import {
   type SlackEventDeps
 } from "@/lib/slack/events";
 import { resolveHostDevDir } from "@/lib/slack/dev-mode";
-import { createSlackWebClient, slackAuthTest } from "@/lib/slack/web";
+import { slackTeamContext } from "@/lib/slack/installations";
 
 export const MIN_RECURRENCE_MS = 5 * 60 * 1000;
 export const MAX_ACTIVE_TASKS_PER_DOCUMENT = 20;
@@ -62,8 +63,8 @@ type ScheduledTaskRow = {
   createdById: string | null;
   instruction: string;
   contextType: string;
-  slackTeamId: string;
-  slackChannelId: string;
+  slackTeamId: string | null;
+  slackChannelId: string | null;
   slackThreadTs: string | null;
   cron: string | null;
   timezone: string | null;
@@ -100,10 +101,24 @@ async function deferBeat(task: ScheduledTaskRow): Promise<Date | null> {
 
 // Fire one claimed task. deps injectable for tests; production builds real
 // Slack deps from the environment.
-export async function fireScheduledTask(task: ScheduledTaskRow, deps?: SlackEventDeps) {
-  const resolvedDeps = deps ?? (await buildSlackDeps());
+export async function fireScheduledTask(
+  task: ScheduledTaskRow,
+  deps?: SlackEventDeps,
+  hooks?: ApiChannelTaskHooks
+) {
+  if (task.contextType === API_CHANNEL_CONTEXT) return fireApiChannelTask(task, hooks);
+  if (!task.slackTeamId || !task.slackChannelId) {
+    console.error("[scheduler] disabling slack task without a channel", { taskId: task.id });
+    await db.scheduledTask.update({ where: { id: task.id }, data: { disabledAt: new Date() } }).catch(() => null);
+    return null;
+  }
+  const slackChannelId = task.slackChannelId;
+  const resolvedDeps = deps ?? (await buildSlackDeps(task.slackTeamId));
   if (!resolvedDeps) {
-    console.warn("[scheduler] slack not configured; skipping task", { taskId: task.id });
+    console.warn("[scheduler] slack not configured for this workspace; skipping task", {
+      taskId: task.id,
+      slackTeamId: task.slackTeamId
+    });
     return null;
   }
   const document = await db.document.findUnique({
@@ -135,11 +150,11 @@ export async function fireScheduledTask(task: ScheduledTaskRow, deps?: SlackEven
   const kickoff = isThreadContext
     ? { ts: undefined as string | undefined }
     : await resolvedDeps.slack.postMessage({
-        channel: task.slackChannelId,
+        channel: slackChannelId,
         text: `⏰ Scheduled task: ${task.instruction.slice(0, 200)}`
       });
   const threadRoot = isThreadContext ? task.slackThreadTs ?? undefined : kickoff.ts ?? undefined;
-  const triggerId = threadRoot ? `${task.slackChannelId}:${threadRoot}` : `${task.slackChannelId}:scheduled`;
+  const triggerId = threadRoot ? `${slackChannelId}:${threadRoot}` : `${slackChannelId}:scheduled`;
 
   // One active agent session per Slack thread. If the thread this task fires
   // into is already working, the firing is STEERING for that session, not a
@@ -187,19 +202,19 @@ export async function fireScheduledTask(task: ScheduledTaskRow, deps?: SlackEven
     select: { id: true }
   });
 
-  const isDm = task.slackChannelId.startsWith("D");
-  const channelName = isDm ? null : (await resolvedDeps.slack.channelInfo(task.slackChannelId))?.name ?? null;
+  const isDm = slackChannelId.startsWith("D");
+  const channelName = isDm ? null : (await resolvedDeps.slack.channelInfo(slackChannelId))?.name ?? null;
   // Host dev mode must survive scheduled wake-ups: a check_back_later alarm set
   // by a host-dev run fires a fresh follow-up run here, and losing hostDevDir
   // containerized it — thread/resume then failed on the host-only rollout file
   // (2026-08-23, #lenovo). Same resolution as the mention handler, keyed on the
   // task CREATOR (the run executes as them).
-  const hostDevDir = resolveHostDevDir(task.slackChannelId, channelName, link.user.email);
+  const hostDevDir = resolveHostDevDir(slackChannelId, channelName, link.user.email);
   const aiRunId = await startSlackConversationRun({
     deps: resolvedDeps,
     surface: isDm ? "dm" : "mention",
     document,
-    channel: task.slackChannelId,
+    channel: slackChannelId,
     channelName,
     teamId: task.slackTeamId,
     triggerId,
@@ -219,20 +234,12 @@ export async function fireScheduledTask(task: ScheduledTaskRow, deps?: SlackEven
   return aiRunId;
 }
 
-let cachedDeps: SlackEventDeps | null = null;
-
-async function buildSlackDeps(): Promise<SlackEventDeps | null> {
-  if (cachedDeps) return cachedDeps;
-  const botToken = process.env.SLACK_BOT_TOKEN?.trim();
-  if (!botToken) return null;
-  const auth = await slackAuthTest(botToken).catch(() => null);
-  if (!auth?.userId) return null;
-  cachedDeps = {
-    slack: createSlackWebClient(botToken),
-    appUrl: process.env.APP_URL?.trim() || "http://localhost:14141",
-    botUserId: auth.userId
-  };
-  return cachedDeps;
+// Bot client for the TASK's workspace (multi-workspace installs) — the
+// scheduler fires tasks from every team the app is installed in.
+async function buildSlackDeps(teamId: string): Promise<SlackEventDeps | null> {
+  const context = await slackTeamContext(teamId);
+  if (!context) return null;
+  return { slack: context.slack, appUrl: context.appUrl, botUserId: context.botUserId };
 }
 
 export async function schedulerTick(now = new Date(), deps?: SlackEventDeps) {

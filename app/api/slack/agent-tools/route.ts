@@ -3,8 +3,8 @@ import { z } from "zod";
 
 import { handleSlackAgentToolCall } from "@/lib/slack/agent-tools";
 import { handleSlackAgentMcpMessage } from "@/lib/slack/agent-tools-mcp";
+import { slackTeamContext } from "@/lib/slack/installations";
 import { verifySlackToolsToken } from "@/lib/slack/link-token";
-import { createSlackWebClient, slackAuthTest } from "@/lib/slack/web";
 
 export const runtime = "nodejs";
 
@@ -28,18 +28,11 @@ const toolRequestSchema = z.object({
   args: z.record(z.string(), z.unknown()).default({})
 });
 
-let cachedBotUserId: string | null = null;
-
 // HTTP callback for the agent's Slack read tools (see lib/slack/agent-tools.ts
 // for the access invariant). Called from inside a running agent — including
 // from inside the run container — with the run-scoped bearer token minted at
 // run start. The bot token itself never leaves this process.
 export async function POST(request: Request) {
-  const botToken = process.env.SLACK_BOT_TOKEN?.trim();
-  if (!botToken) {
-    return NextResponse.json({ ok: false, text: "Slack is not configured on this server." }, { status: 503 });
-  }
-
   const auth = request.headers.get("authorization") ?? "";
   const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : null;
   const claims = token ? await verifySlackToolsToken(token) : null;
@@ -48,19 +41,17 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json().catch(() => null);
-  if (!cachedBotUserId) {
-    cachedBotUserId = (await slackAuthTest(botToken)).userId;
-    if (!cachedBotUserId) {
-      return NextResponse.json({ ok: false, text: "Slack auth.test failed." }, { status: 502 });
-    }
+  // Bot token + identity for the RUN's workspace (multi-workspace installs).
+  const team = await slackTeamContext(claims.slackTeamId);
+  if (!team) {
+    return NextResponse.json({ ok: false, text: "Slack is not configured for this workspace." }, { status: 503 });
   }
-  const botUserId = cachedBotUserId;
 
   const execute = async (toolRequest: z.infer<typeof toolRequestSchema>) => {
     const result = await handleSlackAgentToolCall(toolRequest, {
       claims,
-      slack: createSlackWebClient(botToken),
-      botUserId
+      slack: team.slack,
+      botUserId: team.botUserId
     });
     console.log("[slack] agent tool call", {
       aiRunId: claims.aiRunId,

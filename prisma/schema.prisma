@@ -728,11 +728,12 @@ model ScheduledTask {
   createdById    String?
   createdByRunId String?
   instruction    String
-  // "slack_thread" (reply into the stored thread) or "slack_channel" (post
-  // top-level, starting a fresh thread per firing).
+  // "slack_thread" (reply into the stored thread), "slack_channel" (post
+  // top-level, starting a fresh thread per firing) or "api_channel" (fire a run
+  // of the document's AgentApiChannel, lib/agent-channel-schedules.ts — no Slack).
   contextType    String
-  slackTeamId    String
-  slackChannelId String
+  slackTeamId    String?
+  slackChannelId String?
   slackThreadTs  String?
   // Recurring: a 5-field cron expression. One-shot: null cron, nextRunAt only.
   cron           String?

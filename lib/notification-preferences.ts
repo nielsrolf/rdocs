@@ -71,3 +71,20 @@ export function scopeWantsNotification(
 export function legacyBooleanForScope(scope: CommentNotificationScope): boolean {
   return scope !== "none";
 }
+
+/**
+ * The Slack identity that receives a user's DMs. Users linked in several
+ * workspaces pick one in Settings → Notifications (`User.notificationSlackTeamId`);
+ * without a pick, or when the picked link is gone, the oldest link wins.
+ * `links` must be ordered oldest first.
+ */
+export function pickNotificationSlackLink<T extends { slackTeamId: string }>(
+  links: readonly T[],
+  preferredTeamId: string | null | undefined
+): T | null {
+  if (preferredTeamId) {
+    const preferred = links.find((link) => link.slackTeamId === preferredTeamId);
+    if (preferred) return preferred;
+  }
+  return links[0] ?? null;
+}

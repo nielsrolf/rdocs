@@ -19,6 +19,9 @@ const patchSchema = z
     documentShareSlackNotifications: z.boolean().optional(),
     forumShareSlackNotifications: z.boolean().optional(),
     forumPostSlackNotifications: z.boolean().optional(),
+    // Which linked Slack workspace receives DMs; null = oldest link. Must be one
+    // of the caller's own SlackAccountLink teams.
+    notificationSlackTeamId: z.string().min(1).nullable().optional(),
     documentCommentPreference: z
       .object({
         documentId: z.string().min(1),
@@ -36,7 +39,8 @@ function selection() {
     commentNotificationScope: true,
     documentShareSlackNotifications: true,
     forumShareSlackNotifications: true,
-    forumPostSlackNotifications: true
+    forumPostSlackNotifications: true,
+    notificationSlackTeamId: true
   } as const;
 }
 
@@ -51,7 +55,8 @@ export async function GET() {
     commentSlackNotifications: row?.commentSlackNotifications ?? true,
     documentShareSlackNotifications: row?.documentShareSlackNotifications ?? false,
     forumShareSlackNotifications: row?.forumShareSlackNotifications ?? false,
-    forumPostSlackNotifications: row?.forumPostSlackNotifications ?? true
+    forumPostSlackNotifications: row?.forumPostSlackNotifications ?? true,
+    notificationSlackTeamId: row?.notificationSlackTeamId ?? null
   });
 }
 
@@ -108,6 +113,13 @@ export async function PATCH(request: Request) {
       });
     }
   }
+  const teamId = parsed.data.notificationSlackTeamId;
+  if (teamId) {
+    const link = await db.slackAccountLink.findFirst({ where: { userId: user.id, slackTeamId: teamId }, select: { id: true } });
+    if (!link) {
+      return NextResponse.json({ error: "Your Slack account is not linked in that workspace." }, { status: 400 });
+    }
+  }
   // A scope always rewrites the legacy boolean mirror, so a draining old-code
   // sibling still behaves sanely during a blue/green overlap.
   const scope =
@@ -131,7 +143,8 @@ export async function PATCH(request: Request) {
         : { forumShareSlackNotifications: parsed.data.forumShareSlackNotifications }),
       ...(parsed.data.forumPostSlackNotifications === undefined
         ? {}
-        : { forumPostSlackNotifications: parsed.data.forumPostSlackNotifications })
+        : { forumPostSlackNotifications: parsed.data.forumPostSlackNotifications }),
+      ...(teamId === undefined ? {} : { notificationSlackTeamId: teamId })
     },
     select: selection()
   });
