@@ -6,8 +6,8 @@ import { useState } from "react";
 import type { ForumLayout } from "@/lib/forum-layout";
 
 const OPTIONS: Array<{ value: ForumLayout; label: string; title: string }> = [
-  { value: "unified", label: "One feed", title: "Posts and quick takes in one ranked feed" },
-  { value: "split", label: "Separate", title: "Quick takes above, posts below" }
+  { value: "unified", label: "Feed", title: "Posts and quick takes in one ranked feed" },
+  { value: "split", label: "Sections", title: "Quick takes above, posts below" }
 ];
 
 // Segmented control for the forum frontpage layout. Persists via
