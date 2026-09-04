@@ -212,7 +212,7 @@ const listDocuments = defineTool({
 const listQuicktakes = defineTool({
   name: "list_quicktakes",
   description:
-    "List forum quicktakes (short twitter-like posts) you can read — your own, public ones, and ones shared with a group you belong to — newest first, with their FULL body text, author, score and comment count.",
+    "List forum quicktakes (short twitter-like posts) you can read — your own, public ones, and ones shared with a group you belong to — newest first, with their FULL body text, author, score (karma), agreement score and comment count.",
   schema: z
     .object({
       limit: z.number().int().min(1).max(200).optional().describe("Max quicktakes to return (default 50).")
@@ -230,6 +230,7 @@ const listQuicktakes = defineTool({
         is_owner: take.isOwner,
         visibility: take.isPublic ? "public" : take.groupName ? `group:${take.groupName}` : "private",
         score: take.score,
+        agreement: take.agreement,
         comment_count: take.commentCount,
         url: quicktakeUrl(ctx.origin, take.id)
       }))

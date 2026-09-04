@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+import type { VoteTally } from "@/lib/forum-votes";
+
 import { QuicktakeCard, QuicktakeComposer, type QuicktakeGroupOption, type QuicktakeView } from "./quicktakes";
 import { VoteWidget } from "./vote-widget";
 
@@ -12,11 +14,9 @@ export type ForumPostView = {
   title: string;
   postedAt: string;
   ownerName: string;
-  score: number;
-  ownVote: number;
   commentCount: number;
   excerpt: string;
-};
+} & VoteTally;
 
 // One frontpage feed entry: a full post or a quicktake, already ranked.
 export type ForumFeedItemView =
@@ -41,8 +41,7 @@ export function ForumPostCard({ post, canVote }: { post: ForumPostView; canVote:
       <VoteWidget
         targetType="document"
         targetId={post.id}
-        initialScore={post.score}
-        initialOwnVote={post.ownVote}
+        tally={post}
         canVote={canVote}
       />
       <div className="forum-post-body">

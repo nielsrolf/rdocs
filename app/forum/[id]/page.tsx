@@ -14,6 +14,7 @@ import { ThreadStatusValue } from "@/lib/contracts";
 import { db } from "@/lib/db";
 import { listDocumentThreads } from "@/lib/document-data";
 import { listForumComments, type ForumComment } from "@/lib/forum-data";
+import { documentVoteTally } from "@/lib/forum-votes";
 import { loadMentionCandidates } from "@/lib/mention-data";
 import { canComment, resolveDocumentAccess } from "@/lib/permissions";
 
@@ -50,18 +51,12 @@ export default async function ForumDocumentPage({ params }: PageProps) {
     notFound();
   }
 
-  const [threads, mentionMembers, forumComments, voteAgg, ownVote, initialCollaborationVersion] =
+  const [threads, mentionMembers, forumComments, voteTally, initialCollaborationVersion] =
     await Promise.all([
       listDocumentThreads(id, user?.id ?? null),
       loadMentionCandidates(id),
       listForumComments(id, user?.id ?? null),
-      db.documentVote.aggregate({ where: { documentId: id }, _sum: { value: true } }),
-      user
-        ? db.documentVote.findUnique({
-            where: { documentId_userId: { documentId: id, userId: user.id } },
-            select: { value: true }
-          })
-        : Promise.resolve(null),
+      documentVoteTally(id, user?.id ?? null),
       getCollaborationVersion(id, access.document.content, access.document.updatedAt)
     ]);
 
@@ -102,8 +97,7 @@ export default async function ForumDocumentPage({ params }: PageProps) {
         <VoteWidget
           targetType="document"
           targetId={id}
-          initialScore={voteAgg._sum.value ?? 0}
-          initialOwnVote={ownVote?.value ?? 0}
+          tally={voteTally}
           canVote={Boolean(user)}
         />
         <div>

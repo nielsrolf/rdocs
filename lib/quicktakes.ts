@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { documentVoteTally, EMPTY_TALLY, tallyVotesByTarget, type VoteTally } from "@/lib/forum-votes";
 import { notifyForumItemShared } from "@/lib/activity-notifications";
 import { defaultDocumentContent, serializeDocumentContent } from "@/lib/content";
 
@@ -24,10 +25,8 @@ export type QuicktakeSummary = {
   isOwner: boolean;
   isPublic: boolean;
   groupName: string | null;
-  score: number;
-  ownVote: number;
   commentCount: number;
-};
+} & VoteTally;
 
 export type QuicktakeVisibility = {
   groupId: string | null;
@@ -165,10 +164,31 @@ export async function createQuicktake(userId: string, body: string): Promise<Qui
     isOwner: true,
     isPublic: user.quicktakeGroupId === null,
     groupName: group?.name ?? null,
-    score: 0,
-    ownVote: 0,
+    ...EMPTY_TALLY,
     commentCount: 0
   };
+}
+
+// Owner-only body edit; the derived title follows the new body. Returns null
+// when the take does not exist or is not owned by the user.
+export async function updateQuicktake(
+  userId: string,
+  quicktakeId: string,
+  body: string
+): Promise<QuicktakeSummary | null> {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    throw new QuicktakeError("Quicktake body must not be empty.");
+  }
+  if (trimmed.length > QUICKTAKE_MAX_LENGTH) {
+    throw new QuicktakeError("Quicktake body is too long.");
+  }
+  const updated = await db.document.updateMany({
+    where: { id: quicktakeId, kind: QUICKTAKE_KIND, ownerId: userId },
+    data: { quicktakeBody: trimmed, title: quicktakeTitle(trimmed) }
+  });
+  if (updated.count === 0) return null;
+  return getQuicktake(quicktakeId, userId);
 }
 
 export async function deleteQuicktake(userId: string, quicktakeId: string): Promise<boolean> {
@@ -218,7 +238,7 @@ export async function listQuicktakes(
   const [votes, threads] = await Promise.all([
     db.documentVote.findMany({
       where: { documentId: { in: takeIds } },
-      select: { documentId: true, userId: true, value: true }
+      select: { documentId: true, userId: true, kind: true, value: true }
     }),
     db.commentThread.findMany({
       where: { documentId: { in: takeIds }, status: "OPEN" },
@@ -226,12 +246,7 @@ export async function listQuicktakes(
     })
   ]);
 
-  const scoreByDoc = new Map<string, number>();
-  const ownVoteByDoc = new Map<string, number>();
-  for (const vote of votes) {
-    scoreByDoc.set(vote.documentId, (scoreByDoc.get(vote.documentId) ?? 0) + vote.value);
-    if (vote.userId === userId) ownVoteByDoc.set(vote.documentId, vote.value);
-  }
+  const tallyByDoc = tallyVotesByTarget(votes, (vote) => vote.documentId, userId);
   const commentsByDoc = new Map<string, number>();
   for (const thread of threads) {
     commentsByDoc.set(
@@ -248,8 +263,7 @@ export async function listQuicktakes(
     isOwner: take.ownerId === userId,
     isPublic: take.forumPublic,
     groupName: take.groupAccess[0]?.group.name ?? null,
-    score: scoreByDoc.get(take.id) ?? 0,
-    ownVote: ownVoteByDoc.get(take.id) ?? 0,
+    ...(tallyByDoc.get(take.id) ?? EMPTY_TALLY),
     commentCount: commentsByDoc.get(take.id) ?? 0
   }));
 }
@@ -275,14 +289,8 @@ export async function getQuicktake(
   });
   if (!take || take.kind !== QUICKTAKE_KIND) return null;
 
-  const [voteAgg, ownVote, commentCount] = await Promise.all([
-    db.documentVote.aggregate({ where: { documentId: quicktakeId }, _sum: { value: true } }),
-    userId
-      ? db.documentVote.findUnique({
-          where: { documentId_userId: { documentId: quicktakeId, userId } },
-          select: { value: true }
-        })
-      : Promise.resolve(null),
+  const [tally, commentCount] = await Promise.all([
+    documentVoteTally(quicktakeId, userId),
     db.comment.count({ where: { thread: { documentId: quicktakeId } } })
   ]);
 
@@ -294,8 +302,7 @@ export async function getQuicktake(
     isOwner: take.ownerId === userId,
     isPublic: take.forumPublic,
     groupName: take.groupAccess[0]?.group.name ?? null,
-    score: voteAgg._sum.value ?? 0,
-    ownVote: ownVote?.value ?? 0,
+    ...tally,
     commentCount
   };
 }

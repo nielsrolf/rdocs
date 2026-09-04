@@ -39,6 +39,8 @@ function serializePost(post: ForumDocumentSummary, excerpt: string): ForumPostVi
     ownerName: post.owner.name,
     score: post.score,
     ownVote: post.ownVote,
+    agreement: post.agreement,
+    ownAgreement: post.ownAgreement,
     commentCount: post.commentCount,
     excerpt
   };

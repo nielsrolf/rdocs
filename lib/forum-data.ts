@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { listAccessibleDocumentsForUser } from "@/lib/document-data";
 import { getDocumentPlainText, parseDocumentContent } from "@/lib/content";
+import { EMPTY_TALLY, tallyVotes, tallyVotesByTarget, type VoteTally } from "@/lib/forum-votes";
 import { listQuicktakes, type QuicktakeSummary } from "@/lib/quicktakes";
 
 export type ForumDocumentSummary = {
@@ -11,10 +12,8 @@ export type ForumDocumentSummary = {
   owner: { id: string; name: string };
   permission: string;
   isOwner: boolean;
-  score: number;
-  ownVote: number;
   commentCount: number;
-};
+} & VoteTally;
 
 // LessWrong-style hotness: score decayed by age. Pure so the frontpage can
 // re-rank without another query.
@@ -57,7 +56,7 @@ export async function listForumDocumentsForUser(
   const [votes, commentCounts] = await Promise.all([
     db.documentVote.findMany({
       where: { documentId: { in: postedIds } },
-      select: { documentId: true, userId: true, value: true }
+      select: { documentId: true, userId: true, kind: true, value: true }
     }),
     db.comment.groupBy({
       by: ["threadId"],
@@ -79,12 +78,7 @@ export async function listForumDocumentsForUser(
     })
   ]);
 
-  const scoreByDoc = new Map<string, number>();
-  const ownVoteByDoc = new Map<string, number>();
-  for (const vote of votes) {
-    scoreByDoc.set(vote.documentId, (scoreByDoc.get(vote.documentId) ?? 0) + vote.value);
-    if (vote.userId === userId) ownVoteByDoc.set(vote.documentId, vote.value);
-  }
+  const tallyByDoc = tallyVotesByTarget(votes, (vote) => vote.documentId, userId);
 
   const accessById = new Map(accessible.map((d) => [d.id, d]));
   const summaries: ForumDocumentSummary[] = posted.map((doc) => ({
@@ -95,8 +89,7 @@ export async function listForumDocumentsForUser(
     owner: doc.owner,
     permission: accessById.get(doc.id)?.permission ?? "VIEW",
     isOwner: accessById.get(doc.id)?.isOwner ?? false,
-    score: scoreByDoc.get(doc.id) ?? 0,
-    ownVote: ownVoteByDoc.get(doc.id) ?? 0,
+    ...(tallyByDoc.get(doc.id) ?? EMPTY_TALLY),
     commentCount: commentCounts.get(doc.id) ?? 0
   }));
 
@@ -153,13 +146,14 @@ export type ForumComment = {
   authorId: string | null;
   isAi: boolean;
   createdAt: Date;
-  score: number;
-  ownVote: number;
+  // The viewer may edit this comment (its signed-in author; AI/guest comments
+  // have no author and are never editable).
+  canEdit: boolean;
   // For comments imported from the studio view: the anchored document text
   // they were attached to, rendered as a "> quote" prefix in the forum.
   anchorQuote: string | null;
   replies: ForumComment[];
-};
+} & VoteTally;
 
 // Loads every comment thread of a document and folds it into the forum tree:
 // - forum-origin threads: their root comment is a top-level forum comment,
@@ -187,7 +181,7 @@ export async function listForumComments(documentId: string, userId: string | nul
           authorId: true,
           createdAt: true,
           author: { select: { id: true, name: true } },
-          votes: { select: { userId: true, value: true } }
+          votes: { select: { userId: true, kind: true, value: true } }
         }
       }
     }
@@ -198,10 +192,6 @@ export async function listForumComments(documentId: string, userId: string | nul
     if (thread.comments.length === 0) continue;
     const nodes = new Map<string, ForumComment>();
     for (const comment of thread.comments) {
-      const score = comment.votes.reduce((sum, v) => sum + v.value, 0);
-      const ownVote = userId
-        ? comment.votes.find((v) => v.userId === userId)?.value ?? 0
-        : 0;
       nodes.set(comment.id, {
         id: comment.id,
         threadId: thread.id,
@@ -211,8 +201,8 @@ export async function listForumComments(documentId: string, userId: string | nul
         authorId: comment.authorId,
         isAi: Boolean(comment.aiModel),
         createdAt: comment.createdAt,
-        score,
-        ownVote,
+        canEdit: userId !== null && comment.authorId === userId,
+        ...tallyVotes(comment.votes, userId),
         anchorQuote: null,
         replies: []
       });

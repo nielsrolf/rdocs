@@ -2,32 +2,34 @@
 
 import { useState } from "react";
 
+import type { VoteKind, VoteTally } from "@/lib/forum-votes";
+
 type VoteWidgetProps = {
   targetType: "document" | "comment";
   targetId: string;
-  initialScore: number;
-  initialOwnVote: number;
-  // Signed-out viewers see the score but can't vote.
+  tally: VoteTally;
+  // Signed-out viewers see the scores but can't vote.
   canVote: boolean;
   orientation?: "vertical" | "horizontal";
 };
 
-// LessWrong-style up/down vote control shared by forum posts and comments.
+// LessWrong-style two-axis vote control shared by forum posts, quicktakes and
+// comments: ▲/▼ is the general (karma) vote that ranks the feed, ✓/✗ is
+// agree/disagree and only records where readers stand.
 export function VoteWidget({
   targetType,
   targetId,
-  initialScore,
-  initialOwnVote,
+  tally: initialTally,
   canVote,
   orientation = "vertical"
 }: VoteWidgetProps) {
-  const [score, setScore] = useState(initialScore);
-  const [ownVote, setOwnVote] = useState(initialOwnVote);
+  const [tally, setTally] = useState(initialTally);
   const [busy, setBusy] = useState(false);
 
-  async function vote(direction: 1 | -1) {
+  async function vote(kind: VoteKind, direction: 1 | -1) {
     if (!canVote || busy) return;
-    const next = ownVote === direction ? 0 : direction;
+    const own = kind === "karma" ? tally.ownVote : tally.ownAgreement;
+    const next = own === direction ? 0 : direction;
     setBusy(true);
     try {
       const endpoint =
@@ -37,12 +39,10 @@ export function VoteWidget({
       const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ value: next })
+        body: JSON.stringify({ value: next, kind })
       });
       if (!response.ok) return;
-      const data = (await response.json()) as { score: number; ownVote: number };
-      setScore(data.score);
-      setOwnVote(data.ownVote);
+      setTally((await response.json()) as VoteTally);
     } catch {
       // Leave prior state; the next click retries.
     } finally {
@@ -52,25 +52,48 @@ export function VoteWidget({
 
   return (
     <div className={`forum-vote forum-vote-${orientation}`} data-busy={busy ? "true" : "false"}>
-      <button
-        type="button"
-        className={`forum-vote-btn${ownVote === 1 ? " forum-vote-active" : ""}`}
-        aria-label="Upvote"
-        disabled={!canVote || busy}
-        onClick={() => vote(1)}
-      >
-        ▲
-      </button>
-      <span className="forum-vote-score">{score}</span>
-      <button
-        type="button"
-        className={`forum-vote-btn${ownVote === -1 ? " forum-vote-active" : ""}`}
-        aria-label="Downvote"
-        disabled={!canVote || busy}
-        onClick={() => vote(-1)}
-      >
-        ▼
-      </button>
+      <div className="forum-vote-axis forum-vote-karma" title="Overall vote">
+        <button
+          type="button"
+          className={`forum-vote-btn${tally.ownVote === 1 ? " forum-vote-active" : ""}`}
+          aria-label="Upvote"
+          disabled={!canVote || busy}
+          onClick={() => vote("karma", 1)}
+        >
+          ▲
+        </button>
+        <span className="forum-vote-score">{tally.score}</span>
+        <button
+          type="button"
+          className={`forum-vote-btn${tally.ownVote === -1 ? " forum-vote-active" : ""}`}
+          aria-label="Downvote"
+          disabled={!canVote || busy}
+          onClick={() => vote("karma", -1)}
+        >
+          ▼
+        </button>
+      </div>
+      <div className="forum-vote-axis forum-vote-agreement" title="Agree / disagree">
+        <button
+          type="button"
+          className={`forum-vote-btn${tally.ownAgreement === 1 ? " forum-vote-active" : ""}`}
+          aria-label="Agree"
+          disabled={!canVote || busy}
+          onClick={() => vote("agreement", 1)}
+        >
+          ✓
+        </button>
+        <span className="forum-vote-score forum-vote-agreement-score">{tally.agreement}</span>
+        <button
+          type="button"
+          className={`forum-vote-btn${tally.ownAgreement === -1 ? " forum-vote-active" : ""}`}
+          aria-label="Disagree"
+          disabled={!canVote || busy}
+          onClick={() => vote("agreement", -1)}
+        >
+          ✗
+        </button>
+      </div>
     </div>
   );
 }

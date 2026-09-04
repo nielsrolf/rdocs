@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { MarkdownBody } from "@/components/document-workspace/markdown";
+import type { VoteTally } from "@/lib/forum-votes";
 import { MARKDOWN_SHORTCUT_HINT } from "@/lib/markdown-shortcuts";
 
 import { VoteWidget } from "./vote-widget";
@@ -17,11 +18,10 @@ export type ForumCommentView = {
   authorId: string | null;
   isAi: boolean;
   createdAt: string;
-  score: number;
-  ownVote: number;
+  canEdit: boolean;
   anchorQuote: string | null;
   replies: ForumCommentView[];
-};
+} & VoteTally;
 
 type ForumCommentsProps = {
   documentId: string;
@@ -46,13 +46,22 @@ function formatDate(value: string) {
 function ReplyForm({
   onSubmit,
   onCancel,
-  busy
+  busy,
+  initialBody = "",
+  submitLabel = "Post",
+  busyLabel = "Posting…",
+  placeholder = "Write a comment…"
 }: {
   onSubmit: (body: string) => Promise<void>;
   onCancel?: () => void;
   busy: boolean;
+  // Editing an existing comment reuses the same form with its current text.
+  initialBody?: string;
+  submitLabel?: string;
+  busyLabel?: string;
+  placeholder?: string;
 }) {
-  const [body, setBody] = useState("");
+  const [body, setBody] = useState(initialBody);
   return (
     <form
       className="forum-reply-form"
@@ -67,7 +76,7 @@ function ReplyForm({
       <MentionTextarea
         value={body}
         onChange={setBody}
-        placeholder="Write a comment…"
+        placeholder={placeholder}
         rows={3}
         disabled={busy}
       />
@@ -79,7 +88,7 @@ function ReplyForm({
           </button>
         ) : null}
         <button type="submit" className="forum-btn" disabled={busy || body.trim().length === 0}>
-          {busy ? "Posting…" : "Post"}
+          {busy ? busyLabel : submitLabel}
         </button>
       </div>
     </form>
@@ -118,6 +127,7 @@ function CommentNode({
   canComment,
   canVote,
   onReply,
+  onEdit,
   busyParentId,
   depth
 }: {
@@ -125,10 +135,13 @@ function CommentNode({
   canComment: boolean;
   canVote: boolean;
   onReply: (threadId: string, parentId: string, body: string) => Promise<void>;
+  onEdit: (commentId: string, body: string) => Promise<boolean>;
   busyParentId: string | null;
   depth: number;
 }) {
   const [replying, setReplying] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
   const busy = busyParentId === comment.id;
   return (
     <div className="forum-comment" data-depth={depth} id={`comment-${comment.id}`}>
@@ -136,8 +149,7 @@ function CommentNode({
         <VoteWidget
           targetType="comment"
           targetId={comment.id}
-          initialScore={comment.score}
-          initialOwnVote={comment.ownVote}
+          tally={comment}
           canVote={canVote}
         />
         <div className="forum-comment-content">
@@ -150,16 +162,42 @@ function CommentNode({
           {comment.anchorQuote ? (
             <blockquote className="forum-anchor-quote">{comment.anchorQuote}</blockquote>
           ) : null}
-          <MarkdownBody body={comment.body} className="forum-comment-body markdown-body" />
-          {canComment ? (
+          {editing ? (
+            <ReplyForm
+              busy={saving}
+              initialBody={comment.body}
+              submitLabel="Save"
+              busyLabel="Saving…"
+              placeholder="Edit your comment…"
+              onCancel={() => setEditing(false)}
+              onSubmit={async (body) => {
+                setSaving(true);
+                try {
+                  if (await onEdit(comment.id, body)) setEditing(false);
+                } finally {
+                  setSaving(false);
+                }
+              }}
+            />
+          ) : (
+            <MarkdownBody body={comment.body} className="forum-comment-body markdown-body" />
+          )}
+          {(canComment || comment.canEdit) && !editing ? (
             <div className="forum-comment-actions">
-              <button
-                type="button"
-                className="forum-btn-ghost"
-                onClick={() => setReplying((value) => !value)}
-              >
-                Reply
-              </button>
+              {canComment ? (
+                <button
+                  type="button"
+                  className="forum-btn-ghost"
+                  onClick={() => setReplying((value) => !value)}
+                >
+                  Reply
+                </button>
+              ) : null}
+              {comment.canEdit ? (
+                <button type="button" className="forum-btn-ghost" onClick={() => setEditing(true)}>
+                  Edit
+                </button>
+              ) : null}
             </div>
           ) : null}
           {replying ? (
@@ -183,6 +221,7 @@ function CommentNode({
               canComment={canComment}
               canVote={canVote}
               onReply={onReply}
+              onEdit={onEdit}
               busyParentId={busyParentId}
               depth={depth + 1}
             />
@@ -190,6 +229,18 @@ function CommentNode({
         </div>
       ) : null}
     </div>
+  );
+}
+
+export function replaceCommentBody(
+  comments: ForumCommentView[],
+  commentId: string,
+  body: string
+): ForumCommentView[] {
+  return comments.map((comment) =>
+    comment.id === commentId
+      ? { ...comment, body }
+      : { ...comment, replies: replaceCommentBody(comment.replies, commentId, body) }
   );
 }
 
@@ -239,6 +290,23 @@ export function ForumComments({
     }
   }
 
+  // Edits patch the local tree in place (no refetch) so the reader's scroll
+  // position and any open reply forms survive.
+  async function submitEdit(commentId: string, body: string): Promise<boolean> {
+    setError(null);
+    const response = await fetch(`/api/comments/comment/${commentId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body })
+    });
+    if (!response.ok) {
+      setError("Could not save the comment. Please try again.");
+      return false;
+    }
+    setComments((current) => replaceCommentBody(current, commentId, body));
+    return true;
+  }
+
   async function submitReply(threadId: string, parentId: string, body: string) {
     setBusyParentId(parentId);
     setError(null);
@@ -272,6 +340,7 @@ export function ForumComments({
           canComment={canComment}
           canVote={canVote}
           onReply={submitReply}
+          onEdit={submitEdit}
           busyParentId={busyParentId}
           depth={0}
         />

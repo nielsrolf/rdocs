@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 import { MarkdownBody } from "@/components/document-workspace/markdown";
+import type { VoteTally } from "@/lib/forum-votes";
 import { MARKDOWN_SHORTCUT_HINT } from "@/lib/markdown-shortcuts";
 
 import { ForumComments, type ForumCommentView } from "./forum-comments";
@@ -20,10 +21,8 @@ export type QuicktakeView = {
   isOwner: boolean;
   isPublic: boolean;
   groupName: string | null;
-  score: number;
-  ownVote: number;
   commentCount: number;
-};
+} & VoteTally;
 
 export type QuicktakeGroupOption = { id: string; name: string };
 
@@ -132,6 +131,11 @@ export function QuicktakeCard({
   onDeleted?: (id: string) => void;
 }) {
   const [deleting, setDeleting] = useState(false);
+  const [body, setBody] = useState(take.body);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(take.body);
+  const [saving, setSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [comments, setComments] = useState<ForumCommentView[] | null>(null);
   const [loadingComments, setLoadingComments] = useState(false);
@@ -164,8 +168,7 @@ export function QuicktakeCard({
       <VoteWidget
         targetType="document"
         targetId={take.id}
-        initialScore={take.score}
-        initialOwnVote={take.ownVote}
+        tally={take}
         canVote={canVote}
       />
       <div className="quicktake-content">
@@ -178,7 +181,59 @@ export function QuicktakeCard({
             {take.isPublic ? "Public" : take.groupName ? `Group: ${take.groupName}` : "Private"}
           </span>
         </div>
-        <QuicktakeBody body={take.body} clamp={clampBody} />
+        {editing ? (
+          <form
+            className="forum-reply-form forum-edit-form"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              const trimmed = draft.trim();
+              if (!trimmed || saving) return;
+              setSaving(true);
+              setEditError(null);
+              try {
+                const response = await fetch(`/api/quicktakes/${take.id}`, {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ body: trimmed })
+                });
+                if (!response.ok) {
+                  const data = (await response.json().catch(() => null)) as { error?: string } | null;
+                  setEditError(data?.error ?? "Could not save the quicktake.");
+                  return;
+                }
+                const data = (await response.json()) as { quicktake: { body: string } };
+                setBody(data.quicktake.body);
+                setDraft(data.quicktake.body);
+                setEditing(false);
+              } finally {
+                setSaving(false);
+              }
+            }}
+          >
+            <MentionTextarea value={draft} onChange={setDraft} placeholder="Edit your quicktake…" rows={4} disabled={saving} />
+            {editError ? <p className="forum-error">{editError}</p> : null}
+            <div className="forum-reply-actions">
+              <span className="forum-editor-hint">{MARKDOWN_SHORTCUT_HINT}</span>
+              <button
+                type="button"
+                className="forum-btn-ghost"
+                disabled={saving}
+                onClick={() => {
+                  setDraft(body);
+                  setEditError(null);
+                  setEditing(false);
+                }}
+              >
+                Cancel
+              </button>
+              <button type="submit" className="forum-btn" disabled={saving || draft.trim().length === 0}>
+                {saving ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </form>
+        ) : (
+          <QuicktakeBody body={body} clamp={clampBody} />
+        )}
         <div className="quicktake-actions">
           {inlineComments ? (
             <button type="button" className="forum-copy-link" onClick={toggleComments}>
@@ -190,6 +245,11 @@ export function QuicktakeCard({
             </Link>
           )}
           <CopyLinkButton path={`/forum/quicktakes/${take.id}`} />
+          {take.isOwner && !editing ? (
+            <button type="button" className="forum-copy-link" onClick={() => setEditing(true)}>
+              Edit
+            </button>
+          ) : null}
           {take.isOwner && onDeleted ? (
             <button
               type="button"

@@ -42,6 +42,10 @@ model User {
   // New forum posts and quick takes published to an audience this user is in.
   // On by default; the bell on the forum/quicktakes pages toggles it.
   forumPostSlackNotifications     Boolean                          @default(true)
+  // Which linked Slack workspace receives this user's DMs when claudex is
+  // installed in more than one of them. Null = the oldest SlackAccountLink.
+  // Resolved through pickNotificationSlackLink (lib/notification-preferences.ts).
+  notificationSlackTeamId         String?
   // How the forum frontpage is laid out: "unified" (posts and quick takes in
   // one ranked feed) or "split" (quick takes section above the post list).
   // Read through lib/forum-layout.ts, never directly.
@@ -116,34 +120,38 @@ model DocumentGroupAccess {
   @@index([groupId])
 }
 
-// Forum up/down vote on a posted document. value is +1 or -1; removing a vote
-// deletes the row. Score is aggregated at read time (internal-scale traffic).
+// Forum vote on a posted document. value is +1 or -1; removing a vote deletes
+// the row. kind separates the two LessWrong-style axes: "karma" (the general
+// up/down vote) and "agreement" (agree/disagree). Scores are aggregated at
+// read time (internal-scale traffic); lib/forum-votes.ts owns the tallying.
 model DocumentVote {
   id         String   @id @default(cuid())
   documentId String
   userId     String
+  kind       String   @default("karma")
   value      Int
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
   document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([documentId, userId])
+  @@unique([documentId, userId, kind])
   @@index([documentId])
 }
 
-// Forum up/down vote on a comment. Same semantics as DocumentVote.
+// Forum vote on a comment. Same semantics (and kinds) as DocumentVote.
 model CommentVote {
   id        String   @id @default(cuid())
   commentId String
   userId    String
+  kind      String   @default("karma")
   value     Int
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   comment   Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([commentId, userId])
+  @@unique([commentId, userId, kind])
   @@index([commentId])
 }
 
@@ -793,4 +801,19 @@ model SlackEventClaim {
   createdAt DateTime @default(now())
 
   @@index([createdAt])
+}
+
+// One row per Slack workspace claudex is installed in via OAuth
+// (lib/slack/installations.ts). The workspace configured through
+// SLACK_BOT_TOKEN in .env is NOT stored here — it is the implicit first
+// installation. botToken is encrypted with CREDENTIAL_ENCRYPTION_KEY.
+model SlackInstallation {
+  id                String   @id @default(cuid())
+  teamId            String   @unique
+  teamName          String?
+  botToken          String
+  botUserId         String
+  installedByUserId String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 }
