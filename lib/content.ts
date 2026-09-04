@@ -532,7 +532,67 @@ function visitNodeForAiBlocks(node: unknown, blocks: AiDocumentBlock[]) {
 type MarkdownContext = {
   listStack: Array<{ ordered: boolean; index: number }>;
   inCodeBlock: boolean;
+  // When set, pasted (data-URL) images are emitted as
+  // `![alt](pasted-image://N)` placeholders instead of inline base64, and
+  // `pastedImageIndex` counts them in document order (1-based, shared across
+  // tabs). Agents fetch the pixels separately — see collectPastedImages.
+  pastedImagePlaceholders: boolean;
+  pastedImageIndex: number;
 };
+
+export const PASTED_IMAGE_SCHEME = "pasted-image://";
+
+export type PastedDocumentImage = {
+  index: number;
+  src: string;
+  alt: string;
+  caption: string | null;
+  mediaType: string;
+  base64: string;
+  bytes: number;
+};
+
+export function isPastedImageSrc(src: unknown): src is string {
+  return typeof src === "string" && /^data:image\//i.test(src);
+}
+
+export function parsePastedImageDataUrl(src: string): { mediaType: string; base64: string } | null {
+  const match = /^data:(image\/[a-z0-9.+-]+);base64,([\s\S]+)$/i.exec(src.trim());
+  if (!match) return null;
+  return { mediaType: match[1].toLowerCase(), base64: match[2].replace(/\s+/g, "") };
+}
+
+export function pastedImagePlaceholder(image: { index: number; alt: string; caption: string | null }) {
+  const title = image.caption ? ` "${image.caption.replace(/"/g, '\\"')}"` : "";
+  return `![${image.alt}](${PASTED_IMAGE_SCHEME}${image.index}${title})`;
+}
+
+// Every pasted image node in document order (same numbering as the
+// pasted-image://N placeholders getDocumentMarkdown emits).
+export function collectPastedImages(content: unknown): PastedDocumentImage[] {
+  const images: PastedDocumentImage[] = [];
+  const visit = (node: unknown) => {
+    if (getNodeType(node) === "image") {
+      const attrs = getNodeAttrs(node) as { src?: unknown; alt?: unknown; caption?: unknown } | null;
+      if (isPastedImageSrc(attrs?.src)) {
+        const parsed = parsePastedImageDataUrl(attrs.src);
+        images.push({
+          index: images.length + 1,
+          src: attrs.src,
+          alt: typeof attrs?.alt === "string" ? attrs.alt : "",
+          caption: typeof attrs?.caption === "string" && attrs.caption ? attrs.caption : null,
+          mediaType: parsed?.mediaType ?? "image/*",
+          base64: parsed?.base64 ?? "",
+          bytes: parsed ? Math.floor((parsed.base64.length * 3) / 4) : attrs.src.length
+        });
+      }
+      return;
+    }
+    getNodeContent(node).forEach(visit);
+  };
+  visit(content);
+  return images;
+}
 
 function escapeMarkdown(text: string) {
   return text.replace(/([\\`*_{}\[\]()#+\-.!>])/g, "\\$1");
@@ -610,6 +670,10 @@ function serializeNodeToMarkdown(node: unknown, context: MarkdownContext): strin
     const alt = typeof attrs?.alt === "string" ? attrs.alt : "";
     const caption = typeof attrs?.caption === "string" ? attrs.caption : "";
     const title = caption ? ` "${caption.replace(/"/g, '\\"')}"` : "";
+    if (context.pastedImagePlaceholders && isPastedImageSrc(src)) {
+      context.pastedImageIndex += 1;
+      return `${pastedImagePlaceholder({ index: context.pastedImageIndex, alt, caption: caption || null })}\n\n`;
+    }
     return src ? `![${alt}](${src}${title})\n\n` : "";
   }
 
@@ -734,8 +798,7 @@ function serializeNodeToMarkdown(node: unknown, context: MarkdownContext): strin
   return serializeChildrenToMarkdown(node, context);
 }
 
-function serializeBlocksToMarkdown(blocks: unknown[]): string {
-  const context: MarkdownContext = { listStack: [], inCodeBlock: false };
+function serializeBlocksToMarkdown(blocks: unknown[], context: MarkdownContext): string {
   return blocks
     .map((block) => serializeNodeToMarkdown(block, context))
     .join("")
@@ -747,7 +810,19 @@ function escapeTabTitle(title: string) {
   return title.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
 
-export function getDocumentMarkdown(content: unknown): string {
+export type DocumentMarkdownOptions = {
+  // Emit pasted data-URL images as pasted-image://N placeholders (agent-facing
+  // surfaces) instead of inline base64 (export).
+  pastedImagePlaceholders?: boolean;
+};
+
+export function getDocumentMarkdown(content: unknown, options: DocumentMarkdownOptions = {}): string {
+  const context: MarkdownContext = {
+    listStack: [],
+    inCodeBlock: false,
+    pastedImagePlaceholders: options.pastedImagePlaceholders ?? false,
+    pastedImageIndex: 0
+  };
   const topLevel = getNodeContent(content);
   const groups: Array<{ title: string | null; nodes: unknown[] }> = [
     { title: null, nodes: [] }
@@ -765,13 +840,13 @@ export function getDocumentMarkdown(content: unknown): string {
 
   const hasBreaks = groups.length > 1;
   if (!hasBreaks) {
-    return serializeBlocksToMarkdown(groups[0].nodes);
+    return serializeBlocksToMarkdown(groups[0].nodes, context);
   }
 
   // First group with no title only renders if it has content (untitled prelude).
   const sections: string[] = [];
   groups.forEach((group, index) => {
-    const body = serializeBlocksToMarkdown(group.nodes);
+    const body = serializeBlocksToMarkdown(group.nodes, context);
     if (group.title == null) {
       if (body) sections.push(body);
       return;

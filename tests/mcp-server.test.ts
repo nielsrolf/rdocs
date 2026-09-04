@@ -356,3 +356,73 @@ test("upload_files commits into the workspace; create_widget registers a widget"
     fs.rmSync(documentRoot, { recursive: true, force: true });
   }
 });
+
+// A 1x1 PNG. Pasted screenshots live in the document as data URLs; over MCP
+// they must never be serialized as base64 text (a doc with a few dozen
+// screenshots became megabytes of tool output), but fetched on demand as a
+// real MCP image content block.
+const TINY_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+const TINY_PNG_DATA_URL = `data:image/png;base64,${TINY_PNG_BASE64}`;
+
+test("pasted images: read_document emits placeholders, read_image returns pixels, placeholders round-trip", async () => {
+  const owner = await makeUser("mcp-img-owner");
+  const stranger = await makeUser("mcp-img-stranger");
+  const doc = await db.document.create({
+    data: {
+      title: "Image doc",
+      ownerId: owner.id,
+      content: JSON.stringify({
+        type: "doc",
+        content: [
+          { type: "paragraph", content: [{ type: "text", text: "Before the screenshot." }] },
+          { type: "image", attrs: { src: TINY_PNG_DATA_URL, alt: "Screenshot", caption: "Login page" } },
+          { type: "paragraph", content: [{ type: "text", text: "After the screenshot." }] },
+          { type: "image", attrs: { src: TINY_PNG_DATA_URL, alt: "Second", caption: null } }
+        ]
+      })
+    }
+  });
+  const ctx = ctxFor(owner);
+
+  const read = await callTool(ctx, "read_document", { document: doc.id });
+  assert.equal(read.isError, false);
+  const payload = parseToolJson(read);
+  assert.ok(!read.content[0].text.includes("base64,"), "read_document must not ship base64 pixels as text");
+  assert.match(payload.markdown, /!\[Screenshot\]\(pasted-image:\/\/1 "Login page"\)/);
+  assert.match(payload.markdown, /!\[Second\]\(pasted-image:\/\/2\)/);
+  assert.equal(payload.pasted_images.length, 2);
+  assert.equal(payload.pasted_images[0].index, 1);
+  assert.equal(payload.pasted_images[0].mime_type, "image/png");
+  assert.equal(payload.pasted_images[0].placeholder, '![Screenshot](pasted-image://1 "Login page")');
+  assert.ok(payload.pasted_images[0].bytes > 0);
+
+  // read_image returns a real MCP image content block, not JSON text.
+  const image = await callTool(ctx, "read_image", { document: doc.id, index: 1 });
+  assert.equal(image.isError, false);
+  const imageBlock = image.content[0] as unknown as { type: string; data: string; mimeType: string };
+  assert.equal(imageBlock.type, "image");
+  assert.equal(imageBlock.mimeType, "image/png");
+  assert.equal(imageBlock.data, TINY_PNG_BASE64);
+
+  const missing = await callTool(ctx, "read_image", { document: doc.id, index: 3 });
+  assert.equal(missing.isError, true);
+  const denied = await callTool(ctxFor(stranger), "read_image", { document: doc.id, index: 1 });
+  assert.equal(denied.isError, true);
+
+  // The placeholder is a valid find_text anchor and an echoed placeholder keeps
+  // the ORIGINAL image node (same pixels) instead of dropping or inlining it.
+  const edit = await callTool(ctx, "replace_in_document", {
+    document: doc.id,
+    find_text: '![Screenshot](pasted-image://1 "Login page")',
+    replacement_markdown: 'Figure 1 below.\n\n![Screenshot](pasted-image://1 "Login page")'
+  });
+  assert.equal(edit.isError, false, edit.content[0].text);
+  const after = await db.document.findUniqueOrThrow({ where: { id: doc.id }, select: { content: true } });
+  const nodes = parseDocumentContent(after.content).content as Array<{ type: string; attrs?: Record<string, unknown>; content?: Array<{ text?: string }> }>;
+  const images = nodes.filter((node) => node.type === "image");
+  assert.equal(images.length, 2, "both pasted images survive the edit");
+  assert.equal(images[0].attrs?.src, TINY_PNG_DATA_URL);
+  assert.equal(images[0].attrs?.caption, "Login page");
+  assert.ok(nodes.some((node) => node.content?.some((child) => child.text === "Figure 1 below.")));
+});

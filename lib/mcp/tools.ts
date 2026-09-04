@@ -3,11 +3,13 @@ import { z } from "zod";
 import { embedSourceExists } from "@/agent-core/ai-edit-submission";
 import { broadcastDocumentEvent } from "@/lib/collaboration";
 import {
+  collectPastedImages,
   defaultDocumentContent,
   getContextAroundMatch,
   getDocumentMarkdown,
   getDocumentPlainText,
   parseDocumentContent,
+  pastedImagePlaceholder,
   serializeDocumentContent
 } from "@/lib/content";
 import { notifyCommentPosted } from "@/lib/comment-notifications";
@@ -25,6 +27,12 @@ export type McpUser = { id: string; email: string; name: string };
 export type McpToolContext = { user: McpUser; origin: string };
 
 export class McpToolError extends Error {}
+
+// A tool result that must reach the client as raw MCP content blocks (e.g. an
+// `image` block) instead of being JSON-stringified into a text block.
+export class McpRawContent {
+  constructor(public readonly content: Array<Record<string, unknown>>) {}
+}
 
 // ---------------------------------------------------------------------------
 // Shared input pieces
@@ -241,7 +249,7 @@ const listQuicktakes = defineTool({
 const readDocument = defineTool({
   name: "read_document",
   description:
-    "Read a document as markdown. Works for forum quicktakes too (their body is returned as the markdown). Existing interactive widgets appear as ![widget: <label>](widget://<widget_id>) placeholders and images as workspace paths — echo them verbatim to keep them when editing. Also returns the document's widgets and open comment threads.",
+    "Read a document as markdown. Works for forum quicktakes too (their body is returned as the markdown). Existing interactive widgets appear as ![widget: <label>](widget://<widget_id>) placeholders, repository images as workspace paths, and pasted screenshots as ![alt](pasted-image://N) placeholders (listed in pasted_images; fetch the pixels with read_image only when you need to see them) — echo all placeholders verbatim to keep them when editing. Also returns the document's widgets and open comment threads.",
   schema: z.object({ document: documentRef }).strict(),
   handler: async (args, ctx) => {
     const { documentId } = await requireAccess(args.document, ctx.user.id, "view");
@@ -273,6 +281,7 @@ const readDocument = defineTool({
     ]);
     const content = parseDocumentContent(document.content);
     const isQuicktake = document.kind === QUICKTAKE_KIND;
+    const pastedImages = isQuicktake ? [] : collectPastedImages(content);
     return {
       id: document.id,
       title: document.title,
@@ -292,7 +301,20 @@ const readDocument = defineTool({
       repo: document.repoUrl ? { url: document.repoUrl, branch: document.repoBranch } : null,
       updated_at: document.updatedAt.toISOString(),
       // A quicktake keeps its text in quicktakeBody; its TipTap content is empty.
-      markdown: isQuicktake ? document.quicktakeBody ?? "" : getDocumentMarkdown(content),
+      markdown: isQuicktake
+        ? document.quicktakeBody ?? ""
+        : getDocumentMarkdown(content, { pastedImagePlaceholders: true }),
+      // Pasted screenshots are data URLs in the document; never ship them as
+      // base64 text (megabytes of tokens per read). read_image returns them as
+      // a real image content block on demand.
+      pasted_images: pastedImages.map((image) => ({
+        index: image.index,
+        placeholder: pastedImagePlaceholder(image),
+        alt: image.alt,
+        caption: image.caption,
+        mime_type: image.mediaType,
+        bytes: image.bytes
+      })),
       widgets: widgets.map((widget) => ({
         widget_id: widget.id,
         label: widget.label,
@@ -304,6 +326,44 @@ const readDocument = defineTool({
       })),
       open_comment_threads: threads.map((thread) => serializeThread(thread))
     };
+  }
+});
+
+const readImage = defineTool({
+  name: "read_image",
+  description:
+    "Return the pixels of one pasted screenshot from a document as an image (vision) block. index is the N from the ![alt](pasted-image://N) placeholder / pasted_images entry that read_document returned. Repository images referenced by path are files in the workspace, not readable with this tool.",
+  schema: z
+    .object({
+      document: documentRef,
+      index: z.number().int().min(1).describe("1-based index from the pasted-image://N placeholder.")
+    })
+    .strict(),
+  handler: async (args, ctx) => {
+    const { documentId } = await requireAccess(args.document, ctx.user.id, "view");
+    const document = await db.document.findUniqueOrThrow({
+      where: { id: documentId },
+      select: { content: true }
+    });
+    const images = collectPastedImages(parseDocumentContent(document.content));
+    const image = images.find((candidate) => candidate.index === args.index);
+    if (!image) {
+      throw new McpToolError(
+        images.length === 0
+          ? "This document has no pasted images."
+          : `No pasted image with index ${args.index}; the document has ${images.length} (1–${images.length}).`
+      );
+    }
+    if (!image.base64) {
+      throw new McpToolError("This pasted image is not a base64 data URL and cannot be returned.");
+    }
+    return new McpRawContent([
+      { type: "image", data: image.base64, mimeType: image.mediaType },
+      {
+        type: "text",
+        text: `Pasted image ${image.index}/${images.length}: alt="${image.alt}"${image.caption ? ` caption="${image.caption}"` : ""} (${image.mediaType}, ${image.bytes} bytes)`
+      }
+    ]);
   }
 });
 
@@ -671,6 +731,7 @@ export const MCP_TOOLS: McpTool[] = [
   listDocuments,
   listQuicktakes,
   readDocument,
+  readImage,
   replaceInDocument,
   appendToDocument,
   replaceDocument,

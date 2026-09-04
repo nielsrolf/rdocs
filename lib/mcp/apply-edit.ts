@@ -3,7 +3,12 @@ import { Transform } from "@tiptap/pm/transform";
 import type { JSONContent } from "@tiptap/react";
 
 import { getCollaborationVersion, submitCollaborationSteps } from "@/lib/collaboration";
-import { parseDocumentContent } from "@/lib/content";
+import {
+  collectPastedImages,
+  isPastedImageSrc,
+  parseDocumentContent,
+  pastedImagePlaceholder
+} from "@/lib/content";
 import { db } from "@/lib/db";
 import { createDocumentEditorSchema } from "@/lib/document-editor-schema";
 import { markdownToDocNodes } from "@/lib/mcp/markdown-doc";
@@ -12,12 +17,27 @@ const schema = createDocumentEditorSchema();
 
 export type MarkdownEditMode = "replace" | "append" | "replace_all";
 
+// Pasted images of the CURRENT document content, so echoed pasted-image://N
+// placeholders resolve to the original pixels. Numbering matches read_document;
+// a concurrent edit that reorders images between read and write is accepted as
+// the same race any find_text anchor already has.
+async function loadPastedImages(documentId: string) {
+  const document = await db.document.findUnique({ where: { id: documentId }, select: { content: true } });
+  if (!document) return [];
+  return collectPastedImages(parseDocumentContent(document.content)).map((image) => ({
+    index: image.index,
+    src: image.src,
+    alt: image.alt,
+    caption: image.caption
+  }));
+}
+
 export class McpEditError extends Error {}
 
 // Markdown-shaped placeholder text for atom block nodes, mirroring what
 // getDocumentMarkdown emits for them, so find_text copied from read_document
 // can match (and therefore delete/move) widgets, images and attachments.
-function atomPlaceholderText(node: ProseMirrorNode): string | null {
+function atomPlaceholderText(node: ProseMirrorNode, counters: { pastedImages: number }): string | null {
   const attrs = node.attrs as Record<string, unknown>;
   const str = (key: string) => (typeof attrs[key] === "string" ? (attrs[key] as string) : "");
   switch (node.type.name) {
@@ -34,6 +54,11 @@ function atomPlaceholderText(node: ProseMirrorNode): string | null {
     }
     case "image": {
       const src = str("src");
+      if (isPastedImageSrc(src)) {
+        // Same numbering as getDocumentMarkdown's pasted-image://N placeholders.
+        counters.pastedImages += 1;
+        return pastedImagePlaceholder({ index: counters.pastedImages, alt: str("alt"), caption: str("caption") || null });
+      }
       return src ? `![${str("alt")}](${src})` : null;
     }
     case "attachmentChip":
@@ -52,6 +77,7 @@ function atomPlaceholderText(node: ProseMirrorNode): string | null {
 function buildTextIndex(doc: ProseMirrorNode) {
   let text = "";
   const positions: number[] = [];
+  const counters = { pastedImages: 0 };
   doc.descendants((node, pos) => {
     if (node.isText && node.text) {
       for (let i = 0; i < node.text.length; i += 1) {
@@ -65,7 +91,7 @@ function buildTextIndex(doc: ProseMirrorNode) {
       positions.push(pos);
     }
     if (node.isBlock && node.isAtom) {
-      const placeholder = atomPlaceholderText(node);
+      const placeholder = atomPlaceholderText(node, counters);
       if (placeholder) {
         if (text.length > 0 && !text.endsWith("\n")) {
           text += "\n";
@@ -284,7 +310,8 @@ export async function applyMarkdownEdit(input: {
         widgetRows: await db.embeddedWidget.findMany({
           where: { documentId: input.documentId },
           select: { id: true, label: true, buildCmd: true, embedSource: true }
-        })
+        }),
+        pastedImages: await loadPastedImages(input.documentId)
       });
 
   if (!blank && input.mode !== "replace_all" && nodes.length === 0) {

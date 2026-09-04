@@ -4,6 +4,7 @@ import type { JSONContent } from "@tiptap/react";
 import {
   buildAiEditInsertContent,
   normalizeWidgetsOutsideTables,
+  type ExistingPastedImage,
   type ExistingWidget
 } from "@/components/document-workspace/ai-edit-insert";
 import { documentEditorExtensions } from "@/lib/document-editor-schema";
@@ -39,6 +40,10 @@ export function markdownToDocNodes(input: {
   markdown: string;
   documentId: string;
   widgetRows: WidgetRowForMarkdown[];
+  // The document's pasted (data-URL) images, so pasted-image://N placeholders
+  // copied from read_document resolve to the original node (lib/content.ts
+  // collectPastedImages).
+  pastedImages?: ExistingPastedImage[];
 }): JSONContent[] {
   const html = buildAiEditInsertContent({
     replacementText: input.markdown,
@@ -47,7 +52,8 @@ export function markdownToDocNodes(input: {
     widgets: [],
     documentId: input.documentId,
     shareToken: null,
-    existingWidgets: input.widgetRows.map((row) => toExistingWidget(input.documentId, row))
+    existingWidgets: input.widgetRows.map((row) => toExistingWidget(input.documentId, row)),
+    existingPastedImages: input.pastedImages ?? []
   });
 
   const parsed = generateJSON(html, documentEditorExtensions()) as JSONContent;

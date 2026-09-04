@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { McpEditError } from "@/lib/mcp/apply-edit";
-import { callMcpTool, MCP_TOOLS, McpToolError, type McpToolContext } from "@/lib/mcp/tools";
+import { callMcpTool, MCP_TOOLS, McpRawContent, McpToolError, type McpToolContext } from "@/lib/mcp/tools";
 import { McpFileError } from "@/lib/mcp/workspace-files";
 
 // Minimal stateless MCP server over streamable HTTP (single POST endpoint,
@@ -92,6 +92,9 @@ export async function handleMcpMessage(
         }
         try {
           const result = await callMcpTool(name, message.params?.arguments, ctx);
+          if (result instanceof McpRawContent) {
+            return rpcResult(id, { content: result.content, isError: false });
+          }
           const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
           return rpcResult(id, { content: [{ type: "text", text }], isError: false });
         } catch (error) {

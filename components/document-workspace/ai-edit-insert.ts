@@ -30,6 +30,25 @@ export type ExistingWidget = {
 };
 
 const WIDGET_PLACEHOLDER_SCHEME = "widget://";
+// Pasted (data-URL) images are shown to agents as ![alt](pasted-image://N)
+// placeholders (lib/content.ts getDocumentMarkdown). An echoed placeholder must
+// resolve back to the SAME pixels, so callers pass the document's pasted images.
+const PASTED_IMAGE_PLACEHOLDER_SCHEME = "pasted-image://";
+
+export type ExistingPastedImage = {
+  index: number;
+  src: string;
+  alt: string;
+  caption: string | null;
+};
+
+function toPastedImageNode(image: ExistingPastedImage, alt: string, caption: string) {
+  const finalAlt = alt.trim() || image.alt;
+  const finalCaption = caption.trim() || image.caption || "";
+  return `<img src="${escapeHtml(image.src)}" alt="${escapeHtml(finalAlt)}"${
+    finalCaption ? ` caption="${escapeHtml(finalCaption)}" title="${escapeHtml(finalCaption)}"` : ""
+  }>`;
+}
 
 // "widget: Foo" / "Interactive widget: Foo" / "Foo" -> "Foo".
 function stripWidgetLabelPrefix(alt: string): string {
@@ -96,6 +115,9 @@ export function buildAiEditInsertContent(input: {
   // placeholders an agent echoed from a selection resolve back to the SAME node
   // instead of being pasted as literal link/metadata text.
   existingWidgets?: ExistingWidget[];
+  // Pasted data-URL images of the current document, so pasted-image://N
+  // placeholders echoed from read_document resolve back to the same node.
+  existingPastedImages?: ExistingPastedImage[];
   // When false, images that aren't referenced inline in replacementText are NOT
   // appended at the end. Agent suggestions set this so the run's images don't get
   // duplicated onto every suggestion — each suggestion renders only what it cites.
@@ -204,6 +226,16 @@ export function buildAiEditInsertContent(input: {
       const node = resolveWidgetPlaceholder(ref, stripWidgetLabelPrefix(alt));
       flushBefore(match.index);
       if (node) content.push(node); // unresolved placeholders are dropped, not printed literally
+      cursor = matchEnd;
+      continue;
+    }
+
+    // Pasted image placeholder: ![alt](pasted-image://N "caption")
+    if (isImageSyntax && src.trim().startsWith(PASTED_IMAGE_PLACEHOLDER_SCHEME)) {
+      const index = Number.parseInt(src.trim().slice(PASTED_IMAGE_PLACEHOLDER_SCHEME.length), 10);
+      const existing = (input.existingPastedImages ?? []).find((image) => image.index === index);
+      flushBefore(match.index);
+      if (existing) content.push(toPastedImageNode(existing, alt, caption)); // unknown index: dropped, never printed literally
       cursor = matchEnd;
       continue;
     }
