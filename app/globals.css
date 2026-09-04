@@ -6588,6 +6588,41 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   align-items: center;
 }
 
+.forum-layout-toggle {
+  display: inline-flex;
+  border: 1px solid #d5d5d5;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.forum-layout-toggle-option {
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 0.85rem;
+  padding: 0.35rem 0.7rem;
+  background: transparent;
+  color: #555;
+  border: none;
+  cursor: pointer;
+}
+
+.forum-layout-toggle-option + .forum-layout-toggle-option {
+  border-left: 1px solid #d5d5d5;
+}
+
+.forum-layout-toggle-option:hover {
+  color: #222;
+}
+
+.forum-layout-toggle-option-active {
+  background: #f1ede4;
+  color: #222;
+  font-weight: 600;
+}
+
+.forum-layout-toggle-option:disabled {
+  cursor: default;
+}
+
 .forum-title {
   font-size: 1.9rem;
   font-weight: 700;

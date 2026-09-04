@@ -42,6 +42,10 @@ model User {
   // New forum posts and quick takes published to an audience this user is in.
   // On by default; the bell on the forum/quicktakes pages toggles it.
   forumPostSlackNotifications     Boolean                          @default(true)
+  // How the forum frontpage is laid out: "unified" (posts and quick takes in
+  // one ranked feed) or "split" (quick takes section above the post list).
+  // Read through lib/forum-layout.ts, never directly.
+  forumLayout                     String                           @default("unified")
   createdAt                       DateTime                         @default(now())
   updatedAt                       DateTime                         @updatedAt
   ownedDocuments                  Document[]                       @relation("DocumentOwner")

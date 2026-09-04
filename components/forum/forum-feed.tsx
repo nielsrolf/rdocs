@@ -35,7 +35,7 @@ function formatDate(value: string) {
   }
 }
 
-function ForumPostCard({ post, canVote }: { post: ForumPostView; canVote: boolean }) {
+export function ForumPostCard({ post, canVote }: { post: ForumPostView; canVote: boolean }) {
   return (
     <article className="forum-post-card">
       <VoteWidget
