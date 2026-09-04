@@ -2,14 +2,17 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
-import { castDocumentVote, VOTE_KINDS } from "@/lib/forum-votes";
+import { castDocumentVote, isAllowedVoteValue, VOTE_KINDS } from "@/lib/forum-votes";
 
-const voteSchema = z.object({
-  // 1 = up/agree, -1 = down/disagree, 0 = clear my vote of this kind.
-  value: z.union([z.literal(1), z.literal(-1), z.literal(0)]),
-  // "karma" (default, the general upvote) or "agreement" (agree/disagree).
-  kind: z.enum(VOTE_KINDS).default("karma")
-});
+const voteSchema = z
+  .object({
+    // ±1 = up/agree or down/disagree, 0 = clear my vote of this kind. The karma
+    // axis also accepts ±STRONG_VOTE_WEIGHT (click-and-hold strong vote).
+    value: z.number().int(),
+    // "karma" (default, the general upvote) or "agreement" (agree/disagree).
+    kind: z.enum(VOTE_KINDS).default("karma")
+  })
+  .refine((vote) => isAllowedVoteValue(vote.kind, vote.value), { message: "Invalid vote value." });
 
 export async function POST(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;

@@ -3,12 +3,15 @@ import crypto from "node:crypto";
 import test from "node:test";
 
 import { replaceCommentBody, type ForumCommentView } from "../components/forum/forum-comments";
+import { nextKarmaVote } from "../components/forum/vote-widget";
 import { db } from "../lib/db";
 import { listForumComments } from "../lib/forum-data";
 import {
   castCommentVote,
   castDocumentVote,
   documentVoteTally,
+  isAllowedVoteValue,
+  STRONG_VOTE_WEIGHT,
   tallyVotes,
   tallyVotesByTarget
 } from "../lib/forum-votes";
@@ -159,4 +162,49 @@ test("replaceCommentBody edits a nested comment in place", () => {
   assert.equal(next[0].replies[0].body, "B2");
   assert.equal(next[0].body, "A");
   assert.equal(next[1].body, "C");
+});
+
+test("strong votes exist only on the karma axis and weigh STRONG_VOTE_WEIGHT", async () => {
+  assert.equal(isAllowedVoteValue("karma", STRONG_VOTE_WEIGHT), true);
+  assert.equal(isAllowedVoteValue("karma", -STRONG_VOTE_WEIGHT), true);
+  assert.equal(isAllowedVoteValue("karma", 2), false);
+  assert.equal(isAllowedVoteValue("agreement", STRONG_VOTE_WEIGHT), false);
+  assert.equal(isAllowedVoteValue("agreement", 1), true);
+
+  const owner = await makeUser("owner");
+  const voter = await makeUser("voter");
+  const other = await makeUser("other");
+  const take = await createQuicktake(owner.id, "Hold to strong-upvote.");
+  try {
+    await castDocumentVote(take.id, other.id, "karma", 1);
+    let tally = await castDocumentVote(take.id, voter.id, "karma", STRONG_VOTE_WEIGHT);
+    assert.equal(tally.score, 1 + STRONG_VOTE_WEIGHT);
+    assert.equal(tally.ownVote, STRONG_VOTE_WEIGHT);
+
+    // Downgrading to a normal vote replaces, never stacks.
+    tally = await castDocumentVote(take.id, voter.id, "karma", 1);
+    assert.equal(tally.score, 2);
+    assert.equal(tally.ownVote, 1);
+
+    await assert.rejects(() => castDocumentVote(take.id, voter.id, "agreement", STRONG_VOTE_WEIGHT), RangeError);
+    await assert.rejects(() => castDocumentVote(take.id, voter.id, "karma", 2), RangeError);
+    assert.equal((await documentVoteTally(take.id, voter.id)).agreement, 0);
+  } finally {
+    await db.document.deleteMany({ where: { id: take.id } });
+    await db.user.deleteMany({ where: { id: { in: [owner.id, voter.id, other.id] } } });
+  }
+});
+
+test("karma button: tap toggles a normal vote, hold toggles a strong vote", () => {
+  const S = STRONG_VOTE_WEIGHT;
+  assert.equal(nextKarmaVote(0, 1, false), 1);
+  assert.equal(nextKarmaVote(1, 1, false), 0);
+  assert.equal(nextKarmaVote(0, 1, true), S);
+  assert.equal(nextKarmaVote(S, 1, true), 0);
+  // Tap while strong-voted drops to a normal vote; hold while normal-voted upgrades.
+  assert.equal(nextKarmaVote(S, 1, false), 1);
+  assert.equal(nextKarmaVote(1, 1, true), S);
+  // Opposite direction always switches.
+  assert.equal(nextKarmaVote(S, -1, false), -1);
+  assert.equal(nextKarmaVote(-1, 1, true), S);
 });

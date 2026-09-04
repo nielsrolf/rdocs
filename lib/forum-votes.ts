@@ -7,7 +7,24 @@ export const VOTE_KINDS = ["karma", "agreement"] as const;
 export type VoteKind = (typeof VOTE_KINDS)[number];
 export const DEFAULT_VOTE_KIND: VoteKind = "karma";
 
-export type VoteValue = 1 | -1;
+// A normal vote weighs ±1. Holding the karma button casts a LessWrong-style
+// STRONG vote worth ±STRONG_VOTE_WEIGHT (stored as the weight itself, so tallies
+// stay a plain sum and `ownVote` tells the UI which strength is active). Only
+// the karma axis has strong votes; agreement is always ±1.
+export const STRONG_VOTE_WEIGHT = 3;
+export type VoteValue = 1 | -1 | typeof STRONG_VOTE_WEIGHT | -3;
+
+export function allowedVoteValues(kind: VoteKind): readonly number[] {
+  return kind === "karma" ? [0, 1, -1, STRONG_VOTE_WEIGHT, -STRONG_VOTE_WEIGHT] : [0, 1, -1];
+}
+
+export function isAllowedVoteValue(kind: VoteKind, value: number): value is VoteValue | 0 {
+  return allowedVoteValues(kind).includes(value);
+}
+
+export function isStrongVote(value: number): boolean {
+  return Math.abs(value) === STRONG_VOTE_WEIGHT;
+}
 
 export type VoteRow = { userId: string; kind: string; value: number };
 
@@ -75,14 +92,18 @@ export async function commentVoteTally(commentId: string, userId: string | null)
   return tallyVotes(votes, userId);
 }
 
-// Casts (value ±1) or clears (value 0) one user's vote of one kind and returns
-// the fresh tally. Access has been checked by the caller.
+// Casts (±1, or ±STRONG_VOTE_WEIGHT on the karma axis) or clears (0) one
+// user's vote of one kind and returns the fresh tally. Access has been checked
+// by the caller; an out-of-range value throws.
 export async function castDocumentVote(
   documentId: string,
   userId: string,
   kind: VoteKind,
-  value: VoteValue | 0
+  value: number
 ): Promise<VoteTally> {
+  if (!isAllowedVoteValue(kind, value)) {
+    throw new RangeError(`Invalid ${kind} vote value ${value}.`);
+  }
   if (value === 0) {
     await db.documentVote.deleteMany({ where: { documentId, userId, kind } });
   } else {
@@ -99,8 +120,11 @@ export async function castCommentVote(
   commentId: string,
   userId: string,
   kind: VoteKind,
-  value: VoteValue | 0
+  value: number
 ): Promise<VoteTally> {
+  if (!isAllowedVoteValue(kind, value)) {
+    throw new RangeError(`Invalid ${kind} vote value ${value}.`);
+  }
   if (value === 0) {
     await db.commentVote.deleteMany({ where: { commentId, userId, kind } });
   } else {
