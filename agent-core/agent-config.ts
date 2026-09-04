@@ -59,7 +59,8 @@ export const ANTHROPIC_AGENT_MODELS: readonly AgentModelOption[] = [
 export const OPENROUTER_AGENT_MODELS: readonly AgentModelOption[] = [
   { value: "openrouter/z-ai/glm-5.3", label: "GLM 5.3", hint: "Zhipu flagship", provider: "openrouter" },
   { value: "openrouter/z-ai/glm-5.3-flash", label: "GLM 5.3 Flash", hint: "Zhipu, fast", provider: "openrouter" },
-  { value: "openrouter/openai/gpt-5.6-sol", label: "GPT-5.6 Sol", hint: "OpenAI flagship", provider: "openrouter" },
+  { value: "openrouter/openai/gpt-6-astra", label: "GPT-6 Astra", hint: "OpenAI flagship (Sep 2026)", provider: "openrouter" },
+  { value: "openrouter/openai/gpt-5.6-sol", label: "GPT-5.6 Sol", hint: "OpenAI previous flagship", provider: "openrouter" },
   { value: "openrouter/openai/gpt-5.6-terra", label: "GPT-5.6 Terra", hint: "OpenAI flagship, balanced", provider: "openrouter" },
   { value: "openrouter/openai/gpt-5.6-luna", label: "GPT-5.6 Luna", hint: "OpenAI flagship, fast", provider: "openrouter" },
   { value: "openrouter/moonshotai/kimi-latest", label: "Kimi (latest)", hint: "Moonshot flagship", provider: "openrouter" },
@@ -94,7 +95,8 @@ export const LITELLM_AGENT_MODELS: readonly AgentModelOption[] = OPENROUTER_AGEN
 // OpenAI-compatible /v1 Responses endpoint. Host Codex login state is never
 // considered. Direct Anthropic API models are deliberately not represented.
 export const CODEX_OPENAI_AGENT_MODELS: readonly AgentModelOption[] = [
-  { value: "codex/openai/gpt-5.6-sol", label: "GPT-5.6 Sol", hint: "OpenAI flagship", provider: "openai" },
+  { value: "codex/openai/gpt-6-astra", label: "GPT-6 Astra", hint: "OpenAI flagship (Sep 2026)", provider: "openai" },
+  { value: "codex/openai/gpt-5.6-sol", label: "GPT-5.6 Sol", hint: "OpenAI previous flagship", provider: "openai" },
   { value: "codex/openai/gpt-5.6-terra", label: "GPT-5.6 Terra", hint: "Balanced coding default", provider: "openai" },
   { value: "codex/openai/gpt-5.6-luna", label: "GPT-5.6 Luna", hint: "Fast coding model", provider: "openai" }
 ] as const;

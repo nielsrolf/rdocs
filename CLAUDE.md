@@ -144,6 +144,8 @@ and polls `GET .../runs/:runId`; it can trigger and inspect only that document.
 document with initial Markdown, environment and one skill, then returns its scoped
 channel. `/agent-setup` is the current browser flow used by forecasting; service-specific
 prompts and callbacks belong in the integrating service, not in the channel runner.
+There is no UI for minting a channel yet (only `POST /api/documents/:id/api-channel`, owner-only); the
+standalone voice client `github.com/nielsrolf/rdocs-voice` (2026-09-05) consumes this API from outside.
 Manifest fetches and callbacks are server-side (so HTTPS can integrate with a
 tailnet-only HTTP service) and restricted to `AGENT_SETUP_ALLOWED_ORIGINS`.
 Two generic extensions (2026-09-04) let an integrating service build a chat on top of

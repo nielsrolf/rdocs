@@ -17,6 +17,11 @@ import {
   parseMaxTurns,
   resolveAgentSdkConfig,
   resolveCodexAgentConfig,
+  OPENROUTER_AGENT_MODELS,
+  LITELLM_AGENT_MODELS,
+  CODEX_OPENAI_AGENT_MODELS,
+  CODEX_CHATGPT_AGENT_MODELS,
+  CODEX_LITELLM_AGENT_MODELS,
   resolveRefusalFallbackModel,
   REFUSAL_FALLBACK_MODEL,
   THIRD_PARTY_THINKING_BUDGETS
@@ -309,4 +314,25 @@ test("agentModelProvider routes each prefix to its provider", () => {
 
 test("litellm models never fall back to an Anthropic model on refusal", () => {
   assert.equal(resolveRefusalFallbackModel({ model: "litellm/anthropic/claude-fable-5" }), null);
+});
+
+test("GPT-6 Astra is selectable on every OpenAI-capable route", () => {
+  const values = [
+    ...OPENROUTER_AGENT_MODELS,
+    ...LITELLM_AGENT_MODELS,
+    ...CODEX_OPENAI_AGENT_MODELS,
+    ...CODEX_CHATGPT_AGENT_MODELS,
+    ...CODEX_LITELLM_AGENT_MODELS
+  ].map((m) => m.value);
+  for (const expected of [
+    "openrouter/openai/gpt-6-astra",
+    "litellm/openai/gpt-6-astra",
+    "codex/openai/gpt-6-astra",
+    "codex/chatgpt/gpt-6-astra",
+    "codex/litellm/openai/gpt-6-astra"
+  ]) {
+    assert.ok(values.includes(expected), `missing ${expected}`);
+    assert.ok(isStorableAgentModel(expected), `${expected} not storable`);
+  }
+  assert.deepEqual(resolveCodexAgentConfig({ model: "codex/openai/gpt-6-astra", effort: "high" }).model, "gpt-6-astra");
 });

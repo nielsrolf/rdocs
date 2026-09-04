@@ -431,7 +431,7 @@ export function AgentPanel({
         customMode === "openrouter"
           ? "Enter an OpenRouter slug like openai/gpt-5.2"
           : customMode === "codex-openai"
-            ? "Enter an OpenAI model name like gpt-5.6-terra"
+            ? "Enter an OpenAI model name like gpt-6-astra"
             : "Enter a LiteLLM model name like anthropic/claude-opus-5"
       );
       return;
@@ -650,7 +650,7 @@ export function AgentPanel({
                     commitCustomSlug();
                   }
                 }}
-                placeholder={customMode === "openrouter" ? "openai/gpt-5.2" : customMode === "codex-openai" ? "gpt-5.6-terra" : "anthropic/claude-opus-5"}
+                placeholder={customMode === "openrouter" ? "openai/gpt-6-astra" : customMode === "codex-openai" ? "gpt-6-astra" : "anthropic/claude-opus-5"}
                 value={customDraft}
               />
               <button
