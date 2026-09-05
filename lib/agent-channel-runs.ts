@@ -5,12 +5,20 @@
 // channel's creator, agent config = that user's defaults for the document.
 
 import type { AgentApiChannel, Document } from "@prisma/client";
+import { z } from "zod";
 
 import { RUN_STARTED_CLAUDE } from "@/agent-core/lifecycle-messages";
 import { resolveAgentConfigForUser } from "@/lib/agent-defaults";
 import { runAgentConversationInBackground } from "@/lib/agent-conversation";
 import { recordAiRunEvent } from "@/lib/ai-runs";
 import { db } from "@/lib/db";
+
+/** Body of POST /api/agent-channels/:triggerId/runs. */
+export const channelRunMessageSchema = z.object({
+  message: z.string().trim().min(1).max(6000),
+  /** Resume the harness session of an earlier run of this channel (same document). */
+  previousRunId: z.string().min(1).max(64).optional().nullable()
+});
 
 export type ChannelWithDocument = Pick<AgentApiChannel, "id" | "documentId" | "createdById"> & {
   document: Pick<Document, "id" | "title" | "content" | "runnerMode" | "agentModel" | "agentEffort">;
