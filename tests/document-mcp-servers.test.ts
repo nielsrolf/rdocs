@@ -11,14 +11,25 @@ import { codexProviderConfig } from "../agent-core/codex-agent";
 import { resolveChannelPreviousRunId, upsertAgentApiChannel } from "../lib/agent-api-channels";
 import { serializeDocumentContent } from "../lib/content";
 import { db } from "../lib/db";
+import { channelRunMcpServers, channelRunMessageSchema } from "../lib/agent-channel-runs";
+import { upsertDocumentEnv } from "../lib/document-env";
 import {
   McpServerValidationError,
   deleteDocumentMcpServer,
+  deleteUserMcpServer,
   listDocumentMcpServers,
+  listInheritedMcpServers,
+  listUserMcpServers,
   loadDocumentMcpServerInputs,
+  loadRunMcpServerInputs,
+  mergeMcpServerInputs,
   resolveMcpServerInputs,
-  upsertDocumentMcpServer
+  resolveRunMcpServerInputs,
+  upsertDocumentMcpServer,
+  upsertUserMcpServer
 } from "../lib/document-mcp-servers";
+
+process.env.CREDENTIAL_ENCRYPTION_KEY = process.env.CREDENTIAL_ENCRYPTION_KEY || crypto.randomBytes(32).toString("base64");
 
 async function fixture() {
   const user = await db.user.create({
@@ -165,5 +176,155 @@ test("channel follow-ups may only resume runs of the same channel", async () => 
   } finally {
     for (const doc of [document, other.document]) await db.document.delete({ where: { id: doc.id } }).catch(() => null);
     for (const u of [user, other.user]) await db.user.delete({ where: { id: u.id } }).catch(() => null);
+  }
+});
+
+test("mergeMcpServerInputs: run > document > workspace > user on a name clash, order otherwise preserved", () => {
+  const merged = mergeMcpServerInputs({
+    user: [{ name: "shared", url: "https://user.example/mcp" }, { name: "mine", url: "https://mine.example/mcp" }],
+    workspace: [{ name: "shared", url: "https://ws.example/mcp" }, { name: "ws", url: "https://ws2.example/mcp" }],
+    document: [{ name: "shared", url: "https://doc.example/mcp" }],
+    run: [{ name: "ws", url: "https://run.example/mcp", headers: { Authorization: "Bearer r" } }]
+  });
+  assert.deepEqual(merged, [
+    { name: "ws", url: "https://run.example/mcp", headers: { Authorization: "Bearer r" } },
+    { name: "shared", url: "https://doc.example/mcp" },
+    { name: "mine", url: "https://mine.example/mcp" }
+  ]);
+});
+
+test("per-run servers from the agent API are validated and turned into bearer/explicit headers", () => {
+  assert.deepEqual(
+    resolveRunMcpServerInputs([
+      { name: "a", url: "https://a.example/mcp", authToken: "tok" },
+      { name: "b", url: "https://b.example/mcp", headers: { "X-Api-Key": "k" } },
+      { name: "c", url: "https://c.example/mcp" }
+    ]),
+    [
+      { name: "a", url: "https://a.example/mcp", headers: { Authorization: "Bearer tok" } },
+      { name: "b", url: "https://b.example/mcp", headers: { "X-Api-Key": "k" } },
+      { name: "c", url: "https://c.example/mcp" }
+    ]
+  );
+  assert.deepEqual(resolveRunMcpServerInputs(undefined), []);
+  assert.throws(() => resolveRunMcpServerInputs([{ name: "rdocs", url: "https://x.example/mcp" }]), McpServerValidationError);
+  assert.throws(
+    () => resolveRunMcpServerInputs([{ name: "a", url: "https://x.example/mcp" }, { name: "a", url: "https://y.example/mcp" }]),
+    McpServerValidationError
+  );
+  assert.throws(
+    () => resolveRunMcpServerInputs([{ name: "a", url: "https://x.example/mcp", headers: { "Bad Header": "v" } }]),
+    McpServerValidationError
+  );
+  assert.throws(
+    () => resolveRunMcpServerInputs([{ name: "a", url: "https://x.example/mcp", headers: { "X-H": "v\r\nInjected: 1" } }]),
+    McpServerValidationError
+  );
+
+  // The HTTP body schema accepts the same shape and the route helper is the same validator.
+  const parsed = channelRunMessageSchema.safeParse({
+    message: "hi",
+    mcpServers: [{ name: "a", url: "https://a.example/mcp", authToken: "tok" }]
+  });
+  assert.ok(parsed.success);
+  assert.deepEqual(channelRunMcpServers(parsed.success ? parsed.data.mcpServers : null), [
+    { name: "a", url: "https://a.example/mcp", headers: { Authorization: "Bearer tok" } }
+  ]);
+  assert.equal(channelRunMessageSchema.safeParse({ message: "hi", mcpServers: [{ name: "a" }] }).success, false);
+});
+
+test("user-scoped servers: token is stored encrypted, never listed, and applies to every run the user triggers", async () => {
+  const { user, document } = await fixture();
+  try {
+    await assert.rejects(
+      upsertUserMcpServer({ userId: user.id, name: "gdocs", url: "https://x.example/mcp" }),
+      McpServerValidationError
+    );
+    let servers = await upsertUserMcpServer({ userId: user.id, name: "mine", url: "https://mine.example/mcp", authToken: "secret-1" });
+    assert.equal(servers.length, 1);
+    assert.equal(servers[0].hasAuthToken, true);
+    assert.equal("authToken" in servers[0], false);
+    const row = await db.userMcpServer.findFirstOrThrow({ where: { userId: user.id, name: "mine" } });
+    assert.notEqual(row.authToken, "secret-1");
+    assert.equal(row.authToken?.includes("secret-1"), false);
+
+    // Re-saving without a token keeps the stored one; null clears it.
+    servers = await upsertUserMcpServer({ userId: user.id, name: "mine", url: "https://mine2.example/mcp" });
+    assert.equal(servers[0].url, "https://mine2.example/mcp");
+    assert.equal(servers[0].hasAuthToken, true);
+
+    let resolved = await loadRunMcpServerInputs({ documentId: document.id, userId: user.id, env: {} });
+    assert.deepEqual(resolved, [
+      { name: "mine", url: "https://mine2.example/mcp", headers: { Authorization: "Bearer secret-1" } }
+    ]);
+    // Anonymous runs (no triggering user) get no personal servers.
+    assert.deepEqual(await loadRunMcpServerInputs({ documentId: document.id, userId: null, env: {} }), []);
+
+    servers = await upsertUserMcpServer({ userId: user.id, name: "mine", url: "https://mine2.example/mcp", authToken: null });
+    assert.equal(servers[0].hasAuthToken, false);
+    resolved = await loadRunMcpServerInputs({ documentId: document.id, userId: user.id, env: {} });
+    assert.deepEqual(resolved, [{ name: "mine", url: "https://mine2.example/mcp" }]);
+
+    // A document server of the same name overrides the personal one.
+    await upsertDocumentMcpServer({ documentId: document.id, name: "mine", url: "https://doc.example/mcp" });
+    resolved = await loadRunMcpServerInputs({ documentId: document.id, userId: user.id, env: {} });
+    assert.deepEqual(resolved, [{ name: "mine", url: "https://doc.example/mcp" }]);
+    const inherited = await listInheritedMcpServers(document.id, user.id);
+    assert.deepEqual(inherited, [{ name: "mine", url: "https://mine2.example/mcp", scope: "user", shadowed: true }]);
+
+    // And a per-run server overrides the document one.
+    resolved = await loadRunMcpServerInputs({
+      documentId: document.id,
+      userId: user.id,
+      env: {},
+      runServers: [{ name: "mine", url: "https://run.example/mcp" }]
+    });
+    assert.deepEqual(resolved, [{ name: "mine", url: "https://run.example/mcp" }]);
+
+    servers = await deleteUserMcpServer(user.id, "mine");
+    assert.deepEqual(servers, []);
+    assert.deepEqual(await listUserMcpServers(user.id), []);
+  } finally {
+    await db.document.delete({ where: { id: document.id } }).catch(() => null);
+    await db.user.delete({ where: { id: user.id } }).catch(() => null);
+  }
+});
+
+test("workspace-scoped servers: a document sharing another document's workspace inherits its servers and their env keys", async () => {
+  const { user, document: workspaceDoc } = await fixture();
+  const member = await db.document.create({
+    data: {
+      ownerId: user.id,
+      title: "member",
+      content: serializeDocumentContent({ type: "doc", content: [{ type: "paragraph" }] }),
+      workspaceDocumentId: workspaceDoc.id
+    }
+  });
+  try {
+    await upsertDocumentMcpServer({ documentId: workspaceDoc.id, name: "ws", url: "https://ws.example/mcp", authEnvKey: "WS_TOKEN" });
+    await upsertDocumentMcpServer({ documentId: workspaceDoc.id, name: "shared", url: "https://ws-shared.example/mcp" });
+    await upsertDocumentMcpServer({ documentId: member.id, name: "shared", url: "https://member.example/mcp" });
+    // The operator put the key on the workspace document, not on the member.
+    await upsertDocumentEnv(workspaceDoc.id, "WS_TOKEN", "ws-secret");
+
+    const resolved = await loadRunMcpServerInputs({ documentId: member.id, userId: user.id, env: {} });
+    assert.deepEqual(resolved, [
+      { name: "shared", url: "https://member.example/mcp" },
+      { name: "ws", url: "https://ws.example/mcp", headers: { Authorization: "Bearer ws-secret" } }
+    ]);
+    // The run env (member document env + account keys) still wins for the same key.
+    const overridden = await loadRunMcpServerInputs({ documentId: member.id, userId: user.id, env: { WS_TOKEN: "member-secret" } });
+    assert.equal(overridden[1].headers?.Authorization, "Bearer member-secret");
+
+    assert.deepEqual(await listInheritedMcpServers(member.id, user.id), [
+      { name: "ws", url: "https://ws.example/mcp", scope: "workspace", shadowed: false },
+      { name: "shared", url: "https://ws-shared.example/mcp", scope: "workspace", shadowed: true }
+    ]);
+    // The workspace-owning document itself inherits nothing.
+    assert.deepEqual(await listInheritedMcpServers(workspaceDoc.id, null), []);
+  } finally {
+    await db.document.delete({ where: { id: member.id } }).catch(() => null);
+    await db.document.delete({ where: { id: workspaceDoc.id } }).catch(() => null);
+    await db.user.delete({ where: { id: user.id } }).catch(() => null);
   }
 });

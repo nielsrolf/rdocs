@@ -161,7 +161,21 @@ plaintext value becomes `Authorization: Bearer …` (resolved from `agentEnv`, n
 broker-substituted env — a missing key skips the server with an `[mcp-servers]` warning).
 Names `gdocs`/`rdocs` are reserved; max 10 per document. The pure builders live in
 `agent-core/mcp-servers.ts` (so a runner-image rebuild is needed when they change).
-Tests: `tests/document-mcp-servers.test.ts`.
+MCP servers come from FOUR scopes, merged by `loadRunMcpServerInputs` (the ONLY entry point
+the three run paths call; name clashes resolve **run > document > workspace > user**,
+`mergeMcpServerInputs`): **run** — `mcpServers: [{name,url,authToken?|headers?}]` on
+`POST /api/agent-channels/:triggerId/runs` (validated by `resolveRunMcpServerInputs`, max 10,
+never persisted — a `previousRunId` follow-up must resend them); **document** — the rows above;
+**workspace** — a document that shares another document's workspace (`workspaceDocumentId`,
+resolved via `resolveWorkspaceDocumentId`) inherits the workspace-owning document's servers,
+whose `authEnvKey` resolves against the run env first and then that workspace document's own
+env; **user** — `UserMcpServer` rows of the triggering user (`createdById`; anonymous runs get
+none), managed at Settings → AI → "Your MCP servers" (`GET/POST/DELETE /api/user/mcp-servers`,
+`components/user-mcp-servers-section.tsx`) with the bearer token stored encrypted
+(`encryptSecret`, write-only: the API reports only `hasAuthToken`; re-saving without a token
+keeps it, `authToken:null` clears it). The document route's GET also returns `inherited`
+(workspace + user servers with a `shadowed` flag) so the environment menu can show why a run
+has a tool. Tests: `tests/document-mcp-servers.test.ts`.
 A channel can also hold **standing jobs**: `GET/POST /api/agent-channels/:triggerId/schedules`
 and `DELETE .../schedules/:taskId` (channel token) manage `ScheduledTask` rows with
 `contextType: "api_channel"` (no Slack fields — `slackTeamId`/`slackChannelId` are nullable

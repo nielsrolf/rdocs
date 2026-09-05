@@ -232,6 +232,7 @@ export function EnvironmentMenu({
 }
 
 type McpServer = { id: string; name: string; url: string; authEnvKey: string | null };
+type InheritedMcpServer = { name: string; url: string; scope: "workspace" | "user"; shadowed: boolean };
 
 /**
  * HTTP MCP servers mounted into every agent run of this document (next to the
@@ -240,6 +241,7 @@ type McpServer = { id: string; name: string; url: string; authEnvKey: string | n
  */
 function McpServersSection({ documentId, shareToken }: { documentId: string; shareToken: string | null }) {
   const [servers, setServers] = useState<McpServer[] | null>(null);
+  const [inherited, setInherited] = useState<InheritedMcpServer[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
@@ -254,6 +256,7 @@ function McpServersSection({ documentId, shareToken }: { documentId: string; sha
         const data = await response.json().catch(() => null);
         if (!response.ok) throw new Error(data?.error ?? "Failed to load MCP servers.");
         setServers(data.servers ?? []);
+        setInherited(data.inherited ?? []);
       })
       .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed to load MCP servers."));
   }, [documentId, shareToken]);
@@ -274,6 +277,7 @@ function McpServersSection({ documentId, shareToken }: { documentId: string; sha
         return false;
       }
       setServers(data.servers ?? []);
+      if (Array.isArray(data.inherited)) setInherited(data.inherited);
       return true;
     } finally {
       setBusy(false);
@@ -310,6 +314,25 @@ function McpServersSection({ documentId, shareToken }: { documentId: string; sha
         ) : servers ? (
           <div className="env-empty">No MCP servers.</div>
         ) : null}
+        {inherited.map((server) => (
+          <div
+            className={`env-var-row env-var-row-inherited${server.shadowed ? " env-var-row-shadowed" : ""}`}
+            key={`${server.scope}:${server.name}`}
+            title={
+              server.shadowed
+                ? `Overridden by the ${server.scope === "workspace" ? "document" : "document or workspace"} server of the same name`
+                : server.scope === "workspace"
+                  ? "Inherited from the shared workspace's document"
+                  : "Your personal server (Settings → AI)"
+            }
+          >
+            <code className="env-var-key">{server.name}</code>
+            <span className="env-var-value" title={server.url}>
+              {server.url} · {server.scope === "workspace" ? "from workspace" : "personal"}
+              {server.shadowed ? " · overridden" : ""}
+            </span>
+          </div>
+        ))}
       </div>
       <div className="env-add-row">
         <input

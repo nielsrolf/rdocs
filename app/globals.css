@@ -7394,6 +7394,13 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   padding-top: 12px;
   border-top: 1px solid rgba(0, 0, 0, 0.08);
 }
-.env-mcp-section .env-add-row {
+.env-mcp-section .env-add-row,
+.env-mcp-add-row {
   flex-wrap: wrap;
+}
+.env-var-row-inherited {
+  opacity: 0.75;
+}
+.env-var-row-shadowed .env-var-key {
+  text-decoration: line-through;
 }

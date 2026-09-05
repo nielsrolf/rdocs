@@ -6,7 +6,7 @@
 // directly.
 
 import { RUN_STARTED_CLAUDE } from "@/agent-core/lifecycle-messages";
-import { loadDocumentMcpServerInputs } from "@/lib/document-mcp-servers";
+import { loadRunMcpServerInputs } from "@/lib/document-mcp-servers";
 import { markAiRunSucceeded, recordAiRunEvent } from "@/lib/ai-runs";
 import { withAgentRunLifecycle } from "@/lib/agent-run-lifecycle";
 import { broadcastDocumentEvent } from "@/lib/collaboration";
@@ -225,7 +225,7 @@ export async function runAskAiInBackground(input: {
           author: comment.author?.name ?? comment.aiModel ?? "Claude",
           body: comment.body
         })),
-        mcpServers: await loadDocumentMcpServerInputs(thread.documentId, agentEnv)
+        mcpServers: await loadRunMcpServerInputs({ documentId: thread.documentId, userId: createdById, env: agentEnv })
       }, {
         agentConfig: effectiveAgentConfig,
         agentEnv: runAgentEnv,

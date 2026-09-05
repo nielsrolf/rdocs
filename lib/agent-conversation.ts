@@ -12,7 +12,7 @@ import {
   recordAiRunEvent
 } from "@/lib/ai-runs";
 import { withAgentRunLifecycle } from "@/lib/agent-run-lifecycle";
-import { loadDocumentMcpServerInputs } from "@/lib/document-mcp-servers";
+import { loadRunMcpServerInputs } from "@/lib/document-mcp-servers";
 import { planSessionResume, recordRunSessionId, withConversationLock } from "@/lib/agent-sessions";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
@@ -54,6 +54,9 @@ export type ConversationRunInput = {
   slackContext?: ClaudeResearchAgentInput["slackContext"];
   // Run-scoped HTTP callback enabling the Slack read tools.
   slackTools?: ClaudeResearchAgentInput["slackTools"];
+  // Per-run MCP servers supplied by an API caller (already validated); merged
+  // above document/workspace/user servers of the same name. Never persisted.
+  mcpServers?: ClaudeResearchAgentInput["mcpServers"];
   // Live delivery of interim Slack updates the agent posts mid-run.
   onSlackMessage?: (text: string) => Promise<void> | void;
   // Called once after the run reaches a terminal state (bookkeeping already
@@ -137,6 +140,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
     hostDevDir,
     slackContext,
     slackTools,
+    mcpServers: runMcpServers,
     onSlackMessage,
     onFinished
   } = input;
@@ -252,7 +256,12 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       });
       const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, documentId);
       const { agentEnv, runAgentEnv, effectiveAgentConfig } = await ctx.loadEnv(agentConfig);
-      const mcpServers = await loadDocumentMcpServerInputs(documentId, agentEnv);
+      const mcpServers = await loadRunMcpServerInputs({
+        documentId,
+        userId: createdById,
+        env: agentEnv,
+        runServers: runMcpServers
+      });
       // Comments the agent leaves via add_comment are created (and broadcast)
       // the moment they arrive, so collaborators see review feedback mid-run.
       const commentRecorder = createLiveCommentRecorder({

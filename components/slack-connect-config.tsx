@@ -24,6 +24,7 @@ import {
   type CredentialProvider
 } from "@/lib/credential-detect";
 import { emitTourEvent } from "@/components/onboarding-tour";
+import { UserMcpServersSection } from "@/components/user-mcp-servers-section";
 import { UserSkillsSection, type UserSkillEntry } from "@/components/user-skills-section";
 
 type MaskedCredential = {
@@ -813,6 +814,8 @@ export function SlackConnectConfig({
           </p>
         ) : null}
       </section>
+
+      <UserMcpServersSection />
 
       <UserSkillsSection onSkillsChanged={setSkills} skills={skills} />
 

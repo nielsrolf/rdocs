@@ -5,6 +5,7 @@ import {
   McpServerValidationError,
   deleteDocumentMcpServer,
   listDocumentMcpServers,
+  listInheritedMcpServers,
   upsertDocumentMcpServer
 } from "@/lib/document-mcp-servers";
 import { requireDocumentAccess } from "@/lib/api-helpers";
@@ -30,7 +31,12 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   const { id } = await params;
   const auth = await access(request, id);
   if (!auth.ok) return auth.response;
-  return NextResponse.json({ servers: await listDocumentMcpServers(id) });
+  // `inherited`: workspace-owning document's servers (shared workspace) and the
+  // viewer's personal servers, shown read-only so a run's tool set is explainable.
+  return NextResponse.json({
+    servers: await listDocumentMcpServers(id),
+    inherited: await listInheritedMcpServers(id, auth.user?.id ?? null)
+  });
 }
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {

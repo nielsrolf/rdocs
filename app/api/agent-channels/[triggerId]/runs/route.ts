@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 
 import { resolveAgentApiChannel, resolveChannelPreviousRunId } from "@/lib/agent-api-channels";
-import { channelRunMessageSchema, startAgentChannelRun } from "@/lib/agent-channel-runs";
+import { channelRunMcpServers, channelRunMessageSchema, startAgentChannelRun } from "@/lib/agent-channel-runs";
 import { serializeAiRun } from "@/lib/ai-runs";
 import { db } from "@/lib/db";
+import { McpServerValidationError } from "@/lib/document-mcp-servers";
 import { buildRunPermalink } from "@/lib/request-origin";
 
 export const runtime = "nodejs";
@@ -21,7 +22,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ tri
   if (previousRunId === undefined) {
     return NextResponse.json({ error: "previousRunId does not belong to this channel." }, { status: 400 });
   }
-  const aiRunId = await startAgentChannelRun({ channel, message, previousRunId });
+  let mcpServers;
+  try {
+    mcpServers = channelRunMcpServers(parsed.data.mcpServers);
+  } catch (error) {
+    if (error instanceof McpServerValidationError) return NextResponse.json({ error: error.message }, { status: 400 });
+    throw error;
+  }
+  const aiRunId = await startAgentChannelRun({ channel, message, previousRunId, mcpServers });
 
   const created = await db.aiRun.findUnique({
     where: { id: aiRunId },

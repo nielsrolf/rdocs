@@ -65,6 +65,7 @@ model User {
   apiTokens                       ApiToken[]
   agentApiChannels                AgentApiChannel[]
   skills                          UserSkill[]
+  mcpServers                      UserMcpServer[]
   slackLinks                      SlackAccountLink[]
   aiRuns                          AiRun[]                          @relation("AiRunCreator")
   scheduledTasks                  ScheduledTask[]
@@ -315,6 +316,23 @@ model DocumentMcpServer {
   document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@unique([documentId, name])
+}
+
+// A user-scoped HTTP MCP server: mounted into every agent run the user
+// triggers (any document, Slack, API channel), below document/workspace
+// servers of the same name. Unlike DocumentMcpServer there is no env to point
+// at, so the optional bearer token is stored encrypted on the row
+// (CREDENTIAL_ENCRYPTION_KEY) and never returned in plaintext.
+model UserMcpServer {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  url       String
+  authToken String?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, name])
 }
 
 // A narrowly scoped trigger credential for one configured document-agent.

@@ -6,7 +6,7 @@
 // → respond 202).
 
 import { buildAndVerifyWidget } from "@/agent-core";
-import { loadDocumentMcpServerInputs } from "@/lib/document-mcp-servers";
+import { loadRunMcpServerInputs } from "@/lib/document-mcp-servers";
 import type { AgentAccessMode } from "@/agent-core";
 import { buildConversationHistory, markAiRunSucceeded, recordAiRunEvent } from "@/lib/ai-runs";
 import { withAgentRunLifecycle } from "@/lib/agent-run-lifecycle";
@@ -205,7 +205,7 @@ export async function runAiEditInBackground(input: {
           instruction: parsed.instruction.trim(),
           userInstructions: agentConfig.userInstructions ?? null,
           conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined,
-          mcpServers: await loadDocumentMcpServerInputs(documentId, agentEnv)
+          mcpServers: await loadRunMcpServerInputs({ documentId, userId: createdById, env: agentEnv })
         },
         {
           agentConfig: effectiveAgentConfig,
