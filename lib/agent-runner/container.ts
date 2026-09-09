@@ -20,7 +20,8 @@ import {
   resolveContainerPidsLimit,
   resolveContainerUser,
   serializeEnvFile,
-  sysboxAvailableFromRuntimes
+  innerDockerProfileFromRuntimes,
+  type InnerDockerProfile
 } from "./container-args";
 import {
   CONNECT_ANTHROPIC_CREDENTIAL_MESSAGE,
@@ -52,32 +53,34 @@ import { buildRunPermalink } from "@/lib/request-origin";
 const CONTAINER_TRANSIENT_DELAYS_MS = [2_000, 8_000];
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-// Sysbox availability is a property of the Docker engine, probed once per
-// process (`docker info`) and cached. When the sysbox-runc runtime is
-// registered, EVERY agent container defaults to the Sysbox system-container
-// profile (docker-in-container enabled — see container-args.ts); when it is
-// not installed, the hardened runc profile applies unchanged. There is no
-// feature flag: setting AGENT_CONTAINER_OCI_RUNTIME (e.g. to "runc") is the
-// explicit override / kill-switch that disables the sysbox default.
-let sysboxDetection: Promise<boolean> | undefined;
-function detectSysboxRuntime(runtime: string): Promise<boolean> {
-  if (!sysboxDetection) {
-    sysboxDetection = new Promise<boolean>((resolve) => {
+// Docker-in-container support is a property of the Docker engine, probed once
+// per process (`docker info`) and cached. When gVisor's `runsc` is registered,
+// EVERY agent container runs under the gVisor profile (preferred: user-space
+// kernel boundary); when only `sysbox-runc` is, the Sysbox profile applies;
+// neither → the hardened runc profile, unchanged. There is no feature flag:
+// setting AGENT_CONTAINER_OCI_RUNTIME (e.g. to "runc") is the explicit
+// override / kill-switch that disables the docker-capable default.
+let innerDockerDetection: Promise<InnerDockerProfile | undefined> | undefined;
+function detectInnerDockerProfile(runtime: string): Promise<InnerDockerProfile | undefined> {
+  if (!innerDockerDetection) {
+    innerDockerDetection = new Promise<InnerDockerProfile | undefined>((resolve) => {
       execFile(runtime, ["info", "--format", "{{json .Runtimes}}"], { timeout: 10_000 }, (error, stdout) => {
         if (error) {
-          console.warn(`[agent-runner] sysbox detection failed (assuming unavailable): ${error.message}`);
-          resolve(false);
+          console.warn(`[agent-runner] OCI runtime detection failed (assuming runc only): ${error.message}`);
+          resolve(undefined);
           return;
         }
-        const available = sysboxAvailableFromRuntimes(stdout.trim());
-        if (available) {
+        const profile = innerDockerProfileFromRuntimes(stdout.trim());
+        if (profile === "gvisor") {
+          console.log("[agent-runner] runsc detected: agent containers run under gVisor with inner docker enabled");
+        } else if (profile === "sysbox") {
           console.log("[agent-runner] sysbox-runc detected: agent containers run as system containers with inner docker enabled");
         }
-        resolve(available);
+        resolve(profile);
       });
     });
   }
-  return sysboxDetection;
+  return innerDockerDetection;
 }
 
 export type ContainerFailureDecision =
@@ -275,10 +278,10 @@ export class ContainerRunner implements AgentRunner {
       };
 
       const containerUser = resolveContainerUser(process.platform, process.getuid?.(), process.getgid?.());
-      // An explicit OCI runtime choice always wins and disables the sysbox
+      // An explicit OCI runtime choice always wins and disables the docker-capable
       // default (AGENT_CONTAINER_OCI_RUNTIME=runc forces the hardened profile).
       const explicitOciRuntime = process.env.AGENT_CONTAINER_OCI_RUNTIME || undefined;
-      const sysbox = !explicitOciRuntime && (await detectSysboxRuntime(runtime));
+      const innerDocker = explicitOciRuntime ? undefined : await detectInnerDockerProfile(runtime);
       const args = buildContainerRunArgs({
         image,
         name: opts.containerName,
@@ -293,7 +296,8 @@ export class ContainerRunner implements AgentRunner {
         readOnly,
         // e.g. AGENT_CONTAINER_OCI_RUNTIME=runsc to run under gVisor (Linux).
         ociRuntime: explicitOciRuntime,
-        sysbox,
+        innerDocker,
+        innerDockerTmpfsSize: process.env.AGENT_INNER_DOCKER_TMPFS_SIZE || undefined,
         detached,
         sessionPort: detached ? AGENT_SESSION_PORT : undefined,
         sessionSecret,

@@ -29,7 +29,9 @@
 // HERE, in the sandbox — never on the app host.
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, openSync } from "node:fs";
+import { chownSync, existsSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { networkInterfaces } from "node:os";
+import { spawnSync } from "node:child_process";
 
 import {
   buildSubmissionValidator,
@@ -65,28 +67,92 @@ function emit(frame: Record<string, unknown>) {
   rawStdoutWrite(JSON.stringify(frame) + "\n");
 }
 
-// Inner Docker daemon for docker-in-container (Sysbox system-container runs).
-// Applies only when ALL of: the runner marked this a Sysbox run
+// Inner Docker daemon for docker-in-container runs (gVisor or Sysbox).
+// Applies only when ALL of: the runner marked this a docker-capable run
 // (AGENT_INNER_DOCKER — container root alone is NOT a reliable signal, Docker
 // Desktop's hardened profile is also root and dockerd can never start there),
 // we actually are root, the image ships dockerd, and no daemon is already up.
 // Non-fatal on every path: an agent without docker is degraded, not broken.
+
+// Default route of the sandbox: interface, its IPv4 address and MTU. Read from
+// /proc and node:os because the agent images ship no iproute2.
+function defaultRoute(): { dev: string; addr?: string; mtu?: number } | undefined {
+  try {
+    const lines = readFileSync("/proc/net/route", "utf8").split("\n").slice(1);
+    const row = lines.map((l) => l.trim().split(/\s+/)).find((f) => f.length > 7 && f[1] === "00000000" && f[7] === "00000000");
+    if (!row) return undefined;
+    const dev = row[0];
+    const addr = (networkInterfaces()[dev] ?? []).find((i) => i.family === "IPv4" && !i.internal)?.address;
+    let mtu: number | undefined;
+    try {
+      const n = Number(readFileSync(`/sys/class/net/${dev}/mtu`, "utf8").trim());
+      if (Number.isFinite(n) && n > 0) mtu = n;
+    } catch {
+      // keep undefined
+    }
+    return { dev, addr, mtu };
+  } catch {
+    return undefined;
+  }
+}
+
+// gVisor: dockerd cannot program NAT (netstack exposes no nat table to the
+// iptables tooling dockerd uses), so we start it with --iptables=false and
+// install the one masquerade rule inner containers need for egress ourselves —
+// mirroring gVisor's own images/basic/docker/start-dockerd.sh. Requires the
+// runsc runtime to be registered with --net-raw (iptables-legacy talks to the
+// sandbox kernel over a raw socket); without it the rule fails and inner
+// containers only get egress with --network=host. The host MTU is copied into
+// dockerd because gVisor does not reliably forward fragmented packets.
+function gvisorDockerdArgs(): string[] {
+  const args = ["--iptables=false", "--ip6tables=false"];
+  const route = defaultRoute();
+  if (!route) {
+    process.stderr.write("[agent-entrypoint] inner docker: no default route in the sandbox; inner containers will lack egress\n");
+    return args;
+  }
+  if (route.mtu) args.push(`--mtu=${route.mtu}`);
+  try {
+    writeFileSync("/proc/sys/net/ipv4/ip_forward", "1");
+  } catch (error) {
+    process.stderr.write(`[agent-entrypoint] inner docker: could not enable ip_forward: ${error instanceof Error ? error.message : String(error)}\n`);
+  }
+  if (!route.addr) return args;
+  const iptables = existsSync("/usr/sbin/iptables-legacy") ? "/usr/sbin/iptables-legacy" : "iptables";
+  for (const proto of ["tcp", "udp"]) {
+    const r = spawnSync(iptables, ["-t", "nat", "-A", "POSTROUTING", "-o", route.dev, "-p", proto, "-j", "SNAT", "--to-source", route.addr], {
+      encoding: "utf8",
+      timeout: 10_000
+    });
+    if (r.status !== 0) {
+      process.stderr.write(
+        `[agent-entrypoint] inner docker: SNAT rule (${proto}) failed — inner containers get egress only with --network=host. ` +
+          `Is runsc registered with --net-raw? ${(r.stderr || r.error?.message || "").trim()}\n`
+      );
+      break;
+    }
+  }
+  return args;
+}
+
 async function maybeStartInnerDockerd(): Promise<void> {
   if (process.env.AGENT_INNER_DOCKER !== "1") return;
   if (typeof process.getuid !== "function" || process.getuid() !== 0) return;
   if (!existsSync("/usr/bin/dockerd")) return;
   if (existsSync("/var/run/docker.sock")) return;
+  const dockerdArgs = process.env.AGENT_INNER_DOCKER_PROFILE === "gvisor" ? gvisorDockerdArgs() : [];
   try {
     // dockerd is chatty; keep the run's stderr clean and leave its logs in the
-    // container's writable rootfs for in-sandbox debugging (the Sysbox profile
-    // has no --read-only). Fall back to discarding if the log can't be opened.
+    // container for in-sandbox debugging. Fall back to discarding if the log
+    // can't be opened.
     let logFd: number | "ignore" = "ignore";
     try {
-      logFd = openSync("/var/log/dockerd.log", "a");
+      // /tmp is writable under every profile (tmpfs when the rootfs is read-only).
+      logFd = openSync("/tmp/dockerd.log", "a");
     } catch {
       // keep "ignore"
     }
-    const child = spawn("/usr/bin/dockerd", [], {
+    const child = spawn("/usr/bin/dockerd", dockerdArgs, {
       detached: true,
       stdio: ["ignore", logFd, logFd]
     });
@@ -112,6 +178,36 @@ async function maybeStartInnerDockerd(): Promise<void> {
   process.stderr.write(
     "[agent-entrypoint] inner dockerd socket did not appear within 20s; continuing without docker\n"
   );
+}
+
+// gVisor profile: the container starts as sandbox root (dockerd needs it), but
+// the AGENT must run as the host user so bind-mounted workspace/session writes
+// come back host-owned (gVisor has no userns remap the way Sysbox does). The
+// runner passes AGENT_RUN_USER=uid:gid; we hand the docker socket to that user
+// and drop privileges in-process before agent-core starts. Irreversible by
+// design: the agent cannot get root back. A failed drop is fatal — running the
+// agent as root would leave root-owned files the app cannot commit or clean.
+function dropToRunUser(): void {
+  const raw = process.env.AGENT_RUN_USER;
+  if (!raw) return;
+  if (typeof process.getuid !== "function" || process.getuid() !== 0) return;
+  const match = /^(\d+):(\d+)$/.exec(raw.trim());
+  if (!match) throw new Error(`[agent-entrypoint] AGENT_RUN_USER must be uid:gid, got ${JSON.stringify(raw)}`);
+  const uid = Number(match[1]);
+  const gid = Number(match[2]);
+  if (existsSync("/var/run/docker.sock")) {
+    try {
+      chownSync("/var/run/docker.sock", uid, gid);
+    } catch (error) {
+      process.stderr.write(
+        `[agent-entrypoint] could not chown docker socket: ${error instanceof Error ? error.message : String(error)}\n`
+      );
+    }
+  }
+  process.setgroups?.([gid]);
+  process.setgid!(gid);
+  process.setuid!(uid);
+  process.stderr.write(`[agent-entrypoint] dropped privileges to ${uid}:${gid}\n`);
 }
 
 // Reads the job (first line) and then keeps consuming stdin, routing steering
@@ -405,6 +501,9 @@ const main = sessionPortEnv
   : stdioMain;
 
 maybeStartInnerDockerd()
+  // Always runs, even when dockerd was skipped or failed: the agent must never
+  // run as sandbox root when the runner asked for a host user.
+  .then(() => dropToRunUser())
   .then(() => main())
   .catch((error) => {
     emit({ type: "error", message: error instanceof Error ? error.message : String(error) });

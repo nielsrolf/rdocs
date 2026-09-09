@@ -38,18 +38,35 @@ export type ContainerRunSpec = {
   // Linux-only; register the runtime with the engine before using it.
   ociRuntime?: string;
   /**
-   * Sysbox "system container" profile (`--runtime sysbox-runc`): the container
-   * gets a Linux user namespace (container root ≠ host root, /proc and /sys are
-   * virtualized) and can run a full inner Docker daemon with ZERO visibility
-   * into the host daemon — this is what gives agents `docker build`/`docker run`
-   * inside their sandbox. The userns replaces the runc-profile flags, which
-   * would break the inner dockerd: no --user (dockerd needs container root; the
-   * runner's entrypoint starts it), no --cap-drop ALL / no-new-privileges
-   * (userns root needs its capabilities *within the namespace*), no --read-only
-   * rootfs (sysbox mounts writable host-backed dirs over /var/lib/docker etc.).
+   * Docker-in-container profile. Both give the agent its OWN inner Docker
+   * daemon (started by the runner's entrypoint) with zero visibility into the
+   * host daemon; they differ in what the isolation boundary is:
+   *
+   * - "gvisor" (`--runtime runsc`, preferred): a user-space kernel (the Sentry)
+   *   sits between the container and the host kernel, so the agent's syscalls
+   *   never reach the host kernel directly — the boundary designed for
+   *   untrusted multi-tenant code. `--cap-add ALL` is required for the inner
+   *   dockerd but grants capabilities only as perceived INSIDE the sandbox
+   *   (gVisor never runs with host capabilities). The rootfs stays read-only
+   *   with tmpfs scratch for /var/lib/docker etc. (gVisor requires a tmpfs
+   *   upper layer for the inner overlayfs anyway), and the entrypoint drops to
+   *   the host uid (AGENT_RUN_USER) after starting dockerd so workspace writes
+   *   come back host-owned.
+   * - "sysbox" (`--runtime sysbox-runc`): a Linux user namespace on the shared
+   *   host kernel (container root ≠ host root, /proc and /sys virtualized).
+   *   Needs a writable rootfs (sysbox mounts host-backed dirs over
+   *   /var/lib/docker) and no --user; the userns replaces the runc-profile
+   *   flags, which would break the inner dockerd.
+   *
    * Resource ceilings (pids/memory/cpus) still bound everything nested inside.
    */
-  sysbox?: boolean;
+  innerDocker?: InnerDockerProfile;
+  /**
+   * Size cap of the tmpfs behind the inner daemon's image/layer store under the
+   * gVisor profile (default "8g"). tmpfs is memory-backed, so image pulls count
+   * toward --memory; raise both for image-heavy channels.
+   */
+  innerDockerTmpfsSize?: string;
   /**
    * Detached session container (`docker run -d`): its lifetime is NOT tied to
    * the app process that started it, so a deploy/crash no longer kills the run.
@@ -83,22 +100,37 @@ export type ContainerRunSpec = {
 
 export const DEFAULT_CONTAINER_PIDS_LIMIT = 512;
 
+export type InnerDockerProfile = "gvisor" | "sysbox";
+
 /** Runtime name Sysbox registers with the Docker engine. */
 export const SYSBOX_RUNTIME = "sysbox-runc";
+/** Runtime name gVisor registers with the Docker engine (`runsc install`). */
+export const GVISOR_RUNTIME = "runsc";
+export const DEFAULT_INNER_DOCKER_TMPFS_SIZE = "8g";
 
 /**
- * Parse `docker info --format '{{json .Runtimes}}'` output and report whether
- * Sysbox is registered with the engine. Pure so it is unit-testable; the
- * caller does the (cached) docker invocation. Any parse failure → false, i.e.
- * the hardened runc profile stays in effect.
+ * Parse `docker info --format '{{json .Runtimes}}'` output and pick the
+ * docker-in-container profile the engine supports: gVisor when `runsc` is
+ * registered (the stronger boundary), else Sysbox when `sysbox-runc` is, else
+ * none (the hardened runc profile stays in effect). Pure so it is
+ * unit-testable; the caller does the (cached) docker invocation. Any parse
+ * failure → undefined.
  */
-export function sysboxAvailableFromRuntimes(runtimesJson: string): boolean {
+export function innerDockerProfileFromRuntimes(runtimesJson: string): InnerDockerProfile | undefined {
   try {
     const parsed = JSON.parse(runtimesJson);
-    return Boolean(parsed && typeof parsed === "object" && SYSBOX_RUNTIME in parsed);
+    if (!parsed || typeof parsed !== "object") return undefined;
+    if (GVISOR_RUNTIME in parsed) return "gvisor";
+    if (SYSBOX_RUNTIME in parsed) return "sysbox";
+    return undefined;
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+/** @deprecated use innerDockerProfileFromRuntimes; kept for the Sysbox-only callers. */
+export function sysboxAvailableFromRuntimes(runtimesJson: string): boolean {
+  return innerDockerProfileFromRuntimes(runtimesJson) === "sysbox";
 }
 
 /**
@@ -214,10 +246,28 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
     args.push("--name", spec.name);
   }
 
-  if (spec.sysbox) {
-    // Sysbox system-container profile (see the `sysbox` field docs): the user
-    // namespace is the isolation boundary, and the runc-profile flags below
-    // would break the inner dockerd, so they are intentionally absent here.
+  if (spec.innerDocker === "gvisor") {
+    // gVisor docker-in-container profile (see the `innerDocker` field docs).
+    // The Sentry is the isolation boundary; --cap-add ALL is in-sandbox only.
+    // No --user: dockerd needs (sandboxed) root, and the entrypoint drops to
+    // AGENT_RUN_USER afterwards. no-new-privileges is absent because the inner
+    // runc must set up namespaces for the agent's containers.
+    args.push("--runtime", GVISOR_RUNTIME, "--cap-add", "ALL");
+    // Read-only rootfs is kept; everything the inner daemon writes lives on
+    // tmpfs. Layers need dev nodes + suid bits, so the docker default
+    // nosuid,nodev,noexec is overridden for the store; docker's default tmpfs
+    // size (64 MiB) would fail the first image pull, hence the explicit cap.
+    const storeOpts = `rw,exec,suid,dev,size=${spec.innerDockerTmpfsSize ?? DEFAULT_INNER_DOCKER_TMPFS_SIZE}`;
+    args.push("--read-only");
+    args.push("--tmpfs", "/tmp:rw,nosuid,nodev,exec");
+    args.push("--tmpfs", `${home}:rw,nosuid,nodev,exec`);
+    args.push("--tmpfs", `/var/lib/docker:${storeOpts}`);
+    args.push("--tmpfs", `/var/lib/containerd:${storeOpts}`);
+    args.push("--tmpfs", "/run:rw,exec,suid,dev,size=256m");
+  } else if (spec.innerDocker === "sysbox") {
+    // Sysbox system-container profile (see the `innerDocker` field docs): the
+    // user namespace is the isolation boundary, and the runc-profile flags
+    // below would break the inner dockerd, so they are intentionally absent.
     args.push("--runtime", SYSBOX_RUNTIME);
   } else {
     // Stronger isolation runtime (e.g. gVisor's runsc) when configured. An extra
@@ -270,13 +320,25 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
     // The matching secret goes in the env file, never here.
     args.push("-e", `${AGENT_SESSION_PORT_ENV}=${spec.sessionPort}`);
   }
-  if (spec.sysbox) {
+  if (spec.innerDocker) {
     // Internal wire (not a user-facing flag): tells the entrypoint it is inside
-    // a Sysbox system container, where starting the inner dockerd is expected
+    // a docker-capable sandbox, where starting the inner dockerd is expected
     // to work. Without it the entrypoint stays passive — container root alone
     // is not a reliable signal (Docker Desktop's hardened profile is also root,
     // and dockerd can never start there; probing would waste 20s per run).
     args.push("-e", "AGENT_INNER_DOCKER=1");
+    // The profile decides HOW dockerd is started: gVisor's netstack has no
+    // iptables NAT for dockerd to program, so the entrypoint runs it with
+    // --iptables=false and installs one SNAT rule itself; Sysbox runs a stock
+    // dockerd.
+    args.push("-e", `AGENT_INNER_DOCKER_PROFILE=${spec.innerDocker}`);
+  }
+  if (spec.innerDocker === "gvisor" && typeof spec.uid === "number" && typeof spec.gid === "number") {
+    // gVisor has no userns mapping sandbox root to the host user, so the
+    // entrypoint (started as sandbox root for dockerd) drops to this uid:gid
+    // before the agent runs — workspace/session writes then land host-owned,
+    // which is what lets the app commit agent output afterwards.
+    args.push("-e", `AGENT_RUN_USER=${spec.uid}:${spec.gid}`);
   }
   if (spec.agentHarness === "claude-code") {
     // Docker Desktop must run as container root so its root-owned bind mounts

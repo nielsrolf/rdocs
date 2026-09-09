@@ -8,6 +8,8 @@ import {
   resolveContainerUser,
   serializeEnvFile,
   sysboxAvailableFromRuntimes,
+  innerDockerProfileFromRuntimes,
+  GVISOR_RUNTIME,
   SYSBOX_RUNTIME
 } from "../lib/agent-runner/container-args";
 import { classifyContainerFailure } from "../lib/agent-runner/container";
@@ -138,7 +140,7 @@ test("ociRuntime selects --runtime when set (e.g. gVisor), and is absent otherwi
 });
 
 test("the Sysbox profile swaps userns isolation for the runc-profile flags (docker-in-container)", () => {
-  const a = args({ sysbox: true });
+  const a = args({ innerDocker: "sysbox" });
   const joined = a.join(" ");
   // The runtime that makes the container a "system container".
   const i = a.indexOf("--runtime");
@@ -161,20 +163,72 @@ test("the Sysbox profile swaps userns isolation for the runc-profile flags (dock
   // (container root alone also happens on Docker Desktop, where dockerd can
   // never start and probing would waste 20s per run).
   assert.ok(a.some((v, i) => v === "AGENT_INNER_DOCKER=1" && a[i - 1] === "-e"));
+  assert.ok(a.includes("AGENT_INNER_DOCKER_PROFILE=sysbox"));
   assert.ok(!args().includes("AGENT_INNER_DOCKER=1"));
+  assert.ok(!args().some((v) => v.startsWith("AGENT_INNER_DOCKER_PROFILE=")));
   // Still no host docker socket — the agent gets its OWN daemon, not ours.
   assert.ok(!joined.includes("docker.sock"));
 });
 
-test("an explicit ociRuntime never combines with the sysbox profile", () => {
-  // container.ts only sets sysbox when AGENT_CONTAINER_OCI_RUNTIME is unset,
-  // but the arg builder must also be safe if both ever arrive: sysbox wins and
-  // exactly one --runtime is emitted.
-  const a = args({ sysbox: true, ociRuntime: "runsc" });
+test("an explicit ociRuntime never combines with a docker-in-container profile", () => {
+  // container.ts only sets innerDocker when AGENT_CONTAINER_OCI_RUNTIME is
+  // unset, but the arg builder must also be safe if both ever arrive: the
+  // profile wins and exactly one --runtime is emitted.
+  const a = args({ innerDocker: "sysbox", ociRuntime: "runsc" });
   assert.deepEqual(
     a.filter((v, i) => a[i - 1] === "--runtime"),
     [SYSBOX_RUNTIME]
   );
+  const g = args({ innerDocker: "gvisor", ociRuntime: "runc" });
+  assert.deepEqual(
+    g.filter((v, i) => g[i - 1] === "--runtime"),
+    [GVISOR_RUNTIME]
+  );
+});
+
+test("the gVisor profile keeps the read-only rootfs, adds in-sandbox caps, and drops to the host user via the entrypoint", () => {
+  const a = args({ innerDocker: "gvisor", uid: 1000, gid: 1000 });
+  const joined = a.join(" ");
+  assert.equal(a[a.indexOf("--runtime") + 1], GVISOR_RUNTIME);
+  // Inner dockerd needs capabilities, but under gVisor they exist only inside
+  // the Sentry — the sandbox itself never gets host capabilities.
+  assert.equal(a[a.indexOf("--cap-add") + 1], "ALL");
+  assert.ok(!joined.includes("--cap-drop"));
+  assert.ok(!joined.includes("no-new-privileges"), "inner runc must set up namespaces");
+  // Container root is required to start dockerd, so no --user …
+  assert.ok(!a.includes("--user"));
+  // … and the entrypoint drops to the host user instead (bind-mount ownership).
+  assert.ok(a.some((v, i) => v === "AGENT_RUN_USER=1000:1000" && a[i - 1] === "-e"));
+  assert.ok(a.some((v, i) => v === "AGENT_INNER_DOCKER=1" && a[i - 1] === "-e"));
+  assert.ok(a.includes("AGENT_INNER_DOCKER_PROFILE=gvisor"));
+  // Hardening that survives: read-only rootfs, tmpfs scratch, and a tmpfs image
+  // store (gVisor needs a tmpfs upper for the inner overlayfs; docker's 64 MiB
+  // tmpfs default would fail the first pull, and layers need dev/suid).
+  assert.ok(a.includes("--read-only"));
+  assert.ok(joined.includes("--tmpfs /tmp:"));
+  assert.ok(joined.includes("--tmpfs /home/agent:"));
+  assert.ok(joined.includes("--tmpfs /var/lib/docker:rw,exec,suid,dev,size=8g"));
+  assert.ok(joined.includes("--tmpfs /run:"));
+  assert.ok(args({ innerDocker: "gvisor", innerDockerTmpfsSize: "20g" }).join(" ").includes("/var/lib/docker:rw,exec,suid,dev,size=20g"));
+  // No uid known (Darwin) → no AGENT_RUN_USER, everything else identical.
+  assert.ok(!args({ innerDocker: "gvisor", uid: undefined, gid: undefined }).some((v) => v.startsWith("AGENT_RUN_USER=")));
+  // Unchanged: ceilings, network, mounts, no host docker socket.
+  assert.ok(joined.includes("--pids-limit 512"));
+  assert.ok(joined.includes("--memory 4g"));
+  assert.ok(joined.includes(`-v ${WS}:/workspace`));
+  assert.ok(!joined.includes("docker.sock"));
+  assert.ok(a.includes("IS_SANDBOX=1"));
+});
+
+test("innerDockerProfileFromRuntimes prefers gVisor over Sysbox and is defensive", () => {
+  assert.equal(
+    innerDockerProfileFromRuntimes('{"runc":{"path":"runc"},"runsc":{"path":"/usr/local/bin/runsc"},"sysbox-runc":{"path":"/usr/bin/sysbox-runc"}}'),
+    "gvisor"
+  );
+  assert.equal(innerDockerProfileFromRuntimes('{"runc":{"path":"runc"},"sysbox-runc":{"path":"/usr/bin/sysbox-runc"}}'), "sysbox");
+  assert.equal(innerDockerProfileFromRuntimes('{"runc":{"path":"runc"}}'), undefined);
+  assert.equal(innerDockerProfileFromRuntimes("not json"), undefined);
+  assert.equal(innerDockerProfileFromRuntimes("null"), undefined);
 });
 
 test("sysboxAvailableFromRuntimes parses `docker info` runtimes JSON defensively", () => {
