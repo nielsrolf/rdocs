@@ -27,6 +27,9 @@ import {
 } from "@/lib/agent-runner/run-registry";
 import { createAgentRunner, getAgentRunner, getSelfHostedRunner, type AgentRunner } from "@/lib/agent-runner";
 import { AttachSupersededError } from "@/lib/agent-runner/session-client";
+import { DurableContainerRunner } from "@/lib/agent-runner/durable";
+import { resolveDurableRunTarget, resolveInnerDockerPreference, type DurableRunTarget } from "@/lib/durable-apps";
+import { getSessionsRootDir } from "@/lib/agent-sessions";
 import { db } from "@/lib/db";
 import {
   loadAgentEnvWithFreeFallback,
@@ -35,6 +38,7 @@ import {
 } from "@/lib/user-credentials";
 import {
   commitWorkspaceChanges,
+  ensureLinkedRepositoryDurable,
   ensureLinkedRepositoryWorktree,
   removeRunWorktree,
   type CommitResult,
@@ -81,6 +85,11 @@ function isAttachSuperseded(error: unknown): boolean {
 
 export const SESSION_HANDED_OFF_MESSAGE =
   "Another server process took over this run's agent container — it continues there, driven by another server process. This reader stepped aside.";
+
+export function durableAppRunNotice(target: { containerName: string; hostname: string | null; appPort: number }): string {
+  const where = target.hostname ? `https://${target.hostname} → port ${target.appPort}` : `port ${target.appPort} (no public hostname)`;
+  return `Running inside the workspace's durable app container ${target.containerName} (${where}); the base workspace is mounted directly and the container stays up between sessions.`;
+}
 
 export function hostDevRunNotice(cwd: string): string {
   return `⚠ HOST DEV RUN: executing unsandboxed on the host in ${cwd}.`;
@@ -165,12 +174,21 @@ export async function withAgentRunLifecycle<T>(
   fn: (ctx: AgentRunLifecycleContext) => Promise<T>
 ): Promise<AgentRunLifecycleResult<T>> {
   const { aiRunId, documentId, createdById, agentAccessMode, hostDevDir } = opts;
-  const isSelfHosted = !hostDevDir && opts.runnerMode === "selfHosted";
-  const runner = hostDevDir
-    ? createAgentRunner("inprocess")
-    : isSelfHosted
-      ? getSelfHostedRunner()
-      : getAgentRunner();
+  // Durable app mode (lib/durable-apps.ts) wins over everything: the run must
+  // land in the workspace's one long-lived container, or the agent cannot
+  // manage the app that lives there.
+  const durable: DurableRunTarget | null = await resolveDurableRunTarget(documentId).catch((error) => {
+    console.warn(`[durable-app] could not resolve durable target for ${documentId}:`, error);
+    return null;
+  });
+  const isSelfHosted = !durable && !hostDevDir && opts.runnerMode === "selfHosted";
+  const runner: AgentRunner = durable
+    ? new DurableContainerRunner({ ...durable, sessionsRootHostPath: getSessionsRootDir(durable.workspaceDocumentId) })
+    : hostDevDir
+      ? createAgentRunner("inprocess")
+      : isSelfHosted
+        ? getSelfHostedRunner()
+        : withInnerDockerPreference(getAgentRunner(), await resolveInnerDockerPreference(documentId).catch(() => true));
   // Held in an object rather than a `let`: setupWorkspace assigns it from
   // inside a closure, which TS control-flow analysis cannot see, so a plain
   // `let` narrows to `null` at the catch/finally use sites below.
@@ -204,10 +222,17 @@ export async function withAgentRunLifecycle<T>(
       ]).catch(() => null);
     },
     setupWorkspace: async () => {
-      state.linkedRepo =
-        hostDevDir || isSelfHosted
+      state.linkedRepo = durable
+        ? await ensureLinkedRepositoryDurable(documentId, createdById)
+        : hostDevDir || isSelfHosted
           ? null
           : await ensureLinkedRepositoryWorktree(documentId, aiRunId, createdById);
+      if (durable) {
+        if (!state.linkedRepo) {
+          throw new Error("Durable app mode needs a linked repository or shared workspace on this document.");
+        }
+        await recordAiRunEvent({ aiRunId, role: "system", message: durableAppRunNotice(durable) });
+      }
       if (hostDevDir) {
         await db.aiRun.update({
           where: { id: aiRunId },
@@ -227,11 +252,13 @@ export async function withAgentRunLifecycle<T>(
             branchName: state.linkedRepo.branchName
           }
         });
-        await recordAiRunEvent({
-          aiRunId,
-          role: "system",
-          message: isolatedWorktreeMessage(state.linkedRepo)
-        });
+        if (!durable) {
+          await recordAiRunEvent({
+            aiRunId,
+            role: "system",
+            message: isolatedWorktreeMessage(state.linkedRepo)
+          });
+        }
       }
       return state.linkedRepo;
     },
@@ -360,4 +387,15 @@ export async function withAgentRunLifecycle<T>(
       await removeRunWorktree(state.linkedRepo).catch(() => null);
     }
   }
+}
+
+// Non-durable container runs on a workspace with docker-in-docker switched off
+// (Document.agentInnerDocker=false) get the cheaper hardened runc profile.
+function withInnerDockerPreference(runner: AgentRunner, innerDocker: boolean): AgentRunner {
+  if (innerDocker || runner.mode !== "container") return runner;
+  return {
+    mode: runner.mode,
+    run: (input, options) => runner.run(input, { ...(options ?? {}), innerDocker: false }),
+    resolveMergeConflicts: (job) => runner.resolveMergeConflicts(job)
+  };
 }

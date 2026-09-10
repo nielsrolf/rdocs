@@ -71,6 +71,9 @@ export type AgentRunOptions = {
   // GDOCS_RUN_URL — see container-args.ts); inprocess/http ignore them.
   documentId?: string;
   aiRunId?: string;
+  // false → run in the hardened runc profile even when the engine could offer
+  // docker-in-docker (Document.agentInnerDocker off). Container runner only.
+  innerDocker?: boolean;
 };
 
 /** The serializable half of an agent run — safe to JSON-encode and ship. */

@@ -1746,10 +1746,12 @@ async function runClaudeResearchAgentOnce(
     runKey: options.runKey
   });
   const promptEnvKeys = agentEnvKeysForPrompt(options.agentEnv ?? {}, agentProcessEnv);
+  const durableAppDisclosure = durableAppPromptBlock(agentProcessEnv);
   const envDisclosure =
-    promptEnvKeys.length > 0
+    durableAppDisclosure +
+    (promptEnvKeys.length > 0
       ? `\n\nRun environment: these environment variables are set for this run and available in Bash and any subprocess (values hidden): ${promptEnvKeys.join(", ")}. Use them to decide which services/providers you can call — e.g. use a provider's API directly only when its key is present (OPENAI_API_KEY → OpenAI directly; LITELLM_API_KEY + LITELLM_BASE_URL → an OpenAI-compatible LiteLLM proxy serving many models; GITHUB_TOKEN → authenticated gh/git). Never print or commit their values.`
-      : `\n\nRun environment: no API keys or custom environment variables are configured for this run. Do not assume provider keys (e.g. OPENAI_API_KEY) exist; scripts that need one will fail until the user adds it via the document's Env menu.`;
+      : `\n\nRun environment: no API keys or custom environment variables are configured for this run. Do not assume provider keys (e.g. OPENAI_API_KEY) exist; scripts that need one will fail until the user adds it via the document's Env menu.`);
 
   // A delivered message ends the ALARM park: the wake-up (or a user follow-up)
   // arrived, so the next turn decides on its own whether to park again or
@@ -2184,4 +2186,22 @@ export async function runClaudeResearchAgent(
       agentConfig: { ...options.agentConfig, model: fallbackModel }
     });
   }
+}
+
+/**
+ * Durable app mode (r-docs `lib/durable-apps.ts`): the container this agent
+ * runs in is the workspace's single long-lived container. GDOCS_APP_PORT /
+ * GDOCS_APP_URL are set by the runner on that container only.
+ */
+export function durableAppPromptBlock(env: Record<string, string | undefined>): string {
+  const port = env.GDOCS_APP_PORT?.trim();
+  if (!port) return "";
+  const url = env.GDOCS_APP_URL?.trim();
+  const where = url
+    ? `It is published on the internet at ${url} (TLS terminates in front of the container; the app itself serves plain HTTP).`
+    : `No public hostname is configured for it yet; the owner can set one in the document's "Durable app" menu.`;
+  return (
+    `\n\nDurable app container: this session runs inside the workspace's long-lived container, which is NOT torn down between agent sessions — background processes you start (servers, daemons, docker containers) keep running after your turn ends, and later sessions land in this same container and can inspect or restart them. /workspace is the workspace's base checkout (there is no per-run worktree; changes are committed in place at the end of each run). Exactly one port is reachable from outside: bind the app to 0.0.0.0:${port}. ${where} ` +
+    `Only that port is exposed; everything else stays private to the container. Prefer restarting a running app in place over starting a second copy on another port.`
+  );
 }

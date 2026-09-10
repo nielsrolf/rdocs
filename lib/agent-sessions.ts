@@ -44,7 +44,12 @@ function sanitizeKey(value: string) {
 }
 
 export function getConversationSessionDir(documentId: string, conversationKey: string) {
-  return path.join(WORKSPACE_ROOT, sanitizeKey(documentId), "sessions", sanitizeKey(conversationKey));
+  return path.join(getSessionsRootDir(documentId), sanitizeKey(conversationKey));
+}
+
+/** Parent of every conversation session dir of a document (mounted whole into a durable container). */
+export function getSessionsRootDir(documentId: string) {
+  return path.join(WORKSPACE_ROOT, sanitizeKey(documentId), "sessions");
 }
 
 /**

@@ -282,6 +282,12 @@ export type AttachDetachedOptions = {
   job?: unknown;
   /** Frame cursor already persisted; frames at or below it are not replayed. */
   since: number;
+  /**
+   * Durable containers: a refused job means the container is busy with another
+   * session, so consuming frames would read someone else's run. Throw
+   * DurableJobRejectedError instead of treating it as a resume.
+   */
+  requireJobAccepted?: boolean;
   docker?: DetachedDockerOps;
   sink?: SessionFrameSink;
   store?: DetachedSessionStore;
@@ -329,7 +335,10 @@ export async function attachDetachedSession(
   if (options.job !== undefined) {
     // False means the container already has a job: this is a resume, and posting
     // again must never start a second agent turn.
-    await client.postJob(options.job);
+    const accepted = await client.postJob(options.job);
+    if (!accepted && options.requireJobAccepted) {
+      throw new DurableJobRejectedError();
+    }
   }
 
   // Cancellation is in-container now: a detached container has no parent to
@@ -388,6 +397,13 @@ export async function attachDetachedSession(
     if (released) {
       await options.store?.onFinished?.(handle);
     }
+  }
+}
+
+export class DurableJobRejectedError extends Error {
+  constructor() {
+    super("Durable app container is busy with another agent session.");
+    this.name = "DurableJobRejectedError";
   }
 }
 

@@ -1,5 +1,6 @@
 import { EnvironmentMenu } from "./environment-menu";
 import { SelfHostedMenu } from "./self-hosted-menu";
+import { DurableAppMenu } from "./durable-app-menu";
 import { SkillsMenu } from "./skills-menu";
 import { useEffect, useState } from "react";
 
@@ -465,6 +466,7 @@ export function AgentPanel({
             isOwner={isOwner}
             onRunnerModeChange={onRunnerModeChange}
           />
+          {canManageAutomation ? <DurableAppMenu documentId={documentId} isOwner={isOwner} /> : null}
           <label className="agent-config-field">
             <span className="agent-config-label">Harness</span>
             <select

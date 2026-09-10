@@ -327,3 +327,29 @@ test("an over-limit job body fails with an actionable HTTP error, not a destroye
     await session.server.close();
   }
 });
+
+test("durable: release acknowledges without exiting and the container takes the next job", async () => {
+  const session = await startSession({ stateOptions: { durable: true } });
+  try {
+    const first = await session.client.attach();
+    assert.equal(await session.client.postJob({ input: { n: 1 } }), true);
+    session.server.emit({ type: "result", output: { n: 1 } });
+    await session.client.release();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.deepEqual(session.exits, []);
+
+    // Next session (possibly a different host process) attaches and posts job 2.
+    const next = session.newClient();
+    const attached = await next.attach();
+    assert.ok(attached.lastSeq >= first.lastSeq);
+    assert.equal(await next.postJob({ input: { n: 2 } }), true);
+    assert.equal(session.jobs.length, 2);
+    session.server.emit({ type: "result", output: { n: 2 } });
+    const batch = await next.frames(attached.lastSeq, 0);
+    assert.equal(batch.done, true);
+    assert.equal(batch.frames.length, 1);
+    assert.deepEqual((batch.frames[0] as { output?: unknown }).output, { n: 2 });
+  } finally {
+    await session.server.close();
+  }
+});

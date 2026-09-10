@@ -229,6 +229,9 @@ export function createAgentSessionServer(options: {
 
     if (method === "POST" && url.pathname === "/release") {
       json(res, 200, { ok: true });
+      // Durable: the host collected this job's result; the container stays up
+      // for the next job (and for the app the agent runs in it).
+      if (state.status().durable) return;
       // Let the response flush before the process tears itself down.
       setTimeout(() => handlers.onExit("released"), 10).unref?.();
       return;

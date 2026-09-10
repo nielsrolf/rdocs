@@ -61,7 +61,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // setting AGENT_CONTAINER_OCI_RUNTIME (e.g. to "runc") is the explicit
 // override / kill-switch that disables the docker-capable default.
 let innerDockerDetection: Promise<InnerDockerProfile | undefined> | undefined;
-function detectInnerDockerProfile(runtime: string): Promise<InnerDockerProfile | undefined> {
+export function detectInnerDockerProfile(runtime: string): Promise<InnerDockerProfile | undefined> {
   if (!innerDockerDetection) {
     innerDockerDetection = new Promise<InnerDockerProfile | undefined>((resolve) => {
       execFile(runtime, ["info", "--format", "{{json .Runtimes}}"], { timeout: 10_000 }, (error, stdout) => {
@@ -162,7 +162,8 @@ export class ContainerRunner implements AgentRunner {
       aiRunId: options?.aiRunId,
       // Together with aiRunId this puts GDOCS_RUN_ID / GDOCS_DOCUMENT_ID /
       // GDOCS_RUN_URL in the container env (see buildContainerRunArgs).
-      documentId: options?.documentId
+      documentId: options?.documentId,
+      innerDocker: options?.innerDocker
     });
     return output as ClaudeResearchAgentOutput;
   }
@@ -199,6 +200,7 @@ export class ContainerRunner implements AgentRunner {
     steerRunId?: string;
     aiRunId?: string;
     documentId?: string;
+    innerDocker?: boolean;
   }): Promise<Record<string, unknown>> {
     const runtime = process.env.AGENT_CONTAINER_RUNTIME || "docker";
     const harness = agentHarnessForModel(opts.agentModel);
@@ -281,7 +283,9 @@ export class ContainerRunner implements AgentRunner {
       // An explicit OCI runtime choice always wins and disables the docker-capable
       // default (AGENT_CONTAINER_OCI_RUNTIME=runc forces the hardened profile).
       const explicitOciRuntime = process.env.AGENT_CONTAINER_OCI_RUNTIME || undefined;
-      const innerDocker = explicitOciRuntime ? undefined : await detectInnerDockerProfile(runtime);
+      // The workspace can also switch docker-in-docker off (Document.agentInnerDocker).
+      const innerDocker =
+        explicitOciRuntime || opts.innerDocker === false ? undefined : await detectInnerDockerProfile(runtime);
       const args = buildContainerRunArgs({
         image,
         name: opts.containerName,

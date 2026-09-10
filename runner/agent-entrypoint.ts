@@ -45,6 +45,7 @@ import {
 import {
   AGENT_SESSION_PORT,
   AGENT_SESSION_PORT_ENV,
+  AGENT_SESSION_DURABLE_ENV,
   AGENT_SESSION_SECRET_ENV,
   createAgentSessionState,
   type AgentSessionFrameBody
@@ -264,13 +265,30 @@ type EntrypointJob =
       agentConfig?: { model?: string | null; effort?: string | null };
       agentEnv?: Record<string, string>;
       validation?: Parameters<typeof buildSubmissionValidator>[0];
+      sessionConfigDir?: string | null;
     }
   | {
       kind: "merge_resolve";
       commitSha: string;
       agentConfig?: { model?: string | null };
       agentEnv?: Record<string, string>;
+      sessionConfigDir?: string | null;
     };
+
+// Where the harness keeps its config root + transcripts for this job. A classic
+// single-job container gets ONE conversation's session dir mounted and exported
+// on the container env (CLAUDE_CONFIG_DIR / CODEX_HOME); a durable container
+// serves many conversations from one mount, so the host names the per-job
+// subdirectory on the job itself (a container-side path) and that wins.
+function resolveSessionConfigDir(job: EntrypointJob): string | undefined {
+  const perJob = job.sessionConfigDir?.trim();
+  if (perJob) return perJob;
+  return (
+    (agentHarnessForModel(job.agentConfig?.model) === "codex"
+      ? process.env.CODEX_HOME
+      : process.env.CLAUDE_CONFIG_DIR)?.trim() || undefined
+  );
+}
 
 // Runs one job and emits its frames through `emit`. Transport-agnostic: the
 // stdio and session modes differ only in what `emit` does and where the job and
@@ -293,10 +311,7 @@ async function executeJob(
         isolatedRuntime: true,
         // Same reason as the agent turn below: keep the CLI's config root on
         // the mounted store instead of letting it default under HOME.
-        sessionConfigDir:
-          (agentHarnessForModel(job.agentConfig?.model) === "codex"
-            ? process.env.CODEX_HOME
-            : process.env.CLAUDE_CONFIG_DIR)?.trim() || undefined
+        sessionConfigDir: resolveSessionConfigDir(job)
       };
       if (agentHarnessForModel(job.agentConfig?.model) === "codex") {
         const { runCodexMergeConflictResolver } = await import("./agent-core/codex-agent");
@@ -356,10 +371,7 @@ async function executeJob(
       // to be forwarded explicitly or the CLI would write transcripts into the
       // container's tmpfs HOME (losing session resume) and look there for
       // credentials.
-      sessionConfigDir:
-        (agentHarnessForModel(job.agentConfig?.model) === "codex"
-          ? process.env.CODEX_HOME
-          : process.env.CLAUDE_CONFIG_DIR)?.trim() || undefined,
+      sessionConfigDir: resolveSessionConfigDir(job),
       validateSubmission,
       // Steering messages the host writes to stdin mid-run reach the live
       // session through this channel: Claude consumes it as streaming input,
@@ -418,28 +430,43 @@ async function sessionMain(port: number) {
     return;
   }
 
-  const inputChannel = createAgentInputChannel();
-  const abort = new AbortController();
+  // Durable app container: one long-lived container per workspace that runs
+  // every agent session of that workspace in turn (so the agent can keep an app
+  // running between sessions and restart it). Multi-job, no TTLs, and the host's
+  // POST /release only marks the current job as collected.
+  const durable = process.env[AGENT_SESSION_DURABLE_ENV]?.trim() === "1";
+
+  // Per-job steering channel + abort controller: a durable container gets a
+  // fresh pair for every job (a cancel must never hit the next session).
+  let inputChannel = createAgentInputChannel();
+  let abort = new AbortController();
   const state = createAgentSessionState({
+    durable,
     noContactTtlMs: numberEnv("AGENT_SESSION_NO_CONTACT_MS"),
     terminalHoldMs: numberEnv("AGENT_SESSION_TERMINAL_HOLD_MS"),
     maxLifetimeMs: numberEnv("AGENT_SESSION_MAX_LIFETIME_MS")
   });
 
-  let resolveJob: ((job: unknown) => void) | null = null;
-  const jobArrived = new Promise<unknown>((resolve) => {
-    resolveJob = resolve;
-  });
+  const pendingJobs: unknown[] = [];
+  let wakeJob: (() => void) | null = null;
   let exit: ((reason: string) => void) | null = null;
   const exited = new Promise<string>((resolve) => {
     exit = resolve;
+  });
+  let exitReason: string | null = null;
+  void exited.then((reason) => {
+    exitReason = reason;
+    wakeJob?.();
   });
 
   const server = createAgentSessionServer({
     state,
     secret,
     handlers: {
-      onJob: (job) => resolveJob?.(job),
+      onJob: (job) => {
+        pendingJobs.push(job);
+        wakeJob?.();
+      },
       onMessage: (text) => {
         const delivered = inputChannel.push(text);
         if (!delivered) {
@@ -457,30 +484,59 @@ async function sessionMain(port: number) {
   });
 
   await server.listen(port);
-  process.stderr.write(`[agent-session] listening on ${port}\n`);
+  process.stderr.write(`[agent-session] listening on ${port}${durable ? " (durable)" : ""}\n`);
 
-  const raw = await Promise.race([
-    jobArrived,
-    exited.then(() => null),
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), JOB_WAIT_MS).unref?.())
-  ]);
-  if (raw == null) {
-    process.stderr.write("[agent-session] no job arrived; exiting\n");
-    await server.close();
-    return;
-  }
+  // Waits for the next job. Classic mode gives up after JOB_WAIT_MS (the app
+  // crashed between `docker run -d` and POST /job); a durable container waits
+  // forever — its lifetime is the host's decision.
+  const nextJob = async (): Promise<unknown | null> => {
+    if (pendingJobs.length > 0) return pendingJobs.shift();
+    if (exitReason) return null;
+    let timer: NodeJS.Timeout | null = null;
+    await new Promise<void>((resolve) => {
+      wakeJob = () => {
+        wakeJob = null;
+        if (timer) clearTimeout(timer);
+        resolve();
+      };
+      if (!durable) {
+        timer = setTimeout(() => wakeJob?.(), JOB_WAIT_MS);
+        timer.unref?.();
+      }
+    });
+    if (pendingJobs.length > 0) return pendingJobs.shift();
+    return null;
+  };
 
-  const job = typeof raw === "string" ? parseJob(raw) : (raw as EntrypointJob);
-  if (!job) {
-    server.emit({ type: "error", message: "Failed to parse job JSON." });
-  } else {
-    await executeJob(job, (frame) => server.emit(frame), inputChannel, abort.signal);
+  for (;;) {
+    const raw = await nextJob();
+    if (raw == null) {
+      if (exitReason) break;
+      process.stderr.write("[agent-session] no job arrived; exiting\n");
+      await server.close();
+      return;
+    }
+
+    const job = typeof raw === "string" ? parseJob(raw) : (raw as EntrypointJob);
+    if (!job) {
+      server.emit({ type: "error", message: "Failed to parse job JSON." });
+    } else {
+      await executeJob(job, (frame) => server.emit(frame), inputChannel, abort.signal);
+    }
+
+    if (!durable) break;
+    // Ready for the next session: a failed job must not turn into the exit code
+    // of a container that keeps serving, and the next job gets its own channel.
+    process.exitCode = undefined;
+    inputChannel = createAgentInputChannel();
+    abort = new AbortController();
+    process.stderr.write(`[agent-session] job finished; awaiting next job (${state.status().jobsAccepted} so far)\n`);
   }
 
   // The terminal frame is in the log; the container now stays alive until the
   // host has persisted it and calls POST /release (or a TTL fires). THIS is what
   // makes a result survive the process that started the run.
-  const reason = await exited;
+  const reason = exitReason ?? (await exited);
   process.stderr.write(`[agent-session] exiting (${reason})\n`);
   await server.close();
 }

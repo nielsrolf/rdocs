@@ -167,3 +167,49 @@ test("the absolute lifetime ceiling wins over ongoing contact", () => {
   }
   assert.equal(state.expiredReason(), "max-lifetime");
 });
+
+test("a durable session accepts the next job after the previous one is terminal", () => {
+  const { state } = stateWithClock({ durable: true });
+  assert.equal(state.status().durable, true);
+  assert.equal(state.acceptJob({ id: 1 }), true);
+  // Still running: a second job is refused exactly like a classic session.
+  assert.equal(state.acceptJob({ id: 2 }), false);
+  state.append({ type: "progress", role: "system", message: "job 1" });
+  state.append({ type: "result", output: { a: 1 } });
+  assert.equal(state.status().phase, "terminal");
+  assert.equal(state.framesSince(0).done, true);
+
+  assert.equal(state.acceptJob({ id: 2 }), true);
+  assert.equal(state.status().phase, "running");
+  assert.equal(state.status().jobsAccepted, 2);
+  // The cursor from job 1 stays valid: sequence numbers never restart.
+  assert.equal(state.framesSince(2).done, false);
+  state.append({ type: "result", output: { a: 2 } });
+  const batch = state.framesSince(2);
+  assert.equal(batch.done, true);
+  assert.equal(batch.frames.length, 1);
+  assert.equal(batch.frames[0].seq, 3);
+});
+
+test("a durable session never expires on silence, hold or age", () => {
+  const { state, advance } = stateWithClock({
+    durable: true,
+    noContactTtlMs: 1_000,
+    terminalHoldMs: 1_000,
+    maxLifetimeMs: 2_000
+  });
+  advance(10_000);
+  assert.equal(state.expiredReason(), null);
+  state.acceptJob({});
+  state.append({ type: "result", output: {} });
+  advance(10_000);
+  assert.equal(state.expiredReason(), null);
+});
+
+test("a classic session still refuses a second job after the result", () => {
+  const { state } = stateWithClock();
+  state.acceptJob({});
+  state.append({ type: "result", output: {} });
+  assert.equal(state.acceptJob({}), false);
+  assert.equal(state.status().durable, false);
+});

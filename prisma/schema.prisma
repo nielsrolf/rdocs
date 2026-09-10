@@ -265,6 +265,10 @@ model Document {
   // trust decision the owner made by flipping this flag, analogous to the
   // existing GitHub-auth owner-credential fallback.
   runnerMode              String                           @default("managed")
+  // Docker-in-docker for this workspace's agent containers (gVisor profile with
+  // an inner dockerd). Off → the cheaper hardened runc profile, no docker
+  // inside. Read on the WORKSPACE-owning document (lib/durable-apps.ts).
+  agentInnerDocker        Boolean                          @default(true)
   // When set, the document is "posted to the forum": it appears on the forum
   // frontpage for every user who can access it (access management is shared
   // with the studio view — posting never widens access by itself).
@@ -298,6 +302,7 @@ model Document {
   apiChannels             AgentApiChannel[]
   notificationPreferences DocumentNotificationPreference[]
   mcpServers              DocumentMcpServer[]
+  durableApp              DurableApp?
 
   @@unique([slackTeamId, slackChannelId])
 }
@@ -352,6 +357,29 @@ model AgentApiChannel {
   createdBy   User      @relation(fields: [createdById], references: [id], onDelete: Cascade)
 
   @@index([createdById])
+}
+
+// "Durable app" mode of a workspace (lib/durable-apps.ts): ONE long-lived
+// agent container per workspace-owning document runs every agent session of
+// that workspace, so an app the agent starts keeps running between sessions
+// and the next session can restart it. `hostname` is routed by the front door
+// to `hostPort` (loopback), which docker maps onto `appPort` inside the
+// container. The three session columns mirror AiRun's detached-session handle
+// so a new server process can find and reuse the running container.
+model DurableApp {
+  id              String    @id @default(cuid())
+  documentId      String    @unique
+  enabled         Boolean   @default(false)
+  hostname        String?   @unique
+  appPort         Int       @default(3000)
+  hostPort        Int?      @unique
+  containerId     String?
+  sessionEndpoint String?
+  sessionSecret   String?
+  startedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  document        Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
 }
 
 // A queued unit of work for a "selfHosted" runnerMode document. Created

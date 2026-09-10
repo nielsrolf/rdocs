@@ -1,5 +1,5 @@
 import { buildAgentEnv, type DocumentEnv } from "@/agent-core";
-import { AGENT_SESSION_PORT_ENV } from "@/agent-core/session-protocol";
+import { AGENT_SESSION_DURABLE_ENV, AGENT_SESSION_PORT_ENV } from "@/agent-core/session-protocol";
 
 // Pure helpers for spawning the agent container — kept separate from the runner
 // so the hardening profile and env scrubbing are unit-testable without Docker.
@@ -85,6 +85,20 @@ export type ContainerRunSpec = {
    * the argv (visible via `ps`) — the caller must put it in the env file.
    */
   sessionSecret?: string;
+  /**
+   * Durable app container (lib/agent-runner/durable.ts): a long-lived,
+   * multi-job session host. Exports AGENT_SESSION_DURABLE=1 so the entrypoint
+   * keeps accepting jobs instead of exiting after the first result.
+   */
+  durable?: boolean;
+  /**
+   * Extra `-p 127.0.0.1:<hostPort>:<containerPort>` mappings — the durable
+   * app's public port. Loopback only: the front door (Caddy) is what exposes
+   * it under a hostname.
+   */
+  publishPorts?: { hostPort: number; containerPort: number }[];
+  /** Non-secret extra env (e.g. GDOCS_APP_PORT / GDOCS_APP_URL); rides the argv. */
+  extraEnv?: Record<string, string>;
   /** AiRun id of this run; exported as GDOCS_RUN_ID. */
   aiRunId?: string;
   /** Document the run belongs to; exported as GDOCS_DOCUMENT_ID. */
@@ -242,6 +256,10 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
     args.push("-p", `127.0.0.1::${spec.sessionPort}`);
   }
 
+  for (const mapping of spec.publishPorts ?? []) {
+    args.push("-p", `127.0.0.1:${mapping.hostPort}:${mapping.containerPort}`);
+  }
+
   if (spec.name) {
     args.push("--name", spec.name);
   }
@@ -319,6 +337,13 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
     // The entrypoint selects session mode on the presence of this variable.
     // The matching secret goes in the env file, never here.
     args.push("-e", `${AGENT_SESSION_PORT_ENV}=${spec.sessionPort}`);
+  }
+  if (spec.durable) {
+    args.push("-e", `${AGENT_SESSION_DURABLE_ENV}=1`);
+  }
+  for (const [key, value] of Object.entries(spec.extraEnv ?? {})) {
+    if (!/^[A-Z_][A-Z0-9_]*$/.test(key) || /[\s]/.test(value)) continue;
+    args.push("-e", `${key}=${value}`);
   }
   if (spec.innerDocker) {
     // Internal wire (not a user-facing flag): tells the entrypoint it is inside

@@ -43,6 +43,8 @@ export const AGENT_SESSION_PORT = 8787;
 export const AGENT_SESSION_SECRET_ENV = "AGENT_SESSION_SECRET";
 /** Presence of this env var switches the entrypoint into session-server mode. */
 export const AGENT_SESSION_PORT_ENV = "AGENT_SESSION_PORT";
+/** `1` turns the container into a durable multi-job session host (see AgentSessionStatus.durable). */
+export const AGENT_SESSION_DURABLE_ENV = "AGENT_SESSION_DURABLE";
 /** Header carrying the attach token issued by POST /attach. */
 export const ATTACH_TOKEN_HEADER = "x-agent-attach";
 
@@ -71,6 +73,14 @@ export type AgentSessionPhase = "awaiting_job" | "running" | "terminal";
 
 export type AgentSessionStatus = {
   phase: AgentSessionPhase;
+  /**
+   * Durable (multi-job) session: the container is a long-lived workspace host
+   * that accepts a new job after each terminal frame, never expires on a TTL,
+   * and treats POST /release as "this job's result was collected", not "exit".
+   */
+  durable: boolean;
+  /** Jobs accepted so far (1 for a classic single-job session once running). */
+  jobsAccepted: number;
   /** Highest sequence number assigned so far (0 = nothing emitted yet). */
   lastSeq: number;
   /** Lowest sequence number still replayable; > 1 means older frames were dropped. */
@@ -108,6 +118,8 @@ export type AgentSessionState = {
   /**
    * Accept the job. Returns false if a job was already accepted — a re-attach
    * after a deploy must resume the existing run, never start a second one.
+   * A DURABLE session accepts the next job once the previous one is terminal
+   * (the frame log keeps growing; `done` refers to the current job).
    */
   acceptJob(job: unknown): boolean;
   job(): unknown;
@@ -127,6 +139,8 @@ export function createAgentSessionState(options?: {
   terminalHoldMs?: number;
   maxLifetimeMs?: number;
   newToken?: () => string;
+  /** Multi-job, no-TTL session for durable app containers (see status.durable). */
+  durable?: boolean;
 }): AgentSessionState {
   const now = options?.now ?? (() => Date.now());
   const frameLimit = Math.max(1, options?.frameLimit ?? DEFAULT_FRAME_LOG_LIMIT);
@@ -134,8 +148,10 @@ export function createAgentSessionState(options?: {
   const terminalHoldMs = options?.terminalHoldMs ?? DEFAULT_TERMINAL_HOLD_MS;
   const maxLifetimeMs = options?.maxLifetimeMs ?? DEFAULT_MAX_LIFETIME_MS;
   const newToken = options?.newToken ?? defaultTokenFactory();
+  const durable = options?.durable === true;
 
   const startedAtMs = now();
+  let jobsAccepted = 0;
   let lastContactAtMs = startedAtMs;
   let finishedAtMs: number | null = null;
   let attachEpoch = 0;
@@ -149,6 +165,8 @@ export function createAgentSessionState(options?: {
 
   const status = (): AgentSessionStatus => ({
     phase: terminal ? "terminal" : hasJob ? "running" : "awaiting_job",
+    durable,
+    jobsAccepted,
     lastSeq,
     firstSeq,
     attachEpoch,
@@ -172,9 +190,15 @@ export function createAgentSessionState(options?: {
       lastContactAtMs = now();
     },
     acceptJob(job) {
-      if (hasJob) return false;
+      if (hasJob && !(durable && terminal)) return false;
+      // Durable: the previous job is over and collected (or abandoned); start
+      // the next one in the same container. Sequence numbers keep counting so a
+      // reader's cursor from the previous job stays valid.
       hasJob = true;
+      terminal = false;
+      finishedAtMs = null;
       jobValue = job;
+      jobsAccepted += 1;
       lastContactAtMs = now();
       return true;
     },
@@ -214,6 +238,9 @@ export function createAgentSessionState(options?: {
       return terminal;
     },
     expiredReason() {
+      // A durable container's lifetime is managed by the host (stop/restart
+      // through its DurableApp row), never by silence or age.
+      if (durable) return null;
       const t = now();
       if (t - startedAtMs > maxLifetimeMs) return "max-lifetime";
       if (terminal && finishedAtMs != null && t - finishedAtMs > terminalHoldMs) return "terminal-hold";

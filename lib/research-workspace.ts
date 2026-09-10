@@ -518,6 +518,36 @@ export async function ensureLinkedRepositoryWorktree(
   };
 }
 
+// Durable-app runs work directly in the BASE workspace (no per-run clone): the
+// container that mounts it lives across sessions, so an app the agent started
+// there keeps running and the next session can restart it. Pending base
+// changes are committed first (requireClean), attachments and skills are
+// materialized in place, and `worktree === workspace === baseWorkspace` tells
+// the lifecycle to commit in place and to skip worktree removal.
+export async function ensureLinkedRepositoryDurable(
+  documentId: string,
+  runnerUserId: string | null = null
+): Promise<LinkedRepositoryWorktree | null> {
+  const linked = await ensureLinkedRepository(documentId, {
+    requireClean: true,
+    pushPendingChanges: true,
+    runnerUserId
+  });
+  if (!linked) return null;
+  const branch = await runCommand("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: linked.workspace })
+    .then((r) => r.stdout.trim() || "HEAD")
+    .catch(() => "HEAD");
+  await syncAttachmentsIntoWorktree(documentId, linked.workspace);
+  await syncSkillsIntoWorktree(documentId, linked.workspace);
+  return {
+    ...linked,
+    baseWorkspace: linked.workspace,
+    workspace: linked.workspace,
+    worktree: linked.workspace,
+    branchName: branch
+  };
+}
+
 // Remove a per-run worktree and its branch once the run is finished. The run's
 // commit is merged into the base workspace before this is called, so the branch
 // is redundant and the worktree would otherwise leak (unbounded disk growth).
