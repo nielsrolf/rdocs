@@ -297,3 +297,9 @@ if [ -n "$(port_listeners "$OLD_PORT")" ]; then
 fi
 
 log "done. LB :$LB_PORT -> $NEW :$NEW_PORT ($NEXT_DIST_DIR)"
+
+# ---------------------------------------------------------- dev data copy
+# dev.nielsrolf.com runs on a scrubbed copy of the prod DB (see the script).
+if [ "${SKIP_DEV_REFRESH:-0}" != "1" ]; then
+  ./deploy/refresh-dev-data.sh || log "WARNING: dev data refresh failed (dev keeps its previous copy)"
+fi

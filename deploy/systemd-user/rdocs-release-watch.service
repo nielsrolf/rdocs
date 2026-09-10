@@ -1,0 +1,7 @@
+[Unit]
+Description=r-docs: deploy origin/release when it moves (deploy/release-watch.sh)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/agents/automator/services/r-docs
+ExecStart=%h/agents/automator/services/r-docs/deploy/release-watch.sh

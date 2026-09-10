@@ -37,3 +37,8 @@ claudex.env
 .env.bak*
 .claude/
 .deploy.lock
+
+# dev instance data copy (deploy/refresh-dev-data.sh) and its build
+dev-data/
+.next-dev
+.release-watch.lock
