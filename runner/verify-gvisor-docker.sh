@@ -66,7 +66,7 @@ docker run --rm "${PROFILE[@]}" --entrypoint /bin/bash "$IMAGE" -c '
   set -e
   dev=$(awk "\$2==\"00000000\" && \$8==\"00000000\" {print \$1; exit}" /proc/net/route)
   addr=$(hostname -I | awk "{print \$1}")
-  mtu=$(cat /sys/class/net/$dev/mtu)
+  mtu=$(cat /sys/class/net/$dev/mtu 2>/dev/null || echo 1500)  # gVisor sysfs has no per-device mtu
   echo 1 > /proc/sys/net/ipv4/ip_forward
   for p in tcp udp; do
     iptables-legacy -t nat -A POSTROUTING -o "$dev" -p $p -j SNAT --to-source "$addr" \

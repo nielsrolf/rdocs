@@ -28,7 +28,13 @@ RUN curl -fsSL https://download.docker.com/linux/debian/gpg \
       docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /etc/docker \
- && printf '{\n  "default-address-pools": [{"base": "10.88.0.0/16", "size": 24}]\n}\n' > /etc/docker/daemon.json
+ && printf '{\n  "default-address-pools": [{"base": "10.88.0.0/16", "size": 24}]\n}\n' > /etc/docker/daemon.json \
+ # gVisor's netstack speaks legacy iptables only (no nftables): dockerd
+ # programs the embedded-DNS DNAT of user-defined networks through whatever
+ # `iptables` resolves to, and with the nft variant that fails and DNS on
+ # user-defined networks (compose) breaks. Harmless under Sysbox/runc.
+ && update-alternatives --set iptables /usr/sbin/iptables-legacy \
+ && update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
 
 ENV HOME=/home/agent
 RUN mkdir -p /home/agent /workspace && chmod 1777 /home/agent
