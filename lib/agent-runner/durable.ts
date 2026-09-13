@@ -137,6 +137,28 @@ async function withContainerQueue<T>(name: string, task: () => Promise<T>): Prom
   }
 }
 
+/**
+ * Env that tells the agent about the durable app it runs next to
+ * (`durableAppPromptBlock` in agent-core, `dev/run-dev.sh`). Applied twice:
+ * as container env at `docker run`, and per job in `agentEnv` — the latter is
+ * the only copy that survives the agent-env allowlist.
+ */
+export function durableAppEnv(target: {
+  appPort: number;
+  hostname: string | null;
+  workspaceDocumentId: string;
+}): Record<string, string> {
+  const env: Record<string, string> = {
+    GDOCS_APP_PORT: String(target.appPort),
+    GDOCS_WORKSPACE_DOCUMENT_ID: target.workspaceDocumentId
+  };
+  if (target.hostname) {
+    env.GDOCS_APP_HOSTNAME = target.hostname;
+    env.GDOCS_APP_URL = `https://${target.hostname}`;
+  }
+  return env;
+}
+
 export class DurableContainerRunner implements AgentRunner {
   readonly mode = "container" as const;
 
@@ -185,6 +207,10 @@ export class DurableContainerRunner implements AgentRunner {
     const runUrl =
       options?.aiRunId && options?.documentId ? buildRunPermalink(options.documentId, options.aiRunId) : null;
     if (runUrl) agentEnv.GDOCS_RUN_URL = runUrl;
+    // Same reason for the app port/URL: they are also container env (below),
+    // but agent-core's allowlist scrubs the process env before the harness
+    // and its Bash tool see it, so only the job env reaches the agent.
+    Object.assign(agentEnv, durableAppEnv(this.target));
 
     const containerJob = { ...job, agentEnv, sessionConfigDir: session.container };
 
@@ -290,13 +316,7 @@ export class DurableContainerRunner implements AgentRunner {
       const explicitOciRuntime = process.env.AGENT_CONTAINER_OCI_RUNTIME || undefined;
       const innerDocker =
         explicitOciRuntime || !this.target.innerDocker ? undefined : await detectInnerDockerProfile(runtime);
-      const publicUrl = this.target.hostname ? `https://${this.target.hostname}` : null;
-      const extraEnv: Record<string, string> = {
-        GDOCS_APP_PORT: String(this.target.appPort),
-        GDOCS_WORKSPACE_DOCUMENT_ID: this.target.workspaceDocumentId
-      };
-      if (this.target.hostname) extraEnv.GDOCS_APP_HOSTNAME = this.target.hostname;
-      if (publicUrl) extraEnv.GDOCS_APP_URL = publicUrl;
+      const extraEnv = durableAppEnv(this.target);
 
       const args = (this.deps.buildArgs ?? buildContainerRunArgs)({
         image: process.env.AGENT_CONTAINER_IMAGE || "gdocs-agent:local",

@@ -208,6 +208,17 @@ test("durable runner: one container, two consecutive jobs, per-job session dir, 
     assert.equal(docker.jobs[0].sessionConfigDir, `${CONTAINER_SESSIONS_ROOT}/conv-1`);
     assert.equal(docker.jobs[1].sessionConfigDir, `${CONTAINER_SESSIONS_ROOT}/shared-doc2`);
     assert.equal((docker.jobs[1].agentEnv as Record<string, string>).GDOCS_DOCUMENT_ID, "doc2");
+    // The app port/URL are container env, which the agent-env allowlist strips
+    // before the harness (and its Bash tool) sees it — so they must ALSO ride
+    // the job env, like the run identity does, or `durableAppPromptBlock` and
+    // `dev/run-dev.sh` never learn the port.
+    for (const job of docker.jobs) {
+      const env = job.agentEnv as Record<string, string>;
+      assert.equal(env.GDOCS_APP_PORT, "3000");
+      assert.equal(env.GDOCS_APP_URL, "https://dev.example.com");
+      assert.equal(env.GDOCS_APP_HOSTNAME, "dev.example.com");
+      assert.equal(env.GDOCS_WORKSPACE_DOCUMENT_ID, "doc1");
+    }
     const argv = docker.started[0].join(" ");
     assert.match(argv, /-p 127\.0\.0\.1:16001:3000/);
     assert.match(argv, /-e AGENT_SESSION_DURABLE=1/);

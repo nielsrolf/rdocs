@@ -145,3 +145,8 @@ src/
     transcribe.ts       # Whisper audio transcription
 ```
 
+
+## 2026-09-13 run note (submit_response bridge was unreachable at the end of this run)
+- `dev/run-dev.sh` ran successfully in the durable container; dev app serves on `:3000` (`dev-data/dev.log`, `dev-data/dev.pid`).
+- `https://dev.nielsrolf.com` returned a Cloudflare 502 while the app answered on `[::]:3000` inside — host-side (frontdoor route / `-p` publish) issue, not yet fixed.
+- Fixed `GDOCS_APP_PORT`/`GDOCS_APP_URL` missing from the agent env (`durableAppEnv` in `lib/agent-runner/durable.ts`); needs a `release` push to take effect. Not pushed yet.
