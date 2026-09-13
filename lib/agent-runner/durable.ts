@@ -224,8 +224,26 @@ export class DurableContainerRunner implements AgentRunner {
       let announcedBusy = false;
       for (;;) {
         if (options?.signal?.aborted) throw new RunCancelledError();
-        const { handle, fresh } = await this.ensureContainer(docker, workspaceHostPath);
+        const { handle, fresh, restarted } = await this.ensureContainer(docker, workspaceHostPath);
         const client = (this.deps.clientFactory ?? defaultClientFactory)(handle.endpoint, handle.secret);
+        let attemptJob = containerJob;
+        if (restarted) {
+          // The container came back on its own (docker/host restart): its
+          // rootfs, inner docker state and every process earlier sessions
+          // started are gone. Tell the run's timeline and the agent (the env
+          // var NAME is disclosed in its prompt; `dev/run-dev.sh`-style
+          // scripts can key off it).
+          const restartedAt = new Date((this.deps.now ?? Date.now)()).toISOString();
+          attemptJob = { ...containerJob, agentEnv: { ...agentEnv, GDOCS_CONTAINER_RESTARTED_AT: restartedAt } };
+          if (options?.onProgress) {
+            await Promise.resolve(
+              options.onProgress({
+                role: "system",
+                message: DURABLE_CONTAINER_RESTARTED_MESSAGE
+              })
+            ).catch(() => {});
+          }
+        }
 
         // A just-created container has published its session port, but the
         // entrypoint binds it only after the inner dockerd is up and privileges
@@ -268,7 +286,7 @@ export class DurableContainerRunner implements AgentRunner {
         try {
           return await attachDetachedSession({
             handle,
-            job: containerJob,
+            job: attemptJob,
             // Frames of earlier jobs stay in the log; start after them.
             since: status.lastSeq,
             requireJobAccepted: true,
@@ -310,21 +328,32 @@ export class DurableContainerRunner implements AgentRunner {
   /**
    * Reuse the running container when it answers; otherwise (re)create it.
    * `fresh` tells the caller the container was just started and its session
-   * server may not have bound yet.
+   * server may not have bound yet; `restarted` that the SAME container came
+   * back by itself (restart policy) and lost its in-memory state.
    */
   private async ensureContainer(
     docker: DetachedDockerOps,
     workspaceHostPath: string
-  ): Promise<{ handle: DetachedSessionHandle; fresh: boolean }> {
+  ): Promise<{ handle: DetachedSessionHandle; fresh: boolean; restarted: boolean }> {
     const store = this.deps.handleStore ?? defaultHandleStore;
     const known = await store.load(this.target.workspaceDocumentId);
     if (known) {
-      const client = (this.deps.clientFactory ?? defaultClientFactory)(known.endpoint, known.secret);
-      const alive = await client
-        .status(true)
-        .then((status) => status.durable === true)
-        .catch(() => false);
-      if (alive) return { handle: known, fresh: false };
+      const alive = await this.isDurableSession(known);
+      if (alive) return { handle: known, fresh: false, restarted: false };
+
+      // `--restart unless-stopped` brings the container back after a docker
+      // or host restart — under a NEW ephemeral session port, so the stored
+      // endpoint goes dark while the container is fine. Re-derive the port
+      // from the engine before concluding it is dead; recreating here would
+      // destroy the agent's app for no reason.
+      const rediscovered = await this.rediscoverSession(docker, known);
+      if (rediscovered) {
+        console.warn(
+          `[durable-app] container ${this.target.containerName} was restarted; session endpoint is now ${rediscovered.endpoint}`
+        );
+        await store.save(this.target.workspaceDocumentId, rediscovered);
+        return { handle: rediscovered, fresh: false, restarted: true };
+      }
       console.warn(`[durable-app] container ${this.target.containerName} is not answering; recreating it`);
     }
 
@@ -376,7 +405,7 @@ export class DurableContainerRunner implements AgentRunner {
         const hostPort = await docker.hostPort(containerId, AGENT_SESSION_PORT);
         const handle = { containerId, endpoint: `http://127.0.0.1:${hostPort}`, secret };
         await store.save(this.target.workspaceDocumentId, handle);
-        return { handle, fresh: true };
+        return { handle, fresh: true, restarted: false };
       } catch (error) {
         await docker.remove(containerId).catch(() => {});
         throw error;
@@ -386,7 +415,46 @@ export class DurableContainerRunner implements AgentRunner {
       await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     }
   }
+
+  /** Probe with the handle's secret; true only for a live DURABLE session server. */
+  private async isDurableSession(handle: DetachedSessionHandle): Promise<boolean> {
+    const client = (this.deps.clientFactory ?? defaultClientFactory)(handle.endpoint, handle.secret);
+    return client
+      .status(true)
+      .then((status) => status.durable === true)
+      .catch(() => false);
+  }
+
+  /**
+   * A stored handle that no longer answers may belong to a container that the
+   * engine restarted: same name, same id, same secret (it rides the env file
+   * docker keeps), new published session port. Ask the engine for the port,
+   * give the entrypoint time to bind (inner dockerd first), and accept only a
+   * durable session server that our secret unlocks. Null → really gone.
+   */
+  private async rediscoverSession(
+    docker: DetachedDockerOps,
+    known: DetachedSessionHandle
+  ): Promise<DetachedSessionHandle | null> {
+    const port = await docker.hostPort(this.target.containerName, AGENT_SESSION_PORT).catch(() => null);
+    if (!port) return null;
+    const candidate: DetachedSessionHandle = {
+      containerId: known.containerId,
+      endpoint: `http://127.0.0.1:${port}`,
+      secret: known.secret
+    };
+    const client = (this.deps.clientFactory ?? defaultClientFactory)(candidate.endpoint, candidate.secret);
+    await waitForSessionReady(
+      client,
+      this.deps.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS,
+      this.deps.readyPollMs ?? DEFAULT_READY_POLL_MS
+    ).catch(() => {});
+    return (await this.isDurableSession(candidate)) ? candidate : null;
+  }
 }
+
+export const DURABLE_CONTAINER_RESTARTED_MESSAGE =
+  "The workspace's durable app container was restarted (docker or host restart): processes started by earlier sessions, inner docker images and anything outside /workspace are gone. The agent sees GDOCS_CONTAINER_RESTARTED_AT in this run's environment.";
 
 function defaultClientFactory(baseUrl: string, secret: string): AgentSessionClient {
   return createAgentSessionClient({ baseUrl, secret });

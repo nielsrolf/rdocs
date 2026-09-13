@@ -248,7 +248,15 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
   // Detached: no stdin pipe (there is no parent holding the other end) and the
   // session HTTP API replaces it for job delivery, steering and cancellation.
   // Piped: stdin IS the protocol, and the container dies with its parent.
-  const args = spec.detached ? ["run", "--rm", "-d"] : ["run", "--rm", "-i"];
+  // Durable: the container IS the workspace's long-lived app host, so it must
+  // come back after a docker/host restart (`--restart unless-stopped`, which
+  // docker refuses to combine with `--rm`; `stopDurableContainer` and the
+  // runner's pre-start cleanup `rm -f` it explicitly instead).
+  const args = spec.durable
+    ? ["run", "-d", "--restart", "unless-stopped"]
+    : spec.detached
+      ? ["run", "--rm", "-d"]
+      : ["run", "--rm", "-i"];
 
   if (spec.detached && spec.sessionPort) {
     // Ephemeral host port on loopback only. Off-host reachability would make the

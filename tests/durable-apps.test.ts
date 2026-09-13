@@ -26,6 +26,7 @@ import { RUN_CONTAINER_PREFIX } from "../lib/agent-runner/container-cleanup";
 import {
   containerSessionConfigDir,
   CONTAINER_SESSIONS_ROOT,
+  DURABLE_CONTAINER_RESTARTED_MESSAGE,
   DurableContainerRunner
 } from "../lib/agent-runner/durable";
 import type { DetachedDockerOps, DetachedSessionHandle } from "../lib/agent-runner/container-session";
@@ -78,6 +79,11 @@ test("durable container args publish the app port on loopback and flag the sessi
     extraEnv: { GDOCS_APP_PORT: "3000", GDOCS_APP_URL: "https://dev.example.com", "bad key": "x", OK_BUT_SPACED: "a b" }
   });
   const joined = args.join(" ");
+  // The container is the workspace's app host: it must come back after a
+  // docker/host restart, which rules out --rm (docker rejects the combination).
+  assert.ok(args.includes("-d"));
+  assert.match(joined, /--restart unless-stopped/);
+  assert.ok(!args.includes("--rm"), "a durable container is never auto-removed");
   assert.match(joined, /-p 127\.0\.0\.1:16001:3000/);
   assert.match(joined, /-e AGENT_SESSION_DURABLE=1/);
   assert.match(joined, /-e GDOCS_APP_PORT=3000/);
@@ -122,6 +128,28 @@ function fakeDurableDocker(options: { bindDelayMs?: number } = {}) {
   let emit: (frame: Parameters<ReturnType<typeof createAgentSessionServer>["emit"]>[0]) => void = () => {};
   let bindTimer: NodeJS.Timeout | null = null;
   const cleanup: Array<() => Promise<void>> = [];
+  /** Boot the in-process session server the way the entrypoint would. */
+  const boot = (secret: string) => {
+    const state = createAgentSessionState({ durable: true });
+    server = createAgentSessionServer({
+      state,
+      secret,
+      sweepIntervalMs: 0,
+      handlers: {
+        onJob: (job) => {
+          const record = job as Record<string, unknown>;
+          jobs.push(record);
+          // Answer asynchronously like the entrypoint would.
+          setTimeout(() => emit({ type: "result", output: { reply: `done ${jobs.length}` } }), 10);
+        },
+        onMessage: () => true,
+        onCancel: () => {},
+        onExit: () => {}
+      }
+    });
+    emit = (frame) => server!.emit(frame);
+    return server;
+  };
   const ops: DetachedDockerOps = {
     async start(args) {
       started.push(args);
@@ -130,24 +158,7 @@ function fakeDurableDocker(options: { bindDelayMs?: number } = {}) {
         .split("\n")
         .find((line) => line.startsWith(`${AGENT_SESSION_SECRET_ENV}=`))!
         .slice(AGENT_SESSION_SECRET_ENV.length + 1);
-      const state = createAgentSessionState({ durable: true });
-      server = createAgentSessionServer({
-        state,
-        secret,
-        sweepIntervalMs: 0,
-        handlers: {
-          onJob: (job) => {
-            const record = job as Record<string, unknown>;
-            jobs.push(record);
-            // Answer asynchronously like the entrypoint would.
-            setTimeout(() => emit({ type: "result", output: { reply: `done ${jobs.length}` } }), 10);
-          },
-          onMessage: () => true,
-          onCancel: () => {},
-          onExit: () => {}
-        }
-      });
-      emit = (frame) => server!.emit(frame);
+      const server = boot(secret);
       if (!options.bindDelayMs) {
         (ops as { port?: number }).port = await server.listen(0, "127.0.0.1");
         return "durable-container-1";
@@ -167,7 +178,9 @@ function fakeDurableDocker(options: { bindDelayMs?: number } = {}) {
       return "durable-container-1";
     },
     async hostPort() {
-      return (ops as { port?: number }).port!;
+      const port = (ops as { port?: number }).port;
+      if (!port) throw new Error("agent container spawn failed: no published host port for 8787/tcp");
+      return port;
     },
     async remove(id) {
       removed.push(id);
@@ -178,6 +191,12 @@ function fakeDurableDocker(options: { bindDelayMs?: number } = {}) {
     started,
     removed,
     jobs,
+    /** A container the engine restarted on its own: running under a new port, never `start`ed by this process. */
+    bootRestarted: async (secret: string) => {
+      const port = await boot(secret).listen(0, "127.0.0.1");
+      (ops as { port?: number }).port = port;
+      return port;
+    },
     close: async () => {
       if (bindTimer) clearTimeout(bindTimer);
       for (const fn of cleanup) await fn().catch(() => {});
@@ -315,6 +334,138 @@ test("durable runner: a fresh container whose session server binds late is waite
     assert.deepEqual(output, { reply: "done 1" });
     assert.equal(docker.started.length, 1, "a container that is merely still booting must not be recreated");
     assert.equal(docker.jobs.length, 1);
+  } finally {
+    if (previousOci === undefined) delete process.env.AGENT_CONTAINER_OCI_RUNTIME;
+    else process.env.AGENT_CONTAINER_OCI_RUNTIME = previousOci;
+    await docker.close();
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+function restartTestRunner(
+  docker: ReturnType<typeof fakeDurableDocker>,
+  tmp: string,
+  stale: DetachedSessionHandle,
+  onStore: (handle: DetachedSessionHandle | null) => void
+) {
+  let stored: DetachedSessionHandle | null = stale;
+  return new DurableContainerRunner(
+    {
+      workspaceDocumentId: "doc1",
+      containerName: "gdocs-durable-doc1",
+      hostname: "dev.example.com",
+      appPort: 3000,
+      hostPort: 16001,
+      innerDocker: false,
+      sessionsRootHostPath: path.join(tmp, "sessions")
+    },
+    {
+      docker: docker.ops,
+      clientFactory: (baseUrl, secret) => createAgentSessionClient({ baseUrl, secret }),
+      handleStore: {
+        async load() {
+          return stored;
+        },
+        async save(_id, handle) {
+          stored = handle;
+          onStore(handle);
+        }
+      },
+      readyTimeoutMs: 2_000,
+      readyPollMs: 50,
+      busyPollMs: 20
+    }
+  );
+}
+
+/** A loopback port with nothing behind it (what a stale endpoint looks like after a restart). */
+async function deadPort(): Promise<number> {
+  const probe = net.createServer();
+  const port = await new Promise<number>((resolve) => {
+    probe.listen(0, "127.0.0.1", () => resolve((probe.address() as net.AddressInfo).port));
+  });
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return port;
+}
+
+test("durable runner: a container the engine restarted is re-adopted under its new session port, not recreated", async () => {
+  // `--restart unless-stopped` brings the container back after a docker/host
+  // restart with a NEW ephemeral session port. The stored endpoint is dark, but
+  // the container (and the workspace state in it) is fine; destroying it would
+  // take the agent's app down for nothing.
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "durable-test-"));
+  const docker = fakeDurableDocker();
+  const secret = "restart-secret";
+  const newPort = await docker.bootRestarted(secret);
+  const stale: DetachedSessionHandle = {
+    containerId: "durable-container-1",
+    endpoint: `http://127.0.0.1:${await deadPort()}`,
+    secret
+  };
+  const saved: Array<DetachedSessionHandle | null> = [];
+  const events: string[] = [];
+  const runner = restartTestRunner(docker, tmp, stale, (h) => saved.push(h));
+  const previousOci = process.env.AGENT_CONTAINER_OCI_RUNTIME;
+  process.env.AGENT_CONTAINER_OCI_RUNTIME = "runc";
+  try {
+    const output = await runner.run({ workspacePath: path.join(tmp, "repo") } as never, {
+      agentConfig: { model: "claude-sonnet-5" },
+      agentEnv: { ANTHROPIC_API_KEY: "sk-test" },
+      documentId: "doc1",
+      sessionDirHostPath: path.join(tmp, "sessions", "conv-1"),
+      onProgress: (event: { role: string; message: string }) => {
+        events.push(event.message);
+      }
+    } as never);
+    assert.deepEqual(output, { reply: "done 1" });
+    assert.equal(docker.started.length, 0, "the running container must not be recreated");
+    assert.deepEqual(docker.removed, [], "the running container must not be removed");
+    assert.equal(docker.jobs.length, 1);
+    // The handle now points at the new port, same id and secret.
+    const last = saved[saved.length - 1];
+    assert.equal(last?.endpoint, `http://127.0.0.1:${newPort}`);
+    assert.equal(last?.containerId, "durable-container-1");
+    assert.equal(last?.secret, secret);
+    // Everyone learns the in-memory state is gone: the timeline and the agent.
+    assert.ok(events.includes(DURABLE_CONTAINER_RESTARTED_MESSAGE));
+    const env = docker.jobs[0].agentEnv as Record<string, string>;
+    assert.match(env.GDOCS_CONTAINER_RESTARTED_AT, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(env.GDOCS_APP_PORT, "3000");
+  } finally {
+    if (previousOci === undefined) delete process.env.AGENT_CONTAINER_OCI_RUNTIME;
+    else process.env.AGENT_CONTAINER_OCI_RUNTIME = previousOci;
+    await docker.close();
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("durable runner: a stored handle whose container is really gone leads to a recreate", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "durable-test-"));
+  const docker = fakeDurableDocker(); // nothing running: hostPort throws like `docker port` on a missing container
+  const stale: DetachedSessionHandle = {
+    containerId: "old-container",
+    endpoint: `http://127.0.0.1:${await deadPort()}`,
+    secret: "old-secret"
+  };
+  const events: string[] = [];
+  const runner = restartTestRunner(docker, tmp, stale, () => {});
+  const previousOci = process.env.AGENT_CONTAINER_OCI_RUNTIME;
+  process.env.AGENT_CONTAINER_OCI_RUNTIME = "runc";
+  try {
+    const output = await runner.run({ workspacePath: path.join(tmp, "repo") } as never, {
+      agentConfig: { model: "claude-sonnet-5" },
+      agentEnv: { ANTHROPIC_API_KEY: "sk-test" },
+      documentId: "doc1",
+      sessionDirHostPath: path.join(tmp, "sessions", "conv-1"),
+      onProgress: (event: { role: string; message: string }) => {
+        events.push(event.message);
+      }
+    } as never);
+    assert.deepEqual(output, { reply: "done 1" });
+    assert.equal(docker.started.length, 1, "a gone container is recreated");
+    assert.deepEqual(docker.removed, ["gdocs-durable-doc1"], "leftovers under the name are cleared first");
+    assert.ok(!events.includes(DURABLE_CONTAINER_RESTARTED_MESSAGE), "a recreate is not a restart");
+    assert.equal((docker.jobs[0].agentEnv as Record<string, string>).GDOCS_CONTAINER_RESTARTED_AT, undefined);
   } finally {
     if (previousOci === undefined) delete process.env.AGENT_CONTAINER_OCI_RUNTIME;
     else process.env.AGENT_CONTAINER_OCI_RUNTIME = previousOci;
