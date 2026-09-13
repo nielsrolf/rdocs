@@ -38,10 +38,13 @@ import { RunCancelledError } from "./run-registry";
 import {
   attachDetachedSession,
   createDockerOps,
+  DEFAULT_READY_POLL_MS,
+  DEFAULT_READY_TIMEOUT_MS,
   DurableJobRejectedError,
   generateSessionSecret,
   SessionAbortedError,
   sessionSecretEnv,
+  waitForSessionReady,
   type DetachedDockerOps,
   type DetachedSessionHandle
 } from "./container-session";
@@ -66,6 +69,7 @@ export type DurableRunnerDeps = {
   busyWaitMaxMs?: number;
   busyPollMs?: number;
   readyTimeoutMs?: number;
+  readyPollMs?: number;
   /** Test seam: skip docker probing and use these args verbatim. */
   buildArgs?: typeof buildContainerRunArgs;
 };
@@ -194,8 +198,23 @@ export class DurableContainerRunner implements AgentRunner {
       let announcedBusy = false;
       for (;;) {
         if (options?.signal?.aborted) throw new RunCancelledError();
-        const handle = await this.ensureContainer(docker, workspaceHostPath);
+        const { handle, fresh } = await this.ensureContainer(docker, workspaceHostPath);
         const client = (this.deps.clientFactory ?? defaultClientFactory)(handle.endpoint, handle.secret);
+
+        // A just-created container has published its session port, but the
+        // entrypoint binds it only after the inner dockerd is up and privileges
+        // are dropped (seconds under gVisor). Until then the port resets every
+        // connection, so a single probe here failed the whole run with
+        // "fetch failed: read ECONNRESET". Wait for the server first.
+        if (fresh) {
+          await waitForSessionReady(
+            client,
+            this.deps.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS,
+            this.deps.readyPollMs ?? DEFAULT_READY_POLL_MS,
+            options?.signal
+          );
+          if (options?.signal?.aborted) throw new RunCancelledError();
+        }
 
         // Another server process (blue/green sibling) may be driving a job in
         // this container right now. Attaching would steal its reader, so wait
@@ -232,6 +251,7 @@ export class DurableContainerRunner implements AgentRunner {
             signal: options?.signal,
             steerRunId: options?.aiRunId,
             readyTimeoutMs: this.deps.readyTimeoutMs,
+            readyPollMs: this.deps.readyPollMs,
             clientFactory: this.deps.clientFactory,
             sink: {
               onProgress: options?.onProgress,
@@ -261,8 +281,15 @@ export class DurableContainerRunner implements AgentRunner {
     await getAgentRunner().resolveMergeConflicts(job);
   }
 
-  /** Reuse the running container when it answers; otherwise (re)create it. */
-  private async ensureContainer(docker: DetachedDockerOps, workspaceHostPath: string): Promise<DetachedSessionHandle> {
+  /**
+   * Reuse the running container when it answers; otherwise (re)create it.
+   * `fresh` tells the caller the container was just started and its session
+   * server may not have bound yet.
+   */
+  private async ensureContainer(
+    docker: DetachedDockerOps,
+    workspaceHostPath: string
+  ): Promise<{ handle: DetachedSessionHandle; fresh: boolean }> {
     const store = this.deps.handleStore ?? defaultHandleStore;
     const known = await store.load(this.target.workspaceDocumentId);
     if (known) {
@@ -271,7 +298,7 @@ export class DurableContainerRunner implements AgentRunner {
         .status(true)
         .then((status) => status.durable === true)
         .catch(() => false);
-      if (alive) return known;
+      if (alive) return { handle: known, fresh: false };
       console.warn(`[durable-app] container ${this.target.containerName} is not answering; recreating it`);
     }
 
@@ -329,7 +356,7 @@ export class DurableContainerRunner implements AgentRunner {
         const hostPort = await docker.hostPort(containerId, AGENT_SESSION_PORT);
         const handle = { containerId, endpoint: `http://127.0.0.1:${hostPort}`, secret };
         await store.save(this.target.workspaceDocumentId, handle);
-        return handle;
+        return { handle, fresh: true };
       } catch (error) {
         await docker.remove(containerId).catch(() => {});
         throw error;

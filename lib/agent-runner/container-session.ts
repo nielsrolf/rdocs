@@ -245,14 +245,17 @@ export async function runDetachedSession(
 
 /** Fresh containers pull an image layer cache, mount the workspace, boot Node. */
 export const DEFAULT_READY_TIMEOUT_MS = 120_000;
-const DEFAULT_READY_POLL_MS = 500;
+export const DEFAULT_READY_POLL_MS = 500;
 
 /**
  * Poll `/status` until the container answers. Startup errors are expected and
  * retried; only the deadline (or an abort) gives up. Uses the probe form so a
  * container we are about to drive is not credited with contact it did not have.
+ * Note that a published port with no listener behind it yet resets or refuses
+ * connections (under gVisor the entrypoint starts an inner dockerd before it
+ * binds the session port, which takes seconds) — those are the startup errors.
  */
-async function waitForSessionReady(
+export async function waitForSessionReady(
   client: AgentSessionClient,
   timeoutMs: number,
   pollMs: number,

@@ -5,6 +5,7 @@
 
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -106,13 +107,21 @@ test("session config dirs under the mounted root map 1:1; foreign ones get a dur
   assert.equal(containerSessionConfigDir(root, undefined, "x/y").container, `${CONTAINER_SESSIONS_ROOT}/shared-x-y`);
 });
 
-/** Fake docker: `start` boots a REAL durable session server, secret read from the env file in argv. */
-function fakeDurableDocker() {
+/**
+ * Fake docker: `start` boots a REAL durable session server, secret read from the
+ * env file in argv. With `bindDelayMs`, the published port first belongs to a
+ * placeholder that resets every connection (what a gVisor container's published
+ * port does while the entrypoint is still starting the inner dockerd), and the
+ * session server binds it only after the delay.
+ */
+function fakeDurableDocker(options: { bindDelayMs?: number } = {}) {
   const started: string[][] = [];
   const removed: string[] = [];
   const jobs: Array<Record<string, unknown>> = [];
   let server: ReturnType<typeof createAgentSessionServer> | null = null;
   let emit: (frame: Parameters<ReturnType<typeof createAgentSessionServer>["emit"]>[0]) => void = () => {};
+  let bindTimer: NodeJS.Timeout | null = null;
+  const cleanup: Array<() => Promise<void>> = [];
   const ops: DetachedDockerOps = {
     async start(args) {
       started.push(args);
@@ -139,8 +148,22 @@ function fakeDurableDocker() {
         }
       });
       emit = (frame) => server!.emit(frame);
-      const port = await server.listen(0, "127.0.0.1");
+      if (!options.bindDelayMs) {
+        (ops as { port?: number }).port = await server.listen(0, "127.0.0.1");
+        return "durable-container-1";
+      }
+      const placeholder = net.createServer((socket) => socket.destroy());
+      const port = await new Promise<number>((resolve) => {
+        placeholder.listen(0, "127.0.0.1", () => resolve((placeholder.address() as net.AddressInfo).port));
+      });
       (ops as { port?: number }).port = port;
+      bindTimer = setTimeout(() => {
+        bindTimer = null;
+        placeholder.close(() => {
+          void server!.listen(port, "127.0.0.1");
+        });
+      }, options.bindDelayMs);
+      cleanup.push(() => new Promise<void>((resolve) => placeholder.close(() => resolve())));
       return "durable-container-1";
     },
     async hostPort() {
@@ -150,7 +173,17 @@ function fakeDurableDocker() {
       removed.push(id);
     }
   };
-  return { ops, started, removed, jobs, close: async () => server?.close() };
+  return {
+    ops,
+    started,
+    removed,
+    jobs,
+    close: async () => {
+      if (bindTimer) clearTimeout(bindTimer);
+      for (const fn of cleanup) await fn().catch(() => {});
+      await server?.close();
+    }
+  };
 }
 
 test("durable runner: one container, two consecutive jobs, per-job session dir, handle persisted once", async () => {
@@ -217,6 +250,60 @@ test("durable runner: one container, two consecutive jobs, per-job session dir, 
     // save(null) clears stale state before start, then the live handle.
     assert.deepEqual(handles.map((h) => (h ? "handle" : "null")), ["null", "handle"]);
     assert.equal((stored as DetachedSessionHandle | null)?.containerId, "durable-container-1");
+  } finally {
+    if (previousOci === undefined) delete process.env.AGENT_CONTAINER_OCI_RUNTIME;
+    else process.env.AGENT_CONTAINER_OCI_RUNTIME = previousOci;
+    await docker.close();
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("durable runner: a fresh container whose session server binds late is waited for, not failed", async () => {
+  // Regression: the first durable run on dev.nielsrolf.com failed with
+  // "GET .../status?probe=1 transport error: fetch failed: read ECONNRESET" —
+  // the busy check probed the just-started container once, before the
+  // entrypoint (inner dockerd start + privilege drop) had bound the session port.
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "durable-test-"));
+  const docker = fakeDurableDocker({ bindDelayMs: 400 });
+  let stored: DetachedSessionHandle | null = null;
+  const runner = new DurableContainerRunner(
+    {
+      workspaceDocumentId: "doc1",
+      containerName: "gdocs-durable-doc1",
+      hostname: null,
+      appPort: 3000,
+      hostPort: null,
+      innerDocker: false,
+      sessionsRootHostPath: path.join(tmp, "sessions")
+    },
+    {
+      docker: docker.ops,
+      clientFactory: (baseUrl, secret) => createAgentSessionClient({ baseUrl, secret }),
+      handleStore: {
+        async load() {
+          return stored;
+        },
+        async save(_id, handle) {
+          stored = handle;
+        }
+      },
+      readyTimeoutMs: 5_000,
+      readyPollMs: 50,
+      busyPollMs: 20
+    }
+  );
+  const previousOci = process.env.AGENT_CONTAINER_OCI_RUNTIME;
+  process.env.AGENT_CONTAINER_OCI_RUNTIME = "runc";
+  try {
+    const output = await runner.run({ workspacePath: path.join(tmp, "repo") } as never, {
+      agentConfig: { model: "claude-sonnet-5" },
+      agentEnv: { ANTHROPIC_API_KEY: "sk-test" },
+      documentId: "doc1",
+      sessionDirHostPath: path.join(tmp, "sessions", "conv-1")
+    } as never);
+    assert.deepEqual(output, { reply: "done 1" });
+    assert.equal(docker.started.length, 1, "a container that is merely still booting must not be recreated");
+    assert.equal(docker.jobs.length, 1);
   } finally {
     if (previousOci === undefined) delete process.env.AGENT_CONTAINER_OCI_RUNTIME;
     else process.env.AGENT_CONTAINER_OCI_RUNTIME = previousOci;
