@@ -68,6 +68,15 @@ stop Caddy (`kill $(cat .lb.pid)`) and both color servers first.
 
 ## Operational bits
 
+When deploying from an agent terminal that cleans up descendant processes when
+its command finishes, `nohup` alone does not keep the new server alive. Run the
+deployment in a persistent service scope (for example a user `systemd-run` service
+with `Type=oneshot` and `RemainAfterExit=yes`) and poll its journal/health afterward.
+Do not add unconditional restart to an individual color: graceful drain must be
+able to stop it without bringing the old color back. The 2026-09-21 deployment's
+blue process was recovered in user unit `rdocs-blue-recovery`; its recorded PID
+is the actual Next process and the normal deploy drain can retire it.
+
 - Health: `curl localhost:14141/api/health` → `{ok, draining, activeRuns, pid, distDir, ...}` (503 while draining).
 - Manual drain: `curl -X POST -H "Authorization: Bearer $DEPLOY_SECRET" localhost:<port>/api/admin/drain`.
 - Caddy admin: `curl localhost:2019/config/` ; logs in `logs/caddy_*.log`;
