@@ -1,4 +1,6 @@
 import { resolveBrokerRequest } from "./index";
+import { randomUUID } from "node:crypto";
+import { createUsageCapture, type BrokerUsage } from "./usage";
 
 // The HTTP half of the credential broker: validates the virtual token carried
 // in the incoming request's auth header, swaps in the real credential, and
@@ -63,7 +65,8 @@ export async function handleBrokerProxyRequest(
   request: Request,
   keyId: string,
   pathSegments: string[],
-  opts: { env?: Record<string, string | undefined>; fetchImpl?: typeof fetch } = {}
+  opts: { env?: Record<string, string | undefined>; fetchImpl?: typeof fetch;
+    onUsage?: (aiRunId: string, usage: BrokerUsage) => Promise<void> } = {}
 ): Promise<Response> {
   const env = opts.env ?? process.env;
   const fetchImpl = opts.fetchImpl ?? fetch;
@@ -141,7 +144,44 @@ export async function handleBrokerProxyRequest(
     }ms) run=${resolution.aiRunId ?? "-"} key=${keyId}`
   );
 
-  return new Response(upstream.body, {
+  let responseBody = upstream.body;
+  if (responseBody && resolution.aiRunId) {
+    const rawCost = upstream.headers.get("x-litellm-response-cost");
+    const cost = rawCost === null ? NaN : Number(rawCost);
+    const capture = createUsageCapture({ requestId: randomUUID(), provider: resolution.provider,
+      costUsd: Number.isFinite(cost) && cost >= 0 ? cost : null });
+    const decoder = new TextDecoder();
+    const reader = responseBody.getReader();
+    const aiRunId = resolution.aiRunId;
+    let recorded = false;
+    const finish = async (complete: boolean) => {
+      if (recorded) return;
+      recorded = true;
+      capture.push(decoder.decode());
+      const usage = capture.finish(complete);
+      try {
+        if (opts.onUsage) await opts.onUsage(aiRunId, usage);
+        else {
+          const { db } = await import("@/lib/db");
+          await db.aiRunEvent.create({ data: { aiRunId, role: "system", message: `[usage] ${JSON.stringify(usage)}` } });
+        }
+      } catch (error) {
+        console.warn("[broker] usage persistence failed", { aiRunId, error: String(error) });
+      }
+    };
+    responseBody = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) { await finish(true); controller.close(); return; }
+          capture.push(decoder.decode(value, { stream: true }));
+          controller.enqueue(value);
+        } catch (error) { await finish(false); controller.error(error); }
+      },
+      async cancel(reason) { try { await reader.cancel(reason); } finally { await finish(false); } }
+    });
+  }
+  return new Response(responseBody, {
     status: upstream.status,
     statusText: upstream.statusText,
     headers: responseHeaders
