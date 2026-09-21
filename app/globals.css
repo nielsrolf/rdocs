@@ -6521,6 +6521,15 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   line-height: 1.45;
 }
 
+.credential-dialog {
+  width: min(100%, 560px);
+  line-height: 1.5;
+}
+
+.credential-dialog p {
+  margin: 0.75rem 0;
+}
+
 .slack-connect-worker {
   display: flex;
   flex-direction: column;

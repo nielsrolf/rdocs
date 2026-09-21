@@ -79,7 +79,7 @@ export const OPENROUTER_AGENT_MODELS: readonly AgentModelOption[] = [
 // LiteLLM deployment has no native provider key for (currently Google) keep
 // the "openrouter/" segment so LiteLLM routes them through OpenRouter.
 const LITELLM_KEEPS_OPENROUTER_ROUTE = new Set(["openrouter/google/gemini-3.5-flash"]);
-export const LITELLM_AGENT_MODELS: readonly AgentModelOption[] = OPENROUTER_AGENT_MODELS.map(
+const LITELLM_MIRRORED_OPENROUTER_MODELS: readonly AgentModelOption[] = OPENROUTER_AGENT_MODELS.map(
   (model) => ({
     value: LITELLM_KEEPS_OPENROUTER_ROUTE.has(model.value)
       ? `${LITELLM_MODEL_PREFIX}${model.value}`
@@ -89,6 +89,24 @@ export const LITELLM_AGENT_MODELS: readonly AgentModelOption[] = OPENROUTER_AGEN
     provider: "litellm"
   })
 );
+// The Claude models by their canonical id, served by the LiteLLM proxy as
+// "anthropic/<id>". Listed FIRST in the LiteLLM picker so a user whose only key
+// is LiteLLM still sees Claude (2026-09-21: a LiteLLM-only account had no way
+// to pick Sonnet 5 short of typing a custom name), and the target of the
+// Anthropic→LiteLLM re-route (anthropicLiteLlmFallbackModel). Codex never gets
+// these: its Responses-protocol route is only exercised against OpenAI models.
+export const LITELLM_CLAUDE_AGENT_MODELS: readonly AgentModelOption[] = ANTHROPIC_AGENT_MODELS.map(
+  (model) => ({
+    value: `${LITELLM_MODEL_PREFIX}anthropic/${model.value}`,
+    label: `${model.label} (via LiteLLM)`,
+    hint: model.hint,
+    provider: "litellm"
+  })
+);
+export const LITELLM_AGENT_MODELS: readonly AgentModelOption[] = [
+  ...LITELLM_CLAUDE_AGENT_MODELS,
+  ...LITELLM_MIRRORED_OPENROUTER_MODELS
+];
 
 // Codex uses the OpenAI Responses protocol. Native models authenticate with an
 // account/document OpenAI key; LiteLLM models use the deployment's
@@ -112,7 +130,7 @@ export const CODEX_CHATGPT_AGENT_MODELS: readonly AgentModelOption[] =
   }));
 
 export const CODEX_LITELLM_AGENT_MODELS: readonly AgentModelOption[] =
-  LITELLM_AGENT_MODELS.map((model) => ({
+  LITELLM_MIRRORED_OPENROUTER_MODELS.map((model) => ({
     ...model,
     value: `${CODEX_LITELLM_MODEL_PREFIX}${model.value.slice(LITELLM_MODEL_PREFIX.length)}`
   }));
@@ -165,6 +183,21 @@ export function codexLiteLlmFallbackModel(value: unknown): string | null {
   if (!isCodexOpenAiAgentModel(value)) return null;
   const model = normalizeAgentModel(value as string).slice(CODEX_OPENAI_MODEL_PREFIX.length);
   return `${CODEX_LITELLM_MODEL_PREFIX}openai/${model}`;
+}
+
+/**
+ * Equivalent LiteLLM route ("litellm/anthropic/<canonical id>") for an
+ * Anthropic selection, so a run whose user connected only a LiteLLM key runs
+ * the SAME Claude model through the proxy instead of the free local model.
+ * Null for every non-Anthropic selection; an unknown/legacy Anthropic value
+ * maps the way resolveAgentSdkConfig would run it (alias → canonical id,
+ * anything unrecognized → the default model).
+ */
+export function anthropicLiteLlmFallbackModel(value: unknown): string | null {
+  if (agentModelProvider(value) !== "anthropic") return null;
+  const requested = typeof value === "string" && value ? normalizeAgentModel(value) : DEFAULT_AGENT_MODEL;
+  const canonical = isKnownAnthropicModel(requested) ? requested : DEFAULT_AGENT_MODEL;
+  return `${LITELLM_MODEL_PREFIX}anthropic/${canonical}`;
 }
 
 // An OpenRouter slug is "<author>/<model>", optionally with a ":variant"

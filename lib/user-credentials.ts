@@ -1,6 +1,7 @@
 import {
   agentHarnessForModel,
   agentModelProvider,
+  anthropicLiteLlmFallbackModel,
   codexLiteLlmFallbackModel,
   DEFAULT_AGENT_MODEL
 } from "@/agent-core";
@@ -711,8 +712,20 @@ export async function anthropicRunUsesFreeFallback(
     await resolveModelCredentialEnv(documentId, DEFAULT_AGENT_MODEL, runnerUserId);
     return false;
   } catch (error) {
-    return isAgentCredentialError(error, "anthropic-credential-missing");
+    if (!isAgentCredentialError(error, "anthropic-credential-missing")) return false;
   }
+  // Same order as loadAgentEnvWithFreeFallback: a connected LiteLLM key
+  // carries the Claude model before the local model is ever considered.
+  const litellmModel = anthropicLiteLlmFallbackModel(DEFAULT_AGENT_MODEL);
+  if (litellmModel) {
+    try {
+      await resolveModelCredentialEnv(documentId, litellmModel, runnerUserId);
+      return false;
+    } catch {
+      // No LiteLLM key (or base URL) either — the local fallback fires.
+    }
+  }
+  return true;
 }
 
 /** The deployment's free local model ("local/<name>"), when configured. */
@@ -729,7 +742,11 @@ export type AgentRunEnvResolution = {
   /** Stored-model shape ("local/<name>" when the fallback fired). */
   agentConfig: { model: string | null; effort: string | null };
   usedFreeFallback: boolean;
-  /** Native Codex lacked OpenAI auth and transparently used the same model through LiteLLM. */
+  /**
+   * The selection lacked its native credential (Codex: OpenAI key; Claude:
+   * Anthropic key/OAuth) and transparently ran the SAME model through the
+   * user's LiteLLM key instead.
+   */
   usedProviderFallback: boolean;
 };
 
@@ -757,13 +774,23 @@ export function restrictAgentEnvForReadOnly(agentEnv: DocumentEnv): DocumentEnv 
 }
 
 /**
- * loadAgentEnvForDocument, but an Anthropic-model run with NO credential
- * anywhere falls back to the deployment's free local model instead of failing
- * with "Connect an Anthropic credential…" — so brand-new users (e.g. mid
- * onboarding tour) get a working, free first run. Only that exact failure
- * triggers the fallback; provider-key errors and unrelated failures still
- * throw. Callers surface `usedFreeFallback` in the run timeline so nobody
- * mistakes qwen output for Claude's.
+ * loadAgentEnvForDocument with two transparent re-routes, tried in order:
+ *
+ *  1. Provider fallback (`usedProviderFallback`): a native Codex selection
+ *     without an OpenAI key, or a Claude selection without an Anthropic
+ *     credential, runs the SAME model through the user's LiteLLM key when one
+ *     is connected (Responses endpoint for Codex, Anthropic-compatible
+ *     /v1/messages for Claude). Before 2026-09-21 only the Codex half
+ *     existed, so a LiteLLM-only account selecting Sonnet 5 silently got qwen.
+ *  2. Free fallback (`usedFreeFallback`): a Claude selection with NO
+ *     credential anywhere runs on the deployment's free local model instead of
+ *     failing with "Connect an Anthropic credential…" — so brand-new users
+ *     (e.g. mid onboarding tour) get a working, free first run.
+ *
+ * Only those exact typed failures trigger a re-route; other provider-key
+ * errors and unrelated failures still throw. Callers surface both flags in the
+ * run timeline so nobody mistakes qwen (or LiteLLM) output for a direct
+ * Anthropic run.
  */
 export async function loadAgentEnvWithFreeFallback(
   documentId: string,
@@ -776,10 +803,15 @@ export async function loadAgentEnvWithFreeFallback(
       const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model, runnerUserId);
       return { agentEnv, agentConfig, usedFreeFallback: false, usedProviderFallback: false };
     } catch (error) {
-      const litellmModel = codexLiteLlmFallbackModel(agentConfig.model);
       const isMissingOpenAi =
         isAgentCredentialError(error, "provider-key-missing") && error.provider === "openai";
-      if (litellmModel && isMissingOpenAi) {
+      const isCredentialMiss = isAgentCredentialError(error, "anthropic-credential-missing");
+      const litellmModel = isMissingOpenAi
+        ? codexLiteLlmFallbackModel(agentConfig.model)
+        : isCredentialMiss
+          ? anthropicLiteLlmFallbackModel(agentConfig.model)
+          : null;
+      if (litellmModel) {
         const fallbackConfig = { model: litellmModel, effort: agentConfig.effort };
         try {
           const agentEnv = await loadAgentEnvForDocument(documentId, litellmModel, runnerUserId);
@@ -790,12 +822,12 @@ export async function loadAgentEnvWithFreeFallback(
             usedProviderFallback: true
           };
         } catch {
-          // Preserve the native OpenAI error when LiteLLM is not configured either.
-          throw error;
+          // No LiteLLM key (or base URL) either. Codex keeps its native OpenAI
+          // error; a Claude selection continues to the free local model.
+          if (isMissingOpenAi) throw error;
         }
       }
       const fallbackModel = freeLocalAgentModel();
-      const isCredentialMiss = isAgentCredentialError(error, "anthropic-credential-missing");
       if (!fallbackModel || !isCredentialMiss) {
         throw error;
       }

@@ -18,6 +18,7 @@
 // these strings verbatim; keep them byte-identical).
 
 import type { AgentAccessMode, ClaudeAgentProgressEvent } from "@/agent-core";
+import { isCodexAgentModel } from "@/agent-core";
 import { createDeferredHeartbeat, recordAiRunEvent } from "@/lib/ai-runs";
 import {
   RUN_CANCELLED_MESSAGE,
@@ -61,7 +62,10 @@ export function freeFallbackNotice(model: string | null): string {
 }
 
 export function providerFallbackNotice(model: string | null): string {
-  return `No OpenAI credential connected — routing Codex through LiteLLM as ${model}.`;
+  if (isCodexAgentModel(model)) {
+    return `No OpenAI credential connected — routing Codex through LiteLLM as ${model}.`;
+  }
+  return `No Anthropic credential connected — routing Claude through your LiteLLM key as ${model}.`;
 }
 
 export const READ_ONLY_AGENT_NOTICE =

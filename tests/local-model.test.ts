@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 import {
   agentModelProvider,
+  anthropicLiteLlmFallbackModel,
   isStorableAgentModel,
   resolveAgentSdkConfig
 } from "../agent-core/agent-config";
@@ -174,6 +175,52 @@ test("native Codex selection falls back to the matching LiteLLM Responses model 
   assert.equal(result.usedProviderFallback, true);
   assert.equal(result.agentConfig.model, "codex/litellm/openai/gpt-5.6-terra");
   assert.equal(result.agentEnv.LITELLM_API_KEY, "sk-litellm-owner");
+});
+
+test("Anthropic selection with only a LiteLLM key routes the same Claude model through LiteLLM, not the local model", async () => {
+  const owner = await makeUser("anthropic-litellm-fallback");
+  await upsertUserCredential(
+    owner.id,
+    normalizeCredentialInput({ provider: "litellm", value: "sk-litellm-only" })
+  );
+  const doc = await makeDoc(owner.id);
+
+  const result = await loadAgentEnvWithFreeFallback(
+    doc.id,
+    { model: "claude-sonnet-5", effort: "high" },
+    owner.id
+  );
+  assert.equal(result.usedFreeFallback, false);
+  assert.equal(result.usedProviderFallback, true);
+  assert.equal(result.agentConfig.model, "litellm/anthropic/claude-sonnet-5");
+  assert.equal(result.agentConfig.effort, "high");
+  assert.equal(result.agentEnv.LITELLM_API_KEY, "sk-litellm-only");
+  assert.equal(result.agentEnv.ANTHROPIC_API_KEY, undefined);
+  // Legacy alias rows normalize before mapping.
+  const aliased = await loadAgentEnvWithFreeFallback(doc.id, { model: "sonnet", effort: null }, owner.id);
+  assert.equal(aliased.agentConfig.model, "litellm/anthropic/claude-sonnet-5");
+});
+
+test("anthropicLiteLlmFallbackModel maps only Anthropic selections", () => {
+  assert.equal(anthropicLiteLlmFallbackModel("claude-sonnet-5"), "litellm/anthropic/claude-sonnet-5");
+  assert.equal(anthropicLiteLlmFallbackModel("claude-fable-5-1"), "litellm/anthropic/claude-fable-5-1");
+  assert.equal(anthropicLiteLlmFallbackModel(null), "litellm/anthropic/claude-sonnet-5");
+  assert.equal(anthropicLiteLlmFallbackModel("opus"), "litellm/anthropic/claude-opus-5");
+  assert.equal(anthropicLiteLlmFallbackModel("litellm/openai/gpt-6-astra"), null);
+  assert.equal(anthropicLiteLlmFallbackModel("openrouter/openai/gpt-6-astra"), null);
+  assert.equal(anthropicLiteLlmFallbackModel("local/qwen3.6-27b"), null);
+  assert.equal(anthropicLiteLlmFallbackModel("codex/openai/gpt-5.6-terra"), null);
+});
+
+test("anthropicRunUsesFreeFallback: false when a LiteLLM key will carry the Claude model instead", async () => {
+  const owner = await makeUser("free-fallback-litellm");
+  const doc = await makeDoc(owner.id);
+  assert.equal(await anthropicRunUsesFreeFallback(doc.id, owner.id), true);
+  await upsertUserCredential(
+    owner.id,
+    normalizeCredentialInput({ provider: "litellm", value: "sk-litellm-only" })
+  );
+  assert.equal(await anthropicRunUsesFreeFallback(doc.id, owner.id), false);
 });
 
 test("native Codex selection still fails clearly when neither OpenAI nor LiteLLM is connected", async () => {

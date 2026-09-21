@@ -128,6 +128,77 @@ const PROVIDER_CREDENTIAL: Record<string, CredentialProvider | null> = {
   local: null
 };
 
+// Providers whose credential unlocks a MODEL (as opposed to a tool credential
+// like GitHub / Hugging Face). "You haven't added AI credentials yet" is only
+// true when none of these is connected.
+const LLM_CREDENTIAL_PROVIDERS: ReadonlySet<CredentialProvider> = new Set<CredentialProvider>([
+  "anthropic",
+  "openai",
+  "openai-chatgpt",
+  "openrouter",
+  "litellm"
+]);
+
+const CREDENTIAL_DISPLAY_NAME: Record<CredentialProvider, string> = {
+  anthropic: "an Anthropic API key",
+  openai: "an OpenAI API key",
+  "openai-chatgpt": "a ChatGPT subscription login",
+  openrouter: "an OpenRouter API key",
+  litellm: "a LiteLLM API key",
+  huggingface: "a Hugging Face token",
+  github: "a GitHub token"
+};
+
+// "Add it by doing X" for the credential the selected default model needs.
+const CREDENTIAL_HOW_TO: Record<CredentialProvider, ReactNode> = {
+  anthropic: (
+    <>
+      Add it by pasting an API key (<code>sk-ant-…</code>, from console.anthropic.com) or a Claude
+      subscription token from <code>claude setup-token</code> (<code>sk-ant-oat…</code>) into the
+      credential field above — the type is detected as you paste.
+    </>
+  ),
+  openai: (
+    <>
+      Add it by pasting an OpenAI key (<code>sk-…</code> / <code>sk-proj-…</code>) into the
+      credential field above, or paste your <code>~/.codex/auth.json</code> to use a ChatGPT
+      subscription instead.
+    </>
+  ),
+  "openai-chatgpt": (
+    <>
+      Add it by running <code>codex login</code> on your own machine and pasting the whole
+      contents of <code>~/.codex/auth.json</code> into the credential field above.
+    </>
+  ),
+  openrouter: (
+    <>
+      Add it by pasting an OpenRouter key (<code>sk-or-…</code>) into the credential field above.
+    </>
+  ),
+  litellm: (
+    <>
+      Add it by pasting your LiteLLM key into the credential field above and choosing
+      &quot;LiteLLM API key&quot; when asked for the type.
+    </>
+  ),
+  huggingface: null,
+  github: null
+};
+
+/** Human label for a stored model value ("Sonnet 5"), falling back to the raw value. */
+function agentModelLabel(value: string): string {
+  const option = [
+    ...ANTHROPIC_AGENT_MODELS,
+    ...OPENROUTER_AGENT_MODELS,
+    ...LITELLM_AGENT_MODELS,
+    ...CODEX_OPENAI_AGENT_MODELS,
+    ...CODEX_CHATGPT_AGENT_MODELS,
+    ...CODEX_LITELLM_AGENT_MODELS
+  ].find((candidate) => candidate.value === value);
+  return option?.label ?? value;
+}
+
 // The full-page "Settings" screen, used in two places:
 // - variant "slack": post-Slack-connect landing (app/slack/connected/page.tsx)
 //   with a "Slack account connected" banner.
@@ -232,6 +303,46 @@ export function SlackConnectConfig({
   const neededCredential = PROVIDER_CREDENTIAL[provider];
   const missingCredential = loaded && neededCredential !== null && !hasCredential(neededCredential);
   const fallbackName = localModel ? localModel.slice(LOCAL_MODEL_PREFIX.length) : null;
+  // Whether the account has ANY model credential. Distinguishes "you haven't
+  // added AI credentials yet" (true onboarding) from "you added one, but not the
+  // one your default model needs" — which used to print the former sentence
+  // right above a connected LiteLLM key (2026-09-21).
+  const hasAnyLlmCredential = credentials.some((credential) =>
+    LLM_CREDENTIAL_PROVIDERS.has(credential.provider)
+  );
+  // Mirrors loadAgentEnvWithFreeFallback: a Claude selection with no Anthropic
+  // credential but a connected LiteLLM key runs the same model through LiteLLM.
+  const liteLlmCarriesClaude = missingCredential && provider === "anthropic" && hasCredential("litellm");
+  const liteLlmClaudeName = `anthropic/${normalizedModel}`;
+  const selectedModelLabel = agentModelLabel(normalizedModel);
+
+  // One-time (per page load) explainer for the mismatch case: the user has a
+  // credential, just not the one the selected default model needs. Brand-new
+  // accounts keep the inline warning only — a modal here would sit on top of
+  // the onboarding tour that sends them to this page.
+  const [credentialDialogDismissed, setCredentialDialogDismissed] = useState(false);
+  const credentialDialogOpen =
+    missingCredential && hasAnyLlmCredential && !credentialDialogDismissed && neededCredential !== null;
+  useEffect(() => {
+    if (!credentialDialogOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setCredentialDialogDismissed(true);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [credentialDialogOpen]);
+  function focusCredentialInput() {
+    setCredentialDialogDismissed(true);
+    const input = document.getElementById("credential-input");
+    input?.scrollIntoView({ behavior: "smooth", block: "center" });
+    input?.focus();
+  }
+  function focusModelPicker() {
+    setCredentialDialogDismissed(true);
+    const select = document.getElementById("default-model-select");
+    select?.scrollIntoView({ behavior: "smooth", block: "center" });
+    select?.focus();
+  }
 
   const trimmedDraft = valueDraft.trim();
   const detected = detectCredential(trimmedDraft);
@@ -442,6 +553,66 @@ export function SlackConnectConfig({
 
   return (
     <div className="slack-connect-card">
+      {credentialDialogOpen && neededCredential ? (
+        <div
+          className="share-modal-backdrop"
+          onClick={() => setCredentialDialogDismissed(true)}
+          role="presentation"
+        >
+          <div
+            aria-labelledby="credential-dialog-title"
+            aria-modal="true"
+            className="share-modal credential-dialog"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+          >
+            <div className="share-modal-header">
+              <h2 id="credential-dialog-title">
+                Your default model needs {CREDENTIAL_DISPLAY_NAME[neededCredential]}
+              </h2>
+              <button
+                className="ghost-button"
+                onClick={() => setCredentialDialogDismissed(true)}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+            <p>
+              You have currently selected <strong>{selectedModelLabel}</strong> (
+              <code>{normalizedModel}</code>) as your default model, but this requires{" "}
+              {CREDENTIAL_DISPLAY_NAME[neededCredential]}, and your account doesn&apos;t have one.
+            </p>
+            <p>{CREDENTIAL_HOW_TO[neededCredential]}</p>
+            <p>
+              Or select a different provider and model in the <strong>Default model</strong>{" "}
+              section — the picker offers the providers you have a key for.
+            </p>
+            {liteLlmCarriesClaude ? (
+              <p className="env-note">
+                Until then, runs you trigger use your LiteLLM key and run the same model as{" "}
+                <code>{liteLlmClaudeName}</code> through LiteLLM. To make that explicit, pick the
+                &quot;{selectedModelLabel} (via LiteLLM)&quot; entry in the model picker.
+              </p>
+            ) : null}
+            <div className="credentials-actions">
+              <button className="ghost-button" onClick={focusCredentialInput} type="button">
+                Add the credential
+              </button>
+              <button className="ghost-button" onClick={focusModelPicker} type="button">
+                Choose a different model
+              </button>
+              <button
+                className="ghost-button"
+                onClick={() => setCredentialDialogDismissed(true)}
+                type="button"
+              >
+                Not now
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {variant === "slack" ? (
         <section className="credentials-section slack-connect-success">
           <strong className="credentials-section-title">✅ Slack account connected</strong>
@@ -474,7 +645,7 @@ export function SlackConnectConfig({
           <p className="env-note">Loading…</p>
         ) : (
           <>
-            {missingCredential ? (
+            {missingCredential && !hasAnyLlmCredential ? (
               <div className="env-note env-note-error slack-connect-warning">
                 <strong>⚠️ You haven&apos;t added AI credentials yet.</strong>{" "}
                 {provider === "anthropic" ? (
@@ -491,15 +662,28 @@ export function SlackConnectConfig({
                 ) : (
                   <>
                     The model you picked below needs{" "}
-                    {provider === "openrouter"
-                      ? "an OpenRouter"
-                      : provider === "openai"
-                        ? "an OpenAI (or paste ~/.codex/auth.json to use your ChatGPT subscription)"
-                        : "a LiteLLM"} API key.
+                    {neededCredential ? CREDENTIAL_DISPLAY_NAME[neededCredential] : "a credential"}.
                   </>
                 )}{" "}
                 Add a credential below, or run agents on your own machine instead (see the
                 self-hosted section at the bottom).
+              </div>
+            ) : liteLlmCarriesClaude ? (
+              <div className="env-note slack-connect-warning">
+                <strong>ℹ️ {selectedModelLabel} runs through your LiteLLM key.</strong> Your default
+                model <code>{normalizedModel}</code> needs an Anthropic API key, which you
+                haven&apos;t added, so agent runs you trigger use the same model as{" "}
+                <code>{liteLlmClaudeName}</code> via LiteLLM (the run timeline says so). Add an
+                Anthropic key below to call Anthropic directly, or pick a LiteLLM model explicitly
+                in the model picker.
+              </div>
+            ) : missingCredential && neededCredential ? (
+              <div className="env-note env-note-error slack-connect-warning">
+                <strong>
+                  ⚠️ Your default model {selectedModelLabel} needs {CREDENTIAL_DISPLAY_NAME[neededCredential]}
+                </strong>
+                , which you haven&apos;t added. Add it below, or select a different provider and
+                model in the Default model section.
               </div>
             ) : null}
 
@@ -539,6 +723,7 @@ export function SlackConnectConfig({
             data-form-type="other"
             name="credential-paste"
             onChange={(event) => setValueDraft(event.target.value)}
+            id="credential-input"
             placeholder="Paste any credential: sk-ant-…, sk-or-…, hf_…, github_pat_…, LiteLLM key, ~/.codex/auth.json"
             spellCheck={false}
             type="text"
@@ -628,6 +813,7 @@ export function SlackConnectConfig({
             <span className="agent-config-label">Model</span>
             <select
               className="agent-config-select"
+              id="default-model-select"
               onChange={(event) => setModel(event.target.value)}
               value={normalizedModel}
             >
