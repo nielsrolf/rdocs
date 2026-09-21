@@ -578,8 +578,11 @@ export function codexProviderConfig(
   input: Pick<ClaudeResearchAgentInput, "slackTools" | "mcpServers"> | undefined
 ): { config: CodexConfigObject; baseUrl?: string; apiKey?: string } {
   const documentMcpServers = codexMcpServerOptions(input?.mcpServers);
+  const compactLimit = Number(env.CODEX_AUTO_COMPACT_TOKEN_LIMIT);
   const config: CodexConfigObject = {
     show_raw_agent_reasoning: false,
+    ...(Number.isSafeInteger(compactLimit) && compactLimit >= 16000 && compactLimit <= 1000000
+      ? { model_auto_compact_token_limit: compactLimit } : {}),
     // Codex natively reads only AGENTS.md. Workspaces use CLAUDE.md (the Slack
     // notebook convention, HOST DEV MODE, linked repos), so in any directory
     // that has no AGENTS.md Codex reads CLAUDE.md instead. This is Codex's own

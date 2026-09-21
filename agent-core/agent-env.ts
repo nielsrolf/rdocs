@@ -53,6 +53,7 @@ const ALLOWLIST_EXACT = new Set([
   // Explicit binary override for the `codex app-server` harness (the Codex
   // execution path). Configuration, not a credential.
   "CODEX_APP_SERVER_BIN",
+  "CODEX_AUTO_COMPACT_TOKEN_LIMIT",
   // GITHUB_TOKEN / GH_TOKEN are deliberately NOT allowlisted: the host token is
   // the shared bot account, and copying it into every (untrusted) agent run
   // would let any user act on every repo the bot can see. GitHub auth arrives

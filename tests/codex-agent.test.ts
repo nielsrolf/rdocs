@@ -8,6 +8,12 @@ import {
   runCodexSubmissionLoop
 } from "../agent-core/codex-agent";
 
+test("Codex accepts only bounded explicit auto-compaction thresholds", () => {
+  for (const value of ["", "0", "NaN", "15000", "1000001", "60000.5"])
+    assert.equal(codexProviderConfig("openai", { CODEX_AUTO_COMPACT_TOKEN_LIMIT: value }, undefined).config.model_auto_compact_token_limit, undefined);
+  assert.equal(codexProviderConfig("openai", { CODEX_AUTO_COMPACT_TOKEN_LIMIT: "60000" }, undefined).config.model_auto_compact_token_limit, 60000);
+});
+
 test("Codex Slack runs attach the same Slack and rdocs MCP surfaces Claude receives", () => {
   const configured = codexProviderConfig(
     "openai",
