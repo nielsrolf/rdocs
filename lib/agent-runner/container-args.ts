@@ -28,6 +28,8 @@ export type ContainerRunSpec = {
   memory?: string; // e.g. "2g"
   cpus?: string; // e.g. "2"
   pidsLimit?: number; // e.g. 512
+  /** Opt-in PID 1 reaper for orphaned background jobs; Docker supplies tini. */
+  init?: boolean;
   network?: string; // e.g. "bridge"; never "none" (agent needs egress)
   readOnly?: boolean; // read-only rootfs + tmpfs scratch (default true)
   containerWorkspace?: string; // default "/workspace"
@@ -257,6 +259,8 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
     : spec.detached
       ? ["run", "--rm", "-d"]
       : ["run", "--rm", "-i"];
+
+  if (spec.init) args.push("--init");
 
   if (spec.detached && spec.sessionPort) {
     // Ephemeral host port on loopback only. Off-host reachability would make the

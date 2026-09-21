@@ -48,6 +48,15 @@ test("container run args enforce the hardening profile", () => {
   assert.equal(a[a.length - 1], "gdocs-agent:local");
 });
 
+test("PID 1 reaping is opt-in and preserves container hardening", () => {
+  assert.ok(!args().includes("--init"));
+  const a = args({ init: true });
+  assert.ok(a.includes("--init"));
+  assert.ok(a.includes("--read-only"));
+  assert.ok(a.join(" ").includes("--cap-drop ALL"));
+  assert.equal(a[a.length - 1], "gdocs-agent:local");
+});
+
 test("the pids ceiling is a host-side knob, since the container cannot raise it itself", () => {
   assert.equal(resolveContainerPidsLimit({}), 512);
   assert.equal(resolveContainerPidsLimit({ AGENT_CONTAINER_PIDS_LIMIT: "4096" }), 4096);
