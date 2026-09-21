@@ -20,8 +20,14 @@ async function main() {
   const controller = new AbortController();
   process.on("SIGTERM", () => controller.abort());
   process.on("SIGINT", () => controller.abort());
-  const timer = setTimeout(() => controller.abort(), Math.min(job.timeoutSeconds ?? 3600, 86400) * 1000);
   const emit = (frame: unknown) => process.stdout.write(JSON.stringify(frame) + "\n");
+  const timeoutSeconds = Math.min(job.timeoutSeconds ?? 3600, 86400);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    emit({ type: "timeout", message: `Agent wall-clock limit reached (${timeoutSeconds} seconds).` });
+    controller.abort();
+  }, timeoutSeconds * 1000);
   try {
     const result = await new ContainerRunner().run(job.input, {
       agentConfig: job.agentConfig, agentEnv: job.agentEnv, validation: job.validation,
@@ -30,6 +36,9 @@ async function main() {
       onSessionId: (sessionId) => { emit({ type: "session", sessionId }); }
     });
     emit({ type: "result", result });
+  } catch (error) {
+    if (timedOut) throw new Error(`Agent wall-clock limit reached (${timeoutSeconds} seconds); this was not a user cancellation.`);
+    throw error;
   } finally { clearTimeout(timer); }
 }
 main().catch((error) => {
