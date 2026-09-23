@@ -28,7 +28,7 @@ test("agent model + thinking effort can be configured and persist", async ({ bas
     await expect(effortSelect).toHaveValue("off");
 
     // Change both and wait for the PATCH to land (save indicator returns to Saved).
-    await modelSelect.selectOption("claude-opus-5");
+    await modelSelect.selectOption("claude-opus-5-5");
     await effortSelect.selectOption("high");
 
     await expect
@@ -39,14 +39,14 @@ test("agent model + thinking effort can be configured and persist", async ({ bas
         });
         return `${row?.agentModel}:${row?.agentEffort}`;
       })
-      .toBe("claude-opus-5:high");
+      .toBe("claude-opus-5-5:high");
 
     // The choice survives a reload (server round-trips it back into the UI).
     await page.reload();
     await expect(editor(page)).toBeVisible();
     await page.getByRole("button", { name: /^Agents/ }).click();
     await expect(page.locator(".agent-config-select").first()).toHaveValue("claude-code");
-    await expect(page.locator(".agent-config-select").nth(1)).toHaveValue("claude-opus-5");
+    await expect(page.locator(".agent-config-select").nth(1)).toHaveValue("claude-opus-5-5");
     await expect(page.locator(".agent-config-select").nth(2)).toHaveValue("high");
   } finally {
     await context.close();

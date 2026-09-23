@@ -12,7 +12,7 @@
 //     Anthropic-compatible endpoint via the same SDK. Requires the document
 //     env to provide OPENROUTER_API_KEY (see applyProviderEnv in agent-env.ts).
 //   - "litellm": any model name served by a LiteLLM proxy, stored with a
-//     "litellm/" prefix (e.g. "litellm/anthropic/claude-opus-5") and run
+//     "litellm/" prefix (e.g. "litellm/anthropic/claude-opus-5-5") and run
 //     through LiteLLM's Anthropic-compatible /v1/messages endpoint. Requires
 //     LITELLM_API_KEY (document env) and LITELLM_BASE_URL (document env, or a
 //     host default — see applyProviderEnv in agent-env.ts).
@@ -50,7 +50,7 @@ export const CODEX_CHATGPT_MODEL_PREFIX = "codex/chatgpt/";
 export const ANTHROPIC_AGENT_MODELS: readonly AgentModelOption[] = [
   { value: "claude-sonnet-5", label: "Sonnet 5", hint: "Fast, capable default", provider: "anthropic" },
   { value: "claude-fable-5-1", label: "Fable 5.1", hint: "Most capable, premium", provider: "anthropic" },
-  { value: "claude-opus-5", label: "Opus 5", hint: "Deep agentic work", provider: "anthropic" }
+  { value: "claude-opus-5-5", label: "Opus 5.5", hint: "Deep agentic work", provider: "anthropic" }
 ] as const;
 
 // Curated OpenRouter picks shown when the document has an OPENROUTER_API_KEY.
@@ -136,12 +136,13 @@ export const CODEX_LITELLM_AGENT_MODELS: readonly AgentModelOption[] =
   }));
 
 // Historical values stored on existing Document rows before canonical ids,
-// plus superseded canonical ids remapped to their successor (Opus 4.8 → 5:
+// plus superseded canonical ids remapped to their successor (Opus 4.8 → 5 → 5.5:
 // same price, strictly newer; keeps old rows storable without a migration).
 const LEGACY_MODEL_ALIASES: Record<string, string> = {
   sonnet: "claude-sonnet-5",
-  opus: "claude-opus-5",
-  "claude-opus-4-8": "claude-opus-5",
+  opus: "claude-opus-5-5",
+  "claude-opus-4-8": "claude-opus-5-5",
+  "claude-opus-5": "claude-opus-5-5",
   "claude-fable-5": "claude-fable-5-1"
 };
 
@@ -205,7 +206,7 @@ export function anthropicLiteLlmFallbackModel(value: unknown): string | null {
 // traversal, and empty segments must not.
 const OPENROUTER_SLUG_RE = /^[a-z0-9][\w.-]*\/[a-z0-9][\w.:-]*$/i;
 // A LiteLLM model name is one or more "/"-separated segments (deployments route
-// names like "anthropic/claude-opus-5", "openrouter/openai/gpt-5", or a bare
+// names like "anthropic/claude-opus-5-5", "openrouter/openai/gpt-5", or a bare
 // alias like "embedding"). Same character discipline as OpenRouter slugs.
 const LITELLM_MODEL_RE = /^[a-z0-9][\w.:-]*(\/[a-z0-9][\w.:-]*)*$/i;
 const MAX_MODEL_VALUE_LENGTH = 160;
@@ -410,7 +411,7 @@ export type ResolvedAgentSdkConfig = {
   /** Only set when extended thinking is enabled. */
   effort?: "low" | "medium" | "high";
   /**
-   * Stable label persisted on AiRun.model, e.g. "claude-agent-sdk:claude-opus-5+high"
+   * Stable label persisted on AiRun.model, e.g. "claude-agent-sdk:claude-opus-5-5+high"
    * or "openrouter:openai/gpt-5.2".
    */
   label: string;
@@ -497,11 +498,11 @@ export function resolveAgentSdkConfig(
 // claude-fable-5-1 runs behind safety classifiers with a significant false-positive
 // rate on benign work (the API docs call this out for security/life-sciences
 // adjacent content). A classifier block surfaces as stop_reason "refusal" and
-// kills the whole agent run. Opus (now claude-opus-5, previously 4.8) is the
+// kills the whole agent run. Opus (now claude-opus-5-5, previously 5 and 4.8) is the
 // fallback target for those refusals, so a refused Fable run is rerun once on
 // Opus. Other models (including OpenRouter ones) don't sit behind these
 // classifiers — no fallback.
-export const REFUSAL_FALLBACK_MODEL = "claude-opus-5";
+export const REFUSAL_FALLBACK_MODEL = "claude-opus-5-5";
 const REFUSAL_PRONE_MODELS = new Set(["claude-fable-5-1"]);
 
 /**

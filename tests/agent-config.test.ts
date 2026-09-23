@@ -95,30 +95,31 @@ test("defaults to the built-in model with thinking disabled when unconfigured", 
 });
 
 test("uses the env fallback model when the document has no explicit model", () => {
-  const resolved = resolveAgentSdkConfig({ effort: "off" }, "claude-opus-5");
-  assert.equal(resolved.model, "claude-opus-5");
+  const resolved = resolveAgentSdkConfig({ effort: "off" }, "claude-opus-5-5");
+  assert.equal(resolved.model, "claude-opus-5-5");
   assert.deepEqual(resolved.thinking, { type: "disabled" });
 });
 
 test("legacy alias values (documents and env fallback) normalize to canonical ids", () => {
   assert.equal(normalizeAgentModel("sonnet"), "claude-sonnet-5");
-  assert.equal(normalizeAgentModel("opus"), "claude-opus-5");
+  assert.equal(normalizeAgentModel("opus"), "claude-opus-5-5");
   // Superseded canonical id: existing rows keep working, remapped on read.
-  assert.equal(normalizeAgentModel("claude-opus-4-8"), "claude-opus-5");
+  assert.equal(normalizeAgentModel("claude-opus-4-8"), "claude-opus-5-5");
+  assert.equal(normalizeAgentModel("claude-opus-5"), "claude-opus-5-5");
   assert.equal(normalizeAgentModel("claude-fable-5"), "claude-fable-5-1");
   assert.equal(normalizeAgentModel("claude-fable-5-1"), "claude-fable-5-1");
 
   const fromDocument = resolveAgentSdkConfig({ model: "opus", effort: "high" });
-  assert.equal(fromDocument.model, "claude-opus-5");
-  assert.equal(fromDocument.label, "claude-agent-sdk:claude-opus-5+high");
+  assert.equal(fromDocument.model, "claude-opus-5-5");
+  assert.equal(fromDocument.label, "claude-agent-sdk:claude-opus-5-5+high");
 
   const fromEnvFallback = resolveAgentSdkConfig(null, "sonnet");
   assert.equal(fromEnvFallback.model, "claude-sonnet-5");
 });
 
 test("an explicit document model overrides the env fallback", () => {
-  const resolved = resolveAgentSdkConfig({ model: "claude-opus-5", effort: null }, "claude-sonnet-5");
-  assert.equal(resolved.model, "claude-opus-5");
+  const resolved = resolveAgentSdkConfig({ model: "claude-opus-5-5", effort: null }, "claude-sonnet-5");
+  assert.equal(resolved.model, "claude-opus-5-5");
 });
 
 test("an unrecognised model falls back instead of being passed through", () => {
@@ -128,10 +129,10 @@ test("an unrecognised model falls back instead of being passed through", () => {
 
 test("enables adaptive thinking with the chosen effort level", () => {
   for (const effort of ["low", "medium", "high"] as const) {
-    const resolved = resolveAgentSdkConfig({ model: "claude-opus-5", effort });
+    const resolved = resolveAgentSdkConfig({ model: "claude-opus-5-5", effort });
     assert.deepEqual(resolved.thinking, { type: "adaptive" });
     assert.equal(resolved.effort, effort);
-    assert.equal(resolved.label, `claude-agent-sdk:claude-opus-5+${effort}`);
+    assert.equal(resolved.label, `claude-agent-sdk:claude-opus-5-5+${effort}`);
   }
 });
 
@@ -193,6 +194,7 @@ test("isStorableAgentModel accepts known models, legacy aliases, and well-formed
     "claude-sonnet-5",
     "claude-fable-5",
     "claude-opus-5",
+    "claude-opus-5-5",
     "claude-opus-4-8",
     "sonnet",
     "opus",
@@ -250,10 +252,10 @@ test("resolveRefusalFallbackModel maps a fable run to opus and nothing else", ()
     resolveRefusalFallbackModel({ model: "claude-fable-5", effort: "high" }),
     REFUSAL_FALLBACK_MODEL
   );
-  assert.equal(REFUSAL_FALLBACK_MODEL, "claude-opus-5");
+  assert.equal(REFUSAL_FALLBACK_MODEL, "claude-opus-5-5");
 
   // Already on the fallback model (or another Anthropic model): no fallback.
-  assert.equal(resolveRefusalFallbackModel({ model: "claude-opus-5" }), null);
+  assert.equal(resolveRefusalFallbackModel({ model: "claude-opus-5-5" }), null);
   assert.equal(resolveRefusalFallbackModel({ model: "claude-sonnet-5" }), null);
   assert.equal(resolveRefusalFallbackModel(null), null);
 

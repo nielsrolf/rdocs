@@ -46,7 +46,7 @@ test("toolDisplayName prettifies MCP tool names", () => {
 
 test("agentDisplayName reflects the run harness", () => {
   assert.equal(agentDisplayName("codex-sdk:litellm/openai/gpt-5.6-sol+medium"), "Codex");
-  assert.equal(agentDisplayName("claude-agent-sdk:claude-opus-5"), "Claude");
+  assert.equal(agentDisplayName("claude-agent-sdk:claude-opus-5-5"), "Claude");
 });
 
 test("extractToolDiff reads Edit / MultiEdit / Write payloads", () => {
