@@ -68,7 +68,8 @@ export type SlackEventDeps = {
   // Injectable steering hook (defaults to the process-local run registry) so
   // tests can drive both the "injected into the live run" and the
   // "backend can't steer -> queued" paths.
-  injectRunMessage?: (aiRunId: string, text: string) => boolean;
+  /** Resolves true only once the live session accepted the message. */
+  injectRunMessage?: (aiRunId: string, text: string) => boolean | Promise<boolean>;
   // Injectable Ask-AI starter for comment-notification DM replies that mention
   // the bot; default is startAskAiRunForThread (lib/ask-ai.ts).
   startAskAi?: (args: {
@@ -354,13 +355,27 @@ export function buildSteeringMessage(senderName: string, text: string) {
  * the thread is busy but not steerable — the caller must queue or skip, never
  * start a parallel run.
  */
+// Tries the runs in order and returns the first that ACCEPTED the message.
+// Awaited one by one: an injector resolves asynchronously (container ack), and
+// a truthy pending Promise must never count as delivery.
+async function firstAcceptingRun(
+  runIds: string[],
+  inject: (aiRunId: string, text: string) => boolean | Promise<boolean>,
+  text: string
+): Promise<string | null> {
+  for (const id of runIds) {
+    if ((await inject(id, text)) === true) return id;
+  }
+  return null;
+}
+
 export async function steerActiveThreadRun(args: {
   documentId: string;
   triggerId: string;
   text: string;
   /** Timeline message to record on the steered run (defaults to `text`). */
   timelineMessage?: string;
-  inject?: (aiRunId: string, text: string) => boolean;
+  inject?: (aiRunId: string, text: string) => boolean | Promise<boolean>;
 }): Promise<{ activeRunIds: string[]; steeredRunId: string | null }> {
   const activeRuns = await db.aiRun.findMany({
     where: { documentId: args.documentId, status: { in: ["RUNNING", "PENDING"] }, triggerId: args.triggerId },
@@ -371,8 +386,7 @@ export async function steerActiveThreadRun(args: {
   if (activeRunIds.length === 0) {
     return { activeRunIds, steeredRunId: null };
   }
-  const inject = args.inject ?? injectRunMessage;
-  const steeredRunId = activeRunIds.find((id) => inject(id, args.text)) ?? null;
+  const steeredRunId = await firstAcceptingRun(activeRunIds, args.inject ?? injectRunMessage, args.text);
   if (steeredRunId) {
     await recordAiRunEvent({
       aiRunId: steeredRunId,
@@ -412,9 +426,8 @@ async function steerOrQueueThreadMessage(args: {
   // separate run afterwards. Only backends that hold an open input channel
   // for the run (in-process / container, Claude harness) accept this; every
   // other case returns false and falls through to the queue below.
-  const inject = deps.injectRunMessage ?? injectRunMessage;
   const steeringText = buildSteeringMessage(senderName, text);
-  const steeredRunId = activeRunIds.find((id) => inject(id, steeringText)) ?? null;
+  const steeredRunId = await firstAcceptingRun(activeRunIds, deps.injectRunMessage ?? injectRunMessage, steeringText);
   if (steeredRunId) {
     await recordAiRunEvent({
       aiRunId: steeredRunId,

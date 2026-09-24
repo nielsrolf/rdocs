@@ -117,6 +117,39 @@ export function createBackgroundTaskTracker(): BackgroundTaskTracker {
   };
 }
 
+// Background SUBAGENTS are not advisory: unlike a daemon they always finish,
+// and when one does the CLI resumes the agent by itself with a
+// <task-notification> turn. The session must therefore stay open across the
+// result frame of a turn that ended to wait for them. Closing the input stream
+// there makes the SDK close the CLI's stdin, and every in-process (gdocs) tool
+// call of the resumed turn then fails as "interrupted" (2026-09-24 incident).
+export type BackgroundAgentTracker = {
+  /** Feed every SDK message through this. */
+  observe(message: unknown): void;
+  /** Descriptions of launched subagents with no completion notification yet. */
+  pending(): string[];
+};
+
+export function createBackgroundAgentTracker(): BackgroundAgentTracker {
+  const running = new Map<string, string>();
+  return {
+    observe(message: unknown) {
+      if (!message || typeof message !== "object") return;
+      const msg = message as Record<string, unknown>;
+      if (msg.type !== "system" || typeof msg.task_id !== "string") return;
+      if (msg.subtype === "task_started") {
+        if (msg.task_type !== "local_agent" || msg.is_backgrounded === false || msg.ambient === true) return;
+        running.set(msg.task_id, typeof msg.description === "string" ? msg.description : "background agent");
+      } else if (msg.subtype === "task_notification") {
+        running.delete(msg.task_id);
+      }
+    },
+    pending() {
+      return [...running.values()];
+    }
+  };
+}
+
 export type BackgroundProcess = { pid: number; command: string };
 
 const INFRA_COMMAND_PATTERN = /\bclaude\b|agent-entrypoint|@anthropic|anthropic-ai|\bcodex\b|\bnode\b.*entrypoint/i;

@@ -64,7 +64,7 @@ test("isRunCancellation recognizes cancellations however they surface", () => {
 // activeRuns: 0, and the blue/green drain therefore exited immediately and
 // killed in-flight Slack runs. The registry must live on a globalThis slot so
 // every module instance in the process shares one view.
-test("the run registry is shared across module instances of the same process", () => {
+test("the run registry is shared across module instances of the same process", async () => {
   const registry = (globalThis as Record<string, unknown>)[RUN_REGISTRY_GLOBAL_KEY] as
     | { controllers: Map<string, AbortController>; injectors: Map<string, (text: string) => boolean> }
     | undefined;
@@ -80,7 +80,7 @@ test("the run registry is shared across module instances of the same process", (
   try {
     assert.equal(isCancellableAiRun("foreign-run"), true, "sees a run registered by another instance");
     assert.ok(activeRunCount() >= 1, "drain criterion counts cross-instance runs");
-    assert.equal(injectRunMessage("foreign-run", "hello"), true, "steering reaches cross-instance runs");
+    assert.equal(await injectRunMessage("foreign-run", "hello"), true, "steering reaches cross-instance runs");
     assert.equal(cancelAiRun("foreign-run"), true);
     assert.equal(foreign.signal.aborted, true, "cancel aborts the other instance's controller");
   } finally {

@@ -51,6 +51,10 @@ import { buildRunPermalink } from "@/lib/request-origin";
 // never reach this layer, so the two retry budgets do not stack on the same
 // error.
 const CONTAINER_TRANSIENT_DELAYS_MS = [2_000, 8_000];
+// How long a steering message waits for the container's steer_ack. The ack is
+// a synchronous push inside the container, so this only fires for an image
+// that predates the ack protocol or a wedged container.
+export const STEER_ACK_TIMEOUT_MS = 5_000;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 // Docker-in-container support is a property of the Docker engine, probed once
@@ -439,12 +443,37 @@ export class ContainerRunner implements AgentRunner {
       }
 
       // Live steering: a user message pushed while the turn is running is
-      // written into the container as a "user_message" frame. Returns false
-      // once stdin is gone (container exiting) so the caller queues instead.
+      // written into the container as a "user_message" frame carrying an id, and
+      // the entrypoint answers with a "steer_ack" frame saying whether its input
+      // channel accepted it. Only an accepted ack counts as delivered: a write
+      // into stdin proves nothing once the in-container turn has ended (the
+      // 2026-09-24 message that got 👀 and was dropped). No ack in time → false,
+      // so the caller queues — a duplicate beats a lost message.
+      const pendingSteers = new Map<string, (accepted: boolean) => void>();
+      let steerSeq = 0;
+      const settleSteers = () => {
+        for (const settle of pendingSteers.values()) settle(false);
+        pendingSteers.clear();
+      };
       if (cancel?.steerRunId) {
         registerRunMessageInjector(cancel.steerRunId, (text) => {
           if (!child.stdin.writable || child.stdin.destroyed) return false;
-          return child.stdin.write(JSON.stringify({ type: "user_message", text }) + "\n") || true;
+          const id = `steer-${++steerSeq}`;
+          return new Promise<boolean>((resolve) => {
+            const timer = setTimeout(() => {
+              pendingSteers.delete(id);
+              resolve(false);
+            }, STEER_ACK_TIMEOUT_MS);
+            timer.unref?.();
+            pendingSteers.set(id, (accepted) => {
+              clearTimeout(timer);
+              pendingSteers.delete(id);
+              resolve(accepted);
+            });
+            child.stdin.write(JSON.stringify({ type: "user_message", id, text }) + "\n", (error) => {
+              if (error) pendingSteers.get(id)?.(false);
+            });
+          });
         });
       }
 
@@ -469,6 +498,8 @@ export class ContainerRunner implements AgentRunner {
           authJson?: unknown;
           output?: Record<string, unknown>;
           message?: string;
+          id?: unknown;
+          accepted?: unknown;
         };
         try {
           frame = JSON.parse(trimmed);
@@ -508,6 +539,8 @@ export class ContainerRunner implements AgentRunner {
           if (cancel?.onCodexAuthRefreshed) {
             pending.push(Promise.resolve(cancel.onCodexAuthRefreshed(frame.authJson)).catch(() => {}));
           }
+        } else if (frame.type === "steer_ack" && typeof frame.id === "string") {
+          pendingSteers.get(frame.id)?.(frame.accepted === true);
         } else if (frame.type === "result" && frame.output) {
           result = frame.output;
         } else if (frame.type === "error") {
@@ -541,6 +574,7 @@ export class ContainerRunner implements AgentRunner {
         cancel?.signal?.removeEventListener("abort", onAbort);
         if (cancel?.steerRunId) deregisterRunMessageInjector(cancel.steerRunId);
         if (stdoutBuffer.trim()) handleFrame(stdoutBuffer);
+        settleSteers();
         await Promise.all(pending);
         if (frameError) {
           reject(new Error(frameError));

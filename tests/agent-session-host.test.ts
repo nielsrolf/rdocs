@@ -37,7 +37,11 @@ type FakeContainer = {
 };
 
 /** A fake docker whose "containers" are real in-process session servers. */
-function fakeDocker(options?: { onJob?: (container: FakeContainer, job: unknown) => void }) {
+function fakeDocker(options?: {
+  onJob?: (container: FakeContainer, job: unknown) => void;
+  /** What the container's input channel answers to a steering message. */
+  acceptMessages?: boolean;
+}) {
   const containers: FakeContainer[] = [];
   const removed: string[] = [];
   let seq = 0;
@@ -65,7 +69,11 @@ function fakeDocker(options?: { onJob?: (container: FakeContainer, job: unknown)
             container.jobs.push(job);
             options?.onJob?.(container, job);
           },
-          onMessage: (text) => (container.messages.push(text), true),
+          onMessage: (text) => {
+            if (options?.acceptMessages === false) return false;
+            container.messages.push(text);
+            return true;
+          },
           onCancel: () => {
             container.cancels += 1;
           },
@@ -254,6 +262,33 @@ test("a resumed run does not replay frames the previous process already persiste
   }
 });
 
+test("a steering message the container refuses is reported as not delivered", async () => {
+  // Production runs are detached. The 2026-09-24 incident: the injector here
+  // returned an optimistic true while the container answered delivered:false
+  // (its turn had ended), so Slack showed 👀 and the message was lost.
+  const docker = fakeDocker({ acceptMessages: false });
+  try {
+    const containerId = await docker.ops.start(["run", "-d", "image"]);
+    const container = docker.last();
+    const handle: DetachedSessionHandle = {
+      containerId,
+      endpoint: `http://127.0.0.1:${await docker.ops.hostPort(containerId, PORT)}`,
+      secret: SECRET
+    };
+    const runId = "run-steer-refused";
+    const pending = attachDetachedSession({ handle, job: {}, since: 0, waitMs: 2_000, steerRunId: runId, sink: {} });
+    for (let i = 0; i < 50 && !isSteerableAiRun(runId); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(isSteerableAiRun(runId), true);
+    assert.equal(await injectRunMessage(runId, "too late"), false, "the caller must queue it instead");
+    container.emit({ type: "result", output: {} });
+    await pending;
+  } finally {
+    await docker.closeAll();
+  }
+});
+
 test("steering reaches the container from whichever process holds the handle", async () => {
   const docker = fakeDocker();
   try {
@@ -280,7 +315,7 @@ test("steering reaches the container from whichever process holds the handle", a
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.equal(isSteerableAiRun(runId), true, "a detached run must be steerable");
-    assert.equal(injectRunMessage(runId, "more context"), true);
+    assert.equal(await injectRunMessage(runId, "more context"), true);
 
     for (let i = 0; i < 50 && container.messages.length === 0; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));

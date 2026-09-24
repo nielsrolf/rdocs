@@ -69,3 +69,25 @@ test("buildUserMessageStream without a channel yields exactly one message", asyn
   for await (const message of buildUserMessageStream(baseInput())) messages.push(message);
   assert.equal(messages.length, 1);
 });
+
+test("a sealed channel refuses new messages but keeps the stream open until closed", async () => {
+  // Sealing on submit_response must not end the SDK prompt stream: that closes
+  // the CLI's stdin before submit_response's own result is written back.
+  const channel = createAgentInputChannel();
+  assert.equal(channel.push("queued before seal"), true);
+  channel.seal();
+  assert.equal(channel.push("after seal"), false, "host must fall back to the queue");
+  assert.equal(channel.isClosed(), false);
+
+  const iterator = channel[Symbol.asyncIterator]();
+  assert.deepEqual(await iterator.next(), { value: "queued before seal", done: false });
+  let ended = false;
+  const next = iterator.next().then((result) => {
+    ended = result.done === true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ended, false, "a sealed channel must not end the stream by itself");
+  channel.close();
+  await next;
+  assert.equal(ended, true);
+});

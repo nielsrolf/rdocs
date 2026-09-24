@@ -17,9 +17,17 @@
 
 export const RUN_REGISTRY_GLOBAL_KEY = "__rdocsAgentRunRegistry__";
 
+/**
+ * Delivers one steering message. Resolves true only once the live session has
+ * ACCEPTED it (container transports wait for the container's answer), so a
+ * turn that already ended inside the container is reported as false and the
+ * caller queues instead of showing 👀 for a message nobody will read.
+ */
+export type RunMessageInjector = (text: string) => boolean | Promise<boolean>;
+
 type RunRegistry = {
   controllers: Map<string, AbortController>;
-  injectors: Map<string, (text: string) => boolean>;
+  injectors: Map<string, RunMessageInjector>;
 };
 
 const registryHost = globalThis as typeof globalThis & {
@@ -28,7 +36,7 @@ const registryHost = globalThis as typeof globalThis & {
 
 const registry: RunRegistry = (registryHost[RUN_REGISTRY_GLOBAL_KEY] ??= {
   controllers: new Map<string, AbortController>(),
-  injectors: new Map<string, (text: string) => boolean>()
+  injectors: new Map<string, RunMessageInjector>()
 });
 
 const controllers = registry.controllers;
@@ -88,7 +96,7 @@ export function activeRunCount(): number {
 // Shared across module instances for the same reason as the controllers above.
 const injectors = registry.injectors;
 
-export function registerRunMessageInjector(aiRunId: string, inject: (text: string) => boolean) {
+export function registerRunMessageInjector(aiRunId: string, inject: RunMessageInjector) {
   injectors.set(aiRunId, inject);
 }
 
@@ -102,11 +110,11 @@ export function deregisterRunMessageInjector(aiRunId: string) {
  * backend, or the turn already ended) — the caller MUST then fall back to
  * queueing, so a message is never dropped.
  */
-export function injectRunMessage(aiRunId: string, text: string): boolean {
+export async function injectRunMessage(aiRunId: string, text: string): Promise<boolean> {
   const inject = injectors.get(aiRunId);
   if (!inject) return false;
   try {
-    return inject(text);
+    return (await inject(text)) === true;
   } catch {
     return false;
   }

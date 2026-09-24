@@ -37,7 +37,7 @@ import {
 } from "./ai-edit-submission";
 import { findAnchorMatch } from "./anchor-text";
 import { evaluateToolPathAccess } from "./agent-sandbox";
-import type { AgentInputChannel } from "./input-channel";
+import { createAgentInputChannel, type AgentInputChannel } from "./input-channel";
 import {
   buildBackgroundWorkQuestion,
   createTurnPark,
@@ -48,6 +48,7 @@ import {
   PARK_TIMEOUT_NUDGE
 } from "./turn-park";
 import {
+  createBackgroundAgentTracker,
   createBackgroundTaskTracker,
   describeBackgroundWork,
   scanContainerBackgroundProcesses
@@ -1128,6 +1129,14 @@ async function runClaudeResearchAgentOnce(
   }
   const onExternalAbort = () => abortController.abort();
   options.signal?.addEventListener("abort", onExternalAbort, { once: true });
+  // The SDK closes the CLI's stdin as soon as the prompt stream ends, and the
+  // in-process gdocs tools (submit_response included) answer over that stdin.
+  // So the stream is driven by a channel for EVERY run, not only steerable
+  // ones; without a host channel nothing is ever pushed, and the result-frame
+  // ladder below decides when it closes. Park/keep-alive still require the
+  // host channel (options.inputChannel), because only then can a wake-up be
+  // delivered.
+  const sessionInput: AgentInputChannel = options.inputChannel ?? createAgentInputChannel();
 
   let captured: Partial<ClaudeResearchAgentOutput> | null = null;
   let submissionAttempts = 0;
@@ -1202,8 +1211,10 @@ async function runClaudeResearchAgentOnce(
       captured = normalized;
       // The turn is over: stop accepting steering messages so anything that
       // arrives from here on is rejected by push() and queued as a follow-up
-      // run by the host rather than silently lost.
-      options.inputChannel?.close();
+      // run by the host rather than silently lost. Seal, don't close: closing
+      // ends the SDK prompt stream and with it the CLI's stdin, which is where
+      // THIS tool result still has to go. The result frame closes it.
+      sessionInput.seal();
       return {
         content: [
           {
@@ -1758,17 +1769,15 @@ async function runClaudeResearchAgentOnce(
   // submit. Keep-alive deliberately survives delivery — a mid-park user message
   // ("how is it going?") must not cause the reply turn to end the run and kill
   // the agent's background work (the 2026-08-10 incident).
-  const steeringChannel: AgentInputChannel | undefined = options.inputChannel
-    ? {
-        ...options.inputChannel,
-        async *[Symbol.asyncIterator]() {
-          for await (const text of options.inputChannel as AgentInputChannel) {
-            turnPark.disarm();
-            yield text;
-          }
-        }
+  const steeringChannel: AgentInputChannel = {
+    ...sessionInput,
+    async *[Symbol.asyncIterator]() {
+      for await (const text of sessionInput) {
+        turnPark.disarm();
+        yield text;
       }
-    : undefined;
+    }
+  };
 
   let parkTimer: ReturnType<typeof setTimeout> | null = null;
   // Safety valve: if the wake-up never lands, nudge the agent to wrap up rather
@@ -1833,6 +1842,7 @@ async function runClaudeResearchAgentOnce(
   // the agent once when it ends a turn without deciding — never to keep a
   // session alive on its own.
   const backgroundTracker = createBackgroundTaskTracker();
+  const backgroundAgents = createBackgroundAgentTracker();
   let backgroundQuestionAsked = false;
   function detectBackgroundWork(): string[] {
     try {
@@ -1963,6 +1973,7 @@ async function runClaudeResearchAgentOnce(
       // Track background Bash launches/completions for the turn-boundary
       // background-work question (advisory only; see background-work.ts).
       backgroundTracker.observe(message);
+      backgroundAgents.observe(message);
       if (message.type === "assistant") {
         handleAssistantMessage(message, onProgress);
       } else if (message.type === "result") {
@@ -1975,14 +1986,28 @@ async function runClaudeResearchAgentOnce(
         // Decision ladder at the boundary:
         //   1. alarm park (check_back_later pending) → wait for the wake-up
         //   2. keep-alive on → stay open, periodic check-in nudges
-        //   3. undecided + live background work observed → ask the agent ONCE
+        //   3. background subagents still running → stay open; the CLI resumes
+        //      the agent itself when they finish (see createBackgroundAgentTracker)
+        //   4. undecided + live background work observed → ask the agent ONCE
         //      (the question is a pushed message, so it gets one more turn)
-        //   4. otherwise → close, the run finalizes
-        if (options.inputChannel && !options.inputChannel.isClosed() && options.inputChannel.pendingCount() === 0) {
+        //   5. otherwise → close, the run finalizes
+        const runningAgents = backgroundAgents.pending();
+        if (captured) {
+          // Submitted (the channel is sealed): end the session. Anything queued
+          // before the seal still drains into one more turn first.
+          sessionInput.close();
+        } else if (!sessionInput.isClosed() && sessionInput.pendingCount() === 0) {
           if (turnPark.isArmed()) {
             armParkTimer();
           } else if (turnPark.keepAliveEnabled()) {
             armKeepAliveTimer();
+          } else if (runningAgents.length > 0) {
+            emitProgress(onProgress, {
+              role: "system",
+              message: `Waiting for ${runningAgents.length} background agent${runningAgents.length === 1 ? "" : "s"} to finish: ${runningAgents.join(", ")}.`
+            });
+          } else if (!options.inputChannel) {
+            sessionInput.close();
           } else {
             let asked = false;
             if (!captured && !backgroundQuestionAsked && input.slackTools && turnPark.keepAliveState() === "unset") {
@@ -2026,7 +2051,7 @@ async function runClaudeResearchAgentOnce(
     if (keepAliveTimer) clearTimeout(keepAliveTimer);
     turnPark.disarm();
     turnPark.setKeepAlive(false);
-    options.inputChannel?.close();
+    sessionInput.close();
     agentQuery.close();
   }
 

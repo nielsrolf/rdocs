@@ -89,7 +89,7 @@ function mention(overrides: Partial<SlackMentionEvent> & { teamId: string }): Sl
 function depsWith(
   client: SlackClient,
   runs: ConversationRunInput[],
-  extra?: { injectRunMessage?: (aiRunId: string, text: string) => boolean }
+  extra?: { injectRunMessage?: (aiRunId: string, text: string) => boolean | Promise<boolean> }
 ) {
   return {
     slack: client,
@@ -769,6 +769,32 @@ test("a stuck newer run in the thread does not block steering an older, steerabl
   assert.equal(runs.length, 1);
 
   await db.aiRun.update({ where: { id: stuck.id }, data: { status: "FAILED" } });
+});
+
+test("a steering message the live session refuses is queued, not shown as injected", async () => {
+  // 2026-09-24: a follow-up got 👀 but the container had already ended its
+  // turn, so the message was dropped. Injection is asynchronous now (it waits
+  // for the container's answer) and a pending Promise must not count as "yes".
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-refused-steer");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const { client, reactions } = makeFakeSlack();
+  const runs: ConversationRunInput[] = [];
+  const first = await handleSlackAppMention(mention({ teamId }), depsWith(client, runs));
+  const firstRunId = (first as { aiRunId: string }).aiRunId;
+
+  const refused = await handleSlackAppMention(
+    mention({ teamId, ts: "1004.000", threadTs: "1000.000", text: `<@${BOT_USER_ID}> one more thing` }),
+    depsWith(client, runs, { injectRunMessage: async () => false })
+  );
+
+  assert.equal("action" in refused && refused.action, "queued");
+  assert.ok(!reactions.some((r) => r.ts === "1004.000" && r.name === "eyes"), "no 👀 for a refused message");
+  assert.ok(reactions.some((r) => r.op === "add" && r.ts === "1004.000" && r.name === "hourglass_flowing_sand"));
+
+  await db.aiRun.update({ where: { id: firstRunId }, data: { status: "FAILED" } });
 });
 
 test("interrupting a thread cancels every active run in it", async () => {

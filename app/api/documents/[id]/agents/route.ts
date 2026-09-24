@@ -128,7 +128,7 @@ export async function PATCH(request: Request, { params }: RouteContext<{ id: str
   if (run.status !== "RUNNING") {
     return NextResponse.json({ error: "This run cannot accept a live message right now." }, { status: 409 });
   }
-  let delivered = isSteerableAiRun(run.id) && injectRunMessage(run.id, parsed.data.message);
+  let delivered = isSteerableAiRun(run.id) && (await injectRunMessage(run.id, parsed.data.message));
   if (!delivered && run.sessionEndpoint && run.sessionSecret) {
     delivered = await createAgentSessionClient({
       baseUrl: run.sessionEndpoint,

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createBackgroundAgentTracker,
   createBackgroundTaskTracker,
   describeBackgroundWork,
   scanContainerBackgroundProcesses
@@ -144,4 +145,31 @@ test("describeBackgroundWork merges both signals", () => {
   assert.equal(out.length, 2);
   assert.match(out[0], /npm run watch/);
   assert.match(out[1], /process 99: python serve\.py/);
+});
+
+// --- background subagents (hold the session open; not advisory) ---
+
+test("a background subagent is pending from task_started until its task_notification", () => {
+  const tracker = createBackgroundAgentTracker();
+  tracker.observe({
+    type: "system",
+    subtype: "task_started",
+    task_id: "a1",
+    task_type: "local_agent",
+    is_backgrounded: true,
+    description: "Lit review"
+  });
+  assert.deepEqual(tracker.pending(), ["Lit review"]);
+  tracker.observe({ type: "system", subtype: "task_updated", task_id: "a1", patch: { status: "completed" } });
+  assert.deepEqual(tracker.pending(), ["Lit review"], "only the notification means the CLI will resume the agent");
+  tracker.observe({ type: "system", subtype: "task_notification", task_id: "a1", status: "completed" });
+  assert.deepEqual(tracker.pending(), []);
+});
+
+test("foreground subagents, background Bash and ambient tasks do not hold the session", () => {
+  const tracker = createBackgroundAgentTracker();
+  tracker.observe({ type: "system", subtype: "task_started", task_id: "f", task_type: "local_agent", is_backgrounded: false });
+  tracker.observe({ type: "system", subtype: "task_started", task_id: "b", task_type: "local_bash", is_backgrounded: true });
+  tracker.observe({ type: "system", subtype: "task_started", task_id: "w", task_type: "local_agent", ambient: true });
+  assert.deepEqual(tracker.pending(), []);
 });

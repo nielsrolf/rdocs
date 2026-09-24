@@ -9,14 +9,21 @@
 // harness picks up at the next turn boundary — the same behavior as typing into
 // the Claude Code CLI while it works.
 //
-// Lifecycle: the channel is closed (a) when the agent submits its structured
-// response, (b) when the turn's result frame arrives, or (c) in the run's
-// finally. After close, push() returns false and the caller must fall back to
-// queueing a follow-up run — never silently drop the message.
+// Lifecycle: the channel is SEALED when the agent submits its structured
+// response, and closed (a) when the turn's result frame arrives or (b) in the
+// run's finally. After seal or close, push() returns false and the caller must
+// fall back to queueing a follow-up run — never silently drop the message.
+// Seal exists because the iterator IS the SDK's prompt stream: ending it makes
+// the SDK close the CLI's stdin, and an in-process MCP tool (submit_response
+// itself) answers over that stdin — closing from inside the submit handler
+// dropped the handler's own result whenever the first result frame had
+// already passed (2026-09-24).
 
 export type AgentInputChannel = {
   /** Queue a user message for the running turn. False when already closed. */
   push(text: string): boolean;
+  /** Stop accepting messages but keep the iterator (the SDK stream) open. */
+  seal(): void;
   /** Stop accepting messages; the iterator ends once the queue drains. */
   close(): void;
   isClosed(): boolean;
@@ -28,6 +35,7 @@ export type AgentInputChannel = {
 export function createAgentInputChannel(): AgentInputChannel {
   const queue: string[] = [];
   let closed = false;
+  let sealed = false;
   let wake: (() => void) | null = null;
 
   const notify = () => {
@@ -38,12 +46,15 @@ export function createAgentInputChannel(): AgentInputChannel {
 
   return {
     push(text: string) {
-      if (closed) return false;
+      if (closed || sealed) return false;
       const trimmed = typeof text === "string" ? text : String(text);
       if (!trimmed) return false;
       queue.push(trimmed);
       notify();
       return true;
+    },
+    seal() {
+      sealed = true;
     },
     close() {
       if (closed) return;

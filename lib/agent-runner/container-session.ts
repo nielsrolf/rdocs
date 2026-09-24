@@ -355,12 +355,9 @@ export async function attachDetachedSession(
   // Steering works from ANY process holding the handle — this is what removes
   // the "run not owned by the current server process" class of failure.
   if (options.steerRunId) {
-    registerRunMessageInjector(options.steerRunId, (text) => {
-      void client.message(text).catch(() => false);
-      // Optimistic: the HTTP round trip outlives this synchronous callback. An
-      // undeliverable message is reported by the container and logged there.
-      return true;
-    });
+    // The container answers {delivered} for real (false once its turn ended),
+    // so pass that through — an optimistic true dropped such messages silently.
+    registerRunMessageInjector(options.steerRunId, (text) => client.message(text).catch(() => false));
   }
 
   try {

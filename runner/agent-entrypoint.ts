@@ -17,10 +17,11 @@
 // Legacy stdio protocol (NDJSON over the process's stdio):
 //   stdin  : newline-delimited frames. The FIRST line is the JSON AgentJob
 //            ({ input, agentConfig, agentEnv, validation }); every later line is
-//            a steering frame {type:"user_message",text} injected into the
+//            a steering frame {type:"user_message",id,text} injected into the
 //            RUNNING agent turn (see agent-core/input-channel.ts). stdin stays
 //            open for the life of the run — we never wait for it to end.
 //   stdout : newline-delimited frames — {type:"progress",event} | {type:"result",output} | {type:"error",message}
+//            | {type:"steer_ack",id,accepted} answering each steering frame
 //   stderr : human logs only (never parsed by the host)
 //
 // The workspace is bind-mounted at /workspace; we override the job's host
@@ -227,10 +228,14 @@ function readJobAndSteer(channel: AgentInputChannel): Promise<string> {
         return;
       }
       try {
-        const frame = JSON.parse(trimmed) as { type?: string; text?: unknown };
+        const frame = JSON.parse(trimmed) as { type?: string; text?: unknown; id?: unknown };
         if (frame.type === "user_message" && typeof frame.text === "string") {
-          if (!channel.push(frame.text)) {
-            process.stderr.write("[agent-entrypoint] dropped steering message (turn already ended)\n");
+          const accepted = channel.push(frame.text);
+          // The host counts the message as delivered only on accepted:true and
+          // queues it otherwise, so a refused message is never silently lost.
+          if (typeof frame.id === "string") emit({ type: "steer_ack", id: frame.id, accepted });
+          if (!accepted) {
+            process.stderr.write("[agent-entrypoint] refused steering message (turn already ended)\n");
           }
           return;
         }
