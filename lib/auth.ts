@@ -34,12 +34,24 @@ export async function createSessionToken(userId: string) {
 }
 
 export async function readSessionToken(token: string) {
+  return (await readSession(token))?.userId ?? null;
+}
+
+async function readSession(token: string) {
   try {
     const { payload } = await jwtVerify(token, getSessionSecret());
-    return typeof payload.sub === "string" ? payload.sub : null;
+    return typeof payload.sub === "string"
+      ? { userId: payload.sub, issuedAt: payload.iat ?? 0 }
+      : null;
   } catch {
     return null;
   }
+}
+
+// Truncated to whole seconds to match JWT `iat`, so the session issued right
+// after a password change (same second) still counts as newer.
+export function passwordChangeInstant() {
+  return new Date(Math.floor(Date.now() / 1000) * 1000);
 }
 
 export async function getCurrentUser() {
@@ -50,20 +62,29 @@ export async function getCurrentUser() {
     return null;
   }
 
-  const userId = await readSessionToken(token);
-  if (!userId) {
+  const session = await readSession(token);
+  if (!session) {
     return null;
   }
 
-  return db.user.findUnique({
-    where: { id: userId },
+  const user = await db.user.findUnique({
+    where: { id: session.userId },
     select: {
       id: true,
       email: true,
       name: true,
-      createdAt: true
+      createdAt: true,
+      passwordChangedAt: true
     }
   });
+
+  // Sessions from before the last password change are revoked.
+  if (!user || (user.passwordChangedAt && session.issuedAt * 1000 < user.passwordChangedAt.getTime())) {
+    return null;
+  }
+
+  const { passwordChangedAt: _passwordChangedAt, ...publicUser } = user;
+  return publicUser;
 }
 
 export async function setSessionCookie(token: string) {

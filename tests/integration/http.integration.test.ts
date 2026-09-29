@@ -67,7 +67,10 @@ async function signUp(): Promise<string> {
   return seeded.cookie;
 }
 
-itLive("the HTTP sign-up route issues a session cookie", async () => {
+// With email configured (RESEND_API_KEY) sign-up waits for the address to be
+// confirmed and sets no cookie; without it, it signs in straight away. The
+// @example.com address is never actually mailed (lib/email.ts).
+itLive("the HTTP sign-up route issues a session cookie or asks for confirmation", async () => {
   const email = `int-${crypto.randomUUID()}@example.com`;
   createdEmails.push(email);
   const res = await fetch(`${BASE}/api/auth/sign-up`, {
@@ -76,8 +79,20 @@ itLive("the HTTP sign-up route issues a session cookie", async () => {
     body: JSON.stringify({ name: "Integration Test", email, password: "password1234" })
   });
   assert.equal(res.status, 200, "sign-up should succeed");
+  const data = await res.json();
   const cookie = cookieFrom(res);
-  assert.ok(cookie.includes("gdocs_ai_session"), "sign-up should set a session cookie");
+  if (data.needsVerification) {
+    assert.ok(!cookie.includes("gdocs_ai_session"), "an unconfirmed sign-up must not be signed in");
+    const signIn = await fetch(`${BASE}/api/auth/sign-in`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password: "password1234" })
+    });
+    assert.equal(signIn.status, 403, "signing in before confirming is refused");
+    assert.equal((await signIn.json()).needsVerification, true);
+  } else {
+    assert.ok(cookie.includes("gdocs_ai_session"), "sign-up should set a session cookie");
+  }
 });
 
 function authed(cookie: string, url: string, init: RequestInit = {}) {

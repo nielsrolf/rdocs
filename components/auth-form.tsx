@@ -9,12 +9,35 @@ type AuthFormProps = {
   title: string;
   subtitle: string;
   returnTo?: string;
+  notice?: string | null;
 };
 
-export function AuthForm({ mode, title, subtitle, returnTo = "/dashboard" }: AuthFormProps) {
+export function AuthForm({ mode, title, subtitle, returnTo = "/dashboard", notice = null }: AuthFormProps) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // Set once the server says this address still has to be confirmed: after
+  // sign-up, or on signing in to an unconfirmed account.
+  const [pendingEmail, setPendingEmail] = useState<string | null>(null);
+  const [resendState, setResendState] = useState<"idle" | "sending" | "sent">("idle");
+
+  async function resendVerification() {
+    if (!pendingEmail) return;
+    setError(null);
+    setResendState("sending");
+    const response = await fetch("/api/auth/resend-verification", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: pendingEmail, returnTo })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      setError(data.error ?? "The email could not be sent.");
+      setResendState("idle");
+      return;
+    }
+    setResendState("sent");
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -27,7 +50,8 @@ export function AuthForm({ mode, title, subtitle, returnTo = "/dashboard" }: Aut
         ? {
             name: String(formData.get("name") ?? ""),
             email: String(formData.get("email") ?? ""),
-            password: String(formData.get("password") ?? "")
+            password: String(formData.get("password") ?? ""),
+            returnTo
           }
         : {
             email: String(formData.get("email") ?? ""),
@@ -44,6 +68,13 @@ export function AuthForm({ mode, title, subtitle, returnTo = "/dashboard" }: Aut
 
     const data = await response.json().catch(() => ({ error: "Unexpected server response." }));
 
+    if (data.needsVerification) {
+      setPendingEmail(String(payload.email).toLowerCase());
+      setResendState("idle");
+      setIsSubmitting(false);
+      if (response.ok) return;
+    }
+
     if (!response.ok) {
       setError(data.error ?? "Authentication failed.");
       setIsSubmitting(false);
@@ -55,6 +86,28 @@ export function AuthForm({ mode, title, subtitle, returnTo = "/dashboard" }: Aut
     // authentication.
     router.push(`${returnTo}${window.location.hash || ""}`);
     router.refresh();
+  }
+
+  if (pendingEmail && mode === "sign-up") {
+    return (
+      <section className="auth-card">
+        <div className="section-heading">
+          <h1>Check your inbox</h1>
+          <p>
+            We sent a confirmation link to <strong>{pendingEmail}</strong>. Open it to finish creating your
+            account — it may take a minute, and it can land in the spam folder.
+          </p>
+        </div>
+        {error ? <div className="error-banner" role="alert">{error}</div> : null}
+        <button className="ghost-button wide-button" disabled={resendState !== "idle"} onClick={resendVerification} type="button">
+          {resendState === "sending" ? "Sending..." : resendState === "sent" ? "Sent — check your inbox" : "Resend email"}
+        </button>
+        <p className="inline-note">
+          Wrong address?{" "}
+          <button className="link-button" onClick={() => setPendingEmail(null)} type="button">Sign up again</button>
+        </p>
+      </section>
+    );
   }
 
   return (
@@ -85,11 +138,22 @@ export function AuthForm({ mode, title, subtitle, returnTo = "/dashboard" }: Aut
             type="password"
           />
         </label>
+        {notice && !error ? <div className="inline-note" role="status">{notice}</div> : null}
         {error ? <div className="error-banner" role="alert">{error}</div> : null}
+        {pendingEmail && mode === "sign-in" ? (
+          <button className="ghost-button wide-button" disabled={resendState !== "idle"} onClick={resendVerification} type="button">
+            {resendState === "sending" ? "Sending..." : resendState === "sent" ? "Sent — check your inbox" : "Resend confirmation email"}
+          </button>
+        ) : null}
         <button className="primary-button wide-button" disabled={isSubmitting} type="submit">
           {isSubmitting ? "Working..." : mode === "sign-up" ? "Create account" : "Sign in"}
         </button>
       </form>
+      {mode === "sign-in" ? (
+        <p className="inline-note">
+          <Link href="/forgot-password">Forgot your password?</Link>
+        </p>
+      ) : null}
       <p className="inline-note">
         {mode === "sign-up" ? "Already have an account?" : "Need an account?"}{" "}
         <Link href={`${mode === "sign-up" ? "/sign-in" : "/sign-up"}${

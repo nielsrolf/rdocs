@@ -42,12 +42,22 @@ export async function POST(request: Request) {
     },
     select: {
       id: true,
-      passwordHash: true
+      passwordHash: true,
+      emailVerificationPending: true
     }
   });
 
   if (!user || !(await verifyPassword(parsed.data.password, user.passwordHash))) {
     return NextResponse.json({ error: "Incorrect email or password." }, { status: 401 });
+  }
+
+  // Only reached with the right password, so this does not reveal whether an
+  // address is registered.
+  if (user.emailVerificationPending) {
+    return NextResponse.json(
+      { error: "Please confirm your email address first — check your inbox for the link.", needsVerification: true },
+      { status: 403 }
+    );
   }
 
   await setSessionCookie(await createSessionToken(user.id));

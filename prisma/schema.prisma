@@ -12,6 +12,13 @@ model User {
   email                           String                           @unique
   name                            String
   passwordHash                    String
+  // Set on sign-up while the address is unconfirmed; cleared by the emailed
+  // verification link (or a password reset, which also proves the inbox).
+  // Defaults false so accounts that predate verification stay usable.
+  emailVerificationPending        Boolean                          @default(false)
+  // Session JWTs issued before this instant are rejected (lib/auth.ts), so a
+  // password reset signs out every other device. Second precision.
+  passwordChangedAt               DateTime?
   // Per-user default agent config: used when a run's document has no explicit
   // agentModel/agentEffort (today: Slack channel/DM runs). Null = app default
   // (claude-sonnet-5, thinking off). Same storable values as Document.agentModel.

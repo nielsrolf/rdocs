@@ -180,6 +180,16 @@ body.public-view-shell .document-page-shell {
   width: 100%;
 }
 
+.link-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .marketing-shell,
 .dashboard-shell,
 .auth-shell,
