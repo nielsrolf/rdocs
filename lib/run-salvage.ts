@@ -41,7 +41,15 @@ export async function salvageOrphanedRunWorkspaces(runs: OrphanedRunWorkspace[])
         message: "Preserve work from interrupted AI run",
         push: true
       });
-      if (commit.commitSha) {
+      if (commit.commitSha && commit.mergeError) {
+        await recordAiRunEvent({
+          aiRunId: run.id,
+          role: "error",
+          message: `The interrupted run's unsaved workspace changes were committed as ${commit.commitSha.slice(0, 7)} but could not be merged into the document repository${
+            commit.preservedRef ? ` (kept on branch ${commit.preservedRef})` : ""
+          }: ${commit.mergeError}`
+        }).catch(() => null);
+      } else if (commit.commitSha) {
         await db.aiRun
           .update({
             where: { id: run.id },

@@ -154,6 +154,11 @@ export function getAgentRunner(): AgentRunner {
   return cached;
 }
 
+/** Test seam: replace (or with null, reset) the process-wide runner. */
+export function setAgentRunnerForTesting(runner: AgentRunner | null): void {
+  cached = runner;
+}
+
 let cachedSelfHosted: AgentRunner | null = null;
 
 /**

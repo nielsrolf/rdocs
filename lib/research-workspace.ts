@@ -39,6 +39,12 @@ export type CommitResult = {
   // the bot account lacks write access). Never fatal: the local commit is the
   // source of truth and callers surface this to the user instead of failing.
   pushError?: string;
+  // Set when the run commit could not be merged back into the base workspace
+  // (conflict resolver failed, base wedged, …). Never fatal either: the commit
+  // is kept under `preservedRef` in the base and callers surface a warning, so
+  // an agent run that already succeeded is not turned into a failure.
+  mergeError?: string;
+  preservedRef?: string;
 };
 
 const WORKSPACE_ROOT = path.join(process.cwd(), ".research-workspaces");
@@ -794,12 +800,47 @@ async function resolveMergeConflictsWithClaude(baseWorkspace: string, commitSha:
   await getAgentRunner().resolveMergeConflicts({ workspacePath: baseWorkspace, commitSha });
 }
 
+export function unmergedCommitRef(commitSha: string): string {
+  return `rdocs-unmerged/${commitSha.slice(0, 12)}`;
+}
+
+// Keep an unmerged run commit reachable in the base checkout under a branch.
+// The commit is normally already in the base object database (the merge fetches
+// it first); if that fetch is what failed, fetch it here. Returns the branch
+// name, or undefined when even that was impossible.
+async function preserveUnmergedCommit(
+  baseWorkspace: string,
+  commitSha: string,
+  sourceWorkspace: string
+): Promise<string | undefined> {
+  const ref = unmergedCommitRef(commitSha);
+  const hasCommit = () =>
+    runCommand("git", ["cat-file", "-e", `${commitSha}^{commit}`], { cwd: baseWorkspace })
+      .then(() => true)
+      .catch(() => false);
+  if (!(await hasCommit())) {
+    await runCommand("git", ["fetch", "--no-tags", sourceWorkspace, commitSha], {
+      cwd: baseWorkspace,
+      timeoutMs: 300_000
+    }).catch(() => null);
+    if (!(await hasCommit())) return undefined;
+  }
+  return runCommand("git", ["branch", "-f", ref, commitSha], { cwd: baseWorkspace })
+    .then(() => ref)
+    .catch(() => undefined);
+}
+
 export async function commitWorkspaceChanges(input: {
   workspace: string;
   baseWorkspace?: string;
   repoUrl: string | null;
   message: string;
   push: boolean;
+  // Resolves textual conflicts of the merge-back into baseWorkspace. Agent runs
+  // pass one bound to the run's runner + credentials (agentConfig/agentEnv);
+  // the default spawns the resolver with no credentials at all, which only
+  // works for runner setups that need none.
+  resolveConflicts?: (baseWorkspace: string, commitSha: string) => Promise<void>;
 }): Promise<CommitResult> {
   const status = await runCommand("git", ["status", "--porcelain"], { cwd: input.workspace });
   if (!status.stdout.trim()) {
@@ -817,6 +858,8 @@ export async function commitWorkspaceChanges(input: {
 
   let pushed = false;
   let pushError: string | undefined;
+  // Assigned inside the lock callback, which TS control flow cannot see.
+  const merge: { error?: string; preservedRef?: string } = {};
   if (input.push && !isReadOnlyRepoUrl(input.repoUrl) && (await hasOriginRemote(input.workspace))) {
     try {
       await runCommand("git", ["push", "-u", "origin", "HEAD"], {
@@ -843,17 +886,30 @@ export async function commitWorkspaceChanges(input: {
     // when two runs interleave; serialize it (and any conflict-resolution agent
     // it spawns) per base workspace.
     const baseWorkspace = input.baseWorkspace;
-    await withWorkspaceLock(baseWorkspace, () =>
-      syncBranchToBaseWorkspace(
-        baseWorkspace,
-        commitSha,
-        // Skip the base push when the worktree push was already denied — it
-        // would fail identically; the local merge still keeps the base current.
-        input.push && !pushError && !isReadOnlyRepoUrl(input.repoUrl),
-        resolveMergeConflictsWithClaude,
-        input.workspace
-      )
-    );
+    await withWorkspaceLock(baseWorkspace, async () => {
+      try {
+        await syncBranchToBaseWorkspace(
+          baseWorkspace,
+          commitSha,
+          // Skip the base push when the worktree push was already denied — it
+          // would fail identically; the local merge still keeps the base current.
+          input.push && !pushError && !isReadOnlyRepoUrl(input.repoUrl),
+          input.resolveConflicts ?? resolveMergeConflictsWithClaude,
+          input.workspace
+        );
+      } catch (error) {
+        merge.error = error instanceof Error ? error.message : String(error);
+        // The run worktree (and its ai/... branch) is deleted after the run, so
+        // pin the commit in the base or the work becomes unreachable.
+        merge.preservedRef = await preserveUnmergedCommit(baseWorkspace, commitSha, input.workspace);
+        console.warn("[research-workspace] merge into base failed; keeping commit", {
+          baseWorkspace,
+          commitSha,
+          preservedRef: merge.preservedRef,
+          error: merge.error
+        });
+      }
+    });
   }
 
   return {
@@ -861,6 +917,7 @@ export async function commitWorkspaceChanges(input: {
     // A denied push means the commit does not exist on GitHub — no URL to link.
     commitUrl: pushError ? null : getGithubCommitUrl(input.repoUrl, commitSha),
     pushed,
-    pushError
+    pushError,
+    ...(merge.error ? { mergeError: merge.error, preservedRef: merge.preservedRef } : {})
   };
 }

@@ -26,7 +26,13 @@ import {
   isRunCancellation,
   registerRunAbortController
 } from "@/lib/agent-runner/run-registry";
-import { createAgentRunner, getAgentRunner, getSelfHostedRunner, type AgentRunner } from "@/lib/agent-runner";
+import {
+  createAgentRunner,
+  getAgentRunner,
+  getSelfHostedRunner,
+  type AgentRunner,
+  type MergeResolveJob
+} from "@/lib/agent-runner";
 import { AttachSupersededError } from "@/lib/agent-runner/session-client";
 import { DurableContainerRunner } from "@/lib/agent-runner/durable";
 import { resolveDurableRunTarget, resolveInnerDockerPreference, type DurableRunTarget } from "@/lib/durable-apps";
@@ -73,6 +79,14 @@ export const READ_ONLY_AGENT_NOTICE =
 
 export function pushFailureNotice(pushError: string): string {
   return `Changes were committed locally but could not be pushed to the linked repository: ${pushError}`;
+}
+
+export function mergeFailureNotice(commit: { commitSha: string | null; preservedRef?: string; mergeError?: string }): string {
+  const sha = commit.commitSha?.slice(0, 7) ?? "the run commit";
+  const where = commit.preservedRef
+    ? `It is kept on branch ${commit.preservedRef} of the document workspace`
+    : `It is kept only as commit ${sha}`;
+  return `⚠ The run's workspace changes (commit ${sha}) could not be merged into the document workspace. ${where}; the workspace itself is unchanged. Reason: ${commit.mergeError ?? "unknown"}`;
 }
 
 /**
@@ -160,7 +174,9 @@ export type AgentRunLifecycleContext = {
   }>;
   // Success-path workspace commit: commits + pushes the run worktree when the
   // run has one and workspace access, no-op result otherwise; a push failure
-  // is surfaced as an error timeline event (never fatal).
+  // or a failed merge-back into the base workspace is surfaced as an error
+  // timeline event (never fatal). Merge conflicts are resolved with the run's
+  // own model + credentials from loadEnv — call loadEnv first.
   commitRunChanges(message: string): Promise<CommitResult>;
 };
 
@@ -196,9 +212,36 @@ export async function withAgentRunLifecycle<T>(
   // Held in an object rather than a `let`: setupWorkspace assigns it from
   // inside a closure, which TS control-flow analysis cannot see, so a plain
   // `let` narrows to `null` at the catch/finally use sites below.
-  const state: { linkedRepo: LinkedRepositoryWorktree | null; handedOff: boolean } = {
+  // `mergeAgent` is the run's resolved model + env (set by loadEnv), so the
+  // end-of-run merge-conflict resolver runs on the SAME credentials as the run
+  // (never host credentials). Brokered virtual keys stay valid for it because
+  // both commits happen while the AiRun is still RUNNING.
+  const state: {
+    linkedRepo: LinkedRepositoryWorktree | null;
+    handedOff: boolean;
+    mergeAgent: Pick<MergeResolveJob, "agentConfig" | "agentEnv">;
+  } = {
     linkedRepo: null,
-    handedOff: false
+    handedOff: false,
+    mergeAgent: {}
+  };
+  const resolveConflicts = (workspacePath: string, commitSha: string) =>
+    runner.resolveMergeConflicts({ workspacePath, commitSha, ...state.mergeAgent });
+  const reportCommitProblems = async (commit: CommitResult) => {
+    if (commit.pushError) {
+      await recordAiRunEvent({
+        aiRunId,
+        role: "error",
+        message: pushFailureNotice(commit.pushError)
+      }).catch(() => null);
+    }
+    if (commit.mergeError) {
+      await recordAiRunEvent({
+        aiRunId,
+        role: "error",
+        message: mergeFailureNotice(commit)
+      }).catch(() => null);
+    }
   };
   // Conversation runs pass deferHeartbeat and call ctx.beginHeartbeat() once
   // they hold the per-conversation session lock: a run still queued on that
@@ -290,6 +333,7 @@ export async function withAgentRunLifecycle<T>(
           message: providerFallbackNotice(effectiveAgentConfig.model)
         });
       }
+      state.mergeAgent = { agentConfig: { model: effectiveAgentConfig.model }, agentEnv };
       if (agentAccessMode === "read_only") {
         await recordAiRunEvent({
           aiRunId,
@@ -314,16 +358,11 @@ export async function withAgentRunLifecycle<T>(
               baseWorkspace: state.linkedRepo.baseWorkspace,
               repoUrl: state.linkedRepo.url,
               message,
-              push: true
+              push: true,
+              resolveConflicts
             })
           : { commitSha: null, commitUrl: null, pushed: false };
-      if (commit.pushError) {
-        await recordAiRunEvent({
-          aiRunId,
-          role: "error",
-          message: pushFailureNotice(commit.pushError)
-        }).catch(() => null);
-      }
+      await reportCommitProblems(commit);
       return commit;
     }
   };
@@ -351,11 +390,14 @@ export async function withAgentRunLifecycle<T>(
         baseWorkspace: state.linkedRepo.baseWorkspace,
         repoUrl: state.linkedRepo.url,
         message: opts.failureCommitMessage,
-        push: true
-      }).catch((commitError) => {
-        opts.onFailureCommitError?.(commitError);
-        return null;
-      });
+        push: true,
+        resolveConflicts
+      })
+        .then(reportCommitProblems)
+        .catch((commitError) => {
+          opts.onFailureCommitError?.(commitError);
+          return null;
+        });
     }
 
     opts.onRunError?.(error);
