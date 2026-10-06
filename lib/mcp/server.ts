@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { McpEditError } from "@/lib/mcp/apply-edit";
-import { callMcpTool, MCP_TOOLS, McpRawContent, McpToolError, type McpToolContext } from "@/lib/mcp/tools";
+import { callMcpTool, mcpToolsFor, McpRawContent, McpToolError, type McpTool, type McpToolContext } from "@/lib/mcp/tools";
 import { McpFileError } from "@/lib/mcp/workspace-files";
 
 // Minimal stateless MCP server over streamable HTTP (single POST endpoint,
@@ -34,14 +34,14 @@ function rpcError(id: string | number | null, code: number, message: string): Js
   return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
-function toolInputSchema(tool: (typeof MCP_TOOLS)[number]) {
+function toolInputSchema(tool: McpTool) {
   const jsonSchema = z.toJSONSchema(tool.schema, { io: "input" }) as Record<string, unknown>;
   delete jsonSchema.$schema;
   return jsonSchema;
 }
 
-export function listMcpToolDefinitions() {
-  return MCP_TOOLS.map((tool) => ({
+export function listMcpToolDefinitions(ctx: Pick<McpToolContext, "scopeDocumentId"> = {}) {
+  return mcpToolsFor(ctx).map((tool) => ({
     name: tool.name,
     description: tool.description,
     inputSchema: toolInputSchema(tool)
@@ -84,7 +84,7 @@ export async function handleMcpMessage(
       case "ping":
         return rpcResult(id, {});
       case "tools/list":
-        return rpcResult(id, { tools: listMcpToolDefinitions() });
+        return rpcResult(id, { tools: listMcpToolDefinitions(ctx) });
       case "tools/call": {
         const name = message.params?.name;
         if (typeof name !== "string") {

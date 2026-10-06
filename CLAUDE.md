@@ -183,6 +183,22 @@ for this reason). The same poll loop fires them, as ordinary channel runs via
 `startAgentChannelRun` (`lib/agent-channel-runs.ts`, shared with the runs route), and a
 revoked channel disables its jobs on the next firing. `lib/agent-channel-schedules.ts`,
 tests `tests/agent-channel-schedules.test.ts`.
+**Headless runs edit through the bridge** (2026-10-06): a channel run or scheduled run has no
+browser to apply its `suggestions`, so (before this) its document edits were silently lost.
+`startAgentChannelRun` and document tasks now mount `/api/mcp` as the run server **`doc`**
+(`mcp__doc__*`, `lib/document-run-token.ts`): a 12h JWT (`purpose: document-run-mcp`,
+`{userId, documentId, aiRunId}`) that acts as the channel creator / task scheduler but is
+**confined to that one document** — `McpToolContext.scopeDocumentId` makes `requireAccess`
+refuse any other document and hides/refuses `list_documents`, `list_quicktakes`,
+`create_document`. A run server the integration passes under the name `doc` wins. The
+message gets a `headlessEditNote` preamble (the system prompt still describes suggestions);
+the timeline event records the un-prefixed message. No agent-core change, so no image rebuild.
+**Document standing jobs** (`contextType: "document"`, `lib/document-schedules.ts`): MCP tools
+`schedule_task` / `list_scheduled_tasks` / `cancel_scheduled_task` (edit access; also usable
+by a scoped headless run on its own document) — no Slack, no channel needed. Each firing is a
+`triggerType: "SCHEDULED"` conversation run (`triggerId: schedule:<taskId>`, adoptable like
+`CONVERSATION`) as the scheduler, with the bridge; a scheduler who lost edit access disables
+the task. This is what auto-updating dashboards use. Tests: `tests/document-schedules.test.ts`.
 `GET /authorize?redirect_uri&state` + `POST /api/authorize` (`lib/integration-signin.ts`) is
 the generic **"Sign in with r-docs"** seam: a signed-in user consents, and r-docs redirects
 back with a 2-minute HS256 id token (`sub`, `email`, `name`, `aud` = redirect origin) signed

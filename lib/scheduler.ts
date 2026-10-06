@@ -12,6 +12,7 @@ import { CronExpressionParser } from "cron-parser";
 
 import { API_CHANNEL_CONTEXT, fireApiChannelTask, type ApiChannelTaskHooks } from "@/lib/agent-channel-schedules";
 import { db } from "@/lib/db";
+import { DOCUMENT_CONTEXT, fireDocumentTask, type DocumentTaskHooks } from "@/lib/document-schedules";
 import {
   buildSteeringMessage,
   startSlackConversationRun,
@@ -104,9 +105,10 @@ async function deferBeat(task: ScheduledTaskRow): Promise<Date | null> {
 export async function fireScheduledTask(
   task: ScheduledTaskRow,
   deps?: SlackEventDeps,
-  hooks?: ApiChannelTaskHooks
+  hooks?: ApiChannelTaskHooks & DocumentTaskHooks
 ) {
   if (task.contextType === API_CHANNEL_CONTEXT) return fireApiChannelTask(task, hooks);
+  if (task.contextType === DOCUMENT_CONTEXT) return fireDocumentTask(task, hooks);
   if (!task.slackTeamId || !task.slackChannelId) {
     console.error("[scheduler] disabling slack task without a channel", { taskId: task.id });
     await db.scheduledTask.update({ where: { id: task.id }, data: { disabledAt: new Date() } }).catch(() => null);

@@ -12,6 +12,7 @@ import { resolveAgentConfigForUser } from "@/lib/agent-defaults";
 import { runAgentConversationInBackground } from "@/lib/agent-conversation";
 import { recordAiRunEvent } from "@/lib/ai-runs";
 import { db } from "@/lib/db";
+import { headlessEditNote, withDocumentBridge } from "@/lib/document-run-token";
 import { MAX_MCP_SERVERS_PER_RUN, resolveRunMcpServerInputs, type RunMcpServerInput } from "@/lib/document-mcp-servers";
 import type { AgentMcpServerInput } from "@/agent-core/mcp-servers";
 
@@ -72,10 +73,19 @@ export async function startAgentChannelRun(args: {
   });
   await recordAiRunEvent({ aiRunId: aiRun.id, role: "user", message });
 
+  // Nobody watches a channel run in the editor, so its suggestions would never
+  // be applied: mount the document bridge (confined to this document, acting
+  // as the channel creator) so the agent can edit server-side when asked to.
+  const mcpServers = await withDocumentBridge(args.mcpServers ?? undefined, {
+    userId: channel.createdById,
+    documentId: channel.documentId,
+    aiRunId: aiRun.id
+  });
+
   void runAgentConversationInBackground({
     documentId: channel.documentId,
     aiRunId: aiRun.id,
-    message,
+    message: `${headlessEditNote(channel.documentId)}\n\n${message}`,
     previousRunId,
     documentTitle: channel.document.title,
     documentContent: channel.document.content,
@@ -83,7 +93,7 @@ export async function startAgentChannelRun(args: {
     agentConfig: await resolveAgentConfigForUser(channel.document, channel.createdById),
     agentAccessMode: "workspace",
     runnerMode: channel.document.runnerMode,
-    mcpServers: args.mcpServers ?? undefined
+    mcpServers
   }).catch((error) => {
     console.error("[agent-api] background run threw", {
       channelId: channel.id,

@@ -15,6 +15,12 @@ import {
 import { notifyCommentPosted } from "@/lib/comment-notifications";
 import { db } from "@/lib/db";
 import { serializeComment, serializeThread } from "@/lib/document-data";
+import {
+  cancelDocumentSchedule,
+  createDocumentSchedule,
+  DocumentScheduleError,
+  listDocumentSchedules
+} from "@/lib/document-schedules";
 import { copyOwnerDefaultSkillsToDocument } from "@/lib/document-skills";
 import { applyMarkdownEdit, McpEditError } from "@/lib/mcp/apply-edit";
 import { widgetSourceUrl } from "@/lib/mcp/markdown-doc";
@@ -24,7 +30,16 @@ import { listQuicktakes as listQuicktakesForUser, QUICKTAKE_KIND } from "@/lib/q
 import { ensureLinkedRepository, runWidgetBuild } from "@/lib/research-workspace";
 
 export type McpUser = { id: string; email: string; name: string };
-export type McpToolContext = { user: McpUser; origin: string };
+export type McpToolContext = {
+  user: McpUser;
+  origin: string;
+  /**
+   * Set when the caller is a headless document run authenticated with a
+   * document-run token (lib/document-run-token.ts): every tool is confined to
+   * this one document, and tools that roam across documents are refused.
+   */
+  scopeDocumentId?: string;
+};
 
 export class McpToolError extends Error {}
 
@@ -56,9 +71,12 @@ function parseDocumentRef(ref: string): string {
   throw new McpToolError(`"${ref}" is not a document id or document URL.`);
 }
 
-async function requireAccess(ref: string, userId: string, level: "view" | "comment" | "edit") {
+async function requireAccess(ref: string, ctx: McpToolContext, level: "view" | "comment" | "edit") {
   const documentId = parseDocumentRef(ref);
-  const access = await resolveDocumentAccess(documentId, userId, null);
+  if (ctx.scopeDocumentId && documentId !== ctx.scopeDocumentId) {
+    throw new McpToolError(`This run may only access its own document (${ctx.scopeDocumentId}).`);
+  }
+  const access = await resolveDocumentAccess(documentId, ctx.user.id, null);
   if (!access) {
     throw new McpToolError("Document not found or you do not have access to it.");
   }
@@ -74,8 +92,8 @@ async function requireAccess(ref: string, userId: string, level: "view" | "comme
 // A quicktake's text lives in Document.quicktakeBody, not in the TipTap
 // content, so the markdown edit pipeline would happily rewrite an empty
 // document body and leave the visible take untouched. Refuse loudly instead.
-async function requireEditableDocument(ref: string, userId: string) {
-  const { documentId, access } = await requireAccess(ref, userId, "edit");
+async function requireEditableDocument(ref: string, ctx: McpToolContext) {
+  const { documentId, access } = await requireAccess(ref, ctx, "edit");
   if (access.document.kind === QUICKTAKE_KIND) {
     throw new McpToolError(
       "This document is a forum quicktake — its text is not editable through document markdown tools. Read it with read_document/list_quicktakes; edit or delete it in the forum UI."
@@ -252,7 +270,7 @@ const readDocument = defineTool({
     "Read a document as markdown. Works for forum quicktakes too (their body is returned as the markdown). Existing interactive widgets appear as ![widget: <label>](widget://<widget_id>) placeholders, repository images as workspace paths, and pasted screenshots as ![alt](pasted-image://N) placeholders (listed in pasted_images; fetch the pixels with read_image only when you need to see them) — echo all placeholders verbatim to keep them when editing. Also returns the document's widgets and open comment threads.",
   schema: z.object({ document: documentRef }).strict(),
   handler: async (args, ctx) => {
-    const { documentId } = await requireAccess(args.document, ctx.user.id, "view");
+    const { documentId } = await requireAccess(args.document, ctx, "view");
     const document = await db.document.findUniqueOrThrow({
       where: { id: documentId },
       select: {
@@ -340,7 +358,7 @@ const readImage = defineTool({
     })
     .strict(),
   handler: async (args, ctx) => {
-    const { documentId } = await requireAccess(args.document, ctx.user.id, "view");
+    const { documentId } = await requireAccess(args.document, ctx, "view");
     const document = await db.document.findUniqueOrThrow({
       where: { id: documentId },
       select: { content: true }
@@ -379,7 +397,7 @@ const replaceInDocument = defineTool({
     })
     .strict(),
   handler: async (args, ctx) => {
-    const { documentId } = await requireEditableDocument(args.document, ctx.user.id);
+    const { documentId } = await requireEditableDocument(args.document, ctx);
     const { version } = await applyMarkdownEdit({
       documentId,
       userId: ctx.user.id,
@@ -401,7 +419,7 @@ const appendToDocument = defineTool({
     })
     .strict(),
   handler: async (args, ctx) => {
-    const { documentId } = await requireEditableDocument(args.document, ctx.user.id);
+    const { documentId } = await requireEditableDocument(args.document, ctx);
     const { version } = await applyMarkdownEdit({
       documentId,
       userId: ctx.user.id,
@@ -423,7 +441,7 @@ const replaceDocument = defineTool({
     })
     .strict(),
   handler: async (args, ctx) => {
-    const { documentId } = await requireEditableDocument(args.document, ctx.user.id);
+    const { documentId } = await requireEditableDocument(args.document, ctx);
     const { version } = await applyMarkdownEdit({
       documentId,
       userId: ctx.user.id,
@@ -488,7 +506,7 @@ const uploadFiles = defineTool({
     })
     .strict(),
   handler: async (args, ctx) => {
-    const { documentId } = await requireAccess(args.document, ctx.user.id, "edit");
+    const { documentId } = await requireAccess(args.document, ctx, "edit");
     const files: UploadedFile[] = args.files.map((file) => ({
       path: file.path,
       content: file.content,
@@ -539,7 +557,7 @@ const createWidget = defineTool({
     })
     .strict(),
   handler: async (args, ctx) => {
-    const { documentId } = await requireAccess(args.document, ctx.user.id, "edit");
+    const { documentId } = await requireAccess(args.document, ctx, "edit");
 
     let workspace: string;
     if (args.files && args.files.length > 0) {
@@ -617,7 +635,7 @@ const listComments = defineTool({
     })
     .strict(),
   handler: async (args, ctx) => {
-    const { documentId } = await requireAccess(args.document, ctx.user.id, "view");
+    const { documentId } = await requireAccess(args.document, ctx, "view");
     const status = args.status ?? "ALL";
     const threads = await db.commentThread.findMany({
       where: { documentId, ...(status === "ALL" ? {} : { status }) },
@@ -640,7 +658,7 @@ const addComment = defineTool({
     })
     .strict(),
   handler: async (args, ctx) => {
-    const { documentId } = await requireAccess(args.document, ctx.user.id, "comment");
+    const { documentId } = await requireAccess(args.document, ctx, "comment");
     const document = await db.document.findUniqueOrThrow({
       where: { id: documentId },
       select: { content: true }
@@ -694,7 +712,7 @@ const replyToComment = defineTool({
       select: { id: true, documentId: true }
     });
     if (!thread) throw new McpToolError("Comment thread not found.");
-    await requireAccess(thread.documentId, ctx.user.id, "comment");
+    await requireAccess(thread.documentId, ctx, "comment");
 
     const comment = await db.comment.create({
       data: { threadId: thread.id, authorId: ctx.user.id, body: args.body },
@@ -727,6 +745,64 @@ const replyToComment = defineTool({
   }
 });
 
+// ---------------------------------------------------------------------------
+// Standing jobs on a document (lib/document-schedules.ts)
+
+const scheduleTask = defineTool({
+  name: "schedule_task",
+  description:
+    "Install a standing job on a document: at each firing an agent runs headlessly on that document as you, with the given instruction, and can edit it directly (e.g. 'refresh this dashboard'). Give either cron (recurring, 5-field, at least 5 minutes apart, interpreted in timezone) or at (one-shot ISO-8601 time). Requires edit access. Write the instruction so a fresh agent with no memory of this conversation can do the job from it and the document alone.",
+  schema: z
+    .object({
+      document: documentRef,
+      instruction: z.string().min(1).max(6000).describe("What the agent should do at each firing."),
+      cron: z.string().min(1).max(100).optional().describe("Recurring schedule, e.g. '30 7 * * *'."),
+      at: z.string().min(1).max(100).optional().describe("One-shot time, ISO-8601 with offset."),
+      timezone: z.string().min(1).max(64).optional().describe("IANA timezone for cron, e.g. Europe/Berlin. Default UTC.")
+    })
+    .strict(),
+  handler: async (args, ctx) => {
+    const { documentId } = await requireAccess(args.document, ctx, "edit");
+    try {
+      const task = await createDocumentSchedule({
+        documentId,
+        createdById: ctx.user.id,
+        instruction: args.instruction,
+        cron: args.cron ?? null,
+        at: args.at ?? null,
+        timezone: args.timezone ?? null
+      });
+      return { scheduled: task };
+    } catch (error) {
+      if (error instanceof DocumentScheduleError) throw new McpToolError(error.message);
+      throw error;
+    }
+  }
+});
+
+const listScheduledTasks = defineTool({
+  name: "list_scheduled_tasks",
+  description:
+    "List the active standing jobs installed on a document with schedule_task (id, instruction, cron, next and last firing, last run id).",
+  schema: z.object({ document: documentRef }).strict(),
+  handler: async (args, ctx) => {
+    const { documentId } = await requireAccess(args.document, ctx, "view");
+    return { tasks: await listDocumentSchedules(documentId) };
+  }
+});
+
+const cancelScheduledTask = defineTool({
+  name: "cancel_scheduled_task",
+  description: "Cancel a standing job on a document by id (from list_scheduled_tasks). Requires edit access.",
+  schema: z.object({ document: documentRef, task_id: z.string().min(1).max(64) }).strict(),
+  handler: async (args, ctx) => {
+    const { documentId } = await requireAccess(args.document, ctx, "edit");
+    const cancelled = await cancelDocumentSchedule(documentId, args.task_id);
+    if (!cancelled) throw new McpToolError("No active scheduled task with that id on this document.");
+    return { cancelled: args.task_id };
+  }
+});
+
 export const MCP_TOOLS: McpTool[] = [
   listDocuments,
   listQuicktakes,
@@ -740,8 +816,19 @@ export const MCP_TOOLS: McpTool[] = [
   createWidget,
   listComments,
   addComment,
-  replyToComment
+  replyToComment,
+  scheduleTask,
+  listScheduledTasks,
+  cancelScheduledTask
 ];
+
+// Tools that roam across the user's documents; a document-scoped caller
+// (McpToolContext.scopeDocumentId) neither sees nor may call them.
+const SCOPE_REFUSED_TOOLS = new Set(["list_documents", "list_quicktakes", "create_document"]);
+
+export function mcpToolsFor(ctx: Pick<McpToolContext, "scopeDocumentId">): McpTool[] {
+  return ctx.scopeDocumentId ? MCP_TOOLS.filter((tool) => !SCOPE_REFUSED_TOOLS.has(tool.name)) : MCP_TOOLS;
+}
 
 export function getMcpTool(name: string): McpTool | undefined {
   return MCP_TOOLS.find((tool) => tool.name === name);
@@ -751,6 +838,9 @@ export async function callMcpTool(name: string, args: unknown, ctx: McpToolConte
   const tool = getMcpTool(name);
   if (!tool) {
     throw new McpToolError(`Unknown tool: ${name}`);
+  }
+  if (ctx.scopeDocumentId && SCOPE_REFUSED_TOOLS.has(name)) {
+    throw new McpToolError(`${name} is not available to a run confined to document ${ctx.scopeDocumentId}.`);
   }
   const parsed = tool.schema.safeParse(args ?? {});
   if (!parsed.success) {

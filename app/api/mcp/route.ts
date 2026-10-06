@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { resolveApiTokenUser } from "@/lib/api-tokens";
 import { db } from "@/lib/db";
+import { verifyDocumentRunToken } from "@/lib/document-run-token";
 import { handleMcpBody } from "@/lib/mcp/server";
 import { getPublicOrigin } from "@/lib/request-origin";
 import { verifySlackToolsToken } from "@/lib/slack/link-token";
@@ -24,6 +25,21 @@ async function resolveSlackRunUser(authorizationHeader: string | null) {
   return link?.user ?? null;
 }
 
+// Headless document runs (API-channel runs, scheduled document tasks) carry a
+// document-run token (lib/document-run-token.ts): it acts as the run's user but
+// is confined to that run's document via McpToolContext.scopeDocumentId.
+async function resolveDocumentRunUser(authorizationHeader: string | null) {
+  const match = authorizationHeader?.match(/^Bearer\s+(\S+)$/i);
+  if (!match || match[1].startsWith("gdai_")) return null;
+  const claims = await verifyDocumentRunToken(match[1]);
+  if (!claims) return null;
+  const user = await db.user.findUnique({
+    where: { id: claims.userId },
+    select: { id: true, email: true, name: true }
+  });
+  return user ? { user, scopeDocumentId: claims.documentId } : null;
+}
+
 export const runtime = "nodejs";
 // Long agent-driven tool calls (widget builds, git pushes) can take a while.
 export const maxDuration = 90;
@@ -44,10 +60,15 @@ function unauthorized() {
 
 export async function POST(request: Request) {
   const authorization = request.headers.get("authorization");
-  const user =
-    (await resolveApiTokenUser(authorization)) ?? (await resolveSlackRunUser(authorization));
+  let user = (await resolveApiTokenUser(authorization)) ?? (await resolveSlackRunUser(authorization));
+  let scopeDocumentId: string | undefined;
   if (!user) {
-    return unauthorized();
+    const documentRun = await resolveDocumentRunUser(authorization);
+    if (!documentRun) {
+      return unauthorized();
+    }
+    user = documentRun.user;
+    scopeDocumentId = documentRun.scopeDocumentId;
   }
 
   const body = await request.json().catch(() => null);
@@ -59,7 +80,7 @@ export async function POST(request: Request) {
   }
 
   const origin = getPublicOrigin(request.headers);
-  const { status, payload } = await handleMcpBody(body, { user, origin });
+  const { status, payload } = await handleMcpBody(body, { user, origin, scopeDocumentId });
   if (payload === null) {
     return new Response(null, { status });
   }

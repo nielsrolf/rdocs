@@ -49,7 +49,10 @@ const CONVERSATION_TRIGGER_TYPES = new Set([
   "CONVERSATION",
   "CONVERSATION_FOLLOWUP",
   "SLACK_MENTION",
-  "SLACK_FOLLOWUP"
+  "SLACK_FOLLOWUP",
+  // Scheduled document tasks (lib/document-schedules.ts) are plain headless
+  // conversation runs; their edits went through the MCP bridge already.
+  "SCHEDULED"
 ]);
 
 const SLACK_TRIGGER_TYPES = new Set(["SLACK_MENTION", "SLACK_FOLLOWUP"]);
