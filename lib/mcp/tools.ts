@@ -783,7 +783,7 @@ const scheduleTask = defineTool({
 const listScheduledTasks = defineTool({
   name: "list_scheduled_tasks",
   description:
-    "List the active standing jobs installed on a document with schedule_task (id, instruction, cron, next and last firing, last run id).",
+    "List the active standing jobs of a document: ones installed with schedule_task (context \"document\") and ones an integration installed on its API channel (context \"api_channel\") — id, instruction, cron, next and last firing, last run id.",
   schema: z.object({ document: documentRef }).strict(),
   handler: async (args, ctx) => {
     const { documentId } = await requireAccess(args.document, ctx, "view");

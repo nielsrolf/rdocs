@@ -9,6 +9,7 @@ import {
   verifyDocumentRunToken,
   withDocumentBridge
 } from "../lib/document-run-token";
+import { createChannelSchedule, listChannelSchedules } from "../lib/agent-channel-schedules";
 import { createDocumentSchedule, DocumentScheduleError, fireDocumentTask, listDocumentSchedules } from "../lib/document-schedules";
 import { handleMcpMessage, listMcpToolDefinitions } from "../lib/mcp/server";
 import type { McpToolContext } from "../lib/mcp/tools";
@@ -199,4 +200,24 @@ test("a document task whose scheduler lost edit access is disabled, not fired", 
   assert.equal(fired, null);
   assert.deepEqual(await listDocumentSchedules(document.id), []);
   void user;
+});
+
+test("list_scheduled_tasks also shows the document's API-channel jobs, and can cancel them", async (t) => {
+  const { user, document, cleanup } = await fixture();
+  t.after(cleanup);
+  const channelJob = await createChannelSchedule({
+    documentId: document.id,
+    createdById: user.id,
+    instruction: "Update this dashboard.",
+    cron: "0 7 * * *"
+  });
+  const scoped = ctx(user, document.id);
+  const listed = JSON.parse((await call(scoped, "list_scheduled_tasks", { document: document.id })).content[0].text);
+  assert.deepEqual(
+    listed.tasks.map((task: { id: string; context: string }) => [task.id, task.context]),
+    [[channelJob.id, "api_channel"]]
+  );
+  const cancelled = await call(scoped, "cancel_scheduled_task", { document: document.id, task_id: channelJob.id });
+  assert.equal(cancelled.isError, false, cancelled.content[0].text);
+  assert.deepEqual(await listChannelSchedules(document.id), []);
 });

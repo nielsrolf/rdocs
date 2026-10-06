@@ -19,11 +19,17 @@ import { computeNextRunAt, MAX_ACTIVE_TASKS_PER_DOCUMENT } from "@/lib/scheduler
 export const DOCUMENT_CONTEXT = "document";
 export const SCHEDULED_TRIGGER_TYPE = "SCHEDULED";
 export const MAX_DOCUMENT_INSTRUCTION_LENGTH = 6000;
+// Standing jobs that belong to the document itself rather than to a Slack thread:
+// the document's own tasks and the jobs an integration installed on its API channel
+// (e.g. fai's dashboard update job). Both are listed and cancellable over MCP, so an
+// agent can see the job it was set up with instead of scheduling a duplicate.
+const DOCUMENT_LEVEL_CONTEXTS = [DOCUMENT_CONTEXT, "api_channel"];
 
 export class DocumentScheduleError extends Error {}
 
 export type DocumentScheduleView = {
   id: string;
+  context: string;
   instruction: string;
   cron: string | null;
   timezone: string | null;
@@ -37,6 +43,7 @@ export type DocumentScheduleView = {
 function view(task: ScheduledTask): DocumentScheduleView {
   return {
     id: task.id,
+    context: task.contextType,
     instruction: task.instruction,
     cron: task.cron,
     timezone: task.timezone,
@@ -50,7 +57,7 @@ function view(task: ScheduledTask): DocumentScheduleView {
 
 export async function listDocumentSchedules(documentId: string): Promise<DocumentScheduleView[]> {
   const tasks = await db.scheduledTask.findMany({
-    where: { documentId, contextType: DOCUMENT_CONTEXT, disabledAt: null },
+    where: { documentId, contextType: { in: DOCUMENT_LEVEL_CONTEXTS }, disabledAt: null },
     orderBy: { createdAt: "asc" }
   });
   return tasks.map(view);
@@ -93,10 +100,10 @@ export async function createDocumentSchedule(args: {
   return view(task);
 }
 
-/** Disable one document task. False when there is no such active task. */
+/** Disable one document-level task. False when there is no such active task. */
 export async function cancelDocumentSchedule(documentId: string, taskId: string): Promise<boolean> {
   const updated = await db.scheduledTask.updateMany({
-    where: { id: taskId, documentId, contextType: DOCUMENT_CONTEXT, disabledAt: null },
+    where: { id: taskId, documentId, contextType: { in: DOCUMENT_LEVEL_CONTEXTS }, disabledAt: null },
     data: { disabledAt: new Date() }
   });
   return updated.count === 1;
