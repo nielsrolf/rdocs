@@ -204,7 +204,8 @@ test("Anthropic selection with only a LiteLLM key routes the same Claude model t
 test("anthropicLiteLlmFallbackModel maps only Anthropic selections", () => {
   assert.equal(anthropicLiteLlmFallbackModel("claude-sonnet-5"), "litellm/anthropic/claude-sonnet-5");
   assert.equal(anthropicLiteLlmFallbackModel("claude-fable-5-1"), "litellm/anthropic/claude-fable-5-1");
-  assert.equal(anthropicLiteLlmFallbackModel(null), "litellm/anthropic/claude-sonnet-5");
+  assert.equal(anthropicLiteLlmFallbackModel(null), "litellm/anthropic/claude-sonnet-latest");
+  assert.equal(anthropicLiteLlmFallbackModel("claude-opus-latest"), "litellm/anthropic/claude-opus-latest");
   assert.equal(anthropicLiteLlmFallbackModel("opus"), "litellm/anthropic/claude-opus-5-5");
   assert.equal(anthropicLiteLlmFallbackModel("litellm/openai/gpt-6-astra"), null);
   assert.equal(anthropicLiteLlmFallbackModel("openrouter/openai/gpt-6-astra"), null);

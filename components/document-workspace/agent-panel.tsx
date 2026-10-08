@@ -7,6 +7,9 @@ import { useEffect, useState } from "react";
 import {
   AGENT_EFFORTS,
   ANTHROPIC_AGENT_MODELS,
+  ANTHROPIC_LATEST_AGENT_MODELS,
+  ANTHROPIC_PINNED_AGENT_MODELS,
+  agentModelOptionLabel,
   CODEX_CHATGPT_AGENT_MODELS,
   CODEX_CHATGPT_MODEL_PREFIX,
   CODEX_LITELLM_AGENT_MODELS,
@@ -28,6 +31,7 @@ import {
   normalizeAgentModel
 } from "@/lib/agent-config";
 import { cn, truncate } from "@/lib/utils";
+import { useLatestClaudeModelLabels } from "@/components/use-latest-claude-models";
 
 import { AgentTimeline, agentDisplayName } from "./agent-timeline";
 import { AgentTodoOutline } from "./agent-todo-outline";
@@ -367,6 +371,7 @@ export function AgentPanel({
   const [customDraft, setCustomDraft] = useState("");
   const [customError, setCustomError] = useState<string | null>(null);
 
+  const latestClaudeLabels = useLatestClaudeModelLabels();
   // Legacy stored aliases ("sonnet"/"opus") display as their canonical model;
   // the canonical value is what gets PATCHed on the next change.
   const normalizedModel = normalizeAgentModel(agentModel);
@@ -386,6 +391,12 @@ export function AgentPanel({
   // Without a credential, an "Anthropic" selection actually runs the free
   // local model — say so in the option labels and below the selector.
   const anthropicSuffix = anthropicFreeFallback ? " — no credential, runs free local model" : "";
+  // A pinned Claude id that is no longer offered (e.g. an older version) stays
+  // visible and selected instead of the select silently showing another model.
+  const storedUnlistedAnthropicModel =
+    modelIsAnthropic && !isCodex && !ANTHROPIC_AGENT_MODELS.some((m) => m.value === normalizedModel)
+      ? normalizedModel
+      : null;
   const fallbackModelName = localModel ? localModel.slice(LOCAL_MODEL_PREFIX.length) : null;
   const storedCustomOpenRouterModel =
     modelIsOpenRouter && !OPENROUTER_AGENT_MODELS.some((m) => m.value === normalizedModel)
@@ -520,13 +531,27 @@ export function AgentPanel({
               }
             >
               {!isCodex ? <>
-              <optgroup label="Anthropic">
-                {ANTHROPIC_AGENT_MODELS.map((model) => (
+              <optgroup label="Anthropic — always the newest">
+                {ANTHROPIC_LATEST_AGENT_MODELS.map((model) => (
+                  <option key={model.value} value={model.value}>
+                    {agentModelOptionLabel(model, latestClaudeLabels)}
+                    {anthropicSuffix}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="Anthropic — pinned version">
+                {ANTHROPIC_PINNED_AGENT_MODELS.map((model) => (
                   <option key={model.value} value={model.value}>
                     {model.label}
                     {anthropicSuffix}
                   </option>
                 ))}
+                {storedUnlistedAnthropicModel ? (
+                  <option value={storedUnlistedAnthropicModel}>
+                    {storedUnlistedAnthropicModel}
+                    {anthropicSuffix}
+                  </option>
+                ) : null}
               </optgroup>
               {localModelOptions.length > 0 ? (
                 <optgroup label="Free (this server)">
@@ -556,7 +581,7 @@ export function AgentPanel({
                 <optgroup label="LiteLLM">
                   {LITELLM_AGENT_MODELS.map((model) => (
                     <option key={model.value} value={model.value}>
-                      {model.label}
+                      {agentModelOptionLabel(model, latestClaudeLabels)}
                     </option>
                   ))}
                   {storedCustomLiteLlmModel ? (
@@ -670,7 +695,10 @@ export function AgentPanel({
             <span className="agent-config-hint agent-config-error">
               No AI credential connected — agents run on the free local model
               {fallbackModelName ? ` ${fallbackModelName}` : ""} (very slow), not{" "}
-              {ANTHROPIC_AGENT_MODELS.find((m) => m.value === normalizedModel)?.label ?? "Claude"}.
+              {(() => {
+                const option = ANTHROPIC_AGENT_MODELS.find((m) => m.value === normalizedModel);
+                return option ? agentModelOptionLabel(option, latestClaudeLabels) : "Claude";
+              })()}.
               Connect a credential under Settings (topbar) to use Claude.
             </span>
           ) : isCodex && codexModelIsChatgpt && !hasChatgptAuth ? (

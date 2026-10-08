@@ -47,11 +47,90 @@ export const CODEX_OPENAI_MODEL_PREFIX = "codex/openai/";
 export const CODEX_LITELLM_MODEL_PREFIX = "codex/litellm/";
 export const CODEX_CHATGPT_MODEL_PREFIX = "codex/chatgpt/";
 
-export const ANTHROPIC_AGENT_MODELS: readonly AgentModelOption[] = [
-  { value: "claude-sonnet-5", label: "Sonnet 5", hint: "Fast, capable default", provider: "anthropic" },
-  { value: "claude-fable-5-1", label: "Fable 5.1", hint: "Most capable, premium", provider: "anthropic" },
-  { value: "claude-opus-5-5", label: "Opus 5.5", hint: "Deep agentic work", provider: "anthropic" }
+// "Latest" aliases: a stored value that follows a model family instead of
+// pinning a version. The server rewrites the alias to the newest concrete id
+// of that family right before a run starts (lib/anthropic-model-catalog.ts,
+// discovered from the Anthropic Models API with the run's own credential and
+// cached), so a document set to "Opus (latest)" moves to a new Opus without
+// anyone touching it. `fallback` is the built-in answer used when discovery has
+// never succeeded (no Anthropic credential anywhere, API down) and the id
+// agent-core runs if an alias ever reaches it unresolved — keep it current.
+export type AnthropicLatestFamily = "opus" | "sonnet" | "fable";
+
+export const ANTHROPIC_LATEST_MODEL_ALIASES: Readonly<
+  Record<string, { family: AnthropicLatestFamily; fallback: string; fallbackLabel: string }>
+> = {
+  "claude-opus-latest": { family: "opus", fallback: "claude-opus-5-5", fallbackLabel: "Opus 5.5" },
+  "claude-sonnet-latest": { family: "sonnet", fallback: "claude-sonnet-5-5", fallbackLabel: "Sonnet 5.5" },
+  "claude-fable-latest": { family: "fable", fallback: "claude-fable-5-1", fallbackLabel: "Fable 5.1" }
+};
+
+export const ANTHROPIC_LATEST_AGENT_MODELS: readonly AgentModelOption[] = [
+  { value: "claude-sonnet-latest", label: "Sonnet latest", hint: "Fast, capable default", provider: "anthropic" },
+  { value: "claude-opus-latest", label: "Opus latest", hint: "Deep agentic work", provider: "anthropic" },
+  { value: "claude-fable-latest", label: "Fable latest", hint: "Most capable, premium", provider: "anthropic" }
 ] as const;
+
+// Pinned versions: for documents that must not move when a new model ships.
+// Older pinned ids stay storable through LEGACY_MODEL_ALIASES / the claude-*
+// id pattern even when they drop off this list.
+export const ANTHROPIC_PINNED_AGENT_MODELS: readonly AgentModelOption[] = [
+  { value: "claude-sonnet-5-5", label: "Sonnet 5.5", hint: "Pinned version", provider: "anthropic" },
+  { value: "claude-opus-5-5", label: "Opus 5.5", hint: "Pinned version", provider: "anthropic" },
+  { value: "claude-fable-5-1", label: "Fable 5.1", hint: "Pinned version", provider: "anthropic" },
+  { value: "claude-sonnet-5", label: "Sonnet 5", hint: "Pinned version (previous Sonnet)", provider: "anthropic" }
+] as const;
+
+export const ANTHROPIC_AGENT_MODELS: readonly AgentModelOption[] = [
+  ...ANTHROPIC_LATEST_AGENT_MODELS,
+  ...ANTHROPIC_PINNED_AGENT_MODELS
+];
+
+/** Whether a value is a "latest" family alias (e.g. "claude-opus-latest"). */
+export function isAnthropicLatestAlias(value: unknown): value is string {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(ANTHROPIC_LATEST_MODEL_ALIASES, value);
+}
+
+/**
+ * Picker label for an option, spelling out what a "latest" alias currently
+ * means: "Opus latest (Opus 5.5)", "Opus latest (Opus 5.5, via LiteLLM)".
+ * `latestLabels` maps alias → version label (from GET /api/agent-models/latest);
+ * missing entries use the built-in fallback. Non-alias options keep their label.
+ */
+export function agentModelOptionLabel(
+  option: AgentModelOption,
+  latestLabels: Readonly<Record<string, string>> = {}
+): string {
+  const litellmPrefix = `${LITELLM_MODEL_PREFIX}anthropic/`;
+  const bare = option.value.startsWith(litellmPrefix) ? option.value.slice(litellmPrefix.length) : option.value;
+  if (!isAnthropicLatestAlias(bare)) return option.label;
+  const base = ANTHROPIC_LATEST_AGENT_MODELS.find((m) => m.value === bare)?.label ?? option.label;
+  const version = latestLabels[bare] ?? ANTHROPIC_LATEST_MODEL_ALIASES[bare].fallbackLabel;
+  return `${base} (${version}${option.provider === "litellm" ? ", via LiteLLM" : ""})`;
+}
+
+/** Concrete model ids per family, as discovered from the Models API. */
+export type LatestAnthropicModels = Partial<
+  Record<AnthropicLatestFamily, { id: string; label: string }>
+>;
+
+/**
+ * Replace a "latest" alias with a concrete model id — the discovered one when
+ * `latest` has the family, else the built-in fallback. Handles the bare alias
+ * and the LiteLLM form "litellm/anthropic/<alias>"; every other value is
+ * returned unchanged.
+ */
+export function resolveLatestAnthropicAlias(
+  value: string,
+  latest: LatestAnthropicModels = {}
+): string {
+  const litellmPrefix = `${LITELLM_MODEL_PREFIX}anthropic/`;
+  const bare = value.startsWith(litellmPrefix) ? value.slice(litellmPrefix.length) : value;
+  if (!isAnthropicLatestAlias(bare)) return value;
+  const alias = ANTHROPIC_LATEST_MODEL_ALIASES[bare];
+  const concrete = latest[alias.family]?.id ?? alias.fallback;
+  return value === bare ? concrete : `${litellmPrefix}${concrete}`;
+}
 
 // Curated OpenRouter picks shown when the document has an OPENROUTER_API_KEY.
 // Any other slug is reachable via the custom-slug input; this list is just the
@@ -89,13 +168,13 @@ const LITELLM_MIRRORED_OPENROUTER_MODELS: readonly AgentModelOption[] = OPENROUT
     provider: "litellm"
   })
 );
-// The Claude models by their canonical id, served by the LiteLLM proxy as
-// "anthropic/<id>". Listed FIRST in the LiteLLM picker so a user whose only key
+// The Claude "latest" aliases, served by the LiteLLM proxy as
+// "anthropic/<concrete id>" once the alias is resolved at run start. Listed FIRST in the LiteLLM picker so a user whose only key
 // is LiteLLM still sees Claude (2026-09-21: a LiteLLM-only account had no way
 // to pick Sonnet 5 short of typing a custom name), and the target of the
 // Anthropic→LiteLLM re-route (anthropicLiteLlmFallbackModel). Codex never gets
 // these: its Responses-protocol route is only exercised against OpenAI models.
-export const LITELLM_CLAUDE_AGENT_MODELS: readonly AgentModelOption[] = ANTHROPIC_AGENT_MODELS.map(
+export const LITELLM_CLAUDE_AGENT_MODELS: readonly AgentModelOption[] = ANTHROPIC_LATEST_AGENT_MODELS.map(
   (model) => ({
     value: `${LITELLM_MODEL_PREFIX}anthropic/${model.value}`,
     label: `${model.label} (via LiteLLM)`,
@@ -159,7 +238,7 @@ export const AGENT_EFFORTS = [
 
 export type AgentEffort = (typeof AGENT_EFFORTS)[number]["value"];
 
-export const DEFAULT_AGENT_MODEL = "claude-sonnet-5";
+export const DEFAULT_AGENT_MODEL = "claude-sonnet-latest";
 export const DEFAULT_CODEX_AGENT_MODEL = "codex/openai/gpt-5.6-terra";
 export const DEFAULT_CODEX_CHATGPT_AGENT_MODEL = "codex/chatgpt/gpt-5.6-terra";
 export const DEFAULT_CODEX_LITELLM_AGENT_MODEL = "codex/litellm/openai/gpt-5.6-terra";
@@ -213,7 +292,8 @@ const MAX_MODEL_VALUE_LENGTH = 160;
 
 /** Map a legacy stored alias ("sonnet"/"opus") to its canonical id. */
 export function normalizeAgentModel(value: string): string {
-  return LEGACY_MODEL_ALIASES[value] ?? value;
+  // Own keys only: "constructor" etc. must not resolve to Object.prototype members.
+  return Object.prototype.hasOwnProperty.call(LEGACY_MODEL_ALIASES, value) ? LEGACY_MODEL_ALIASES[value] : value;
 }
 
 export function isOpenRouterAgentModel(value: unknown): boolean {
@@ -276,8 +356,18 @@ export function agentModelProvider(value: unknown): AgentModelProvider {
   return "anthropic";
 }
 
+// Any canonical-looking Claude id ("claude-<family>-<version>…") is accepted,
+// not just the listed ones: "latest" aliases resolve to ids discovered at run
+// time (a model released after this file was written must still run), and old
+// pinned ids keep working after they drop off the picker.
+const ANTHROPIC_MODEL_ID_RE = /^claude-[a-z]+-\d[a-z0-9-]*$/;
+
 function isKnownAnthropicModel(value: string): boolean {
-  return ANTHROPIC_AGENT_MODELS.some((m) => m.value === value);
+  return (
+    isAnthropicLatestAlias(value) ||
+    ANTHROPIC_AGENT_MODELS.some((m) => m.value === value) ||
+    ANTHROPIC_MODEL_ID_RE.test(value)
+  );
 }
 
 /**
@@ -442,7 +532,9 @@ export function resolveAgentSdkConfig(
     : fallback
       ? normalizeAgentModel(fallback)
       : DEFAULT_AGENT_MODEL;
-  const normalized = normalizeAgentModel(stored);
+  // The server resolves "latest" aliases to the live newest model before
+  // dispatch; one that still arrives here runs the built-in fallback id.
+  const normalized = resolveLatestAnthropicAlias(normalizeAgentModel(stored));
 
   if (normalized.startsWith(OPENROUTER_MODEL_PREFIX)) {
     const slug = normalized.slice(OPENROUTER_MODEL_PREFIX.length);
@@ -503,7 +595,9 @@ export function resolveAgentSdkConfig(
 // Opus. Other models (including OpenRouter ones) don't sit behind these
 // classifiers — no fallback.
 export const REFUSAL_FALLBACK_MODEL = "claude-opus-5-5";
-const REFUSAL_PRONE_MODELS = new Set(["claude-fable-5-1"]);
+// Every Fable version runs behind the classifiers (a "latest" alias can resolve
+// to a Fable released after this was written), so match the family.
+const REFUSAL_PRONE_MODEL_RE = /^claude-fable-/;
 
 /**
  * The model a safety-classifier-refused run should be retried on, or null when
@@ -516,7 +610,7 @@ export function resolveRefusalFallbackModel(
 ): string | null {
   const resolved = resolveAgentSdkConfig(config, fallbackModel);
   if (resolved.provider !== "anthropic") return null;
-  return REFUSAL_PRONE_MODELS.has(resolved.model) ? REFUSAL_FALLBACK_MODEL : null;
+  return REFUSAL_PRONE_MODEL_RE.test(resolved.model) ? REFUSAL_FALLBACK_MODEL : null;
 }
 
 // Agent turn budget. The default is effectively unbounded: wall-clock timeouts are

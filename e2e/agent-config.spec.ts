@@ -24,7 +24,7 @@ test("agent model + thinking effort can be configured and persist", async ({ bas
 
     // Defaults reflect the unconfigured document.
     await expect(harnessSelect).toHaveValue("claude-code");
-    await expect(modelSelect).toHaveValue("claude-sonnet-5");
+    await expect(modelSelect).toHaveValue("claude-sonnet-latest");
     await expect(effortSelect).toHaveValue("off");
 
     // Change both and wait for the PATCH to land (save indicator returns to Saved).

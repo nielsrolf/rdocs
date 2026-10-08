@@ -3,8 +3,13 @@ import {
   agentModelProvider,
   anthropicLiteLlmFallbackModel,
   codexLiteLlmFallbackModel,
-  DEFAULT_AGENT_MODEL
+  DEFAULT_AGENT_MODEL,
+  resolveLatestAnthropicAlias
 } from "@/agent-core";
+import {
+  anthropicCatalogCredentialFromEnv,
+  refreshLatestAnthropicModels
+} from "@/lib/anthropic-model-catalog";
 import { maskSecret, type DocumentEnv } from "@/lib/agent-env";
 import {
   detectCredential,
@@ -841,16 +846,39 @@ export async function loadAgentEnvWithFreeFallback(
       };
     }
   })();
+  const concrete = await resolveLatestModelForRun(resolved);
   // Credential broker (opt-in via AGENT_CREDENTIAL_BROKER): swap real API keys
   // for per-run virtual keys pointing at /api/broker. No-op when disabled, when
   // no run id is available to bind the keys to, or when nothing is brokerable.
   if (opts.aiRunId && credentialBrokerEnabled()) {
-    const { agentEnv } = await brokerizeAgentEnvForRun(resolved.agentEnv, {
+    const { agentEnv } = await brokerizeAgentEnvForRun(concrete.agentEnv, {
       aiRunId: opts.aiRunId,
-      agentModel: resolved.agentConfig.model,
+      agentModel: concrete.agentConfig.model,
       runnerMode: opts.runnerMode
     });
-    return { ...resolved, agentEnv };
+    return { ...concrete, agentEnv };
   }
-  return resolved;
+  return concrete;
+}
+
+/**
+ * Pin a "latest" alias ("claude-opus-latest", "litellm/anthropic/claude-…-latest",
+ * or no model at all, which means the default alias) to the concrete newest
+ * model for this run, refreshing the catalog with the run's OWN Anthropic
+ * credential (never a host one) when it is stale. Done here, with the real
+ * (pre-broker) credential, so the AiRun label, the merge resolver and the
+ * runner all see the same concrete id; agent-core only falls back to its
+ * built-in id if an alias somehow arrives unresolved.
+ */
+async function resolveLatestModelForRun(
+  resolved: AgentRunEnvResolution
+): Promise<AgentRunEnvResolution> {
+  const stored =
+    resolved.agentConfig.model ?? (process.env.CLAUDE_AGENT_MODEL?.trim() ? null : DEFAULT_AGENT_MODEL);
+  if (!stored || resolveLatestAnthropicAlias(stored) === stored) return resolved;
+  const latest = await refreshLatestAnthropicModels(anthropicCatalogCredentialFromEnv(resolved.agentEnv));
+  return {
+    ...resolved,
+    agentConfig: { ...resolved.agentConfig, model: resolveLatestAnthropicAlias(stored, latest) }
+  };
 }

@@ -161,10 +161,19 @@ export const NATIVE_LONG_CONTEXT_MODELS: ReadonlySet<string> = new Set([
   "claude-mythos-5-1"
 ]);
 
+// Forward rule for ids newer than the list above ("latest" aliases resolve to
+// whatever the Models API reports, possibly a model released after this file):
+// every Opus/Sonnet/Fable/Mythos from generation 5 on ships a native 1M window.
+// Haiku and the 4.x generation are deliberately excluded.
+const NATIVE_LONG_CONTEXT_FAMILY_RE = /^claude-(opus|sonnet|fable|mythos)-(\d+)(?:-|$)/;
+
 /** Strip an optional `[1m]` suffix before matching a model id. */
 export function hasNativeLongContext(model: string | null | undefined): boolean {
   if (!model) return false;
-  return NATIVE_LONG_CONTEXT_MODELS.has(model.replace(/\[1m\]$/i, "").trim());
+  const id = model.replace(/\[1m\]$/i, "").trim();
+  if (NATIVE_LONG_CONTEXT_MODELS.has(id)) return true;
+  const match = NATIVE_LONG_CONTEXT_FAMILY_RE.exec(id);
+  return Boolean(match && Number(match[2]) >= 5);
 }
 
 /**

@@ -86,12 +86,15 @@ test("parseMaxTurns honors a valid positive env override and ignores junk", () =
 });
 
 test("defaults to the built-in model with thinking disabled when unconfigured", () => {
+  // The default is the "Sonnet latest" alias; agent-core itself runs its
+  // built-in fallback id (the server pins the live newest before dispatch).
+  assert.equal(DEFAULT_AGENT_MODEL, "claude-sonnet-latest");
   const resolved = resolveAgentSdkConfig(null);
-  assert.equal(resolved.model, DEFAULT_AGENT_MODEL);
+  assert.equal(resolved.model, "claude-sonnet-5-5");
   assert.equal(resolved.provider, "anthropic");
   assert.deepEqual(resolved.thinking, { type: "disabled" });
   assert.equal(resolved.effort, undefined);
-  assert.equal(resolved.label, `claude-agent-sdk:${DEFAULT_AGENT_MODEL}`);
+  assert.equal(resolved.label, "claude-agent-sdk:claude-sonnet-5-5");
 });
 
 test("uses the env fallback model when the document has no explicit model", () => {
@@ -210,7 +213,11 @@ test("isStorableAgentModel accepts known models, legacy aliases, and well-formed
 test("isStorableAgentModel rejects malformed or dangerous values", () => {
   for (const value of [
     "gpt-5",
-    "claude-sonnet-4-6",
+    "claude-sonnet",
+    "claude-",
+    "claude-../../etc/passwd",
+    "claude-sonnet-latest-x",
+    "constructor",
     "openrouter/",
     "openrouter/noslash",
     "openrouter//leading",

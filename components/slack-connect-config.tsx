@@ -5,6 +5,9 @@ import { useEffect, useState, type ReactNode } from "react";
 import {
   AGENT_EFFORTS,
   ANTHROPIC_AGENT_MODELS,
+  ANTHROPIC_LATEST_AGENT_MODELS,
+  ANTHROPIC_PINNED_AGENT_MODELS,
+  agentModelOptionLabel,
   CODEX_CHATGPT_AGENT_MODELS,
   CODEX_LITELLM_AGENT_MODELS,
   CODEX_OPENAI_AGENT_MODELS,
@@ -24,6 +27,7 @@ import {
   type CredentialProvider
 } from "@/lib/credential-detect";
 import { emitTourEvent } from "@/components/onboarding-tour";
+import { useLatestClaudeModelLabels } from "@/components/use-latest-claude-models";
 import { UserMcpServersSection } from "@/components/user-mcp-servers-section";
 import { UserSkillsSection, type UserSkillEntry } from "@/components/user-skills-section";
 
@@ -187,7 +191,7 @@ const CREDENTIAL_HOW_TO: Record<CredentialProvider, ReactNode> = {
 };
 
 /** Human label for a stored model value ("Sonnet 5"), falling back to the raw value. */
-function agentModelLabel(value: string): string {
+function agentModelLabel(value: string, latestLabels: Record<string, string>): string {
   const option = [
     ...ANTHROPIC_AGENT_MODELS,
     ...OPENROUTER_AGENT_MODELS,
@@ -196,7 +200,7 @@ function agentModelLabel(value: string): string {
     ...CODEX_CHATGPT_AGENT_MODELS,
     ...CODEX_LITELLM_AGENT_MODELS
   ].find((candidate) => candidate.value === value);
-  return option?.label ?? value;
+  return option ? agentModelOptionLabel(option, latestLabels) : value;
 }
 
 // The full-page "Settings" screen, used in two places:
@@ -297,6 +301,7 @@ export function SlackConnectConfig({
   const hasCredential = (provider: CredentialProvider) =>
     credentials.some((credential) => credential.provider === provider);
 
+  const latestClaudeLabels = useLatestClaudeModelLabels();
   const normalizedModel = normalizeAgentModel(model);
   const harness = agentHarnessForModel(normalizedModel);
   const provider = agentModelProvider(normalizedModel);
@@ -314,7 +319,7 @@ export function SlackConnectConfig({
   // credential but a connected LiteLLM key runs the same model through LiteLLM.
   const liteLlmCarriesClaude = missingCredential && provider === "anthropic" && hasCredential("litellm");
   const liteLlmClaudeName = `anthropic/${normalizedModel}`;
-  const selectedModelLabel = agentModelLabel(normalizedModel);
+  const selectedModelLabel = agentModelLabel(normalizedModel, latestClaudeLabels);
 
   // One-time (per page load) explainer for the mismatch case: the user has a
   // credential, just not the one the selected default model needs. Brand-new
@@ -818,12 +823,23 @@ export function SlackConnectConfig({
               value={normalizedModel}
             >
               {harness === "claude-code" ? <>
-              <optgroup label="Anthropic">
-                {ANTHROPIC_AGENT_MODELS.map((option) => (
+              <optgroup label="Anthropic — always the newest">
+                {ANTHROPIC_LATEST_AGENT_MODELS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {agentModelOptionLabel(option, latestClaudeLabels)} — {option.hint}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="Anthropic — pinned version">
+                {ANTHROPIC_PINNED_AGENT_MODELS.map((option) => (
                   <option key={option.value} value={option.value}>
                     {option.label} — {option.hint}
                   </option>
                 ))}
+                {provider === "anthropic" &&
+                !ANTHROPIC_AGENT_MODELS.some((option) => option.value === normalizedModel) ? (
+                  <option value={normalizedModel}>{normalizedModel}</option>
+                ) : null}
               </optgroup>
               {showLocalOption ? (
                 <optgroup label="Free (this server)">
@@ -847,7 +863,7 @@ export function SlackConnectConfig({
                 <optgroup label="LiteLLM">
                   {LITELLM_AGENT_MODELS.map((option) => (
                     <option key={option.value} value={option.value}>
-                      {option.label}
+                      {agentModelOptionLabel(option, latestClaudeLabels)}
                     </option>
                   ))}
                   {provider === "litellm" &&
