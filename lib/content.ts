@@ -689,15 +689,18 @@ function serializeNodeToMarkdown(node: unknown, context: MarkdownContext): strin
   }
 
   if (nodeType === "embeddedWidget") {
-    const attrs = getNodeAttrs(node) as { widgetId?: unknown; label?: unknown } | null;
+    const attrs = getNodeAttrs(node) as { widgetId?: unknown; label?: unknown; collapsed?: unknown } | null;
     const label = typeof attrs?.label === "string" ? attrs.label : "Interactive widget";
     const widgetId = typeof attrs?.widgetId === "string" ? attrs.widgetId : "";
+    // An expanded (inline) widget carries the "expanded" title so it stays expanded
+    // when an agent echoes the placeholder (WIDGET_EXPANDED_TITLE in ai-edit-insert).
+    const expanded = attrs?.collapsed === false ? ' "expanded"' : "";
     // Scannable, round-trippable placeholder (mirrors the ![alt](path) image
     // scan): buildAiEditInsertContent resolves widget://<id> back to the existing
     // widget node, so an agent that echoes a selected widget preserves it instead
     // of pasting literal metadata/link text into the document. Widgets with no id
     // fall back to the widget://new scheme (a freshly-created array widget).
-    return `![widget: ${label}](widget://${widgetId || "new"})\n\n`;
+    return `![widget: ${label}](widget://${widgetId || "new"}${expanded})\n\n`;
   }
 
   if (nodeType === "attachmentChip") {

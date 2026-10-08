@@ -43,7 +43,8 @@ function atomPlaceholderText(node: ProseMirrorNode, counters: { pastedImages: nu
   switch (node.type.name) {
     case "embeddedWidget": {
       const label = str("label") || "Interactive widget";
-      return `![widget: ${label}](widget://${str("widgetId") || "new"})`;
+      const expanded = attrs.collapsed === false ? ' "expanded"' : "";
+      return `![widget: ${label}](widget://${str("widgetId") || "new"}${expanded})`;
     }
     case "repoImage": {
       const path = str("path") || str("src");

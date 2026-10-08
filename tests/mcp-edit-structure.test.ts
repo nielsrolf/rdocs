@@ -244,3 +244,60 @@ test("mcp edit: empty markdown on append still errors", async () => {
     McpEditError
   );
 });
+
+test("mcp edit: expanded widgets and <details> toggle blocks round-trip through markdown", async () => {
+  const user = await makeUser();
+  const doc = await makeDoc(user.id, { type: "doc", content: [paragraph("Old page.")] });
+  // Placeholders resolve against the document's EmbeddedWidget rows.
+  const { id: widgetId } = await db.embeddedWidget.create({
+    data: { documentId: doc.id, label: "Headline chart", buildCmd: "python3 widgets/h.py", embedSource: "widgets/h.html" }
+  });
+  const markdown = [
+    "# Dashboard",
+    "",
+    `![widget: Headline chart](widget://${widgetId} "expanded")`,
+    "",
+    "**Verdict:** on track.",
+    "",
+    "<details>",
+    "<summary>All releases &amp; details</summary>",
+    "",
+    "| Date | Model |",
+    "| --- | --- |",
+    "| 2026-10-01 | Example |",
+    "",
+    "</details>",
+    "",
+    "Footer line."
+  ].join("\n");
+  await applyMarkdownEdit({ documentId: doc.id, userId: user.id, mode: "replace_all", markdown });
+
+  const stored = await db.document.findUniqueOrThrow({ where: { id: doc.id }, select: { content: true } });
+  const nodes = (parseDocumentContent(stored.content) as { content: Array<{ type: string; attrs?: Record<string, unknown>; content?: Array<{ type: string }> }> }).content;
+  const widget = nodes.find((node) => node.type === "embeddedWidget");
+  assert.equal(widget?.attrs?.collapsed, false, "the \"expanded\" title shows the widget inline");
+  const toggle = nodes.find((node) => node.type === "toggleBlock");
+  assert.equal(toggle?.attrs?.summary, "All releases & details");
+  assert.ok(toggle?.content?.some((child) => child.type === "table"), "markdown inside <details> is parsed");
+  assert.ok(nodes.some((node) => node.type === "paragraph" && JSON.stringify(node).includes("Footer line")));
+  assert.ok(!JSON.stringify(nodes).includes("&lt;details"), "no literal <details> text");
+
+  // read_document echoes both, and echoing the page back changes nothing.
+  const read = await rawMarkdownOf(doc.id);
+  assert.ok(read.includes(`(widget://${widgetId} "expanded")`), read);
+  assert.ok(read.includes("<summary>All releases &amp; details</summary>"), read);
+  await applyMarkdownEdit({ documentId: doc.id, userId: user.id, mode: "replace_all", markdown: read });
+  assert.equal(await rawMarkdownOf(doc.id), read);
+
+  // A placeholder without the title (a minimized widget) stays minimized.
+  await applyMarkdownEdit({
+    documentId: doc.id,
+    userId: user.id,
+    mode: "replace",
+    findText: `![widget: Headline chart](widget://${widgetId} "expanded")`,
+    markdown: `![widget: Headline chart](widget://${widgetId})`
+  });
+  assert.ok((await rawMarkdownOf(doc.id)).includes(`(widget://${widgetId})\n`));
+  await db.document.delete({ where: { id: doc.id } });
+  await db.user.delete({ where: { id: user.id } });
+});

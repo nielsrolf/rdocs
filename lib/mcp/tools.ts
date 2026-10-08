@@ -60,7 +60,8 @@ const documentRef = z
 const MARKDOWN_CONTRACT = [
   "Markdown supports headings, GFM tables, task lists, code blocks and links; a single newline renders as a hard line break.",
   "Images: reference files committed to the document workspace as ![alt](path/in/repo.png) — upload them with upload_files first.",
-  "Interactive widgets: insert the placeholder ![widget: <label>](widget://<widget_id>) on its own line — create the widget with create_widget first, or reuse a widget id from read_document."
+  "Interactive widgets: insert the placeholder ![widget: <label>](widget://<widget_id>) on its own line — create the widget with create_widget first, or reuse a widget id from read_document. Widgets render minimized; add the title \"expanded\" to show one inline: ![widget: <label>](widget://<widget_id> \"expanded\").",
+  "Collapsible sections: <details>\\n<summary>Title</summary>\\n\\n…markdown…\\n\\n</details> becomes a toggle block (collapsed until a reader opens it)."
 ].join(" ");
 
 function parseDocumentRef(ref: string): string {

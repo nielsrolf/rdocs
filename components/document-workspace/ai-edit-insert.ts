@@ -11,12 +11,12 @@ function toRepoImageNode(image: AiEditImage) {
   )}" path="${escapeHtml(image.path ?? image.src)}"></figure>`;
 }
 
-function toWidgetNode(widget: AiEditWidget, documentId: string) {
+function toWidgetNode(widget: AiEditWidget, documentId: string, expanded = false) {
   return `<div data-embedded-widget widgetId="${escapeHtml(widget.id)}" documentId="${escapeHtml(
     documentId
   )}" label="${escapeHtml(widget.label)}" buildCmd="${escapeHtml(
     widget.buildCmd
-  )}" embedSource="${escapeHtml(widget.embedSource)}" src="${escapeHtml(withShareToken(widget.src, null))}" collapsed="true"></div>`;
+  )}" embedSource="${escapeHtml(widget.embedSource)}" src="${escapeHtml(withShareToken(widget.src, null))}" collapsed="${expanded ? "false" : "true"}"></div>`;
 }
 
 // An embeddedWidget already present in the current document, keyed for resolving
@@ -30,6 +30,18 @@ export type ExistingWidget = {
 };
 
 const WIDGET_PLACEHOLDER_SCHEME = "widget://";
+// Title of a widget placeholder that shows the widget inline (expanded) instead of
+// minimized: ![widget: <label>](widget://<id> "expanded"). getDocumentMarkdown emits
+// it for expanded widgets, so echoing a placeholder keeps the widget's state.
+export const WIDGET_EXPANDED_TITLE = "expanded";
+// Toggle blocks round-trip as <details><summary>…</summary> … </details>
+// (getDocumentMarkdown). markdown-it runs with html:false, so these markers are cut
+// out before markdown rendering and turned into toggleBlock HTML here.
+const DETAILS_MARKER_PATTERN = /<details>\s*<summary>([\s\S]*?)<\/summary>|<\/details>/gi;
+
+function unescapeSummary(text: string) {
+  return text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").trim();
+}
 // Pasted (data-URL) images are shown to agents as ![alt](pasted-image://N)
 // placeholders (lib/content.ts getDocumentMarkdown). An echoed placeholder must
 // resolve back to the SAME pixels, so callers pass the document's pasted images.
@@ -140,15 +152,16 @@ export function buildAiEditInsertContent(input: {
   (input.existingWidgets ?? []).forEach((widget) => {
     if (widget.widgetId) existingById.set(widget.widgetId, widget);
   });
-  const existingWidgetNode = (widget: ExistingWidget) =>
+  const existingWidgetNode = (widget: ExistingWidget, expanded: boolean) =>
     toWidgetNode(
       { id: widget.widgetId, label: widget.label, buildCmd: widget.buildCmd, embedSource: widget.embedSource, src: widget.src },
-      input.documentId
+      input.documentId,
+      expanded
     );
 
   // Pick an unconsumed freshly-submitted widget: prefer a label match, else the
   // next one in submission order.
-  function takeNewWidget(label: string): string | null {
+  function takeNewWidget(label: string, expanded: boolean): string | null {
     const wanted = label.trim();
     const byLabel = wanted
       ? submittedWidgets.find((widget) => widget.label.trim() === wanted && !consumedWidgetIds.has(widget.id))
@@ -156,13 +169,13 @@ export function buildAiEditInsertContent(input: {
     const widget = byLabel ?? submittedWidgets.find((w) => !consumedWidgetIds.has(w.id));
     if (!widget) return null;
     consumedWidgetIds.add(widget.id);
-    return toWidgetNode(widget, input.documentId);
+    return toWidgetNode(widget, input.documentId, expanded);
   }
 
   // Resolve a widget://<ref> placeholder. "new"/"new/<label>" -> a submitted
   // array widget; otherwise <ref> is a widgetId matched against existing document
   // widgets first, then any submitted widget by id. Returns HTML or null.
-  function resolveWidgetPlaceholder(ref: string, altLabel: string): string | null {
+  function resolveWidgetPlaceholder(ref: string, altLabel: string, expanded: boolean): string | null {
     const trimmedRef = ref.trim();
     if (trimmedRef === "new" || /^new[/:]/.test(trimmedRef)) {
       const suffix = trimmedRef.slice(3).replace(/^[/:]/, "");
@@ -174,14 +187,14 @@ export function buildAiEditInsertContent(input: {
           wantedLabel = suffix;
         }
       }
-      return takeNewWidget(wantedLabel);
+      return takeNewWidget(wantedLabel, expanded);
     }
     const existing = existingById.get(trimmedRef);
-    if (existing) return existingWidgetNode(existing);
+    if (existing) return existingWidgetNode(existing, expanded);
     const submitted = submittedWidgets.find((widget) => widget.id === trimmedRef && !consumedWidgetIds.has(widget.id));
     if (submitted) {
       consumedWidgetIds.add(submitted.id);
-      return toWidgetNode(submitted, input.documentId);
+      return toWidgetNode(submitted, input.documentId, expanded);
     }
     return null;
   }
@@ -197,13 +210,16 @@ export function buildAiEditInsertContent(input: {
       return toWidgetNode(submitted, input.documentId);
     }
     const existing = (input.existingWidgets ?? []).find((widget) => widget.label.trim() === wanted);
-    if (existing) return existingWidgetNode(existing);
+    if (existing) return existingWidgetNode(existing, false);
     return null;
   }
 
   const usedImagePaths = new Set<string>();
   const content: string[] = [];
-  const text = input.replacementText;
+
+  // Markdown (with widget/image placeholders) -> HTML, appended to `content`.
+  // `sourceLinks` go with the chunk's trailing text.
+  function processChunk(text: string, sourceLinks: string[]) {
   const markdownImagePattern = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)|(?<!\!)\[([^\]]+)\]\(([^)\s]+)\)/g;
   let cursor = 0;
   let match: RegExpExecArray | null;
@@ -223,7 +239,11 @@ export function buildAiEditInsertContent(input: {
     // Widget placeholder: ![widget: <label>](widget://<ref>)
     if (isImageSyntax && src.trim().startsWith(WIDGET_PLACEHOLDER_SCHEME)) {
       const ref = src.trim().slice(WIDGET_PLACEHOLDER_SCHEME.length);
-      const node = resolveWidgetPlaceholder(ref, stripWidgetLabelPrefix(alt));
+      const node = resolveWidgetPlaceholder(
+        ref,
+        stripWidgetLabelPrefix(alt),
+        caption.trim().toLowerCase() === WIDGET_EXPANDED_TITLE
+      );
       flushBefore(match.index);
       if (node) content.push(node); // unresolved placeholders are dropped, not printed literally
       cursor = matchEnd;
@@ -275,9 +295,43 @@ export function buildAiEditInsertContent(input: {
 
   const after = text.slice(cursor).trim();
   if (after) {
-    content.push(buildAiEditHtml(after, input.sourceLinks));
-  } else if (input.sourceLinks.length > 0) {
-    content.push(buildAiEditHtml("", input.sourceLinks));
+    content.push(buildAiEditHtml(after, sourceLinks));
+  } else if (sourceLinks.length > 0) {
+    content.push(buildAiEditHtml("", sourceLinks));
+  }
+  }
+
+  const text = input.replacementText;
+  if (!/<details>/i.test(text)) {
+    processChunk(text, input.sourceLinks);
+  } else {
+    // Split on toggle-block markers; nesting is tracked so an unbalanced close
+    // tag is ignored and unclosed blocks are closed at the end.
+    const openAt: number[] = [];
+    let position = 0;
+    let marker: RegExpExecArray | null;
+    DETAILS_MARKER_PATTERN.lastIndex = 0;
+    while ((marker = DETAILS_MARKER_PATTERN.exec(text)) !== null) {
+      const isOpen = marker[1] !== undefined;
+      if (!isOpen && openAt.length === 0) continue;
+      processChunk(text.slice(position, marker.index), []);
+      position = marker.index + marker[0].length;
+      if (isOpen) {
+        const summary = escapeHtml(unescapeSummary(marker[1] ?? "") || "Details");
+        content.push(`<details data-toggle-block data-toggle-summary="${summary}"><summary>${summary}</summary><div data-toggle-content>`);
+        openAt.push(content.length);
+      } else {
+        // A toggle block needs at least one child block.
+        if (content.length === openAt.pop()) content.push("<p></p>");
+        content.push("</div></details>");
+      }
+    }
+    processChunk(text.slice(position), []);
+    while (openAt.length > 0) {
+      if (content.length === openAt.pop()) content.push("<p></p>");
+      content.push("</div></details>");
+    }
+    if (input.sourceLinks.length > 0) content.push(buildAiEditHtml("", input.sourceLinks));
   }
 
   if (appendUnusedImages) {
