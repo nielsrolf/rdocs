@@ -49,6 +49,15 @@ RUN curl -fsSL https://download.docker.com/linux/debian/gpg \
 # A home dir usable by an arbitrary --user uid (the runner runs the container as
 # the host user so bind-mounted files stay host-owned). Mounted over by a tmpfs
 # at runtime; created here so HOME resolves even without the tmpfs.
+# Headless Chromium + fonts so agents can SEE what they publish: render-widget
+# screenshots a widget the way the document page shows it (sandboxed iframe at the
+# column width, same height bridge) and the agent Reads the PNG.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends chromium fonts-liberation fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/*
+COPY runner/render-widget.py /usr/local/bin/render-widget
+RUN chmod 755 /usr/local/bin/render-widget
+
 ENV HOME=/home/agent
 RUN mkdir -p /home/agent /workspace && chmod 1777 /home/agent
 
