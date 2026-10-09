@@ -76,6 +76,7 @@ import { CommentRail } from "./document-workspace/comment-rail";
 import { layoutCommentRail } from "./document-workspace/comment-rail-layout";
 import { DocOutline, OUTLINE_MAX_WIDTH, OUTLINE_MIN_WIDTH } from "./document-workspace/doc-outline";
 import { LatexShortcut, LinkShortcut, MoveBlock, SlashTab, StrikeShortcut, TabIndentGuard, TaskItem } from "./document-workspace/editor-extras";
+import { HeadingFlash } from "./document-workspace/heading-flash";
 import { EnvironmentMenu } from "./document-workspace/environment-menu";
 import { SkillsMenu } from "./document-workspace/skills-menu";
 import { ExportMenu } from "./document-workspace/export-menu";
@@ -1327,6 +1328,7 @@ export function DocumentWorkspace({
       }),
       MoveBlock,
       TabIndentGuard,
+      HeadingFlash,
       slashTabExtension,
       CaptionedImage.configure({
         allowBase64: true,
@@ -1638,6 +1640,18 @@ export function DocumentWorkspace({
 
   function handleSelectTab(tabId: string) {
     setActiveTabIdState(tabId);
+  }
+
+  // Forum view renders every tab one after another, so picking a tab in the
+  // outline scrolls to where it starts instead of switching what is visible.
+  function handleForumSelectTab(tabId: string) {
+    setActiveTabIdState(tabId);
+    const pos = findTabBreakPos(tabId);
+    if (!editor || pos === null) return;
+    const dom = editor.view.nodeDOM(pos);
+    if (dom instanceof HTMLElement) {
+      window.scrollTo({ top: window.scrollY + dom.getBoundingClientRect().top - 24, behavior: "smooth" });
+    }
   }
 
   useEffect(() => {
@@ -3676,6 +3690,18 @@ export function DocumentWorkspace({
     if (!target) return;
     focusThreadHandledRef.current = true;
     window.requestAnimationFrame(() => focusThread(target));
+    // Pulse the thread's opening comment so it's clear which one the link meant.
+    const rootCommentId = target.comments[0]?.id;
+    if (rootCommentId) {
+      setFlashCommentIds((current) => new Set([...current, rootCommentId]));
+      window.setTimeout(() => {
+        setFlashCommentIds((current) => {
+          const next = new Set(current);
+          next.delete(rootCommentId);
+          return next;
+        });
+      }, 6000);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, initialFocusThreadId, threads]);
 
@@ -5026,9 +5052,10 @@ export function DocumentWorkspace({
         data-comments-collapsed={commentsCollapsed ? "true" : "false"}
         data-public-view={isPublicView ? "true" : "false"}
         data-comments-hidden={forumView || (isPublicView && !hasUnresolvedThreads) ? "true" : "false"}
-        style={{ "--outline-width": `${isPublicView ? 0 : outlineCollapsed ? 36 : Math.round(outlineWidth)}px` } as React.CSSProperties}
+        data-forum-view={forumView ? "true" : "false"}
+        style={{ "--outline-width": `${isPublicView && !forumView ? 0 : outlineCollapsed ? 36 : Math.round(outlineWidth)}px` } as React.CSSProperties}
       >
-        {isPublicView ? null : (
+        {isPublicView && !forumView ? null : (
           <DocOutline
             editor={editor}
             collapsed={outlineCollapsed}
@@ -5038,7 +5065,7 @@ export function DocumentWorkspace({
             tabs={tabs}
             activeTabId={activeTabId}
             canEditTabs={canWriteDocument}
-            onSelectTab={handleSelectTab}
+            onSelectTab={forumView ? handleForumSelectTab : handleSelectTab}
             onCreateTab={handleCreateTab}
             onRenameTab={handleRenameTab}
             onDeleteTab={handleDeleteTab}

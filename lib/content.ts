@@ -538,6 +538,7 @@ type MarkdownContext = {
   // tabs). Agents fetch the pixels separately — see collectPastedImages.
   pastedImagePlaceholders: boolean;
   pastedImageIndex: number;
+  minimalEscaping: boolean;
 };
 
 export const PASTED_IMAGE_SCHEME = "pasted-image://";
@@ -596,6 +597,12 @@ export function collectPastedImages(content: unknown): PastedDocumentImage[] {
 
 function escapeMarkdown(text: string) {
   return text.replace(/([\\`*_{}\[\]()#+\-.!>])/g, "\\$1");
+}
+
+// Human-edited surfaces (a comment composer) only need the characters that
+// would change inline meaning mid-text; `E\.g\.` is noise there.
+function escapeMarkdownMinimal(text: string) {
+  return text.replace(/([\\`*_\[\]])/g, "\\$1");
 }
 
 function applyMarks(text: string, marks: unknown): string {
@@ -657,7 +664,8 @@ function serializeNodeToMarkdown(node: unknown, context: MarkdownContext): strin
     if (context.inCodeBlock) {
       return raw;
     }
-    return applyMarks(escapeMarkdown(raw), (node as { marks?: unknown }).marks);
+    const escaped = context.minimalEscaping ? escapeMarkdownMinimal(raw) : escapeMarkdown(raw);
+    return applyMarks(escaped, (node as { marks?: unknown }).marks);
   }
 
   if (nodeType === "hardBreak") {
@@ -765,11 +773,10 @@ function serializeNodeToMarkdown(node: unknown, context: MarkdownContext): strin
   }
 
   if (nodeType === "taskItem") {
-    const stack = context.listStack;
     const checked = (getNodeAttrs(node) as { checked?: unknown } | null)?.checked === true;
     const marker = `- [${checked ? "x" : " "}]`;
-    const indent = "  ".repeat(Math.max(0, stack.length - 1));
-    const body = serializeChildrenToMarkdown(node, context).trim();
+    const indent = "";
+    const body = tightenNestedLists(serializeChildrenToMarkdown(node, context).trim());
     const lines = body.split("\n");
     const first = lines.shift() ?? "";
     const rest = lines
@@ -783,8 +790,10 @@ function serializeNodeToMarkdown(node: unknown, context: MarkdownContext): strin
     const current = stack[stack.length - 1] ?? { ordered: false, index: 1 };
     const marker = current.ordered ? `${current.index}.` : "-";
     if (current.ordered) current.index += 1;
-    const indent = "  ".repeat(Math.max(0, stack.length - 1));
-    const body = serializeChildrenToMarkdown(node, context).trim();
+    // Nesting depth comes from the parent item re-indenting its continuation
+    // lines below; adding depth here as well double-indented nested lists.
+    const indent = "";
+    const body = tightenNestedLists(serializeChildrenToMarkdown(node, context).trim());
     const lines = body.split("\n");
     const first = lines.shift() ?? "";
     const rest = lines
@@ -799,6 +808,12 @@ function serializeNodeToMarkdown(node: unknown, context: MarkdownContext): strin
   }
 
   return serializeChildrenToMarkdown(node, context);
+}
+
+// An item's paragraph is followed by "\n\n"; before a nested list that blank
+// line turns the whole list "loose" (every item rendered as a spaced <p>).
+function tightenNestedLists(body: string) {
+  return body.replace(/\n{2,}(?=(?:[-+*]|\d+\.) )/g, "\n");
 }
 
 function serializeBlocksToMarkdown(blocks: unknown[], context: MarkdownContext): string {
@@ -817,6 +832,9 @@ export type DocumentMarkdownOptions = {
   // Emit pasted data-URL images as pasted-image://N placeholders (agent-facing
   // surfaces) instead of inline base64 (export).
   pastedImagePlaceholders?: boolean;
+  // Escape only inline-syntax characters (\ ` * _ [ ]) instead of every
+  // markdown punctuation character — for markdown a human will keep editing.
+  minimalEscaping?: boolean;
 };
 
 export function getDocumentMarkdown(content: unknown, options: DocumentMarkdownOptions = {}): string {
@@ -824,7 +842,8 @@ export function getDocumentMarkdown(content: unknown, options: DocumentMarkdownO
     listStack: [],
     inCodeBlock: false,
     pastedImagePlaceholders: options.pastedImagePlaceholders ?? false,
-    pastedImageIndex: 0
+    pastedImageIndex: 0,
+    minimalEscaping: options.minimalEscaping ?? false
   };
   const topLevel = getNodeContent(content);
   const groups: Array<{ title: string | null; nodes: unknown[] }> = [

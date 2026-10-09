@@ -8,6 +8,7 @@ import {
   mentionHandle,
   type MentionCandidate
 } from "@/lib/mentions";
+import { useAutoGrow } from "@/components/use-auto-grow";
 import { useMarkdownShortcuts } from "@/components/use-markdown-shortcuts";
 
 let candidateCache: MentionCandidate[] | null = null;
@@ -32,6 +33,7 @@ export function MentionTextarea({
   const [caret, setCaret] = useState(0);
   const [activeIndex, setActiveIndex] = useState(0);
   const shortcuts = useMarkdownShortcuts(ref, onChange);
+  useAutoGrow(ref, value);
 
   useEffect(() => {
     if (candidateCache) return;

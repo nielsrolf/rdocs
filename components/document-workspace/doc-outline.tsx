@@ -2,6 +2,7 @@ import type { Editor } from "@tiptap/react";
 import { useEffect, useRef, useState } from "react";
 
 import { createHeadingHashNav } from "./heading-hash-nav";
+import { flashHeadingAt } from "./heading-flash";
 import { getActiveTabId, tabHashSlug, type TabSummary } from "./tabs";
 
 type OutlineEntry = {
@@ -288,6 +289,8 @@ export function DocOutline({
       editor.commands.focus();
       editor.commands.setTextSelection(inside);
       window.scrollTo({ top: window.scrollY + coords.top - 96, behavior: "smooth" });
+      // Show which heading the link points at (no-op for "#tab=<id>" targets).
+      flashHeadingAt(editor, entry.pos);
       return true;
     } catch {
       return false;

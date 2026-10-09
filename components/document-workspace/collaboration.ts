@@ -3,7 +3,7 @@ import { collab, getVersion, sendableSteps } from "@tiptap/pm/collab";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Mapping } from "@tiptap/pm/transform";
 import type { Mappable, Step } from "@tiptap/pm/transform";
-import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import type { MutableRefObject } from "react";
 
 // A few characters of text immediately before/after a position, captured within
@@ -221,6 +221,41 @@ export function createCollaborationExtension(version: number, clientID: string) 
   });
 }
 
+export const REMOTE_CURSOR_LABEL_CLASS = "remote-collab-cursor-label";
+export const REMOTE_CURSOR_LABEL_HIDDEN_CLASS = "remote-collab-cursor-label-hidden";
+
+export type CaretBox = { left: number; right: number; top: number; bottom: number };
+
+// True when a remote name label overlaps the local caret (with a few px of
+// slack so a label grazing the caret also yields).
+export function labelCoversCaret(label: CaretBox, caret: CaretBox, slack = 3): boolean {
+  return (
+    label.left - slack < caret.right &&
+    label.right + slack > caret.left &&
+    label.top - slack < caret.bottom &&
+    label.bottom + slack > caret.top
+  );
+}
+
+function hideLabelsCoveringLocalCaret(view: EditorView) {
+  if (view.isDestroyed) return;
+  const labels = view.dom.querySelectorAll<HTMLElement>(`.${REMOTE_CURSOR_LABEL_CLASS}`);
+  if (labels.length === 0) return;
+  let caret: CaretBox | null = null;
+  try {
+    const coords = view.coordsAtPos(view.state.selection.head);
+    // coordsAtPos gives a zero-width box; widen it to the caret's 2px stroke.
+    caret = { left: coords.left - 1, right: coords.right + 1, top: coords.top, bottom: coords.bottom };
+  } catch {
+    caret = null;
+  }
+  labels.forEach((label) => {
+    // Hidden labels are only transparent, so their box is still measurable.
+    const covers = caret !== null && labelCoversCaret(label.getBoundingClientRect(), caret);
+    label.classList.toggle(REMOTE_CURSOR_LABEL_HIDDEN_CLASS, covers);
+  });
+}
+
 export function createRemotePresenceExtension(
   remotePresenceRef: MutableRefObject<RemotePresenceView[]>,
   receivedMappingsRef: MutableRefObject<ReceivedMappingEntry[]>
@@ -298,9 +333,12 @@ export function createRemotePresenceExtension(
                       cursor.className = "remote-collab-cursor";
                       cursor.style.borderColor = presence.color;
                       cursor.style.setProperty("--remote-collab-color", presence.color);
-                      cursor.dataset.name = presence.typing
+                      const label = document.createElement("span");
+                      label.className = REMOTE_CURSOR_LABEL_CLASS;
+                      label.textContent = presence.typing
                         ? `${presence.userName} is typing`
                         : presence.userName;
+                      cursor.appendChild(label);
                       return cursor;
                     },
                     {
@@ -313,6 +351,26 @@ export function createRemotePresenceExtension(
 
               return DecorationSet.create(state.doc, decorations);
             }
+          },
+          // A peer's name label floats above their caret and can sit right on
+          // top of OUR caret (e.g. we're on the line above). Hide any label
+          // that covers the local caret; it reappears once we move away.
+          view: (editorView) => {
+            let frame: number | null = null;
+            const schedule = (view: EditorView) => {
+              if (frame !== null) cancelAnimationFrame(frame);
+              frame = requestAnimationFrame(() => {
+                frame = null;
+                hideLabelsCoveringLocalCaret(view);
+              });
+            };
+            schedule(editorView);
+            return {
+              update: schedule,
+              destroy: () => {
+                if (frame !== null) cancelAnimationFrame(frame);
+              }
+            };
           }
         })
       ];

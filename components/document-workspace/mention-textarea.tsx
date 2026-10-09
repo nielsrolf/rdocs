@@ -6,6 +6,7 @@ import {
   mentionHandle,
   type MentionCandidate
 } from "@/lib/mentions";
+import { useAutoGrow } from "@/components/use-auto-grow";
 import { useMarkdownShortcuts } from "@/components/use-markdown-shortcuts";
 
 // A controlled <textarea> with @mention autocomplete. Mentions are stored as
@@ -41,6 +42,7 @@ export function MentionTextarea({
   const openRef = useRef(open);
   openRef.current = open;
   const shortcuts = useMarkdownShortcuts(ref, onChange);
+  useAutoGrow(ref, value);
 
   function refresh(caret: number, text: string) {
     if (members.length === 0) {

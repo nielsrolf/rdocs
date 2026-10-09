@@ -2,6 +2,7 @@
 
 import type { ClipboardEvent, KeyboardEvent, RefObject } from "react";
 
+import { richClipboardToMarkdown } from "@/lib/clipboard-markdown";
 import { markdownKeyEdit, markdownPasteEdit, type TextSelection } from "@/lib/markdown-shortcuts";
 
 // Wires lib/markdown-shortcuts onto a controlled <textarea>: returns keydown /
@@ -58,10 +59,25 @@ export function useMarkdownShortcuts(
 
   function onPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
     const pasted = event.clipboardData?.getData("text/plain") ?? "";
-    const edit = markdownPasteEdit(current(event.currentTarget), pasted);
-    if (!edit) return;
+    const selection = current(event.currentTarget);
+    const edit = markdownPasteEdit(selection, pasted);
+    if (edit) {
+      event.preventDefault();
+      apply(edit);
+      return;
+    }
+    // Rich content (a list copied from a doc, Google Docs, a web page): its
+    // text/plain flavour separates every block with blank lines and drops
+    // list markers, so paste the HTML flavour converted to markdown instead.
+    const markdown = richClipboardToMarkdown(event.clipboardData?.getData("text/html") ?? "");
+    if (!markdown) return;
     event.preventDefault();
-    apply(edit);
+    const caret = selection.start + markdown.length;
+    apply({
+      text: selection.text.slice(0, selection.start) + markdown + selection.text.slice(selection.end),
+      start: caret,
+      end: caret
+    });
   }
 
   return { onKeyDown, onPaste };

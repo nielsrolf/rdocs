@@ -4664,8 +4664,7 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   position: relative;
 }
 
-.remote-collab-cursor::after {
-  content: attr(data-name);
+.remote-collab-cursor-label {
   position: absolute;
   left: -2px;
   top: -1.55rem;
@@ -4681,6 +4680,15 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   font-weight: 700;
   line-height: 1.2;
   z-index: 5;
+  transition: opacity 120ms ease;
+  user-select: none;
+}
+
+/* Faded out (not removed) while it would cover the local caret — see
+   hideLabelsCoveringLocalCaret in collaboration.ts. Opacity keeps the box
+   measurable, so the label returns as soon as the caret moves away. */
+.remote-collab-cursor-label.remote-collab-cursor-label-hidden {
+  opacity: 0;
 }
 
 .heading-copy-button {
@@ -5818,6 +5826,48 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   }
 }
 
+/* Opened via a heading link ("#<slug>"): highlight the heading the link meant.
+   The short delay lets the smooth scroll land before the pulse starts. */
+.ProseMirror .heading-link-flash {
+  border-radius: 4px;
+  animation: heading-link-flash 2.6s ease-out 0.35s both;
+}
+@keyframes heading-link-flash {
+  0% {
+    background-color: rgba(251, 188, 4, 0);
+    box-shadow: 0 0 0 6px rgba(251, 188, 4, 0);
+  }
+  12%,
+  45% {
+    background-color: rgba(251, 188, 4, 0.32);
+    box-shadow: 0 0 0 6px rgba(251, 188, 4, 0.32);
+  }
+  100% {
+    background-color: rgba(251, 188, 4, 0);
+    box-shadow: 0 0 0 6px rgba(251, 188, 4, 0);
+  }
+}
+
+/* Opened via a comment permalink ("#comment-<id>"). */
+.forum-comment-main.forum-comment-link-flash {
+  animation: comment-link-flash 3.2s ease-out 0.35s both;
+}
+@keyframes comment-link-flash {
+  0% {
+    background-color: #fff;
+    box-shadow: 0 0 0 0 rgba(251, 188, 4, 0);
+  }
+  12%,
+  50% {
+    background-color: #fff7d6;
+    box-shadow: 0 0 0 3px rgba(251, 188, 4, 0.6);
+  }
+  100% {
+    background-color: #fff;
+    box-shadow: 0 0 0 0 rgba(251, 188, 4, 0);
+  }
+}
+
 /* ---------------------------------------------------------------------------
    Landing page (app/page.tsx) — lp-* classes are landing-only.
 --------------------------------------------------------------------------- */
@@ -6945,6 +6995,25 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   gap: 1rem;
   align-items: flex-start;
   margin-bottom: 1.25rem;
+}
+
+/* Forum view of a doc: the studio's tab + heading outline, parked in the page's
+   left margin beside the 860px article column (fixed, so it stays in reach
+   while reading and through the comments). Only where the margin fits it. */
+.editor-stage[data-forum-view="true"] .doc-outline {
+  position: fixed;
+  top: 2rem;
+  left: max(16px, calc(50vw - 430px - 24px - var(--outline-width)));
+  width: min(var(--outline-width), calc(50vw - 430px - 40px));
+  max-height: calc(100vh - 4rem);
+  z-index: 4;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+@media (max-width: 1299px) {
+  .editor-stage[data-forum-view="true"] .doc-outline {
+    display: none;
+  }
 }
 
 .forum-document-body {

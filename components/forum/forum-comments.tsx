@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 
 import { MarkdownBody } from "@/components/document-workspace/markdown";
 import type { VoteTally } from "@/lib/forum-votes";
@@ -93,6 +93,38 @@ function ReplyForm({
       </div>
     </form>
   );
+}
+
+const COMMENT_HASH_PREFIX = "comment-";
+const COMMENT_LINK_FLASH_CLASS = "forum-comment-link-flash";
+
+// Opened via a "#comment-<id>" permalink: scroll that comment into view and
+// briefly highlight it so the reader sees which comment the link meant.
+// Scoped to `root` because a feed renders one ForumComments per quicktake.
+function useCommentLinkFlash(root: RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const flash = () => {
+      const hash = decodeURIComponent(window.location.hash.replace(/^#/, ""));
+      if (!hash.startsWith(COMMENT_HASH_PREFIX)) return;
+      const target = document.getElementById(hash);
+      if (!target || !root.current?.contains(target)) return;
+      const main = target.querySelector<HTMLElement>(":scope > .forum-comment-main") ?? target;
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      // Remove + reflow + re-add restarts the animation on a repeated link.
+      main.classList.remove(COMMENT_LINK_FLASH_CLASS);
+      void main.offsetWidth;
+      main.classList.add(COMMENT_LINK_FLASH_CLASS);
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => main.classList.remove(COMMENT_LINK_FLASH_CLASS), 4000);
+    };
+    flash();
+    window.addEventListener("hashchange", flash);
+    return () => {
+      window.removeEventListener("hashchange", flash);
+      if (timer) clearTimeout(timer);
+    };
+  }, [root]);
 }
 
 // Heading-style permalink for a comment: copies the current page URL with a
@@ -261,6 +293,8 @@ export function ForumComments({
   const [busyParentId, setBusyParentId] = useState<string | null>(null);
   const [topBusy, setTopBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const rootRef = useRef<HTMLElement | null>(null);
+  useCommentLinkFlash(rootRef);
 
   async function refresh() {
     const response = await fetch(`/api/documents/${documentId}/forum-comments`, {
@@ -327,7 +361,7 @@ export function ForumComments({
   }
 
   return (
-    <section className="forum-comments" aria-label="Comments">
+    <section className="forum-comments" aria-label="Comments" ref={rootRef}>
       <h2 className="forum-comments-heading">
         {countComments(comments)} comment{countComments(comments) === 1 ? "" : "s"}
       </h2>
