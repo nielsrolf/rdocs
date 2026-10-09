@@ -599,10 +599,31 @@ function escapeMarkdown(text: string) {
   return text.replace(/([\\`*_{}\[\]()#+\-.!>])/g, "\\$1");
 }
 
-// Human-edited surfaces (a comment composer) only need the characters that
-// would change inline meaning mid-text; `E\.g\.` is noise there.
+// Human-edited surfaces (comment composers) only need the characters that
+// would change inline meaning mid-text; `E\.g\.` is noise there. Three more
+// rules keep comment bodies working: $…$ / $$…$$ math stays verbatim (the
+// renderer's LaTeX rule reads it raw), and an intraword `_` is left alone —
+// CommonMark never opens emphasis there, and escaping it would break @mention
+// detection of handles like `@ada_l@example.com`, which matches raw text.
+const MINIMAL_MATH_SPAN = /(\$\$[^$]+\$\$|\$[^$\n]+\$)/;
 function escapeMarkdownMinimal(text: string) {
-  return text.replace(/([\\`*_\[\]])/g, "\\$1");
+  return text
+    .split(MINIMAL_MATH_SPAN)
+    .map((part, index) =>
+      index % 2 === 1
+        ? part
+        : part
+            .replace(/([\\`*\[\]])/g, "\\$1")
+            .replace(/_/g, (match, offset: number, whole: string) =>
+              /\w/.test(whole[offset - 1] ?? "") && /\w/.test(whole[offset + 1] ?? "") ? match : "\\_"
+            )
+    )
+    .join("");
+}
+
+function hasMark(node: unknown, type: string) {
+  const marks = (node as { marks?: unknown }).marks;
+  return Array.isArray(marks) && marks.some((mark) => (mark as { type?: unknown })?.type === type);
 }
 
 function applyMarks(text: string, marks: unknown): string {
@@ -664,12 +685,23 @@ function serializeNodeToMarkdown(node: unknown, context: MarkdownContext): strin
     if (context.inCodeBlock) {
       return raw;
     }
-    const escaped = context.minimalEscaping ? escapeMarkdownMinimal(raw) : escapeMarkdown(raw);
-    return applyMarks(escaped, (node as { marks?: unknown }).marks);
+    if (context.minimalEscaping) {
+      // Inline code is literal between backticks; a bare autolinked URL reads
+      // better as itself than as [url](url).
+      if (hasMark(node, "code")) return applyMarks(raw, (node as { marks?: unknown }).marks);
+      const marks = (node as { marks?: Array<{ type?: unknown; attrs?: { href?: unknown } }> }).marks;
+      if (marks?.length === 1 && marks[0]?.type === "link" && marks[0].attrs?.href === raw && /^https?:\/\/\S+$/.test(raw)) {
+        return raw;
+      }
+      return applyMarks(escapeMarkdownMinimal(raw), (node as { marks?: unknown }).marks);
+    }
+    return applyMarks(escapeMarkdown(raw), (node as { marks?: unknown }).marks);
   }
 
   if (nodeType === "hardBreak") {
-    return "  \n";
+    // Comment markdown renders with `breaks: true`, so a bare newline is a
+    // line break there; the trailing-space form is for export.
+    return context.minimalEscaping ? "\n" : "  \n";
   }
 
   if (nodeType === "image") {

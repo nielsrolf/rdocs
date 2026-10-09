@@ -55,7 +55,7 @@ test("comment on a select-all over text + image + widget, then it disappears on 
     await page.keyboard.press("ControlOrMeta+a");
     await page.locator(".selection-bubble", { hasText: "Add comment" }).click();
 
-    await page.locator(".comment-composer-popover textarea").fill("Covers everything");
+    await page.locator(".comment-composer-popover .rich-comment-editor .ProseMirror").fill("Covers everything");
     await page.locator(".comment-composer-popover .primary-button", { hasText: "Comment" }).click();
 
     // The thread is created (no "Unable to anchor" error) and the comment shows.

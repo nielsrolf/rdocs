@@ -5763,6 +5763,112 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   position: relative;
 }
 
+/* Rich comment composer (components/rich-comment-editor.tsx). Looks like the
+   textarea it replaced; the inner ProseMirror must not inherit the document
+   editor's global .ProseMirror sizing (min-height: 70vh, doc font). */
+.rich-comment-editor {
+  position: relative;
+  width: 100%;
+}
+
+.rich-comment-editor .ProseMirror {
+  min-height: calc(var(--rce-rows, 3) * 1.5em + 1.5rem);
+  max-width: 100%;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 12px;
+  padding: 0.75rem 0.9rem;
+  font: inherit;
+  font-size: 0.92rem;
+  line-height: 1.5;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  cursor: text;
+}
+
+.rich-comment-editor .ProseMirror:focus {
+  outline: 2px solid rgba(26, 115, 232, 0.18);
+  border-color: rgba(26, 115, 232, 0.42);
+}
+
+.rich-comment-editor-disabled .ProseMirror {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.rich-comment-editor .ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  color: var(--muted);
+}
+
+.rich-comment-editor .ProseMirror > * + * {
+  margin-top: 0.45em;
+}
+
+.rich-comment-editor .ProseMirror h1,
+.rich-comment-editor .ProseMirror h2,
+.rich-comment-editor .ProseMirror h3,
+.rich-comment-editor .ProseMirror h4 {
+  margin: 0.6em 0 0.2em;
+  line-height: 1.3;
+}
+
+.rich-comment-editor .ProseMirror h1 { font-size: 1.3em; }
+.rich-comment-editor .ProseMirror h2 { font-size: 1.18em; }
+.rich-comment-editor .ProseMirror h3,
+.rich-comment-editor .ProseMirror h4 { font-size: 1.05em; }
+
+.rich-comment-editor .ProseMirror blockquote {
+  margin: 0.3em 0;
+  padding-left: 0.75em;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
+.rich-comment-editor .ProseMirror code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88em;
+  background: rgba(127, 127, 127, 0.14);
+  border-radius: 4px;
+  padding: 0.05em 0.3em;
+}
+
+.rich-comment-editor .ProseMirror pre {
+  background: rgba(127, 127, 127, 0.12);
+  border-radius: 8px;
+  padding: 0.6em 0.8em;
+  overflow-x: auto;
+}
+
+.rich-comment-editor .ProseMirror pre code {
+  background: none;
+  padding: 0;
+}
+
+.rich-comment-editor .ProseMirror img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Forum composers keep the forum's flatter input style. */
+.forum-mention-input.rich-comment-editor .ProseMirror {
+  border-color: #ddd8ce;
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  background: #fff;
+  font-size: 0.95rem;
+  min-height: calc(var(--rce-rows, 3) * 1.5em + 1.2rem);
+}
+
+.forum-mention-input.rich-comment-editor .ProseMirror:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft, rgb(0 0 0 / 6%));
+}
+
 .mention-suggest {
   position: absolute;
   z-index: 40;

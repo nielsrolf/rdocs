@@ -45,7 +45,7 @@ test("comment autocomplete inserts a mention that renders highlighted", async ({
     await page.locator(".selection-bubble", { hasText: "Add comment" }).click();
 
     // Type "@Mem" — the autocomplete should offer Member Mary.
-    const composer = page.locator(".comment-composer-popover .mention-textarea-wrap textarea");
+    const composer = page.locator(".comment-composer-popover .rich-comment-editor .ProseMirror");
     await composer.click();
     await composer.type("Please review @Mem");
     const option = page.locator(".mention-suggest-textarea .mention-suggest-item", { hasText: "Member Mary" });
@@ -53,7 +53,7 @@ test("comment autocomplete inserts a mention that renders highlighted", async ({
     await option.click();
 
     // The composer text now contains the resolved handle.
-    await expect(composer).toHaveValue(/@Member Mary/);
+    await expect(composer).toContainText("@Member Mary");
     await page.locator(".comment-composer-popover .primary-button", { hasText: "Comment" }).click();
 
     // The rendered comment highlights the recognized mention of another person.

@@ -1,25 +1,22 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
-import {
-  filterMentionCandidates,
-  findActiveMentionQuery,
-  mentionHandle,
-  type MentionCandidate
-} from "@/lib/mentions";
-import { useAutoGrow } from "@/components/use-auto-grow";
-import { useMarkdownShortcuts } from "@/components/use-markdown-shortcuts";
+import { RichCommentEditor } from "@/components/rich-comment-editor";
+import type { MentionCandidate } from "@/lib/mentions";
 
 let candidateCache: MentionCandidate[] | null = null;
 
+// Forum composer (comments, replies, quicktakes): the rich comment editor
+// with forum-wide mention candidates. Cmd/Ctrl+Enter submits the enclosing
+// form. `maxLength` is enforced by the API (the editor stores markdown, whose
+// length the user does not see directly).
 export function MentionTextarea({
   value,
   onChange,
   placeholder,
   rows,
-  disabled,
-  maxLength
+  disabled
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -28,12 +25,7 @@ export function MentionTextarea({
   disabled?: boolean;
   maxLength?: number;
 }) {
-  const ref = useRef<HTMLTextAreaElement>(null);
   const [candidates, setCandidates] = useState<MentionCandidate[]>(candidateCache ?? []);
-  const [caret, setCaret] = useState(0);
-  const [activeIndex, setActiveIndex] = useState(0);
-  const shortcuts = useMarkdownShortcuts(ref, onChange);
-  useAutoGrow(ref, value);
 
   useEffect(() => {
     if (candidateCache) return;
@@ -46,84 +38,20 @@ export function MentionTextarea({
         if (alive) setCandidates(data.candidates);
       })
       .catch(() => {});
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, []);
 
-  const active = useMemo(() => findActiveMentionQuery(value, caret), [value, caret]);
-  const matches = useMemo(
-    () => active ? filterMentionCandidates(active.query, candidates) : [],
-    [active, candidates]
-  );
-
-  function choose(candidate: MentionCandidate) {
-    if (!active) return;
-    const next = `${value.slice(0, active.start)}@${mentionHandle(candidate)} ${value.slice(active.end)}`;
-    const nextCaret = active.start + mentionHandle(candidate).length + 2;
-    onChange(next);
-    setCaret(nextCaret);
-    setActiveIndex(0);
-    requestAnimationFrame(() => {
-      ref.current?.focus();
-      ref.current?.setSelectionRange(nextCaret, nextCaret);
-    });
-  }
-
   return (
-    <div className="forum-mention-input">
-      <textarea
-        ref={ref}
-        value={value}
-        onChange={(event) => {
-          onChange(event.target.value);
-          setCaret(event.target.selectionStart ?? event.target.value.length);
-          setActiveIndex(0);
-        }}
-        onClick={(event) => setCaret(event.currentTarget.selectionStart ?? 0)}
-        onKeyUp={(event) => setCaret(event.currentTarget.selectionStart ?? 0)}
-        onPaste={shortcuts.onPaste}
-        onKeyDown={(event) => {
-          if (matches.length === 0) {
-            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-              // Cmd/Ctrl+Enter posts, like the studio comment rail.
-              event.preventDefault();
-              event.currentTarget.form?.requestSubmit();
-              return;
-            }
-            shortcuts.onKeyDown(event);
-            return;
-          }
-          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-            event.preventDefault();
-            setActiveIndex((index) => (index + (event.key === "ArrowDown" ? 1 : -1) + matches.length) % matches.length);
-          } else if (event.key === "Enter" || event.key === "Tab") {
-            event.preventDefault();
-            choose(matches[activeIndex] ?? matches[0]);
-          } else if (event.key === "Escape") {
-            setCaret(-1);
-          }
-        }}
-        placeholder={placeholder}
-        rows={rows}
-        disabled={disabled}
-        maxLength={maxLength}
-      />
-      {matches.length > 0 ? (
-        <div className="forum-mention-menu" role="listbox" aria-label="Tag a person">
-          {matches.map((candidate, index) => (
-            <button
-              className={index === activeIndex ? "active" : ""}
-              key={candidate.id}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => choose(candidate)}
-              role="option"
-              type="button"
-            >
-              <strong>{candidate.name || candidate.email}</strong>
-              {candidate.email && candidate.name ? <span>{candidate.email}</span> : null}
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </div>
+    <RichCommentEditor
+      className="forum-mention-input"
+      disabled={disabled}
+      members={candidates}
+      onChange={onChange}
+      placeholder={placeholder}
+      rows={rows}
+      value={value}
+    />
   );
 }
