@@ -37,7 +37,7 @@ async function resolveDocumentRunUser(authorizationHeader: string | null) {
     where: { id: claims.userId },
     select: { id: true, email: true, name: true }
   });
-  return user ? { user, scopeDocumentId: claims.documentId } : null;
+  return user ? { user, scopeDocumentId: claims.documentId, toolset: claims.toolset } : null;
 }
 
 export const runtime = "nodejs";
@@ -62,6 +62,7 @@ export async function POST(request: Request) {
   const authorization = request.headers.get("authorization");
   let user = (await resolveApiTokenUser(authorization)) ?? (await resolveSlackRunUser(authorization));
   let scopeDocumentId: string | undefined;
+  let toolset: "workspaces" | undefined;
   if (!user) {
     const documentRun = await resolveDocumentRunUser(authorization);
     if (!documentRun) {
@@ -69,6 +70,7 @@ export async function POST(request: Request) {
     }
     user = documentRun.user;
     scopeDocumentId = documentRun.scopeDocumentId;
+    toolset = documentRun.toolset;
   }
 
   const body = await request.json().catch(() => null);
@@ -80,7 +82,7 @@ export async function POST(request: Request) {
   }
 
   const origin = getPublicOrigin(request.headers);
-  const { status, payload } = await handleMcpBody(body, { user, origin, scopeDocumentId });
+  const { status, payload } = await handleMcpBody(body, { user, origin, scopeDocumentId, toolset });
   if (payload === null) {
     return new Response(null, { status });
   }

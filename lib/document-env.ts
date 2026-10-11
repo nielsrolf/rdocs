@@ -36,8 +36,18 @@ async function migrateRows(rows: Array<{ id: string; value: string }>) {
   return legacy.length;
 }
 
-/** Full key→value map for a document, for injection into the agent env. */
-export async function loadDocumentEnv(documentId: string): Promise<DocumentEnv> {
+// Admin secrets a PROVISIONER document holds to mint credentials for other
+// workspaces (lib/litellm-provisioning.ts). They are used server-side only and
+// are NEVER given to an agent run: an agent that could read the admin key
+// could mint unbudgeted keys or copy it anywhere. loadDocumentEnv (the source
+// of every run env) drops them; loadProvisionerEnv is the only reader.
+export const PROVISIONER_SECRET_ENV_KEYS: ReadonlySet<string> = new Set(["LITELLM_ADMIN_KEY"]);
+
+export function isProvisionerSecretEnvKey(key: string): boolean {
+  return PROVISIONER_SECRET_ENV_KEYS.has(key);
+}
+
+async function loadAllDocumentEnv(documentId: string): Promise<DocumentEnv> {
   const rows = await db.documentEnvVar.findMany({
     where: { documentId },
     select: { id: true, key: true, value: true }
@@ -48,6 +58,21 @@ export async function loadDocumentEnv(documentId: string): Promise<DocumentEnv> 
   }
   await migrateRows(rows);
   return env;
+}
+
+/**
+ * Full key→value map for a document, for injection into the agent env.
+ * Provisioner admin secrets are withheld (see PROVISIONER_SECRET_ENV_KEYS).
+ */
+export async function loadDocumentEnv(documentId: string): Promise<DocumentEnv> {
+  const env = await loadAllDocumentEnv(documentId);
+  for (const key of PROVISIONER_SECRET_ENV_KEYS) delete env[key];
+  return env;
+}
+
+/** Server-side only: the document env INCLUDING provisioner admin secrets. */
+export async function loadProvisionerEnv(documentId: string): Promise<DocumentEnv> {
+  return loadAllDocumentEnv(documentId);
 }
 
 /** Whether a document has a given env key configured, without loading values. */
@@ -124,4 +149,35 @@ export async function deleteDocumentEnv(documentId: string, key: string): Promis
   await db.documentEnvVar
     .delete({ where: { documentId_key: { documentId, key } } })
     .catch(() => undefined);
+}
+
+/**
+ * Copy env vars from one document to another WITHOUT exposing their values to
+ * the caller (agent "pass this key on" flows). Copies the stored ciphertext
+ * and the secret flag. Returns the keys that were missing on the source;
+ * nothing is written when any key is missing.
+ */
+export async function copyDocumentEnvKeys(
+  fromDocumentId: string,
+  toDocumentId: string,
+  keys: string[]
+): Promise<{ copied: string[]; missing: string[] }> {
+  const rows = await db.documentEnvVar.findMany({
+    where: { documentId: fromDocumentId, key: { in: keys } },
+    select: { key: true, value: true, isSecret: true }
+  });
+  const found = new Set(rows.map((row) => row.key));
+  const missing = keys.filter((key) => !found.has(key));
+  if (missing.length > 0) return { copied: [], missing };
+  await db.$transaction(
+    rows.map((row) => {
+      const value = isEncryptedSecret(row.value) ? row.value : encryptSecret(row.value);
+      return db.documentEnvVar.upsert({
+        where: { documentId_key: { documentId: toDocumentId, key: row.key } },
+        create: { documentId: toDocumentId, key: row.key, value, isSecret: row.isSecret },
+        update: { value, isSecret: row.isSecret }
+      });
+    })
+  );
+  return { copied: rows.map((row) => row.key), missing: [] };
 }

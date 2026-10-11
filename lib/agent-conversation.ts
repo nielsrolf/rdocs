@@ -13,6 +13,7 @@ import {
 } from "@/lib/ai-runs";
 import { withAgentRunLifecycle } from "@/lib/agent-run-lifecycle";
 import { loadRunMcpServerInputs } from "@/lib/document-mcp-servers";
+import { withWorkspacesBridge } from "@/lib/document-run-token";
 import { planSessionResume, recordRunSessionId, withConversationLock } from "@/lib/agent-sessions";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
@@ -256,12 +257,19 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       });
       const workspaceOverview = await getWorkspaceOverview(linkedRepo?.workspace ?? null, documentId);
       const { agentEnv, runAgentEnv, effectiveAgentConfig } = await ctx.loadEnv(agentConfig);
-      const mcpServers = await loadRunMcpServerInputs({
+      const loadedMcpServers = await loadRunMcpServerInputs({
         documentId,
         userId: createdById,
         env: agentEnv,
         runServers: runMcpServers
       });
+      // Workspace provisioning (create_workspace, env hand-over, LiteLLM keys)
+      // for interactive runs; Slack and headless runs already carry these
+      // tools on their rdocs/doc bridge.
+      const mcpServers =
+        createdById && agentAccessMode === "workspace" && !slackTools?.mcpUrl
+          ? await withWorkspacesBridge(loadedMcpServers, { userId: createdById, documentId, aiRunId })
+          : loadedMcpServers;
       // Comments the agent leaves via add_comment are created (and broadcast)
       // the moment they arrive, so collaborators see review feedback mid-run.
       const commentRecorder = createLiveCommentRecorder({

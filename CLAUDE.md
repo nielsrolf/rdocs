@@ -199,6 +199,23 @@ by a scoped headless run on its own document) — no Slack, no channel needed. E
 `triggerType: "SCHEDULED"` conversation run (`triggerId: schedule:<taskId>`, adoptable like
 `CONVERSATION`) as the scheduler, with the bridge; a scheduler who lost edit access disables
 the task. This is what auto-updating dashboards use. Tests: `tests/document-schedules.test.ts`.
+**Agent-provisioned workspaces + budgeted LiteLLM keys** (2026-10-10, `lib/workspace-provisioning.ts`,
+`lib/litellm-provisioning.ts`): MCP tools `create_workspace` / `list_child_workspaces` / `list_workspace_env` /
+`set_workspace_env` and `provision_litellm_key` / `update_litellm_key` / `revoke_litellm_key` / `list_litellm_keys`.
+A child workspace records `Document.parentDocumentId`, is owned by the **parent's owner**, and the creating user
+gets EDIT membership (never create docs the owner can't control); it copies the parent's model/effort/inner-docker.
+Env is handed on **by name** (`copyDocumentEnvKeys` copies ciphertext server-side) — agents never see the values.
+A confined run (`scopeDocumentId`) reaches its own document AND its direct children (`isChildWorkspaceOf` in
+`requireAccess`), and may only create children of itself. Reachability: Slack runs via `rdocs`, headless runs via
+`doc`, and interactive conversation runs via a third bridge `workspaces` (`withWorkspacesBridge`, token claim
+`toolset:"workspaces"` → only `WORKSPACE_TOOL_NAMES`, so doc edits there still go through suggestions).
+A **provisioner** is any document whose env holds `LITELLM_ADMIN_KEY` (use a team-admin key, not the proxy master
+key). `PROVISIONER_SECRET_ENV_KEYS` are dropped by `loadDocumentEnv` (so no run ever sees them), refused by every
+hand-on path, and read only via `loadProvisionerEnv`. Minting needs edit on provisioner + target; the minted key goes
+straight into the target env (secret) and a `ProvisionedCredential` row (audit + handle). Optional provisioner config:
+`LITELLM_ADMIN_BASE_URL` (default: server `LITELLM_BASE_URL` with host.docker.internal→127.0.0.1),
+`LITELLM_PROVISION_MAX_BUDGET_USD` (cap), `LITELLM_PROVISION_TEAM_ID`. Logs: `[workspace-provisioning]`,
+`[litellm-provisioning]`. Test: `tests/workspace-provisioning.test.ts` (fake LiteLLM proxy).
 `GET /authorize?redirect_uri&state` + `POST /api/authorize` (`lib/integration-signin.ts`) is
 the generic **"Sign in with r-docs"** seam: a signed-in user consents, and r-docs redirects
 back with a 2-minute HS256 id token (`sub`, `email`, `name`, `aud` = redirect origin) signed

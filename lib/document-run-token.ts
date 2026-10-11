@@ -31,7 +31,16 @@ export type DocumentRunClaims = {
   userId: string;
   documentId: string;
   aiRunId: string;
+  /** Restrict the bridge to one toolset (McpToolContext.toolset). */
+  toolset?: "workspaces";
 };
+
+/**
+ * Name the workspace-provisioning bridge is mounted under in INTERACTIVE
+ * conversation runs: tools are `mcp__workspaces__*`, limited to the
+ * "workspaces" toolset so document edits keep going through suggestions.
+ */
+export const WORKSPACES_BRIDGE_SERVER_NAME = "workspaces";
 
 export async function createDocumentRunToken(claims: DocumentRunClaims) {
   return new SignJWT({ purpose: PURPOSE, ...claims })
@@ -52,7 +61,12 @@ export async function verifyDocumentRunToken(token: string): Promise<DocumentRun
     ) {
       return null;
     }
-    return { userId: payload.userId, documentId: payload.documentId, aiRunId: payload.aiRunId };
+    return {
+      userId: payload.userId,
+      documentId: payload.documentId,
+      aiRunId: payload.aiRunId,
+      ...(payload.toolset === "workspaces" ? { toolset: "workspaces" as const } : {})
+    };
   } catch {
     return null;
   }
@@ -81,6 +95,35 @@ export async function withDocumentBridge(
     ...existing,
     {
       name: DOCUMENT_BRIDGE_SERVER_NAME,
+      url: documentBridgeUrl(),
+      headers: { Authorization: `Bearer ${token}` }
+    }
+  ];
+}
+
+/**
+ * The workspace-provisioning bridge for an interactive conversation run
+ * (create_workspace, env hand-over, LiteLLM keys), confined to the run's
+ * document and its child workspaces. Skipped when the run already has an
+ * rdocs/doc bridge (Slack runs, headless runs), which carry the same tools.
+ */
+export async function withWorkspacesBridge(
+  servers: AgentMcpServerInput[] | undefined,
+  claims: Omit<DocumentRunClaims, "toolset">
+): Promise<AgentMcpServerInput[]> {
+  const existing = servers ?? [];
+  if (
+    existing.some((server) =>
+      server.name === WORKSPACES_BRIDGE_SERVER_NAME || server.name === DOCUMENT_BRIDGE_SERVER_NAME
+    )
+  ) {
+    return existing;
+  }
+  const token = await createDocumentRunToken({ ...claims, toolset: "workspaces" });
+  return [
+    ...existing,
+    {
+      name: WORKSPACES_BRIDGE_SERVER_NAME,
       url: documentBridgeUrl(),
       headers: { Authorization: `Bearer ${token}` }
     }

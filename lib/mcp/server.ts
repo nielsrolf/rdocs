@@ -40,7 +40,7 @@ function toolInputSchema(tool: McpTool) {
   return jsonSchema;
 }
 
-export function listMcpToolDefinitions(ctx: Pick<McpToolContext, "scopeDocumentId"> = {}) {
+export function listMcpToolDefinitions(ctx: Pick<McpToolContext, "scopeDocumentId" | "toolset"> = {}) {
   return mcpToolsFor(ctx).map((tool) => ({
     name: tool.name,
     description: tool.description,

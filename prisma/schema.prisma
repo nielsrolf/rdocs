@@ -258,6 +258,11 @@ model Document {
   // dangling id falls back to the document's own local workspace. Plain string
   // (no Prisma relation) so deleting the target never cascades here.
   workspaceDocumentId     String?
+  // The workspace this one was provisioned from by an agent (create_workspace,
+  // lib/workspace-provisioning.ts). The child is owned by the parent's owner;
+  // runs confined to the parent may manage it. Plain string (no relation) so
+  // deleting the parent never cascades into its children.
+  parentDocumentId        String?
   activeAiRunId           String?
   agentModel              String?
   agentEffort             String?
@@ -312,6 +317,34 @@ model Document {
   durableApp              DurableApp?
 
   @@unique([slackTeamId, slackChannelId])
+  @@index([parentDocumentId])
+}
+
+// A credential minted at an external provider by a PROVISIONER document's
+// admin secret (e.g. a budgeted LiteLLM virtual key, lib/litellm-provisioning.ts)
+// and written into a target document's env as `envKey`. The secret itself
+// lives only in that DocumentEnvVar; this row is the audit trail and the
+// handle for status/update/revoke. Plain-string document ids (no relations):
+// a deleted document must not erase the record of a key that still exists
+// at the provider.
+model ProvisionedCredential {
+  id                    String    @id @default(cuid())
+  provider              String
+  provisionerDocumentId String
+  targetDocumentId      String
+  envKey                String
+  keyAlias              String
+  maxBudgetUsd          Float?
+  budgetDuration        String?
+  // JSON array of allowed model names; null = provider default.
+  models                String?
+  createdById           String
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  revokedAt             DateTime?
+
+  @@index([provisionerDocumentId])
+  @@index([targetDocumentId, envKey])
 }
 
 // An HTTP MCP server mounted into every agent run of this document, next to

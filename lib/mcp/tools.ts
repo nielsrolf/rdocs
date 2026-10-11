@@ -28,6 +28,21 @@ import { commitFilesToWorkspace, McpFileError, type UploadedFile } from "@/lib/m
 import { canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
 import { listQuicktakes as listQuicktakesForUser, QUICKTAKE_KIND } from "@/lib/quicktakes";
 import { ensureLinkedRepository, runWidgetBuild } from "@/lib/research-workspace";
+import { listDocumentEnvMasked } from "@/lib/document-env";
+import {
+  listLiteLlmKeys,
+  LiteLlmProvisioningError,
+  provisionLiteLlmKey,
+  revokeLiteLlmKey,
+  updateLiteLlmKey
+} from "@/lib/litellm-provisioning";
+import {
+  createChildWorkspace,
+  isChildWorkspaceOf,
+  listChildWorkspaces,
+  setWorkspaceEnv,
+  WorkspaceProvisioningError
+} from "@/lib/workspace-provisioning";
 
 export type McpUser = { id: string; email: string; name: string };
 export type McpToolContext = {
@@ -39,6 +54,13 @@ export type McpToolContext = {
    * this one document, and tools that roam across documents are refused.
    */
   scopeDocumentId?: string;
+  /**
+   * Restricts the visible/callable tools to one named set (document-run token
+   * claim `toolset`). "workspaces" = WORKSPACE_TOOL_NAMES only — mounted into
+   * interactive conversation runs, whose document edits must keep going
+   * through reviewable suggestions rather than the bridge's direct edits.
+   */
+  toolset?: "workspaces";
 };
 
 export class McpToolError extends Error {}
@@ -74,8 +96,16 @@ function parseDocumentRef(ref: string): string {
 
 async function requireAccess(ref: string, ctx: McpToolContext, level: "view" | "comment" | "edit") {
   const documentId = parseDocumentRef(ref);
-  if (ctx.scopeDocumentId && documentId !== ctx.scopeDocumentId) {
-    throw new McpToolError(`This run may only access its own document (${ctx.scopeDocumentId}).`);
+  // A confined run reaches its own document and the child workspaces created
+  // from it (create_workspace) — nothing else.
+  if (
+    ctx.scopeDocumentId &&
+    documentId !== ctx.scopeDocumentId &&
+    !(await isChildWorkspaceOf(documentId, ctx.scopeDocumentId))
+  ) {
+    throw new McpToolError(
+      `This run may only access its own document (${ctx.scopeDocumentId}) and workspaces created from it.`
+    );
   }
   const access = await resolveDocumentAccess(documentId, ctx.user.id, null);
   if (!access) {
@@ -804,6 +834,263 @@ const cancelScheduledTask = defineTool({
   }
 });
 
+
+// ---------------------------------------------------------------------------
+// Workspace provisioning (lib/workspace-provisioning.ts) and budgeted LiteLLM
+// keys (lib/litellm-provisioning.ts). Env VALUES never pass through these
+// tools in the agent→caller direction: copies happen server-side by key name,
+// minted keys go straight into the target's env.
+
+const envValues = z
+  .record(z.string().min(1).max(128), z.string().max(8192))
+  .describe("Env vars to set, KEY → value (plain values you already know; use inherit/copy for secrets you only know by name).");
+
+async function workspaceCall<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (error instanceof WorkspaceProvisioningError || error instanceof LiteLlmProvisioningError) {
+      throw new McpToolError(error.message);
+    }
+    throw error;
+  }
+}
+
+const createWorkspace = defineTool({
+  name: "create_workspace",
+  description:
+    "Create a new workspace (document with its own agent workspace) as a CHILD of an existing one — e.g. one workspace per project, provisioned by a coordinating agent. " +
+    "The child is owned by the parent's owner; you get edit access. It copies the parent's model settings. " +
+    "Hand on secrets by NAME with inherit_env (values are copied server-side; you never see them); set plain config with environment. " +
+    "Needs edit access to the parent. A run confined to its document may only use its own document as parent. " +
+    MARKDOWN_CONTRACT,
+  schema: z
+    .object({
+      parent: documentRef.describe("The workspace the new one is created from (usually the one you are working in)."),
+      title: z.string().min(1).max(300),
+      markdown: z.string().max(400_000).optional().describe("Initial document content, e.g. the project brief."),
+      environment: envValues.optional(),
+      inherit_env: z
+        .array(z.string().min(1).max(128))
+        .max(30)
+        .optional()
+        .describe("Env var names to copy from the parent, e.g. [\"OPENWEIGHTS_API_KEY\"]."),
+      inherit_skills: z.array(z.string().min(1).max(128)).max(30).optional().describe("Parent skill names to copy."),
+      repo_url: z.string().min(1).max(500).optional().describe("GitHub/HuggingFace HTTPS repo to link."),
+      repo_branch: z.string().min(1).max(200).optional()
+    })
+    .strict(),
+  handler: async (args, ctx) => {
+    if (ctx.scopeDocumentId && parseDocumentRef(args.parent) !== ctx.scopeDocumentId) {
+      throw new McpToolError(`A run confined to ${ctx.scopeDocumentId} can only create workspaces under it.`);
+    }
+    const { documentId: parentId } = await requireEditableDocument(args.parent, ctx);
+    const created = await workspaceCall(() =>
+      createChildWorkspace({
+        parentDocumentId: parentId,
+        userId: ctx.user.id,
+        title: args.title,
+        markdown: args.markdown,
+        environment: args.environment,
+        inheritEnv: args.inherit_env,
+        inheritSkills: args.inherit_skills,
+        repoUrl: args.repo_url ?? null,
+        repoBranch: args.repo_branch ?? null
+      })
+    );
+    return {
+      id: created.id,
+      url: `${ctx.origin}/documents/${created.id}`,
+      parent: parentId,
+      env_keys: created.envKeys,
+      skills: created.skills
+    };
+  }
+});
+
+const listWorkspaces = defineTool({
+  name: "list_child_workspaces",
+  description: "List the workspaces created from a document with create_workspace (id, title, url).",
+  schema: z.object({ parent: documentRef }).strict(),
+  handler: async (args, ctx) => {
+    const { documentId } = await requireAccess(args.parent, ctx, "view");
+    const children = await listChildWorkspaces(documentId);
+    const visible = [];
+    for (const child of children) {
+      const access = await resolveDocumentAccess(child.id, ctx.user.id, null);
+      if (!access) continue;
+      visible.push({
+        id: child.id,
+        title: child.title,
+        url: `${ctx.origin}/documents/${child.id}`,
+        repo_url: child.repoUrl,
+        created_at: child.createdAt.toISOString(),
+        your_access: access.document.ownerId === ctx.user.id ? "owner" : access.permission.toLowerCase()
+      });
+    }
+    return { workspaces: visible };
+  }
+});
+
+const listWorkspaceEnv = defineTool({
+  name: "list_workspace_env",
+  description: "List a document's environment variables: names, secret flag, and MASKED values (plain config values are shown in full). Needs edit access.",
+  schema: z.object({ document: documentRef }).strict(),
+  handler: async (args, ctx) => {
+    const { documentId } = await requireAccess(args.document, ctx, "edit");
+    const env = await listDocumentEnvMasked(documentId);
+    return { env: env.map((entry) => ({ key: entry.key, value: entry.masked, is_secret: entry.isSecret })) };
+  }
+});
+
+const setWorkspaceEnvTool = defineTool({
+  name: "set_workspace_env",
+  description:
+    "Change a document's environment variables (they reach every later agent run of that workspace). " +
+    "set = literal values; copy_from = copy named vars from another document you can edit, server-side (use this for secrets); unset = delete. " +
+    "Needs edit access to the document (and to copy_from's document).",
+  schema: z
+    .object({
+      document: documentRef,
+      set: envValues.optional(),
+      copy_from: z
+        .object({ document: documentRef, keys: z.array(z.string().min(1).max(128)).min(1).max(30) })
+        .strict()
+        .optional(),
+      unset: z.array(z.string().min(1).max(128)).max(30).optional()
+    })
+    .strict(),
+  handler: async (args, ctx) => {
+    const { documentId } = await requireAccess(args.document, ctx, "edit");
+    const copyFrom = args.copy_from
+      ? { documentId: (await requireAccess(args.copy_from.document, ctx, "edit")).documentId, keys: args.copy_from.keys }
+      : undefined;
+    const env = await workspaceCall(() =>
+      setWorkspaceEnv({ documentId, set: args.set, copyFrom, unset: args.unset })
+    );
+    return { env: env.map((entry) => ({ key: entry.key, value: entry.masked, is_secret: entry.isSecret })) };
+  }
+});
+
+const PROVISIONER_DESCRIPTION =
+  "the provisioner document: one whose owner stored a LiteLLM admin key (LITELLM_ADMIN_KEY) in its environment. You never see that key.";
+
+const provisionLiteLlmKeyTool = defineTool({
+  name: "provision_litellm_key",
+  description:
+    "Mint a new LiteLLM virtual key with a spend limit and store it in a workspace's env (default LITELLM_API_KEY), so that workspace's agent runs and scripts bill against their own budget. " +
+    "You never see the key. budget_duration resets the budget periodically (e.g. 30d, 7d, 1mo); without it max_budget_usd is a lifetime cap. " +
+    "Needs edit access to both documents; the provisioner may cap budgets (LITELLM_PROVISION_MAX_BUDGET_USD).",
+  schema: z
+    .object({
+      provisioner: documentRef.describe(`The document holding the admin key — ${PROVISIONER_DESCRIPTION}`),
+      document: documentRef.describe("The workspace that receives the key."),
+      max_budget_usd: z.number().min(0).max(1_000_000),
+      budget_duration: z.string().min(2).max(8).optional(),
+      models: z.array(z.string().min(1).max(200)).max(100).optional().describe("Allowed model names; omit for the proxy default."),
+      env_key: z.string().min(1).max(128).optional().describe("Env var name; default LITELLM_API_KEY."),
+      replace: z.boolean().optional().describe("Replace an existing value; a key provisioned earlier is deleted at LiteLLM.")
+    })
+    .strict(),
+  handler: async (args, ctx) => {
+    const { documentId: provisionerDocumentId } = await requireAccess(args.provisioner, ctx, "edit");
+    const { documentId: targetDocumentId } = await requireAccess(args.document, ctx, "edit");
+    const minted = await workspaceCall(() =>
+      provisionLiteLlmKey({
+        provisionerDocumentId,
+        targetDocumentId,
+        userId: ctx.user.id,
+        maxBudgetUsd: args.max_budget_usd,
+        budgetDuration: args.budget_duration ?? null,
+        models: args.models ?? null,
+        envKey: args.env_key,
+        replace: args.replace
+      })
+    );
+    return {
+      provisioned: {
+        document: targetDocumentId,
+        env_key: minted.envKey,
+        key_alias: minted.keyAlias,
+        max_budget_usd: minted.maxBudgetUsd,
+        budget_duration: minted.budgetDuration,
+        models: minted.models,
+        team_id: minted.teamId
+      }
+    };
+  }
+});
+
+const updateLiteLlmKeyTool = defineTool({
+  name: "update_litellm_key",
+  description:
+    "Change a provisioned LiteLLM key's spend limit, budget period or allowed models, or block/unblock it. Needs edit access to both documents.",
+  schema: z
+    .object({
+      provisioner: documentRef.describe(`The document that minted the key — ${PROVISIONER_DESCRIPTION}`),
+      document: documentRef,
+      env_key: z.string().min(1).max(128).optional(),
+      max_budget_usd: z.number().min(0).max(1_000_000).optional(),
+      budget_duration: z.string().min(2).max(8).nullable().optional(),
+      models: z.array(z.string().min(1).max(200)).max(100).nullable().optional(),
+      blocked: z.boolean().optional()
+    })
+    .strict(),
+  handler: async (args, ctx) => {
+    const { documentId: provisionerDocumentId } = await requireAccess(args.provisioner, ctx, "edit");
+    const { documentId: targetDocumentId } = await requireAccess(args.document, ctx, "edit");
+    return workspaceCall(() =>
+      updateLiteLlmKey({
+        provisionerDocumentId,
+        targetDocumentId,
+        envKey: args.env_key,
+        maxBudgetUsd: args.max_budget_usd,
+        budgetDuration: args.budget_duration,
+        models: args.models,
+        blocked: args.blocked
+      })
+    );
+  }
+});
+
+const revokeLiteLlmKeyTool = defineTool({
+  name: "revoke_litellm_key",
+  description: "Delete a provisioned LiteLLM key at the proxy and remove it from the workspace's env. Needs edit access to both documents.",
+  schema: z
+    .object({
+      provisioner: documentRef.describe(`The document that minted the key — ${PROVISIONER_DESCRIPTION}`),
+      document: documentRef,
+      env_key: z.string().min(1).max(128).optional()
+    })
+    .strict(),
+  handler: async (args, ctx) => {
+    const { documentId: provisionerDocumentId } = await requireAccess(args.provisioner, ctx, "edit");
+    const { documentId: targetDocumentId } = await requireAccess(args.document, ctx, "edit");
+    return workspaceCall(() => revokeLiteLlmKey({ provisionerDocumentId, targetDocumentId, envKey: args.env_key }));
+  }
+});
+
+const listLiteLlmKeysTool = defineTool({
+  name: "list_litellm_keys",
+  description:
+    "List the LiteLLM keys a provisioner minted, with LIVE spend, budget, reset time and blocked state from the proxy. Optionally filter to one workspace. Needs edit access to the provisioner.",
+  schema: z
+    .object({
+      provisioner: documentRef.describe(`The provisioner document — ${PROVISIONER_DESCRIPTION}`),
+      document: documentRef.optional(),
+      include_revoked: z.boolean().optional()
+    })
+    .strict(),
+  handler: async (args, ctx) => {
+    const { documentId: provisionerDocumentId } = await requireAccess(args.provisioner, ctx, "edit");
+    const targetDocumentId = args.document ? (await requireAccess(args.document, ctx, "view")).documentId : undefined;
+    const keys = await workspaceCall(() =>
+      listLiteLlmKeys({ provisionerDocumentId, targetDocumentId, includeRevoked: args.include_revoked })
+    );
+    return { keys };
+  }
+});
+
 export const MCP_TOOLS: McpTool[] = [
   listDocuments,
   listQuicktakes,
@@ -820,15 +1107,41 @@ export const MCP_TOOLS: McpTool[] = [
   replyToComment,
   scheduleTask,
   listScheduledTasks,
-  cancelScheduledTask
+  cancelScheduledTask,
+  createWorkspace,
+  listWorkspaces,
+  listWorkspaceEnv,
+  setWorkspaceEnvTool,
+  provisionLiteLlmKeyTool,
+  updateLiteLlmKeyTool,
+  revokeLiteLlmKeyTool,
+  listLiteLlmKeysTool
 ];
+
+/** The `workspaces` toolset (McpToolContext.toolset). */
+export const WORKSPACE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "create_workspace",
+  "list_child_workspaces",
+  "list_workspace_env",
+  "set_workspace_env",
+  "provision_litellm_key",
+  "update_litellm_key",
+  "revoke_litellm_key",
+  "list_litellm_keys"
+]);
 
 // Tools that roam across the user's documents; a document-scoped caller
 // (McpToolContext.scopeDocumentId) neither sees nor may call them.
 const SCOPE_REFUSED_TOOLS = new Set(["list_documents", "list_quicktakes", "create_document"]);
 
-export function mcpToolsFor(ctx: Pick<McpToolContext, "scopeDocumentId">): McpTool[] {
-  return ctx.scopeDocumentId ? MCP_TOOLS.filter((tool) => !SCOPE_REFUSED_TOOLS.has(tool.name)) : MCP_TOOLS;
+function toolAllowed(name: string, ctx: Pick<McpToolContext, "scopeDocumentId" | "toolset">): boolean {
+  if (ctx.scopeDocumentId && SCOPE_REFUSED_TOOLS.has(name)) return false;
+  if (ctx.toolset === "workspaces" && !WORKSPACE_TOOL_NAMES.has(name)) return false;
+  return true;
+}
+
+export function mcpToolsFor(ctx: Pick<McpToolContext, "scopeDocumentId" | "toolset">): McpTool[] {
+  return MCP_TOOLS.filter((tool) => toolAllowed(tool.name, ctx));
 }
 
 export function getMcpTool(name: string): McpTool | undefined {
@@ -840,8 +1153,12 @@ export async function callMcpTool(name: string, args: unknown, ctx: McpToolConte
   if (!tool) {
     throw new McpToolError(`Unknown tool: ${name}`);
   }
-  if (ctx.scopeDocumentId && SCOPE_REFUSED_TOOLS.has(name)) {
-    throw new McpToolError(`${name} is not available to a run confined to document ${ctx.scopeDocumentId}.`);
+  if (!toolAllowed(name, ctx)) {
+    throw new McpToolError(
+      ctx.scopeDocumentId
+        ? `${name} is not available to a run confined to document ${ctx.scopeDocumentId}.`
+        : `${name} is not available on this connection.`
+    );
   }
   const parsed = tool.schema.safeParse(args ?? {});
   if (!parsed.success) {
