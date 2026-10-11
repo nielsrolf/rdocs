@@ -4,8 +4,9 @@ import { useState } from "react";
 
 import { CommentInbox, type InboxThreadView } from "@/components/comment-inbox";
 import { DocumentList, type DashboardDoc } from "@/components/document-list";
+import { SchedulesList } from "@/components/schedules-list";
 
-type DashboardTab = "documents" | "channels" | "comments";
+type DashboardTab = "documents" | "channels" | "schedules" | "comments";
 
 type DashboardTabsProps = {
   documents: DashboardDoc[];
@@ -44,6 +45,15 @@ export function DashboardTabs({
           type="button"
         >
           Slack channels
+        </button>
+        <button
+          aria-selected={tab === "schedules"}
+          className={tab === "schedules" ? "dashboard-tab dashboard-tab-active" : "dashboard-tab"}
+          onClick={() => setTab("schedules")}
+          role="tab"
+          type="button"
+        >
+          Schedules
         </button>
         <button
           aria-selected={tab === "comments"}
@@ -114,6 +124,12 @@ export function DashboardTabs({
             </p>
           </section>
         )
+      ) : tab === "schedules" ? (
+        <SchedulesList
+          documents={documents
+            .filter((d) => d.permission === "EDIT")
+            .map((d) => ({ id: d.id, title: d.title, kind: d.kind }))}
+        />
       ) : (
         <CommentInbox initialThreads={inboxThreads} allTags={inboxTags} />
       )}

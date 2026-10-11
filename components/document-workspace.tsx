@@ -5260,6 +5260,7 @@ export function DocumentWorkspace({
           localModel={localAgentModel}
           anthropicFreeFallback={anthropicFreeFallback}
           runnerMode={runnerMode}
+          documentKind={documentKind}
           isOwner={isOwner}
           onAgentModelChange={(model) => void handleSaveAgentConfig({ model })}
           onAgentEffortChange={(effort) => void handleSaveAgentConfig({ effort })}

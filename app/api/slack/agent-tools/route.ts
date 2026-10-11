@@ -21,6 +21,8 @@ const toolRequestSchema = z.object({
     "keep_alive_after_turn",
     "list_scheduled_tasks",
     "cancel_scheduled_task",
+    "update_scheduled_task",
+    "get_scheduled_task_history",
     "send_file",
     "set_channel_workspace",
     "set_channel_repository"

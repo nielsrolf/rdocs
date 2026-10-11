@@ -30,7 +30,9 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
       ? ("comments" as const)
       : resolvedSearchParams?.tab === "channels"
         ? ("channels" as const)
-        : ("documents" as const);
+        : resolvedSearchParams?.tab === "schedules"
+          ? ("schedules" as const)
+          : ("documents" as const);
 
   // Quicktakes are documents in the backend but live on the forum only —
   // never in the studio dashboard.

@@ -14,7 +14,16 @@ import { recordAiRunEvent } from "@/lib/ai-runs";
 import { db } from "@/lib/db";
 import { headlessEditNote, withDocumentBridge } from "@/lib/document-run-token";
 import { canEdit, resolveDocumentAccess } from "@/lib/permissions";
-import { computeNextRunAt, MAX_ACTIVE_TASKS_PER_DOCUMENT } from "@/lib/scheduler";
+import {
+  endTask,
+  firingHeader,
+  type FiringResult,
+  normalizeTitle,
+  prepareNewSchedule,
+  scheduleLink,
+  ScheduleError,
+  scheduleStatus
+} from "@/lib/schedules";
 
 export const DOCUMENT_CONTEXT = "document";
 export const SCHEDULED_TRIGGER_TYPE = "SCHEDULED";
@@ -29,6 +38,9 @@ export class DocumentScheduleError extends Error {}
 
 export type DocumentScheduleView = {
   id: string;
+  title: string;
+  status: "active" | "paused" | "ended";
+  link: string;
   context: string;
   instruction: string;
   cron: string | null;
@@ -43,6 +55,9 @@ export type DocumentScheduleView = {
 function view(task: ScheduledTask): DocumentScheduleView {
   return {
     id: task.id,
+    title: task.title ?? normalizeTitle(null, task.instruction),
+    status: scheduleStatus(task),
+    link: scheduleLink(task.id),
     context: task.contextType,
     instruction: task.instruction,
     cron: task.cron,
@@ -67,6 +82,7 @@ export async function createDocumentSchedule(args: {
   documentId: string;
   createdById: string;
   instruction: string;
+  title?: string | null;
   cron?: string | null;
   at?: string | null;
   timezone?: string | null;
@@ -78,18 +94,16 @@ export async function createDocumentSchedule(args: {
   }
   let nextRunAt: Date;
   try {
-    nextRunAt = computeNextRunAt({ cron: args.cron ?? null, at: args.at ?? null, timezone: args.timezone ?? null });
+    nextRunAt = await prepareNewSchedule(args);
   } catch (error) {
-    throw new DocumentScheduleError(error instanceof Error ? error.message : String(error));
-  }
-  const active = await db.scheduledTask.count({ where: { documentId: args.documentId, disabledAt: null } });
-  if (active >= MAX_ACTIVE_TASKS_PER_DOCUMENT) {
-    throw new DocumentScheduleError(`This document already has ${active} active scheduled tasks — cancel some first.`);
+    if (error instanceof ScheduleError) throw new DocumentScheduleError(error.message);
+    throw error;
   }
   const task = await db.scheduledTask.create({
     data: {
       documentId: args.documentId,
       createdById: args.createdById,
+      title: normalizeTitle(args.title, instruction),
       instruction,
       contextType: DOCUMENT_CONTEXT,
       cron: args.cron ?? null,
@@ -104,7 +118,7 @@ export async function createDocumentSchedule(args: {
 export async function cancelDocumentSchedule(documentId: string, taskId: string): Promise<boolean> {
   const updated = await db.scheduledTask.updateMany({
     where: { id: taskId, documentId, contextType: { in: DOCUMENT_LEVEL_CONTEXTS }, disabledAt: null },
-    data: { disabledAt: new Date() }
+    data: { disabledAt: new Date(), endedReason: "cancelled" }
   });
   return updated.count === 1;
 }
@@ -113,31 +127,30 @@ export type DocumentTaskHooks = {
   runInBackground?: typeof runAgentConversationInBackground;
 };
 
-async function disable(taskId: string, reason: string) {
-  await db.scheduledTask.update({ where: { id: taskId }, data: { disabledAt: new Date() } }).catch(() => null);
+async function disable(taskId: string, reason: string): Promise<FiringResult> {
+  await endTask(taskId, reason);
   console.warn(`[scheduler] disabling document task: ${reason}`, { taskId });
+  return { outcome: "disabled", detail: reason };
 }
+
+type FireableTask = Pick<ScheduledTask, "id" | "documentId" | "instruction" | "createdById"> &
+  Partial<Pick<ScheduledTask, "title" | "kind">>;
 
 /**
  * Fire one claimed document task as a headless run of its scheduler. Returns
  * the run id, or null when the task can no longer run (document gone, or the
  * scheduler lost edit access) — such a task is disabled, not retried.
  */
-export async function fireDocumentTask(
-  task: Pick<ScheduledTask, "id" | "documentId" | "instruction" | "createdById">,
-  hooks: DocumentTaskHooks = {}
-): Promise<string | null> {
-  if (!task.createdById) {
-    await disable(task.id, "its scheduler was deleted");
-    return null;
-  }
+export async function fireDocumentTask(task: FireableTask, hooks: DocumentTaskHooks = {}): Promise<string | null> {
+  return (await fireDocumentTaskOutcome(task, hooks)).runId ?? null;
+}
+
+export async function fireDocumentTaskOutcome(task: FireableTask, hooks: DocumentTaskHooks = {}): Promise<FiringResult> {
+  if (!task.createdById) return disable(task.id, "its scheduler was deleted");
   const access = await resolveDocumentAccess(task.documentId, task.createdById, null);
-  if (!access || !canEdit(access.permission)) {
-    await disable(task.id, "its scheduler no longer has edit access");
-    return null;
-  }
+  if (!access || !canEdit(access.permission)) return disable(task.id, "its scheduler no longer has edit access");
   const document = access.document;
-  const instruction = `[Scheduled task firing — standing job on this document]\n${task.instruction}`;
+  const instruction = `${firingHeader(task, "standing job on this document")}\n${task.instruction}`;
   const aiRun = await db.aiRun.create({
     data: {
       documentId: task.documentId,
@@ -175,5 +188,5 @@ export async function fireDocumentTask(
     });
   });
   await db.scheduledTask.update({ where: { id: task.id }, data: { lastRunId: aiRun.id } }).catch(() => null);
-  return aiRun.id;
+  return { outcome: "started", runId: aiRun.id };
 }

@@ -59,8 +59,11 @@ const SLACK_MCP_TOOLS: ToolDefinition[] = [
   },
   {
     name: "schedule_task",
-    description: "Schedule a recurring or one-shot task in the current Slack conversation.",
+    description:
+      "Schedule a recurring or one-shot task in the current Slack conversation. Give it a short title; " +
+      "before scheduling, check list_scheduled_tasks so you change an existing job instead of duplicating it.",
     inputSchema: objectSchema({
+      title: string,
       instruction: string,
       cron: string,
       at: string,
@@ -91,13 +94,34 @@ const SLACK_MCP_TOOLS: ToolDefinition[] = [
   },
   {
     name: "list_scheduled_tasks",
-    description: "List active scheduled tasks for the current Slack conversation.",
-    inputSchema: objectSchema({})
+    description:
+      "List scheduled tasks. scope: channel (default, this channel incl. wake-ups), thread (this conversation) or " +
+      "mine (every task the user can see across rdocs).",
+    inputSchema: objectSchema({
+      scope: { type: "string", enum: ["channel", "thread", "mine"] },
+      include_ended: boolean,
+      include_wakeups: boolean
+    })
   },
   {
     name: "cancel_scheduled_task",
     description: "Cancel an active scheduled task by id.",
     inputSchema: objectSchema({ task_id: string }, ["task_id"])
+  },
+  {
+    name: "update_scheduled_task",
+    description:
+      "Change a scheduled task in place: title, instruction, schedule (cron + timezone, or at for a one-shot), " +
+      "or pause/resume it (paused). Use this instead of cancelling and re-creating.",
+    inputSchema: objectSchema(
+      { task_id: string, title: string, instruction: string, cron: string, at: string, timezone: string, paused: boolean },
+      ["task_id"]
+    )
+  },
+  {
+    name: "get_scheduled_task_history",
+    description: "Recent firings of a scheduled task (newest first): outcome, run id and run status, errors.",
+    inputSchema: objectSchema({ task_id: string, limit }, ["task_id"])
   },
   {
     name: "send_slack_file",

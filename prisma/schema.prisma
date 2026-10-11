@@ -827,14 +827,48 @@ model ScheduledTask {
   nextRunAt      DateTime
   lastFiredAt    DateTime?
   lastRunId      String?
+  // Ended for good (cancelled, one-shot fired, channel revoked, …); endedReason says why.
   disabledAt     DateTime?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
+  // Overview fields (lib/schedules.ts). title: short human name, shown in the
+  // Schedules tab and in the firing message. kind: "job" (a standing task someone
+  // set up) or "wakeup" (an agent's own check_back_later alarm, hidden by default).
+  // pausedAt: skipped by the poll loop until resumed (nextRunAt is recomputed then).
+  title          String?
+  kind           String    @default("job")
+  pausedAt       DateTime?
+  endedReason    String?
+  // Outcome of the most recent firing (see ScheduledTaskFiring.outcome).
+  lastOutcome    String?
+  lastError      String?
   document       Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
   createdBy      User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  firings        ScheduledTaskFiring[]
 
   @@index([nextRunAt, disabledAt])
   @@index([documentId])
+  @@index([createdById])
+}
+
+// One row per attempt to fire a ScheduledTask — including the ones that never
+// became a run (deferred because the thread was busy, skipped because Slack is
+// not configured, disabled because the channel was revoked). Those used to be
+// visible only in the service log.
+model ScheduledTaskFiring {
+  id        String        @id @default(cuid())
+  taskId    String
+  firedAt   DateTime      @default(now())
+  // "started" | "injected" | "deferred" | "skipped" | "disabled" | "error"
+  outcome   String
+  // "schedule" (due time reached) or "manual" (Run now)
+  trigger   String        @default("schedule")
+  runId     String?
+  detail    String?
+  task      ScheduledTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, firedAt])
+  @@index([runId])
 }
 
 model EmbeddedWidget {

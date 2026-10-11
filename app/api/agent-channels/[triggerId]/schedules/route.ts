@@ -23,6 +23,8 @@ export async function GET(request: Request, { params }: { params: Promise<{ trig
 
 const createSchema = z.object({
   instruction: z.string().min(1).max(MAX_INSTRUCTION_LENGTH),
+  /** Short human name shown in the r-docs Schedules overview. Defaults to the instruction's first line. */
+  title: z.string().max(80).optional().nullable(),
   /** 5-field cron for a recurring job … */
   cron: z.string().min(9).max(100).optional().nullable(),
   /** … or an ISO-8601 time for a one-shot. Exactly one of the two. */

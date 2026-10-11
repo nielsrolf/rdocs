@@ -15,12 +15,7 @@ import {
 import { notifyCommentPosted } from "@/lib/comment-notifications";
 import { db } from "@/lib/db";
 import { serializeComment, serializeThread } from "@/lib/document-data";
-import {
-  cancelDocumentSchedule,
-  createDocumentSchedule,
-  DocumentScheduleError,
-  listDocumentSchedules
-} from "@/lib/document-schedules";
+import { createDocumentSchedule, DocumentScheduleError } from "@/lib/document-schedules";
 import { copyOwnerDefaultSkillsToDocument } from "@/lib/document-skills";
 import { applyMarkdownEdit, McpEditError } from "@/lib/mcp/apply-edit";
 import { widgetSourceUrl } from "@/lib/mcp/markdown-doc";
@@ -28,6 +23,14 @@ import { commitFilesToWorkspace, McpFileError, type UploadedFile } from "@/lib/m
 import { canComment, canEdit, resolveDocumentAccess } from "@/lib/permissions";
 import { listQuicktakes as listQuicktakesForUser, QUICKTAKE_KIND } from "@/lib/quicktakes";
 import { ensureLinkedRepository, runWidgetBuild } from "@/lib/research-workspace";
+import {
+  cancelSchedule,
+  getScheduleHistory,
+  listSchedulesForDocument,
+  listSchedulesForUser,
+  ScheduleError,
+  updateSchedule
+} from "@/lib/schedules";
 import { listDocumentEnvMasked } from "@/lib/document-env";
 import {
   listLiteLlmKeys,
@@ -782,10 +785,11 @@ const replyToComment = defineTool({
 const scheduleTask = defineTool({
   name: "schedule_task",
   description:
-    "Install a standing job on a document: at each firing an agent runs headlessly on that document as you, with the given instruction, and can edit it directly (e.g. 'refresh this dashboard'). Give either cron (recurring, 5-field, at least 5 minutes apart, interpreted in timezone) or at (one-shot ISO-8601 time). Requires edit access. Write the instruction so a fresh agent with no memory of this conversation can do the job from it and the document alone.",
+    "Install a standing job on a document: at each firing an agent runs headlessly on that document as you, with the given instruction, and can edit it directly (e.g. 'refresh this dashboard'). Give either cron (recurring, 5-field, at least 5 minutes apart, interpreted in timezone) or at (one-shot ISO-8601 time). Requires edit access. Write the instruction so a fresh agent with no memory of this conversation can do the job from it and the document alone. Check list_scheduled_tasks first — if a similar job exists, change it with update_scheduled_task instead.",
   schema: z
     .object({
       document: documentRef,
+      title: z.string().min(1).max(80).optional().describe("Short name shown in the Schedules overview, e.g. 'Daily dashboard refresh'."),
       instruction: z.string().min(1).max(6000).describe("What the agent should do at each firing."),
       cron: z.string().min(1).max(100).optional().describe("Recurring schedule, e.g. '30 7 * * *'."),
       at: z.string().min(1).max(100).optional().describe("One-shot time, ISO-8601 with offset."),
@@ -798,12 +802,13 @@ const scheduleTask = defineTool({
       const task = await createDocumentSchedule({
         documentId,
         createdById: ctx.user.id,
+        title: args.title ?? null,
         instruction: args.instruction,
         cron: args.cron ?? null,
         at: args.at ?? null,
         timezone: args.timezone ?? null
       });
-      return { scheduled: task };
+      return { scheduled: { ...task, link: `${ctx.origin}${task.link}` } };
     } catch (error) {
       if (error instanceof DocumentScheduleError) throw new McpToolError(error.message);
       throw error;
@@ -811,29 +816,122 @@ const scheduleTask = defineTool({
   }
 });
 
+// The shared rule (lib/schedules.ts) decides who may see and change a task; a
+// run confined to one document additionally only reaches that document's tasks.
+async function requireScheduleInScope(taskId: string, ctx: McpToolContext) {
+  if (!ctx.scopeDocumentId) return;
+  const task = await db.scheduledTask.findUnique({ where: { id: taskId }, select: { documentId: true } });
+  if (!task || task.documentId !== ctx.scopeDocumentId) {
+    throw new McpToolError(`This run may only manage scheduled tasks of its own document (${ctx.scopeDocumentId}).`);
+  }
+}
+
+function scheduleToolError(error: unknown): never {
+  if (error instanceof ScheduleError) throw new McpToolError(error.message);
+  throw error;
+}
+
 const listScheduledTasks = defineTool({
   name: "list_scheduled_tasks",
   description:
-    "List the active standing jobs of a document: ones installed with schedule_task (context \"document\") and ones an integration installed on its API channel (context \"api_channel\") — id, instruction, cron, next and last firing, last run id.",
-  schema: z.object({ document: documentRef }).strict(),
+    "List scheduled tasks — id, title, schedule in plain words, status (active / paused / ended), next and last firing with its outcome, where it runs, creator, and a link to the Schedules overview. With document: every task of that document (Slack, API-channel and document jobs). Without: every task you can see — ones you created plus tasks on documents you can edit.",
+  schema: z
+    .object({
+      document: documentRef.optional(),
+      include_ended: z.boolean().optional().describe("Also list cancelled and finished tasks."),
+      include_wakeups: z.boolean().optional().describe("Also list agents' check_back_later wake-ups.")
+    })
+    .strict(),
   handler: async (args, ctx) => {
-    const { documentId } = await requireAccess(args.document, ctx, "view");
-    return { tasks: await listDocumentSchedules(documentId) };
+    const options = { includeEnded: args.include_ended ?? false, includeWakeups: args.include_wakeups ?? false };
+    const documentRefArg = args.document ?? ctx.scopeDocumentId;
+    const tasks = documentRefArg
+      ? await listSchedulesForDocument((await requireAccess(documentRefArg, ctx, "view")).documentId, options)
+      : await listSchedulesForUser(ctx.user.id, options);
+    return {
+      tasks: tasks.map((task) => ({ ...task, link: `${ctx.origin}${task.link}` })),
+      overview: `${ctx.origin}/dashboard?tab=schedules`
+    };
+  }
+});
+
+const updateScheduledTask = defineTool({
+  name: "update_scheduled_task",
+  description:
+    "Change a scheduled task in place: title, instruction, schedule (cron + timezone, or at for a one-shot), or pause/resume it. Only its creator or an editor of its document may. Prefer this over cancelling and re-creating.",
+  schema: z
+    .object({
+      task_id: z.string().min(1).max(64),
+      title: z.string().min(1).max(80).optional(),
+      instruction: z.string().min(1).max(6000).optional().describe("Full replacement instruction."),
+      cron: z.string().min(1).max(100).optional(),
+      at: z.string().min(1).max(100).optional(),
+      timezone: z.string().min(1).max(64).optional(),
+      paused: z.boolean().optional().describe("true pauses a recurring task, false resumes it.")
+    })
+    .strict(),
+  handler: async (args, ctx) => {
+    await requireScheduleInScope(args.task_id, ctx);
+    const { task_id, ...patch } = args;
+    if (Object.keys(patch).length === 0) {
+      throw new McpToolError("Nothing to change: pass title, instruction, cron/at, timezone or paused.");
+    }
+    try {
+      const task = await updateSchedule(task_id, patch, { userId: ctx.user.id });
+      return { updated: { ...task, link: `${ctx.origin}${task.link}` } };
+    } catch (error) {
+      scheduleToolError(error);
+    }
   }
 });
 
 const cancelScheduledTask = defineTool({
   name: "cancel_scheduled_task",
-  description: "Cancel a standing job on a document by id (from list_scheduled_tasks). Requires edit access.",
-  schema: z.object({ document: documentRef, task_id: z.string().min(1).max(64) }).strict(),
+  description:
+    "Cancel a scheduled task by id (from list_scheduled_tasks). Only its creator or an editor of its document may. To stop it temporarily, pause it with update_scheduled_task instead.",
+  schema: z
+    .object({
+      document: documentRef.optional().describe("Optional; kept for older callers."),
+      task_id: z.string().min(1).max(64)
+    })
+    .strict(),
   handler: async (args, ctx) => {
-    const { documentId } = await requireAccess(args.document, ctx, "edit");
-    const cancelled = await cancelDocumentSchedule(documentId, args.task_id);
-    if (!cancelled) throw new McpToolError("No active scheduled task with that id on this document.");
-    return { cancelled: args.task_id };
+    await requireScheduleInScope(args.task_id, ctx);
+    if (args.document) {
+      const { documentId } = await requireAccess(args.document, ctx, "view");
+      const task = await db.scheduledTask.findUnique({ where: { id: args.task_id }, select: { documentId: true } });
+      if (!task || task.documentId !== documentId) {
+        throw new McpToolError("No active scheduled task with that id on this document.");
+      }
+    }
+    try {
+      await cancelSchedule(args.task_id, { userId: ctx.user.id });
+      return { cancelled: args.task_id };
+    } catch (error) {
+      scheduleToolError(error);
+    }
   }
 });
 
+const scheduledTaskHistory = defineTool({
+  name: "get_scheduled_task_history",
+  description:
+    "Recent firings of a scheduled task, newest first: when, outcome (started / injected / deferred / skipped / disabled / error), whether it was a manual Run now, the run id and that run's status, and any error.",
+  schema: z
+    .object({
+      task_id: z.string().min(1).max(64),
+      limit: z.number().int().min(1).max(100).optional()
+    })
+    .strict(),
+  handler: async (args, ctx) => {
+    await requireScheduleInScope(args.task_id, ctx);
+    try {
+      return { firings: await getScheduleHistory(args.task_id, { userId: ctx.user.id }, args.limit ?? 20) };
+    } catch (error) {
+      scheduleToolError(error);
+    }
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Workspace provisioning (lib/workspace-provisioning.ts) and budgeted LiteLLM
@@ -1107,7 +1205,9 @@ export const MCP_TOOLS: McpTool[] = [
   replyToComment,
   scheduleTask,
   listScheduledTasks,
+  updateScheduledTask,
   cancelScheduledTask,
+  scheduledTaskHistory,
   createWorkspace,
   listWorkspaces,
   listWorkspaceEnv,

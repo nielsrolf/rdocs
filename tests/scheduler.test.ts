@@ -109,7 +109,7 @@ test("schedule_task tool creates a task anchored to the run's conversation and a
     { claims, slack: deps.slack, botUserId: BOT }
   );
   assert.ok(created.ok, created.text);
-  assert.match(created.text, /Scheduled \(id /);
+  assert.match(created.text, /Scheduled "post a daily digest" \(id /);
 
   const task = await db.scheduledTask.findFirst({ where: { documentId: doc.id, disabledAt: null } });
   assert.ok(task);

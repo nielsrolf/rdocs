@@ -7598,3 +7598,276 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 .env-var-row-shadowed .env-var-key {
   text-decoration: line-through;
 }
+
+/* Schedules overview (components/schedules-list.tsx): dashboard tab + agent-screen menu */
+.schedules {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.schedules-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem 1rem;
+}
+
+.schedules-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+  max-width: 62ch;
+}
+
+.schedules-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  font-size: 0.9rem;
+}
+
+.schedules-filters label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  white-space: nowrap;
+}
+
+.schedules-filters input[type="checkbox"],
+.schedule-field input[type="checkbox"] {
+  width: auto;
+}
+
+.schedules-empty p {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+}
+
+.schedule-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.schedule-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.85rem 1rem;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid var(--border);
+  min-width: 0;
+}
+
+.schedule-card-highlight {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.schedule-card-ended {
+  opacity: 0.72;
+}
+
+.schedule-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.schedule-card-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.schedule-card-title strong {
+  overflow-wrap: anywhere;
+}
+
+.schedule-card-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.schedule-card-buttons .ghost-button {
+  padding: 0.35rem 0.75rem;
+  font-size: 0.85rem;
+}
+
+.schedule-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+.schedule-link {
+  color: var(--accent);
+}
+
+.schedule-link:hover {
+  text-decoration: underline;
+}
+
+.schedule-error-text {
+  color: var(--danger);
+}
+
+.schedule-dot {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  flex: none;
+  vertical-align: baseline;
+  background: var(--border);
+}
+
+.schedule-dot-ok {
+  background: #1e8e3e;
+}
+
+.schedule-dot-warn {
+  background: #f9ab00;
+}
+
+.schedule-dot-bad {
+  background: var(--danger);
+}
+
+.schedule-card-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.88rem;
+}
+
+.schedule-card-toggles summary {
+  cursor: pointer;
+  color: var(--muted);
+  width: fit-content;
+}
+
+.schedule-instruction {
+  margin: 0.4rem 0 0;
+  padding: 0.6rem 0.75rem;
+  border-radius: 10px;
+  background: var(--bg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: inherit;
+  font-size: 0.88rem;
+  max-height: 16rem;
+  overflow: auto;
+}
+
+.schedule-history {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.schedule-history li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem 0.6rem;
+}
+
+.schedule-history-when {
+  color: var(--muted);
+  min-width: 9.5rem;
+}
+
+.schedule-history-detail {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.schedule-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding-top: 0.4rem;
+}
+
+.schedule-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  min-width: 0;
+}
+
+.schedule-field input,
+.schedule-field select,
+.schedule-field textarea {
+  color: var(--text);
+  padding: 0.5rem 0.65rem;
+  border-radius: 10px;
+}
+
+.schedule-field-grow {
+  flex: 1 1 14rem;
+}
+
+.schedule-timing {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.schedule-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.schedule-form-row > .schedule-field {
+  flex: 1 1 10rem;
+}
+
+.schedule-preview {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.schedule-preview-error {
+  color: var(--danger);
+}
+
+.schedule-hint {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.schedule-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.schedules-menu-panel {
+  max-height: min(70vh, 720px);
+  overflow: auto;
+}

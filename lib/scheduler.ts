@@ -8,11 +8,10 @@
 // conditional update BEFORE firing, so a crashed firing skips a beat instead
 // of double-running, and an overdue task fires once rather than backfilling.
 
-import { CronExpressionParser } from "cron-parser";
-
-import { API_CHANNEL_CONTEXT, fireApiChannelTask, type ApiChannelTaskHooks } from "@/lib/agent-channel-schedules";
+import { API_CHANNEL_CONTEXT, fireApiChannelTaskOutcome, type ApiChannelTaskHooks } from "@/lib/agent-channel-schedules";
 import { db } from "@/lib/db";
-import { DOCUMENT_CONTEXT, fireDocumentTask, type DocumentTaskHooks } from "@/lib/document-schedules";
+import { DOCUMENT_CONTEXT, fireDocumentTaskOutcome, type DocumentTaskHooks } from "@/lib/document-schedules";
+import { computeNextRunAt, endTask, firingHeader, recordFiring, type FiringResult } from "@/lib/schedules";
 import {
   buildSteeringMessage,
   startSlackConversationRun,
@@ -22,41 +21,9 @@ import {
 import { resolveHostDevDir } from "@/lib/slack/dev-mode";
 import { slackTeamContext } from "@/lib/slack/installations";
 
-export const MIN_RECURRENCE_MS = 5 * 60 * 1000;
-export const MAX_ACTIVE_TASKS_PER_DOCUMENT = 20;
-
-export function computeNextRunAt(input: {
-  cron?: string | null;
-  at?: string | null;
-  timezone?: string | null;
-  from?: Date;
-}): Date {
-  const from = input.from ?? new Date();
-  if (input.cron && input.at) {
-    throw new Error("Provide either cron (recurring) or at (one-shot), not both.");
-  }
-  if (input.cron) {
-    const options = { currentDate: from, ...(input.timezone ? { tz: input.timezone } : {}) };
-    const expression = CronExpressionParser.parse(input.cron, options);
-    const first = expression.next().toDate();
-    const second = expression.next().toDate();
-    if (second.getTime() - first.getTime() < MIN_RECURRENCE_MS) {
-      throw new Error("Schedule too frequent: firings must be at least 5 minutes apart.");
-    }
-    return first;
-  }
-  if (input.at) {
-    const at = new Date(input.at);
-    if (Number.isNaN(at.getTime())) {
-      throw new Error(`Invalid timestamp: ${input.at}. Use ISO-8601, e.g. 2026-07-21T09:00:00+02:00.`);
-    }
-    if (at.getTime() <= from.getTime()) {
-      throw new Error("The one-shot time is in the past.");
-    }
-    return at;
-  }
-  throw new Error("Provide cron (recurring) or at (one-shot).");
-}
+// Timing rules live in lib/schedules.ts (the shared schedule service); these
+// re-exports keep the historical import paths working.
+export { computeNextRunAt, firingHeader, MAX_ACTIVE_TASKS_PER_DOCUMENT, MIN_RECURRENCE_MS } from "@/lib/schedules";
 
 type ScheduledTaskRow = {
   id: string;
@@ -70,6 +37,8 @@ type ScheduledTaskRow = {
   cron: string | null;
   timezone: string | null;
   nextRunAt: Date;
+  title?: string | null;
+  kind?: string;
 };
 
 export const BEAT_DEFER_MS = 2 * 60_000;
@@ -94,25 +63,52 @@ async function deferBeat(task: ScheduledTaskRow): Promise<Date | null> {
   const updated = await db.scheduledTask
     .updateMany({
       where: { id: task.id },
-      data: { nextRunAt: retryAt, ...(task.cron ? {} : { disabledAt: null }) }
+      data: { nextRunAt: retryAt, ...(task.cron ? {} : { disabledAt: null, endedReason: null }) }
     })
     .catch(() => null);
   return updated?.count === 1 ? retryAt : null;
 }
 
+export type FireOptions = {
+  deps?: SlackEventDeps;
+  hooks?: ApiChannelTaskHooks & DocumentTaskHooks;
+  // "manual" = Run now from the Schedules UI / an agent tool: never touches the
+  // schedule itself (no beat deferral), and is logged as such.
+  trigger?: "schedule" | "manual";
+};
+
 // Fire one claimed task. deps injectable for tests; production builds real
-// Slack deps from the environment.
+// Slack deps from the environment. Returns the run id (or null when no run
+// started); every attempt is recorded in the firing log.
 export async function fireScheduledTask(
   task: ScheduledTaskRow,
   deps?: SlackEventDeps,
   hooks?: ApiChannelTaskHooks & DocumentTaskHooks
-) {
-  if (task.contextType === API_CHANNEL_CONTEXT) return fireApiChannelTask(task, hooks);
-  if (task.contextType === DOCUMENT_CONTEXT) return fireDocumentTask(task, hooks);
+): Promise<string | null> {
+  const result = await fireScheduledTaskWithResult(task, { deps, hooks });
+  return result.runId ?? null;
+}
+
+export async function fireScheduledTaskWithResult(task: ScheduledTaskRow, options: FireOptions = {}): Promise<FiringResult> {
+  const trigger = options.trigger ?? "schedule";
+  let result: FiringResult;
+  try {
+    result = await fireOnce(task, options);
+  } catch (error) {
+    result = { outcome: "error", detail: error instanceof Error ? error.message : String(error) };
+    console.error("[scheduler] task firing failed", { taskId: task.id, trigger, error: result.detail });
+  }
+  await recordFiring(task.id, { ...result, trigger });
+  return result;
+}
+
+async function fireOnce(task: ScheduledTaskRow, { deps, hooks, trigger = "schedule" }: FireOptions): Promise<FiringResult> {
+  if (task.contextType === API_CHANNEL_CONTEXT) return fireApiChannelTaskOutcome(task, hooks);
+  if (task.contextType === DOCUMENT_CONTEXT) return fireDocumentTaskOutcome(task, hooks);
   if (!task.slackTeamId || !task.slackChannelId) {
     console.error("[scheduler] disabling slack task without a channel", { taskId: task.id });
-    await db.scheduledTask.update({ where: { id: task.id }, data: { disabledAt: new Date() } }).catch(() => null);
-    return null;
+    await endTask(task.id, "no Slack channel");
+    return { outcome: "disabled", detail: "no Slack channel" };
   }
   const slackChannelId = task.slackChannelId;
   const resolvedDeps = deps ?? (await buildSlackDeps(task.slackTeamId));
@@ -121,26 +117,25 @@ export async function fireScheduledTask(
       taskId: task.id,
       slackTeamId: task.slackTeamId
     });
-    return null;
+    return { outcome: "skipped", detail: "Slack is not configured for this workspace" };
   }
   const document = await db.document.findUnique({
     where: { id: task.documentId },
     select: { id: true, title: true, content: true, agentModel: true, agentEffort: true, runnerMode: true }
   });
   if (!document || !task.createdById) {
-    await db.scheduledTask.update({
-      where: { id: task.id },
-      data: { disabledAt: new Date() }
-    }).catch(() => null);
-    return null;
+    const reason = !document ? "document deleted" : "creator deleted";
+    await endTask(task.id, reason);
+    return { outcome: "disabled", detail: reason };
   }
   const link = await db.slackAccountLink.findFirst({
     where: { slackTeamId: task.slackTeamId, userId: task.createdById },
     select: { slackUserId: true, user: { select: { email: true } } }
   });
   if (!link) {
-    await db.scheduledTask.update({ where: { id: task.id }, data: { disabledAt: new Date() } }).catch(() => null);
-    return null;
+    const reason = "creator's Slack account is no longer linked";
+    await endTask(task.id, reason);
+    return { outcome: "disabled", detail: reason };
   }
 
   // Kickoff message: ONLY for channel context, where each firing starts a
@@ -153,7 +148,7 @@ export async function fireScheduledTask(
     ? { ts: undefined as string | undefined }
     : await resolvedDeps.slack.postMessage({
         channel: slackChannelId,
-        text: `⏰ Scheduled task: ${task.instruction.slice(0, 200)}`
+        text: `⏰ Scheduled task: ${task.kind === "wakeup" ? task.instruction.slice(0, 200) : task.title?.trim() || task.instruction.slice(0, 200)}`
       });
   const threadRoot = isThreadContext ? task.slackThreadTs ?? undefined : kickoff.ts ?? undefined;
   const triggerId = threadRoot ? `${slackChannelId}:${threadRoot}` : `${slackChannelId}:scheduled`;
@@ -162,7 +157,7 @@ export async function fireScheduledTask(
   // into is already working, the firing is STEERING for that session, not a
   // second run: stacked runs all park on the per-conversation session lock, so
   // they look hung, never reply, and make follow-up messages unsteerable.
-  const instruction = `[Scheduled task firing — set up earlier in this conversation]\n${task.instruction}`;
+  const instruction = `${firingHeader(task, "set up earlier in this conversation")}\n${task.instruction}`;
   const live = await steerActiveThreadRun({
     documentId: document.id,
     triggerId,
@@ -175,11 +170,7 @@ export async function fireScheduledTask(
       taskId: task.id,
       aiRunId: live.steeredRunId
     });
-    await db.scheduledTask.update({
-      where: { id: task.id },
-      data: { lastRunId: live.steeredRunId }
-    }).catch(() => null);
-    return live.steeredRunId;
+    return { outcome: "injected", runId: live.steeredRunId };
   }
   if (live.activeRunIds.length > 0) {
     // The thread has an active run we cannot steer (another server process after
@@ -189,13 +180,18 @@ export async function fireScheduledTask(
     // (and, for a one-shot, disabled) this task, so returning here used to lose a
     // check_back_later wake-up forever. Retry shortly — the blocking run either
     // finishes or gets reaped within STALE_AI_RUN_MS.
+    if (trigger === "manual") {
+      return { outcome: "skipped", detail: "the thread is busy with a run that cannot be steered; try again later" };
+    }
     const deferred = await deferBeat(task);
     console.warn("[scheduler] deferring beat: thread has an active run that cannot be steered", {
       taskId: task.id,
       activeRunIds: live.activeRunIds,
       retryAt: deferred?.toISOString() ?? null
     });
-    return null;
+    return deferred
+      ? { outcome: "deferred", detail: `thread busy; retrying at ${deferred.toISOString()}` }
+      : { outcome: "error", detail: "thread stayed busy for more than 30 minutes; this firing was dropped" };
   }
 
   const previousRun = await db.aiRun.findFirst({
@@ -229,11 +225,7 @@ export async function fireScheduledTask(
     channelContext: null,
     hostDevDir
   });
-  await db.scheduledTask.update({
-    where: { id: task.id },
-    data: { lastRunId: aiRunId }
-  }).catch(() => null);
-  return aiRunId;
+  return { outcome: "started", runId: aiRunId };
 }
 
 // Bot client for the TASK's workspace (multi-workspace installs) — the
@@ -246,7 +238,7 @@ async function buildSlackDeps(teamId: string): Promise<SlackEventDeps | null> {
 
 export async function schedulerTick(now = new Date(), deps?: SlackEventDeps) {
   const due = await db.scheduledTask.findMany({
-    where: { disabledAt: null, nextRunAt: { lte: now } },
+    where: { disabledAt: null, pausedAt: null, nextRunAt: { lte: now } },
     orderBy: { nextRunAt: "asc" },
     take: 10
   });
@@ -266,20 +258,17 @@ export async function schedulerTick(now = new Date(), deps?: SlackEventDeps) {
       }
     }
     const claim = await db.scheduledTask.updateMany({
-      where: { id: task.id, nextRunAt: task.nextRunAt, disabledAt: null },
+      where: { id: task.id, nextRunAt: task.nextRunAt, disabledAt: null, pausedAt: null },
       data: {
         lastFiredAt: now,
-        ...(next ? { nextRunAt: next } : { disabledAt: now })
+        ...(next
+          ? { nextRunAt: next }
+          : { disabledAt: now, endedReason: task.cron ? "invalid cron expression" : "completed" })
       }
     });
     if (claim.count !== 1) continue;
     fired++;
-    await fireScheduledTask(task, deps).catch((error) => {
-      console.error("[scheduler] task firing failed", {
-        taskId: task.id,
-        error: error instanceof Error ? error.message : error
-      });
-    });
+    await fireScheduledTaskWithResult(task, { deps });
   }
   return fired;
 }

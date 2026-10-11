@@ -1,6 +1,7 @@
 import { EnvironmentMenu } from "./environment-menu";
 import { SelfHostedMenu } from "./self-hosted-menu";
 import { DurableAppMenu } from "./durable-app-menu";
+import { SchedulesMenu } from "./schedules-menu";
 import { SkillsMenu } from "./skills-menu";
 import { useEffect, useState } from "react";
 
@@ -257,9 +258,34 @@ function ConversationContextCard({
     );
   }
 
+  const scheduled = parseScheduledFiring(conversation.rootInstruction);
+  if (scheduled) {
+    return (
+      <div className="agent-context">
+        <div className="agent-context-kind">
+          <span>⏰ Scheduled task: {scheduled.title}</span>
+          <a className="ghost-button agent-context-open" href={`/dashboard?tab=schedules#schedule-${scheduled.id}`}>
+            Manage schedule
+          </a>
+        </div>
+      </div>
+    );
+  }
+
   // Plain conversations open with the full first message as a user bubble
   // right below — no card needed.
   return null;
+}
+
+// Runs fired by a scheduled task start with the header written by
+// firingHeader (lib/schedules.ts): `[Scheduled task firing — "<title>" (id <id>), …]`.
+// Keep the two in sync.
+const SCHEDULED_FIRING_RE = /^\[Scheduled task firing — "(.+?)" \(id ([A-Za-z0-9_-]+)\)[^\n]*\]\n?/;
+
+function parseScheduledFiring(instruction: string): { title: string; id: string; body: string } | null {
+  const match = SCHEDULED_FIRING_RE.exec(instruction);
+  if (!match) return null;
+  return { title: match[1], id: match[2], body: instruction.slice(match[0].length) };
 }
 
 type ComposeMode = "selected" | "new";
@@ -271,6 +297,7 @@ type AgentConversationOptions = {
 
 export function AgentPanel({
   canManageAutomation,
+  documentKind,
   onEnvKeysChanged,
   title,
   documentId,
@@ -324,6 +351,8 @@ export function AgentPanel({
   canWriteComments: boolean;
   canWriteDocument: boolean;
   canManageAutomation: boolean;
+  /** Document.kind — "slack_channel" workspaces can schedule claudex posts into their channel. */
+  documentKind?: string;
   onEnvKeysChanged: (keys: string[]) => void;
   agentModel: string;
   agentEffort: string;
@@ -478,6 +507,7 @@ export function AgentPanel({
             onRunnerModeChange={onRunnerModeChange}
           />
           {canManageAutomation ? <DurableAppMenu documentId={documentId} isOwner={isOwner} /> : null}
+          {canManageAutomation ? <SchedulesMenu documentId={documentId} documentKind={documentKind} /> : null}
           <label className="agent-config-field">
             <span className="agent-config-label">Harness</span>
             <select
@@ -749,9 +779,11 @@ export function AgentPanel({
               <div className="agent-sidebar-empty">No conversations yet.</div>
             ) : (
               conversations.map((conv) => {
-                const firstLine =
-                  conv.rootInstruction.split("\n")[0] ||
-                  conv.latestRun.triggerType.replace(/_/g, " ").toLowerCase();
+                const scheduled = parseScheduledFiring(conv.rootInstruction);
+                const firstLine = scheduled
+                  ? `⏰ ${scheduled.title}`
+                  : conv.rootInstruction.split("\n")[0] ||
+                    conv.latestRun.triggerType.replace(/_/g, " ").toLowerCase();
                 const isActive = composeMode === "selected" && selectedConversation?.rootId === conv.rootId;
                 const turnCount = conv.runs.length;
                 return (
@@ -767,7 +799,7 @@ export function AgentPanel({
                       <span className="agent-sidebar-item-title">{truncate(firstLine, 48)}</span>
                       <span className="agent-sidebar-item-time">{formatRelativeTime(conv.lastActivityAt)}</span>
                     </div>
-                    <p className="agent-sidebar-item-snippet">{truncate(conv.rootInstruction, 120)}</p>
+                    <p className="agent-sidebar-item-snippet">{truncate(scheduled ? scheduled.body : conv.rootInstruction, 120)}</p>
                     {turnCount > 1 ? (
                       <span className="agent-sidebar-item-turns">{turnCount} turns</span>
                     ) : null}

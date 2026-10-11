@@ -316,7 +316,9 @@ const SCHEDULE_TOOL_NAMES = [
   "mcp__gdocs__check_back_later",
   "mcp__gdocs__keep_alive_after_turn",
   "mcp__gdocs__list_scheduled_tasks",
-  "mcp__gdocs__cancel_scheduled_task"
+  "mcp__gdocs__cancel_scheduled_task",
+  "mcp__gdocs__update_scheduled_task",
+  "mcp__gdocs__get_scheduled_task_history"
 ];
 
 // A safety-classifier block is an HTTP 200 with stop_reason "refusal" (not an
@@ -746,7 +748,7 @@ function buildUserPromptRaw(input: ClaudeResearchAgentInput) {
         }). Your submit_response reply is posted to the Slack thread — write it as a chat message: concise Markdown, no long report unless asked (it is converted to Slack formatting for you).
 While you work you may post short interim updates to the thread with the post_slack_message tool (e.g. what you found so far, or that a step will take a while). Default to ONE message per round of conversation: every unnecessary interim message fragments the thread. Never use post_slack_message for the final answer, which always goes through submit_response. Everything you post goes to the CURRENT thread only — never attempt to reach other channels or threads via shell/curl; use only the provided tools.${
           input.slackTools
-            ? "\nYou can also inspect other Slack content with list_slack_channels / read_slack_channel / read_slack_thread. Access is enforced server-side: only channels that both you (the bot) and the requesting user are members of are readable.\nYou can also SUPERVISE agents working in other threads with message_thread(channel_id, thread_ts?, text): the message is posted to that thread (labelled as coming from you) and treated exactly like a message from a person there — it steers the agent already working in that thread, or starts a new agent run there. Omit thread_ts to open a NEW top-level thread in that channel. Use it to unblock, redirect or delegate to another agent; the answer comes back in THAT thread, so read it later with read_slack_thread. Same membership rule as the read tools, and never for your own conversation.\nYou can schedule (recurring) work with schedule_task / list_scheduled_tasks / cancel_scheduled_task — each firing runs as a fresh agent run in this conversation with the scheduling user's credentials. Only schedule when explicitly asked; always confirm the schedule you set in your reply.\nFor work that takes longer than a couple of minutes (training runs, builds, long scripts, waiting on someone else), do NOT sit in a sleep/poll loop — waiting burns your context window. Instead: (1) start the work in the background (e.g. `nohup <cmd> > /tmp/job.log 2>&1 &`), (2) call check_back_later with a delay (up to " + MAX_KEEP_ALIVE_MINUTES + " minutes keeps THIS session, its container and your background processes alive; longer delays end the session and wake you in a fresh run with a clean workspace) and a self-contained note to your future self (what you started, where the logs are, how to tell whether it finished, what to do next), (3) if the user should know what is running, post ONE short post_slack_message, and then END your turn WITHOUT calling submit_response — submitting ends the run and kills the background work. When the alarm fires you get your note as a message in this thread and continue right where you were: if the work is still running, check_back_later again; if it is done, report the result with submit_response. Prefer a few longer waits over many short ones.\nWhen the timing of background work is OPEN-ENDED (you cannot say when to check back) or you want the session to stay alive regardless of messages arriving in between, call keep_alive_after_turn with enabled=true instead: the session then survives every turn end — including turns where you reply to a user message mid-wait — until you call it with enabled=false and submit. The host checks in with you periodically while it is on. Answering a user's question mid-wait does NOT protect your background work by itself: only a pending check_back_later or keep-alive on does.\nThe rdocs MCP server (tools starting with mcp__rdocs__) gives you the requesting user's rdocs documents: list, read, edit, comment — you act with exactly their document access.\nFiles the user attaches in Slack appear in your workspace under attachments/; share files back into the thread with send_slack_file.\nWhen a user asks to connect this channel to a document (\"set the workspace of this channel to <doc link>\"), call set_channel_workspace with the document id or URL — the channel then shares that document's workspace and its content is included in this channel's context on every run; pass \"none\" to disconnect. The server enforces that the requesting user has edit access to the target document.\nWhen a user asks to link a GitHub or HuggingFace repository to this channel, call set_channel_repository with the repository URL and optional branch; pass \"none\" as the repository to disconnect it. The server enforces edit access to the channel's document."
+            ? "\nYou can also inspect other Slack content with list_slack_channels / read_slack_channel / read_slack_thread. Access is enforced server-side: only channels that both you (the bot) and the requesting user are members of are readable.\nYou can also SUPERVISE agents working in other threads with message_thread(channel_id, thread_ts?, text): the message is posted to that thread (labelled as coming from you) and treated exactly like a message from a person there — it steers the agent already working in that thread, or starts a new agent run there. Omit thread_ts to open a NEW top-level thread in that channel. Use it to unblock, redirect or delegate to another agent; the answer comes back in THAT thread, so read it later with read_slack_thread. Same membership rule as the read tools, and never for your own conversation.\nYou can schedule (recurring) work with schedule_task / list_scheduled_tasks / update_scheduled_task / cancel_scheduled_task / get_scheduled_task_history — each firing runs as a fresh agent run in this conversation with the scheduling user's credentials. Only schedule when explicitly asked; give every task a short title; always confirm the schedule you set in your reply, with the overview link from the tool result. When asked to change a standing job, update it in place instead of cancelling and re-creating it. A firing message names its task id, so when the user reacts to a scheduled report with feedback about the job itself ('skip weekends', 'shorter'), apply it with update_scheduled_task.\nFor work that takes longer than a couple of minutes (training runs, builds, long scripts, waiting on someone else), do NOT sit in a sleep/poll loop — waiting burns your context window. Instead: (1) start the work in the background (e.g. `nohup <cmd> > /tmp/job.log 2>&1 &`), (2) call check_back_later with a delay (up to " + MAX_KEEP_ALIVE_MINUTES + " minutes keeps THIS session, its container and your background processes alive; longer delays end the session and wake you in a fresh run with a clean workspace) and a self-contained note to your future self (what you started, where the logs are, how to tell whether it finished, what to do next), (3) if the user should know what is running, post ONE short post_slack_message, and then END your turn WITHOUT calling submit_response — submitting ends the run and kills the background work. When the alarm fires you get your note as a message in this thread and continue right where you were: if the work is still running, check_back_later again; if it is done, report the result with submit_response. Prefer a few longer waits over many short ones.\nWhen the timing of background work is OPEN-ENDED (you cannot say when to check back) or you want the session to stay alive regardless of messages arriving in between, call keep_alive_after_turn with enabled=true instead: the session then survives every turn end — including turns where you reply to a user message mid-wait — until you call it with enabled=false and submit. The host checks in with you periodically while it is on. Answering a user's question mid-wait does NOT protect your background work by itself: only a pending check_back_later or keep-alive on does.\nThe rdocs MCP server (tools starting with mcp__rdocs__) gives you the requesting user's rdocs documents: list, read, edit, comment — you act with exactly their document access.\nFiles the user attaches in Slack appear in your workspace under attachments/; share files back into the thread with send_slack_file.\nWhen a user asks to connect this channel to a document (\"set the workspace of this channel to <doc link>\"), call set_channel_workspace with the document id or URL — the channel then shares that document's workspace and its content is included in this channel's context on every run; pass \"none\" to disconnect. The server enforces that the requesting user has edit access to the target document.\nWhen a user asks to link a GitHub or HuggingFace repository to this channel, call set_channel_repository with the repository URL and optional branch; pass \"none\" as the repository to disconnect it. The server enforces edit access to the channel's document."
             : ""
         }
 ${
@@ -1451,8 +1453,9 @@ async function runClaudeResearchAgentOnce(
 
   const scheduleTaskTool = tool(
     "schedule_task",
-    "Schedule a (recurring) agent task in THIS Slack conversation. Each firing runs the instruction as a fresh agent run with the scheduling user's credentials, replying in this thread (default) or as a new top-level channel message. The channel is notified and any member can cancel.",
+    "Schedule a (recurring) agent task in THIS Slack conversation. Each firing runs the instruction as a fresh agent run with the scheduling user's credentials, replying in this thread (default) or as a new top-level channel message. The channel is notified and any member can cancel. Before scheduling, check list_scheduled_tasks: if a similar job exists, change it with update_scheduled_task instead of adding a duplicate.",
     {
+      title: z.string().max(80).optional().describe("Short name for the task, shown in the user's Schedules overview (e.g. 'Daily research check-in')."),
       instruction: z.string().min(1).max(4000).describe("What the agent should do each time the task fires."),
       cron: z.string().optional().describe("5-field cron expression for recurring tasks (e.g. '0 9 * * 1-5'). Provide cron OR at."),
       at: z.string().optional().describe("ISO-8601 timestamp for a one-shot task. Provide cron OR at."),
@@ -1560,9 +1563,36 @@ async function runClaudeResearchAgentOnce(
   );
   const listScheduledTasksTool = tool(
     "list_scheduled_tasks",
-    "List the active scheduled tasks of this Slack channel/conversation.",
-    {},
-    async () => callSlackTool("list_scheduled_tasks", {})
+    "List scheduled tasks with id, title, schedule, next/last firing and outcome. scope: 'channel' (default: this Slack channel, including your check_back_later wake-ups), 'thread' (only this conversation) or 'mine' (every task the requesting user can see across rdocs).",
+    {
+      scope: z.enum(["channel", "thread", "mine"]).optional(),
+      include_ended: z.boolean().optional().describe("Also list cancelled/finished tasks."),
+      include_wakeups: z.boolean().optional().describe("With scope 'mine': also list check_back_later wake-ups.")
+    },
+    async (args) => callSlackTool("list_scheduled_tasks", args)
+  );
+  const updateScheduledTaskTool = tool(
+    "update_scheduled_task",
+    "Change a scheduled task in place — its title, instruction, schedule (cron + timezone, or `at` for a one-shot) — or pause/resume it. Use this when the user asks to adjust a standing job ('skip weekends', 'only report X', 'move it to 9am'), including the job that just woke you: its id is in the firing message. Only the task's creator or the document's editors may change it.",
+    {
+      task_id: z.string().min(1),
+      title: z.string().max(80).optional(),
+      instruction: z.string().min(1).max(6000).optional().describe("Full replacement instruction."),
+      cron: z.string().optional().describe("New 5-field cron expression."),
+      at: z.string().optional().describe("New ISO-8601 time (one-shot tasks)."),
+      timezone: z.string().optional().describe("IANA timezone for the cron expression."),
+      paused: z.boolean().optional().describe("true pauses a recurring task, false resumes it.")
+    },
+    async (args) => callSlackTool("update_scheduled_task", args)
+  );
+  const scheduledTaskHistoryTool = tool(
+    "get_scheduled_task_history",
+    "Recent firings of a scheduled task, newest first: when, outcome (started / injected / deferred / skipped / disabled / error), run id and run status. Use it to check whether a standing job has been working.",
+    {
+      task_id: z.string().min(1),
+      limit: z.number().int().min(1).max(100).optional()
+    },
+    async (args) => callSlackTool("get_scheduled_task_history", args)
   );
   const cancelScheduledTaskTool = tool(
     "cancel_scheduled_task",
@@ -1670,7 +1700,9 @@ async function runClaudeResearchAgentOnce(
             checkBackLaterTool,
             keepAliveTool,
             listScheduledTasksTool,
-            cancelScheduledTaskTool
+            cancelScheduledTaskTool,
+            updateScheduledTaskTool,
+            scheduledTaskHistoryTool
           ]
         : []),
       ...(input.slackTools && isDmOverview ? [recentActivityTool] : [])
