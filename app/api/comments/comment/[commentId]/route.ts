@@ -6,7 +6,7 @@ import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { serializeComment } from "@/lib/document-data";
 import { db } from "@/lib/db";
 import { syncCommentMentions } from "@/lib/mention-data";
-import { canComment } from "@/lib/permissions";
+import { canComment, canCommentOnDocument } from "@/lib/permissions";
 
 export const runtime = "nodejs";
 
@@ -40,17 +40,25 @@ export async function PATCH(request: Request, { params }: RouteContext<{ comment
     return NextResponse.json({ error: "Comment not found." }, { status: 404 });
   }
 
-  const gate = await requireDocumentAccess(request, comment.thread.documentId, "COMMENT", {
+  // Same gate as creating the comment: a signed-in reader of a public forum
+  // post has only VIEW access but may comment, so they must be able to edit
+  // their own comment too.
+  const gate = await requireDocumentAccess(request, comment.thread.documentId, "VIEW", {
     shareToken: parsed.data.shareToken ?? null,
-    requireUser: true,
-    forbiddenMessage: "You do not have comment access."
+    requireUser: true
   });
   if (!gate.ok) {
+    console.warn("[comment-edit] no access", { commentId, documentId: comment.thread.documentId, status: gate.response.status });
     return gate.response;
   }
-  const { user } = gate;
+  const { user, access } = gate;
+  if (!canCommentOnDocument(access, true)) {
+    console.warn("[comment-edit] forbidden (no comment access)", { commentId, documentId: comment.thread.documentId, userId: user.id, permission: access.permission });
+    return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
+  }
 
   if (comment.authorId !== user.id) {
+    console.warn("[comment-edit] forbidden (not author)", { commentId, userId: user.id });
     return NextResponse.json({ error: "You can only edit your own comments." }, { status: 403 });
   }
 
@@ -134,16 +142,19 @@ export async function DELETE(request: Request, { params }: RouteContext<{ commen
     return NextResponse.json({ error: "Comment not found." }, { status: 404 });
   }
 
-  const gate = await requireDocumentAccess(request, comment.thread.documentId, "COMMENT", {
+  const gate = await requireDocumentAccess(request, comment.thread.documentId, "VIEW", {
     shareToken: parsed.data.shareToken ?? null,
-    requireUser: true,
-    forbiddenMessage: "You do not have comment access."
+    requireUser: true
   });
   if (!gate.ok) {
     console.warn("[comment-delete] forbidden (no access)", { commentId, documentId: comment.thread.documentId, status: gate.response.status });
     return gate.response;
   }
   const { user, access } = gate;
+  if (!canCommentOnDocument(access, true)) {
+    console.warn("[comment-delete] forbidden (no comment access)", { commentId, documentId: comment.thread.documentId, userId: user.id, permission: access.permission });
+    return NextResponse.json({ error: "You do not have comment access." }, { status: 403 });
+  }
 
   const canDelete =
     comment.thread.document.ownerId === user.id ||

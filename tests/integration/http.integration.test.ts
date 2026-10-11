@@ -285,6 +285,45 @@ itLive("a comment author can edit their comment; unauthenticated edits are rejec
   assert.ok(noauth.status === 401 || noauth.status === 403, `expected 401/403, got ${noauth.status}`);
 });
 
+// Regression (2026-10-02): a signed-in reader of a public forum post has only
+// VIEW access, which canCommentOnDocument lets them comment with — but the
+// edit/delete route demanded COMMENT, so their own comment 403'd and the
+// forum showed "Could not save the comment. Please try again."
+itLive("a forum reader with VIEW-only access can edit and delete their own comment", async () => {
+  const ownerCookie = await signUp();
+  const docId = await createDocument(ownerCookie);
+  await db.document.update({ where: { id: docId }, data: { forumPostedAt: new Date(), forumPublic: true } });
+
+  const readerCookie = await signUp();
+  const create = await authed(readerCookie, `/api/documents/${docId}/comments`, {
+    method: "POST",
+    body: JSON.stringify({ body: "typo hree", origin: "forum", anchorText: "" })
+  });
+  assert.equal(create.status, 200, "a forum reader can post a comment");
+  const commentId = (await create.json()).thread.comments[0].id as string;
+
+  const edit = await authed(readerCookie, `/api/comments/comment/${commentId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ body: "typo here" })
+  });
+  assert.equal(edit.status, 200, `edit should succeed, got ${edit.status}: ${await edit.clone().text()}`);
+  assert.equal((await edit.json()).comment.body, "typo here");
+
+  // Another forum reader still cannot edit someone else's comment.
+  const otherCookie = await signUp();
+  const foreign = await authed(otherCookie, `/api/comments/comment/${commentId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ body: "hijack" })
+  });
+  assert.equal(foreign.status, 403);
+
+  const del = await authed(readerCookie, `/api/comments/comment/${commentId}`, {
+    method: "DELETE",
+    body: JSON.stringify({})
+  });
+  assert.equal(del.status, 200, `delete should succeed, got ${del.status}`);
+});
+
 itLive("agent model PATCH accepts canonical ids, legacy aliases, and openrouter slugs — and rejects junk", async () => {
   const cookie = await signUp();
   const docId = await createDocument(cookie);
