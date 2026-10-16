@@ -29,6 +29,7 @@ import {
   resolveContainerCredentialEnv
 } from "./agent-credential";
 import { agentRunSemaphore } from "./concurrency";
+import { agentContainerMemory, agentMemoryAdmission, resolveMemoryAdmissionConfig } from "./memory-admission";
 import {
   RunCancelledError,
   deregisterRunMessageInjector,
@@ -232,9 +233,34 @@ export class ContainerRunner implements AgentRunner {
       if (opts.signal?.aborted) throw new RunCancelledError();
       throw error;
     }
+    let releaseMemory: () => void;
+    try {
+      // Memory gate (memory-admission.ts): wait until this run's --memory limit
+      // fits into the host budget next to everything already running.
+      const memory = agentMemoryAdmission();
+      releaseMemory = await memory.admit(
+        { name: opts.containerName, bytes: resolveMemoryAdmissionConfig().perRunBytes },
+        {
+          signal: opts.signal,
+          onQueued: (reason) => {
+            console.log(`[agent-memory] queued ${opts.containerName ?? "run"}: ${reason}`);
+            if (opts.onProgress) {
+              void Promise.resolve(
+                opts.onProgress({ role: "system", message: `Queued: waiting for memory (${reason}).` })
+              ).catch(() => {});
+            }
+          }
+        }
+      );
+    } catch (error) {
+      releaseSlot();
+      if (opts.signal?.aborted) throw new RunCancelledError();
+      throw error;
+    }
     try {
       return await this.spawnJobWithSlot(opts, { runtime, image, readOnly });
     } finally {
+      releaseMemory();
       releaseSlot();
     }
   }
@@ -298,7 +324,7 @@ export class ContainerRunner implements AgentRunner {
         agentHarness: harness,
         envFileHostPath: envFile,
         ...containerUser,
-        memory: process.env.AGENT_CONTAINER_MEMORY || "4g",
+        memory: agentContainerMemory(),
         cpus: process.env.AGENT_CONTAINER_CPUS || undefined,
         init: process.env.AGENT_CONTAINER_INIT === "1",
         pidsLimit: resolveContainerPidsLimit(process.env),
