@@ -856,6 +856,12 @@ function serializeBlocksToMarkdown(blocks: unknown[], context: MarkdownContext):
     .trim();
 }
 
+// The marker agents read and write for a tab break: `<tab title="…">` starts a
+// new tab (buildAiEditInsertContent turns it back into a tabBreak node).
+export function tabMarker(title: string) {
+  return `<tab title="${escapeTabTitle(title || "Untitled tab")}">`;
+}
+
 function escapeTabTitle(title: string) {
   return title.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
@@ -905,29 +911,86 @@ export function getDocumentMarkdown(content: unknown, options: DocumentMarkdownO
       if (body) sections.push(body);
       return;
     }
-    const title = escapeTabTitle(group.title);
     // Tab with no content still emits an empty wrapper so the LLM sees the tab exists.
-    sections.push(`<tab title="${title}">\n${body}\n</tab>`);
+    sections.push(`${tabMarker(group.title)}\n${body}\n</tab>`);
     void index;
   });
 
   return sections.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+// Atoms rendered as structured blocks (metadata + attached pixels) in agent context.
+const AI_BLOCK_ATOM_TYPES = new Set(["image", "embeddedWidget", "repoImage", "attachmentChip"]);
+
+// The document as agents see it in native runs: MARKDOWN text (bullets, numbered
+// and task lists, headings, quotes, code, tables, toggles, and a `<tab title="…">`
+// line where each tab starts) interleaved with structured image/widget blocks.
+// Before 2026-10-21 the text was flattened, so agents could not tell a bullet
+// from a paragraph and never saw tab titles at all. Anchors (findText) still
+// validate against flattenDocumentAnchorText; agent-core/anchor-text.ts strips
+// the markdown an agent copies from this view.
 export function getDocumentAiBlocks(content: unknown): AiDocumentBlock[] {
   const blocks: AiDocumentBlock[] = [];
-  visitNodeForAiBlocks(content, blocks);
+  const context: MarkdownContext = {
+    listStack: [],
+    inCodeBlock: false,
+    pastedImagePlaceholders: true,
+    pastedImageIndex: 0,
+    minimalEscaping: true
+  };
+  const appendMarkdown = (text: string) => {
+    const last = blocks[blocks.length - 1];
+    if (last?.type === "text") last.text += text;
+    else blocks.push({ type: "text", text });
+  };
+
+  for (const child of getNodeContent(content)) {
+    const type = getNodeType(child);
+    if (type === "tabBreak") {
+      const attrs = getNodeAttrs(child) as { title?: unknown } | null;
+      appendMarkdown(`\n\n${tabMarker(typeof attrs?.title === "string" ? attrs.title : "")}\n\n`);
+      continue;
+    }
+    if (type && AI_BLOCK_ATOM_TYPES.has(type)) {
+      // Keep pasted-image numbering in step with nested pasted-image://N placeholders.
+      if (type === "image" && isPastedImageSrc((getNodeAttrs(child) as { src?: unknown } | null)?.src)) {
+        context.pastedImageIndex += 1;
+      }
+      visitNodeForAiBlocks(child, blocks);
+      appendMarkdown("\n\n");
+      continue;
+    }
+    appendMarkdown(serializeNodeToMarkdown(child, context) + "\n\n");
+    // Atoms nested in lists/toggles/tables: also attach their structured block.
+    collectNestedAiAtoms(child).forEach((atom) => {
+      visitNodeForAiBlocks(atom, blocks);
+      appendMarkdown("\n");
+    });
+  }
 
   const normalized = blocks
     .map((block) =>
       block.type === "text"
         ? {
             ...block,
-            text: block.text.replace(/\n{3,}/g, "\n\n").trim()
+            text: block.text.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim()
           }
         : block
     )
     .filter((block) => block.type !== "text" || block.text);
 
   return normalized.length > 0 ? normalized : [{ type: "text", text: "" }];
+}
+
+function collectNestedAiAtoms(node: unknown): unknown[] {
+  const atoms: unknown[] = [];
+  const visit = (current: unknown) => {
+    for (const child of getNodeContent(current)) {
+      const type = getNodeType(child);
+      if (type && AI_BLOCK_ATOM_TYPES.has(type) && type !== "attachmentChip") atoms.push(child);
+      else visit(child);
+    }
+  };
+  visit(node);
+  return atoms;
 }

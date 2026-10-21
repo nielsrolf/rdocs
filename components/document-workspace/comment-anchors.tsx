@@ -4,6 +4,8 @@ import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type { MutableRefObject } from "react";
 
+import { REACTION_THREAD_ORIGIN } from "@/lib/reactions";
+
 import type { CommentAnchorRange, HighlightThread, ProseMirrorDocWithDescendants } from "./types";
 import { footnoteNumberByThreadId, isFootnoteThread } from "./comment-footnotes";
 
@@ -171,8 +173,16 @@ export function createCommentHighlightExtension(
                 }
 
                 const isActive = thread.id === activeThreadIdRef.current;
+                // Text reactions stay unhighlighted (like Google Docs) and only
+                // light up while their margin pills are focused.
+                const isReaction = thread.origin === REACTION_THREAD_ORIGIN;
+                if (isReaction && !isActive) {
+                  return [];
+                }
                 const isFootnote = isFootnoteThread(thread);
-                const className = isFootnote
+                const className = isReaction
+                  ? "reaction-anchor-highlight"
+                  : isFootnote
                   ? `footnote-anchor${isActive ? " footnote-anchor-active" : ""}`
                   : isActive
                     ? "comment-anchor-highlight comment-anchor-highlight-active"

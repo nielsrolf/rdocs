@@ -3,12 +3,41 @@
 // counts + "did I react") is a pure function so it's unit-testable and reusable
 // on both the server (serialization) and any future client recompute.
 
-export const REACTION_EMOJIS = ["👍", "👎", "❤️", "🎉", "😄", "😕", "🚀", "👀"] as const;
+//
+// The same palette serves reactions on comments and on document text. A text
+// reaction is a CommentThread with origin "reaction" anchored to the selection;
+// its root comment's reactions are the emoji shown in the margin.
 
-export type ReactionEmoji = (typeof REACTION_EMOJIS)[number];
+// Quick selection: strong agreement, strong disagreement, fire, party,
+// laughing, skeptical, thinking, "worth discussing".
+export const REACTION_EMOJIS = ["➕", "➖", "🔥", "🎉", "😂", "🤔", "💭", "💬"] as const;
+
+// The previous palette. Not offered in the picker any more, but rows using it
+// still exist, so they stay valid (otherwise nobody could remove them).
+const LEGACY_REACTION_EMOJIS = ["👍", "👎", "❤️", "😄", "😕", "🚀", "👀"] as const;
+
+const ALL_REACTION_EMOJIS: readonly string[] = [...REACTION_EMOJIS, ...LEGACY_REACTION_EMOJIS];
+
+export type ReactionEmoji = (typeof REACTION_EMOJIS)[number] | (typeof LEGACY_REACTION_EMOJIS)[number];
 
 export function isReactionEmoji(value: unknown): value is ReactionEmoji {
-  return typeof value === "string" && (REACTION_EMOJIS as readonly string[]).includes(value);
+  return typeof value === "string" && ALL_REACTION_EMOJIS.includes(value);
+}
+
+export const REACTION_THREAD_ORIGIN = "reaction";
+
+/**
+ * The root-comment body of a text-reaction thread: its distinct emoji in
+ * palette order. Surfaces that only read comment text (agents, MCP, Slack) see
+ * "🔥 🎉" instead of an empty comment.
+ */
+export function reactionThreadBody(rows: Array<{ emoji: string }>): string {
+  return aggregateReactions(
+    rows.map((row) => ({ emoji: row.emoji, userId: "" })),
+    null
+  )
+    .map((entry) => entry.emoji)
+    .join(" ");
 }
 
 export type RawReaction = {
@@ -50,7 +79,7 @@ export function aggregateReactions(
 }
 
 function sortByPalette(entries: ReactionSummary[]): ReactionSummary[] {
-  const order = new Map(REACTION_EMOJIS.map((emoji, index) => [emoji as string, index]));
+  const order = new Map(ALL_REACTION_EMOJIS.map((emoji, index) => [emoji as string, index]));
   return entries.sort((a, b) => {
     const ai = order.get(a.emoji) ?? Number.MAX_SAFE_INTEGER;
     const bi = order.get(b.emoji) ?? Number.MAX_SAFE_INTEGER;

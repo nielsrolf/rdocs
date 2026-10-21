@@ -249,7 +249,8 @@ export const TabBreakSchemaNode = Node.create({
           const title = typeof attributes.title === "string" ? attributes.title : "Untitled tab";
           return { "data-tab-title": title };
         }
-      }
+      },
+      ...suggestionRecordsAttributesSpec
     };
   },
   parseHTML() {

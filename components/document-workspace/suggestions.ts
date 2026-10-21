@@ -12,6 +12,9 @@ import {
   SUGGESTION_INSERT_RECORDS_ATTR,
   type SuggestionRecord
 } from "@/lib/suggestion-content";
+import { isListItemType, isListType } from "@/lib/structured-replace";
+
+export type { SuggestionRecord };
 
 // ---------------------------------------------------------------------------
 // Tracked-change "suggestions" (Google-Docs style).
@@ -45,7 +48,7 @@ export type SuggestionSummary = {
   createdAt: string | null;
 };
 
-const ATOM_NODE_TYPES = new Set(["repoImage", "embeddedWidget", "image", "attachmentChip"]);
+const ATOM_NODE_TYPES = new Set(["repoImage", "embeddedWidget", "image", "attachmentChip", "tabBreak"]);
 
 function isAtomNode(node: PMNode): boolean {
   return ATOM_NODE_TYPES.has(node.type.name);
@@ -562,36 +565,47 @@ export function markExplicitSuggestion(
     record: SuggestionRecord;
   }
 ): Transaction | null {
-  const insMark = state.schema.marks[SUGGESTED_INSERTION_MARK];
-  const delMark = state.schema.marks[SUGGESTED_DELETION_MARK];
-  if (!insMark || !delMark) return null;
+  if (!state.schema.marks[SUGGESTED_INSERTION_MARK] || !state.schema.marks[SUGGESTED_DELETION_MARK]) return null;
   const tr = state.tr;
-  const docSize = state.doc.content.size;
-
-  const apply = (range: { from: number; to: number }, kind: SuggestionKind) => {
-    const from = Math.max(0, Math.min(range.from, docSize));
-    const to = Math.max(from, Math.min(range.to, docSize));
-    if (to <= from) return;
-    const mark = (kind === "insert" ? insMark : delMark).create({ ...opts.record });
-    const attr = attrForKind(kind);
-    tr.doc.nodesBetween(from, to, (node, pos) => {
-      if (node.isText) {
-        const segFrom = Math.max(from, pos);
-        const segTo = Math.min(to, pos + node.nodeSize);
-        if (segTo > segFrom) tr.addMark(segFrom, segTo, mark);
-        return;
-      }
-      if (isAtomNode(node)) {
-        tr.setNodeAttribute(pos, attr, [opts.record]);
-      }
-    });
-  };
-
-  if (opts.deletion) apply(opts.deletion, "delete");
-  if (opts.insertion) apply(opts.insertion, "insert");
+  if (opts.deletion) addSuggestionMarks(tr, opts.deletion, "delete", opts.record);
+  if (opts.insertion) addSuggestionMarks(tr, opts.insertion, "insert", opts.record);
   if (!tr.docChanged) return null;
   tr.setMeta(suggestionPluginKey, { type: "skip" } satisfies SuggestionPluginMeta);
   return tr;
+}
+
+// Flags [from, to) of tr.doc as one side of a suggestion: inline content gets the
+// insertion/deletion mark (hard breaks and other inline nodes too, so a struck
+// multi-line paragraph empties completely on accept), block atoms get the record
+// attribute. Sets the suggestion plugin's skip meta.
+export function addSuggestionMarks(
+  tr: Transaction,
+  range: { from: number; to: number },
+  kind: SuggestionKind,
+  record: SuggestionRecord
+) {
+  const markType = tr.doc.type.schema.marks[kind === "insert" ? SUGGESTED_INSERTION_MARK : SUGGESTED_DELETION_MARK];
+  if (!markType) return;
+  const docSize = tr.doc.content.size;
+  const from = Math.max(0, Math.min(range.from, docSize));
+  const to = Math.max(from, Math.min(range.to, docSize));
+  if (to <= from) return;
+  const mark = markType.create({ ...record });
+  const attr = attrForKind(kind);
+  tr.doc.nodesBetween(from, to, (node, pos, parent) => {
+    if (isAtomNode(node)) {
+      tr.setNodeAttribute(pos, attr, [record]);
+      return false;
+    }
+    if (node.isInline) {
+      const segFrom = Math.max(from, pos);
+      const segTo = Math.min(to, pos + node.nodeSize);
+      if (segTo > segFrom && (!parent || parent.type.allowsMarkType(markType))) tr.addMark(segFrom, segTo, mark);
+      return false;
+    }
+    return true;
+  });
+  tr.setMeta(suggestionPluginKey, { type: "skip" } satisfies SuggestionPluginMeta);
 }
 
 function attrForKind(kind: SuggestionKind): string {
@@ -616,7 +630,7 @@ function collectTargets(
   const deleteMark = state.schema.marks[SUGGESTED_DELETION_MARK];
 
   state.doc.descendants((node, pos) => {
-    if (node.isText) {
+    if (node.isInline && !isAtomNode(node)) {
       const insertion = node.marks.find((m) => m.type.name === SUGGESTED_INSERTION_MARK);
       const deletion = node.marks.find((m) => m.type.name === SUGGESTED_DELETION_MARK);
       if (insertion && predicate(markRecord(insertion).suggestionId)) {
@@ -669,6 +683,7 @@ function applyTargets(state: EditorState, targets: AccumulatedTargets): Transact
   if (targets.removeMark.length === 0 && targets.deleteRanges.length === 0 && targets.clearAtomAttr.length === 0) {
     return null;
   }
+  const emptied = collectEmptiedTextblocks(state.doc, targets.deleteRanges);
   const tr = state.tr;
   // Mark removals and attr clears do not change positions; do them first.
   for (const target of targets.removeMark) {
@@ -681,8 +696,59 @@ function applyTargets(state: EditorState, targets: AccumulatedTargets): Transact
   for (const range of [...targets.deleteRanges].sort((a, b) => b.from - a.from)) {
     tr.delete(range.from, range.to);
   }
+  // Blocks whose whole text this resolution removed go too (high → low), so a
+  // rewritten paragraph/bullet leaves no empty husk. Mirrors the committed view
+  // (lib/suggestion-content.ts transformNode) — keep the two rules in lockstep.
+  for (const pos of emptied.sort((a, b) => b - a)) {
+    removeEmptiedBlock(tr, tr.mapping.map(pos, 1));
+  }
   tr.setMeta(suggestionPluginKey, { type: "skip" } satisfies SuggestionPluginMeta);
   return tr;
+}
+
+// Positions of non-empty textblocks whose inline content is entirely covered by
+// the ranges about to be deleted.
+function collectEmptiedTextblocks(doc: PMNode, ranges: Array<{ from: number; to: number }>): number[] {
+  if (ranges.length === 0) return [];
+  // Adjacent text nodes are separate ranges; merge touching ones first.
+  const merged: Array<{ from: number; to: number }> = [];
+  for (const range of [...ranges].sort((a, b) => a.from - b.from)) {
+    const last = merged[merged.length - 1];
+    if (last && range.from <= last.to) last.to = Math.max(last.to, range.to);
+    else merged.push({ ...range });
+  }
+  const covered = (from: number, to: number) => merged.some((range) => range.from <= from && range.to >= to);
+  const positions: number[] = [];
+  doc.descendants((node, pos) => {
+    if (!node.isTextblock) return true;
+    if (node.content.size > 0 && covered(pos + 1, pos + node.nodeSize - 1)) positions.push(pos);
+    return false;
+  });
+  return positions;
+}
+
+// Removes the (now empty) textblock at `pos`. An only child takes its list item
+// (and an emptied list) with it; a list item's first paragraph stays while the
+// item has other children; nothing else that would empty a container (or the
+// document) is removed.
+function removeEmptiedBlock(tr: Transaction, pos: number) {
+  const node = tr.doc.nodeAt(pos);
+  if (!node || !node.isTextblock || node.content.size > 0) return;
+  const $pos = tr.doc.resolve(pos);
+  let from = pos;
+  let to = pos + node.nodeSize;
+  for (let depth = $pos.depth; depth >= 0; depth -= 1) {
+    const parent = $pos.node(depth);
+    const index = $pos.index(depth);
+    if (parent.childCount > 1) {
+      if (isListItemType(parent.type.name) && index === 0) return;
+      tr.delete(from, to);
+      return;
+    }
+    if (depth === 0 || !(isListItemType(parent.type.name) || isListType(parent.type.name))) return;
+    from = $pos.before(depth);
+    to = $pos.after(depth);
+  }
 }
 
 export function acceptSuggestion(state: EditorState, suggestionId: string): Transaction | null {

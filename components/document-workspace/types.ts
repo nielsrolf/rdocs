@@ -25,6 +25,9 @@ export type CommentView = {
 
 export type ThreadView = {
   id: string;
+  // "studio" (absent on older payloads), "forum", or "reaction" (an emoji
+  // reaction on document text, rendered as pills instead of a comment card).
+  origin?: string;
   anchorText: string;
   anchorContext: string | null;
   status: ThreadStatusValue;
@@ -206,11 +209,12 @@ export type SelectionState = {
   bubbleLeft: number;
 };
 
-export type SelectionPopoverMode = "menu" | "comment" | "edit";
+export type SelectionPopoverMode = "menu" | "comment" | "edit" | "react";
 export type CommentTagFilterValue = "yes" | "no" | "all";
 
 export type HighlightThread = {
   id: string;
+  origin?: string;
   tags?: string[];
   status?: string;
 };

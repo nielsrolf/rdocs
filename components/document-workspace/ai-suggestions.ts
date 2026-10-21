@@ -1,8 +1,9 @@
-import type { Node as PMNode } from "@tiptap/pm/model";
+import { Fragment, type Node as PMNode } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 
+import { insertBlocksAfterRange } from "@/lib/structured-replace";
 import { SUGGESTED_DELETION_MARK, SUGGESTED_INSERTION_MARK, findAnchorMatch } from "@/lib/suggestion-content";
-import type { SuggestionAuthor } from "./suggestions";
+import { addSuggestionMarks, type SuggestionAuthor, type SuggestionRecord } from "./suggestions";
 
 // Applies an AGENT's anchored find/replace suggestions to the live editor as
 // tracked-change marks. The agent only emits document text, so each suggestion
@@ -147,4 +148,58 @@ export function buildAiSuggestionsTransaction(
   }
 
   return { tr, applied: resolved.length, skipped };
+}
+
+// Tracked replacement of a KNOWN range with rich block content (an agent
+// suggestion, or a selection edit in direct mode): the range is struck and the
+// content is spliced in right after it via lib/structured-replace, so a bullet
+// rewritten as "**Label:** text" stays ONE bullet instead of "bullet, blank
+// line, text". When the content has block structure and the range ends
+// mid-text, the strike is widened to the end of that textblock and its tail is
+// re-inserted after the content — otherwise rejecting would leave the paragraph
+// split in two. Pure (no editor), so tests drive it directly.
+export function buildRichTrackedReplacementTransaction(
+  state: EditorState,
+  range: { from: number; to: number },
+  content: Fragment,
+  record: SuggestionRecord
+): Transaction | null {
+  const tr = state.tr;
+  let deletionTo = range.to;
+  const nodes: PMNode[] = [];
+  content.forEach((node) => nodes.push(node));
+  while (nodes.length > 0 && isEmptyParagraph(nodes[0])) nodes.shift();
+  while (nodes.length > 0 && isEmptyParagraph(nodes[nodes.length - 1])) nodes.pop();
+
+  const $to = state.doc.resolve(range.to);
+  const inlineOnly = nodes.length === 1 && nodes[0].type.name === "paragraph";
+  if (nodes.length > 0 && !inlineOnly && $to.parent.isTextblock && range.to < $to.end()) {
+    const tailContent = $to.parent.content.cut($to.parentOffset);
+    const tail = stripSuggestionMarks(tailContent);
+    const last = nodes[nodes.length - 1];
+    if (last.type.name === "paragraph") {
+      nodes[nodes.length - 1] = last.copy(last.content.append(tail));
+    } else {
+      nodes.push(state.schema.nodes.paragraph.create(null, tail));
+    }
+    deletionTo = $to.end();
+  }
+
+  const inserted = nodes.length > 0 ? insertBlocksAfterRange(tr, range.from, deletionTo, nodes) : [];
+  if (deletionTo > range.from) addSuggestionMarks(tr, { from: range.from, to: deletionTo }, "delete", record);
+  for (const span of inserted) addSuggestionMarks(tr, span, "insert", record);
+  return tr.docChanged ? tr : null;
+}
+
+function isEmptyParagraph(node: PMNode) {
+  return node.type.name === "paragraph" && node.content.size === 0;
+}
+
+function stripSuggestionMarks(fragment: Fragment): Fragment {
+  const names = new Set([SUGGESTED_INSERTION_MARK, SUGGESTED_DELETION_MARK]);
+  const nodes: PMNode[] = [];
+  fragment.forEach((node) => {
+    nodes.push(node.mark(node.marks.filter((mark) => !names.has(mark.type.name))));
+  });
+  return Fragment.fromArray(nodes);
 }

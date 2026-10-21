@@ -9,13 +9,16 @@ import { db } from "@/lib/db";
 import { notifyCommentPosted } from "@/lib/comment-notifications";
 import { syncCommentMentions } from "@/lib/mention-data";
 import { canCommentOnDocument } from "@/lib/permissions";
+import { createReactionThread } from "@/lib/reaction-data";
+import { isReactionEmoji } from "@/lib/reactions";
 
 const createThreadSchema = z.object({
   threadId: z.string().min(1).max(100).optional(),
   body: z.string().min(1).max(4000),
   // "studio" (default) threads anchor to document text; "forum" threads are
-  // top-level forum comments with no anchor.
-  origin: z.enum(["studio", "forum"]).optional(),
+  // top-level forum comments with no anchor; "reaction" threads are emoji
+  // reactions on document text (body = the emoji, anchored like studio).
+  origin: z.enum(["studio", "forum", "reaction"]).optional(),
   anchorText: z.string().max(1000).optional().default(""),
   anchorContext: z.string().max(2000).optional().nullable(),
   clientId: z.string().min(1).max(120).optional().nullable(),
@@ -59,9 +62,11 @@ export async function POST(request: Request, { params }: RouteContext<{ id: stri
   const guestName = user ? null : parsed.data.guestName?.trim() || "Guest";
   const origin = parsed.data.origin ?? "studio";
 
-  // Studio threads must arrive with a real anchor snippet; forum threads
-  // deliberately have none.
-  if (origin === "studio" && parsed.data.anchorText.length === 0) {
+  const anchored = origin !== "forum";
+
+  // Studio and reaction threads must arrive with a real anchor snippet; forum
+  // threads deliberately have none.
+  if (anchored && parsed.data.anchorText.length === 0) {
     console.warn("[comment-create] missing anchorText", { documentId: id, userId: user?.id ?? null });
     return NextResponse.json({ error: "Invalid comment payload." }, { status: 400 });
   }
@@ -72,7 +77,7 @@ export async function POST(request: Request, { params }: RouteContext<{ id: stri
   // succeed and retry. Without this, a transient "Save failed" between the
   // step push and this POST leaves a thread row with no anchor mark and the
   // comment becomes invisible in the editor.
-  if (parsed.data.threadId && origin === "studio") {
+  if (parsed.data.threadId && anchored) {
     const docContent = parseDocumentContent(access.document.content);
     if (!documentHasAnchorForThread(docContent, parsed.data.threadId)) {
       console.warn("[comment-create] anchor missing", {
@@ -84,6 +89,59 @@ export async function POST(request: Request, { params }: RouteContext<{ id: stri
         { error: "Anchor not yet saved. Please retry in a moment." },
         { status: 409 }
       );
+    }
+  }
+
+  if (origin === "reaction") {
+    // Reactions are stored per user, so anonymous share-link visitors cannot
+    // react; and only the fixed palette is accepted.
+    if (!user) {
+      return jsonError(401, "Sign in to react.");
+    }
+    if (!isReactionEmoji(parsed.data.body)) {
+      return NextResponse.json({ error: "Invalid reaction." }, { status: 400 });
+    }
+    try {
+      const thread = await createReactionThread({
+        threadId: parsed.data.threadId,
+        documentId: id,
+        userId: user.id,
+        emoji: parsed.data.body,
+        anchorText: parsed.data.anchorText,
+        anchorContext: parsed.data.anchorContext
+      });
+      const now = new Date();
+      await db.commentThreadRead.upsert({
+        where: { threadId_userId: { threadId: thread.id, userId: user.id } },
+        create: { threadId: thread.id, userId: user.id, lastReadAt: now },
+        update: { lastReadAt: now }
+      });
+      const serialized = serializeThread(thread, { lastReadAt: now, currentUserId: user.id });
+      // Broadcast without the per-viewer "reactedByMe"; other clients recompute it.
+      broadcastDocumentEvent(
+        id,
+        "thread-created",
+        { thread: serializeThread(thread, { currentUserId: null }) },
+        parsed.data.clientId ?? null
+      );
+      // No Slack notification: a reaction is a lightweight signal, not a comment.
+      console.log("[comment-create]", {
+        documentId: id,
+        userId: user.id,
+        threadId: thread.id,
+        reaction: parsed.data.body,
+        anchorBytes: parsed.data.anchorText.length,
+        elapsedMs: Date.now() - startedAt
+      });
+      return NextResponse.json({ thread: serialized, updatedAt: null });
+    } catch (error) {
+      console.error("[comment-create] reaction failed", {
+        documentId: id,
+        userId: user.id,
+        requestedThreadId: parsed.data.threadId ?? null,
+        error: error instanceof Error ? error.message : error
+      });
+      return NextResponse.json({ error: "Failed to save reaction." }, { status: 500 });
     }
   }
 

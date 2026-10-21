@@ -94,6 +94,7 @@ export function serializeComment(
 export function serializeThread(
   thread: {
     id: string;
+    origin?: string | null;
     anchorText: string;
     anchorContext: string | null;
     status: string;
@@ -124,6 +125,9 @@ export function serializeThread(
 ) {
   return {
     id: thread.id,
+    // Omitted when the caller did not select it, so a partial update
+    // (thread-updated) never overwrites a client's known origin.
+    ...(thread.origin ? { origin: thread.origin } : {}),
     anchorText: thread.anchorText,
     anchorContext: thread.anchorContext,
     status: thread.status,
@@ -166,6 +170,7 @@ export async function listDocumentThreads(documentId: string, userId?: string | 
     orderBy: { updatedAt: "desc" },
     select: {
       id: true,
+      origin: true,
       anchorText: true,
       anchorContext: true,
       status: true,
@@ -399,6 +404,7 @@ export async function listTaggedThreadsForUser(
     select: {
       id: true,
       documentId: true,
+      origin: true,
       anchorText: true,
       anchorContext: true,
       status: true,

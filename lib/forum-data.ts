@@ -3,6 +3,7 @@ import { listAccessibleDocumentsForUser } from "@/lib/document-data";
 import { getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { EMPTY_TALLY, tallyVotes, tallyVotesByTarget, type VoteTally } from "@/lib/forum-votes";
 import { listQuicktakes, type QuicktakeSummary } from "@/lib/quicktakes";
+import { REACTION_THREAD_ORIGIN } from "@/lib/reactions";
 
 export type ForumDocumentSummary = {
   id: string;
@@ -60,11 +61,11 @@ export async function listForumDocumentsForUser(
     }),
     db.comment.groupBy({
       by: ["threadId"],
-      where: { thread: { documentId: { in: postedIds }, status: "OPEN" } },
+      where: { thread: { documentId: { in: postedIds }, status: "OPEN", origin: { not: REACTION_THREAD_ORIGIN } } },
       _count: { _all: true }
     }).then(async (rows) => {
       const threads = await db.commentThread.findMany({
-        where: { documentId: { in: postedIds }, status: "OPEN" },
+        where: { documentId: { in: postedIds }, status: "OPEN", origin: { not: REACTION_THREAD_ORIGIN } },
         select: { id: true, documentId: true }
       });
       const docByThread = new Map(threads.map((t) => [t.id, t.documentId]));
@@ -163,7 +164,8 @@ export type ForumComment = {
 //   (or under their explicit parentId when set).
 export async function listForumComments(documentId: string, userId: string | null): Promise<ForumComment[]> {
   const threads = await db.commentThread.findMany({
-    where: { documentId, status: "OPEN" },
+    // Text reactions are margin annotations, not forum comments.
+    where: { documentId, status: "OPEN", origin: { not: REACTION_THREAD_ORIGIN } },
     orderBy: { createdAt: "asc" },
     select: {
       id: true,

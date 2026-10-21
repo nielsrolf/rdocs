@@ -5,10 +5,15 @@ import {
   aggregateReactions,
   isReactionEmoji,
   REACTION_EMOJIS,
+  reactionThreadBody,
   toggleReactionLocal
 } from "../lib/reactions";
 
 test("isReactionEmoji only accepts palette members", () => {
+  for (const emoji of ["➕", "➖", "🔥", "🎉", "😂", "🤔", "💭", "💬"]) {
+    assert.equal(isReactionEmoji(emoji), true, emoji);
+  }
+  // Legacy palette: no longer offered, still valid so old rows can be removed.
   assert.equal(isReactionEmoji("👍"), true);
   assert.equal(isReactionEmoji("🚀"), true);
   assert.equal(isReactionEmoji("🦄"), false);
@@ -42,15 +47,31 @@ test("reactedByMe is false when the user has not reacted (or is anonymous)", () 
 });
 
 test("aggregateReactions orders entries by the fixed palette", () => {
-  // Provide in scrambled order; expect palette order (👍 before 🎉 before 👀).
+  // Provide in scrambled order; expect palette order (➕ before 🎉 before 💬).
   const rows = [
-    { emoji: "👀", userId: "u1" },
+    { emoji: "💬", userId: "u1" },
     { emoji: "🎉", userId: "u1" },
-    { emoji: "👍", userId: "u1" }
+    { emoji: "➕", userId: "u1" }
   ];
   const order = aggregateReactions(rows, null).map((r) => r.emoji);
   const expected = REACTION_EMOJIS.filter((e) => order.includes(e));
   assert.deepEqual(order, expected);
+});
+
+test("legacy emoji sort after the current palette", () => {
+  const rows = [
+    { emoji: "👍", userId: "u1" },
+    { emoji: "💬", userId: "u1" }
+  ];
+  assert.deepEqual(aggregateReactions(rows, null).map((r) => r.emoji), ["💬", "👍"]);
+});
+
+test("reactionThreadBody lists distinct emoji in palette order", () => {
+  assert.equal(
+    reactionThreadBody([{ emoji: "🔥" }, { emoji: "➕" }, { emoji: "🔥" }]),
+    "➕ 🔥"
+  );
+  assert.equal(reactionThreadBody([]), "");
 });
 
 test("empty input yields no summaries", () => {
@@ -58,29 +79,29 @@ test("empty input yields no summaries", () => {
 });
 
 test("toggleReactionLocal adds a brand-new reaction", () => {
-  const next = toggleReactionLocal([], "👍", "Ann");
-  assert.deepEqual(next, [{ emoji: "👍", count: 1, reactedByMe: true, users: ["Ann"] }]);
+  const next = toggleReactionLocal([], "➕", "Ann");
+  assert.deepEqual(next, [{ emoji: "➕", count: 1, reactedByMe: true, users: ["Ann"] }]);
 });
 
 test("toggleReactionLocal joins an existing reaction the user hasn't made", () => {
-  const start = [{ emoji: "👍", count: 1, reactedByMe: false, users: ["Bo"] }];
-  const next = toggleReactionLocal(start, "👍", "Ann");
+  const start = [{ emoji: "➕", count: 1, reactedByMe: false, users: ["Bo"] }];
+  const next = toggleReactionLocal(start, "➕", "Ann");
   assert.equal(next[0].count, 2);
   assert.equal(next[0].reactedByMe, true);
   assert.deepEqual(next[0].users, ["Bo", "Ann"]);
 });
 
 test("toggleReactionLocal removes the user's own reaction, dropping empty entries", () => {
-  const start = [{ emoji: "👍", count: 1, reactedByMe: true, users: ["Ann"] }];
-  assert.deepEqual(toggleReactionLocal(start, "👍", "Ann"), []);
+  const start = [{ emoji: "➕", count: 1, reactedByMe: true, users: ["Ann"] }];
+  assert.deepEqual(toggleReactionLocal(start, "➕", "Ann"), []);
 });
 
 test("toggleReactionLocal is its own inverse (rollback)", () => {
   const start = [
-    { emoji: "👍", count: 2, reactedByMe: false, users: ["Bo", "Cy"] },
+    { emoji: "➕", count: 2, reactedByMe: false, users: ["Bo", "Cy"] },
     { emoji: "🎉", count: 1, reactedByMe: true, users: ["Ann"] }
   ];
-  const once = toggleReactionLocal(start, "👍", "Ann");
-  const twice = toggleReactionLocal(once, "👍", "Ann");
+  const once = toggleReactionLocal(start, "➕", "Ann");
+  const twice = toggleReactionLocal(once, "➕", "Ann");
   assert.deepEqual(twice, start);
 });

@@ -1,4 +1,4 @@
-import { Fragment, Slice, type Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { Fragment, type Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Transform } from "@tiptap/pm/transform";
 import type { JSONContent } from "@tiptap/react";
 
@@ -7,11 +7,13 @@ import {
   collectPastedImages,
   isPastedImageSrc,
   parseDocumentContent,
-  pastedImagePlaceholder
+  pastedImagePlaceholder,
+  tabMarker
 } from "@/lib/content";
 import { db } from "@/lib/db";
 import { createDocumentEditorSchema } from "@/lib/document-editor-schema";
 import { markdownToDocNodes } from "@/lib/mcp/markdown-doc";
+import { replaceRangeWithBlocks } from "@/lib/structured-replace";
 
 const schema = createDocumentEditorSchema();
 
@@ -64,6 +66,8 @@ function atomPlaceholderText(node: ProseMirrorNode, counters: { pastedImages: nu
     }
     case "attachmentChip":
       return `[Attachment: ${str("fileName") || "Attachment"}](${str("workspacePath")})`;
+    case "tabBreak":
+      return tabMarker(str("title"));
     default:
       return null;
   }
@@ -126,6 +130,8 @@ function stripMarkdownSyntax(value: string): string {
         .replace(/^\[[ xX]\]\s+/, "")
         .replace(/^#{1,6}\s+/, "")
     )
+    // read_document closes each tab with </tab>; it is not part of the document.
+    .filter((line) => !/^\s*<\/tab>\s*$/.test(line))
     .join("\n")
     .replace(/\\([\\`*_{}[\]()#+\-.!>])/g, "$1");
 }
@@ -207,18 +213,19 @@ export function findTextRange(doc: ProseMirrorNode, findText: string): { from: n
   return { from: positions[start], to: positions[end - 1] + 1 };
 }
 
-function fragmentFromNodes(nodes: JSONContent[]): Fragment {
-  return Fragment.fromArray(nodes.map((node) => schema.nodeFromJSON(node)));
-}
-
-function buildEditSteps(input: {
+// Exported for tests. Structure-aware splicing lives in lib/structured-replace
+// (shared with selection edits and suggestions): a single paragraph replaces
+// inline, lists replacing list items become siblings, other blocks never leave an
+// empty half of the matched textblock behind, and tab breaks land at the top level.
+export function buildEditSteps(input: {
   doc: ProseMirrorNode;
   mode: MarkdownEditMode;
   findText?: string;
   nodes: JSONContent[];
 }) {
+  const docSchema = input.doc.type.schema;
   const tr = new Transform(input.doc);
-  const fragment = fragmentFromNodes(input.nodes);
+  const fragment = Fragment.fromArray(input.nodes.map((node) => docSchema.nodeFromJSON(node)));
 
   if (input.mode === "append") {
     tr.insert(input.doc.content.size, fragment);
@@ -234,8 +241,19 @@ function buildEditSteps(input: {
     throw new McpEditError("find_text is required for replace edits.");
   }
   const { from, to } = findTextRange(input.doc, input.findText);
-  const $from = input.doc.resolve(from);
-  const $to = input.doc.resolve(to);
+
+  // Renaming a tab: its <tab title="…"> marker replaced by another one keeps the
+  // tab (and its id, which links and the active-tab state point at).
+  const matched = input.doc.nodeAt(from);
+  if (
+    matched?.type.name === "tabBreak" &&
+    to === from + matched.nodeSize &&
+    fragment.childCount === 1 &&
+    fragment.child(0).type.name === "tabBreak"
+  ) {
+    tr.setNodeMarkup(from, undefined, { ...matched.attrs, title: fragment.child(0).attrs.title });
+    return tr;
+  }
 
   // Empty replacement deletes the matched range (e.g. removing a widget
   // placeholder or a whole block). deleteRange expands to full blocks so no
@@ -245,42 +263,7 @@ function buildEditSteps(input: {
     return tr;
   }
 
-  // A single-paragraph replacement of a range inside one textblock is applied
-  // inline, so replacing a phrase doesn't split its paragraph.
-  const singleParagraph =
-    input.nodes.length === 1 && input.nodes[0].type === "paragraph" ? input.nodes[0] : null;
-  if (singleParagraph && $from.sameParent($to) && $from.parent.isTextblock) {
-    tr.replaceWith(from, to, fragmentFromNodes(singleParagraph.content ?? []));
-    return tr;
-  }
-
-  // Replacing list item(s) with a list: swap whole items at the matched list's
-  // level so the replacement's own structure decides nesting. Without this,
-  // replaceRange "fits" the new list INSIDE the matched item, so a new bullet
-  // always became a nested child and items could never be de-nested.
-  const listTypeNames = new Set(["bulletList", "orderedList", "taskList"]);
-  const singleList =
-    input.nodes.length === 1 && listTypeNames.has(input.nodes[0].type ?? "") ? input.nodes[0] : null;
-  const coversWholeBlocks =
-    $from.parent.isTextblock && $to.parent.isTextblock && from === $from.start() && to === $to.end();
-  if (singleList && coversWholeBlocks) {
-    const range = $from.blockRange($to, (node) => listTypeNames.has(node.type.name));
-    if (range) {
-      const newList = schema.nodeFromJSON(singleList);
-      if (range.startIndex === 0 && range.endIndex === range.parent.childCount) {
-        // The match covers the whole list — replace the list node itself.
-        tr.replaceWith(range.$from.before(range.depth), range.$from.after(range.depth), newList);
-        return tr;
-      }
-      if (range.parent.canReplace(range.startIndex, range.endIndex, newList.content)) {
-        // Replace just the matched items with the new list's items (siblings).
-        tr.replaceWith(range.start, range.end, newList.content);
-        return tr;
-      }
-    }
-  }
-
-  tr.replaceRange(from, to, new Slice(fragment, 0, 0));
+  replaceRangeWithBlocks(tr, from, to, fragment);
   return tr;
 }
 

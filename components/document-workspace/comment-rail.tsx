@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import type { MentionViewer } from "@/lib/mention-markdown";
-import { REACTION_EMOJIS } from "@/lib/reactions";
+import { REACTION_EMOJIS, REACTION_THREAD_ORIGIN } from "@/lib/reactions";
 import { getSourceLabel } from "@/lib/sources";
 import { formatDateTime, truncate } from "@/lib/utils";
 
@@ -22,11 +22,13 @@ import { getThreadTags, isThreadUnread } from "./utils";
 function CommentReactions({
   comment,
   canReact,
-  onToggleReaction
+  onToggleReaction,
+  addLabel = "☺+"
 }: {
   comment: CommentView;
   canReact: boolean;
   onToggleReaction: (commentId: string, emoji: string) => void;
+  addLabel?: string;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const reactions = comment.reactions ?? [];
@@ -61,7 +63,7 @@ function CommentReactions({
             }}
             type="button"
           >
-            ☺+
+            {addLabel}
           </button>
           {pickerOpen ? (
             <div className="comment-reaction-picker" role="menu">
@@ -244,6 +246,32 @@ export function CommentRail({
       ) : (
         orderedThreads.map((thread) => {
           const isActive = activeThreadId === thread.id;
+          if (thread.origin === REACTION_THREAD_ORIGIN) {
+            // A text reaction: emoji pills only. Its reactions live on the
+            // root comment; clicking a pill toggles it, "+" adds another.
+            const root = thread.comments[0];
+            if (!root) return null;
+            const reactors = (root.reactions ?? []).flatMap((reaction) => reaction.users);
+            return (
+              <article
+                className={`comment-thread-card reaction-thread-card${isActive ? " comment-thread-card-active" : ""}`}
+                data-thread-id={thread.id}
+                key={thread.id}
+                onMouseDown={() => {
+                  if (!isActive) onFocusThread(thread);
+                }}
+                style={{ top: threadOffsets[thread.id] ?? 16 }}
+                title={`Reaction on “${truncate(thread.anchorText, 52)}”${reactors.length ? ` by ${[...new Set(reactors)].join(", ")}` : ""}`}
+              >
+                <CommentReactions
+                  addLabel="+"
+                  comment={root}
+                  canReact={canWriteComments && currentUserId !== null}
+                  onToggleReaction={onToggleReaction}
+                />
+              </article>
+            );
+          }
           const threadRun = commentThreadRunsByThread.get(thread.id) ?? null;
           const isThreadAiBusy = aiBusyThreadId === thread.id || threadRun !== null;
           const allComments = thread.comments;

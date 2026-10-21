@@ -142,6 +142,9 @@ function normalizedMatch(haystack: string, needle: string): AnchorMatchResult {
  */
 export function stripMarkdownSyntax(input: string): string {
   let out = input;
+  // Structure markers of the markdown view that are not document text: tab
+  // starts/ends and toggle-block wrappers (their summary lives in an attribute).
+  out = out.replace(/^[ \t]*(?:<tab\b[^>\n]*>|<\/tab>|<details>|<\/details>|<summary>[^\n]*<\/summary>)[ \t]*$/gim, "");
   // Images first (so the link pattern below doesn't half-match "![").
   out = out.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");
   // Links: keep the visible text.
@@ -149,7 +152,10 @@ export function stripMarkdownSyntax(input: string): string {
   // Backslash escapes of markdown punctuation.
   out = out.replace(/\\([\\`*_{}[\]()#+\-.!>~|"'])/g, "$1");
   // Line-leading block markers (possibly stacked, e.g. "> - item").
-  out = out.replace(/^[ \t]{0,3}(?:#{1,6}[ \t]+|>[ \t]?|[-*+][ \t]+|\d{1,3}[.)][ \t]+)+/gm, "");
+  // Any indentation: nested list items are indented two spaces per level.
+  out = out.replace(/^[ \t]*(?:#{1,6}[ \t]+|>[ \t]?|[-*+][ \t]+|\d{1,3}[.)][ \t]+)+/gm, "");
+  // Task-list checkboxes left behind by the list marker.
+  out = out.replace(/^\[[ xX]\][ \t]+/gm, "");
   // Bold / bold-italic wrappers.
   out = out.replace(/(\*\*\*|___|\*\*|__)(?=\S)([\s\S]*?\S)\1/g, "$2");
   // Inline code.

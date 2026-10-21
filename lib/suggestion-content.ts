@@ -66,7 +66,11 @@ function mergeAdjacentTextNodes(nodes: unknown[]): unknown[] {
   for (const node of nodes) {
     const previous = merged[merged.length - 1];
     if (canMergeTextNodes(previous, node)) {
-      (previous as { text: string }).text += (node as { text: string }).text;
+      // Copy, never mutate: `previous` may be the caller's own node object.
+      merged[merged.length - 1] = {
+        ...(previous as object),
+        text: (previous as { text: string }).text + (node as { text: string }).text
+      };
       continue;
     }
     merged.push(node);
@@ -137,18 +141,55 @@ export function computeCommittedContent(content: unknown, options: { reject?: bo
   return transformNode(content, reject);
 }
 
-function transformNode(input: unknown, reject: boolean): unknown {
-  if (Array.isArray(input)) {
-    const transformed: unknown[] = [];
-    for (const child of input) {
-      const next = transformNode(child, reject);
-      if (next !== null) transformed.push(next);
+const TEXTBLOCK_TYPES = new Set(["paragraph", "heading", "codeBlock"]);
+const LIST_TYPES = new Set(["bulletList", "orderedList", "taskList"]);
+const LIST_ITEM_TYPES = new Set(["listItem", "taskItem"]);
+
+// Blocks the resolution emptied are removed, mirroring the editor's accept/reject
+// (components/document-workspace/suggestions.ts removeEmptiedBlock): a textblock
+// that had content and lost all of it disappears; an only child takes its list
+// item / list with it (signalled upward as "emptied"); a list item's first
+// paragraph stays while the item has other children; no other container is
+// emptied. Children are processed last → first, like the editor's high → low pass.
+function transformChildren(parentType: string | undefined, children: unknown[], reject: boolean): {
+  content: unknown[];
+  emptied: boolean;
+} {
+  const transformed: Array<{ node: unknown; emptied: boolean }> = [];
+  for (const child of children) {
+    const result = transformBlock(child, reject);
+    if (result.node !== null) transformed.push(result);
+  }
+  let parentEmptied = false;
+  for (let index = transformed.length - 1; index >= 0; index -= 1) {
+    if (!transformed[index].emptied) continue;
+    if (transformed.length > 1) {
+      if (parentType && LIST_ITEM_TYPES.has(parentType) && index === 0) continue;
+      transformed.splice(index, 1);
+      continue;
     }
-    return mergeAdjacentTextNodes(transformed);
+    if (parentType && parentType !== "doc" && (LIST_ITEM_TYPES.has(parentType) || LIST_TYPES.has(parentType))) {
+      parentEmptied = true;
+    }
+  }
+  return {
+    content: mergeAdjacentTextNodes(transformed.map((entry) => entry.node)),
+    emptied: parentEmptied
+  };
+}
+
+function transformNode(input: unknown, reject: boolean): unknown {
+  return transformBlock(input, reject).node;
+}
+
+function transformBlock(input: unknown, reject: boolean): { node: unknown; emptied: boolean } {
+  if (Array.isArray(input)) {
+    return { node: transformChildren(undefined, input, reject).content, emptied: false };
   }
 
-  if (!input || typeof input !== "object") return input;
+  if (!input || typeof input !== "object") return { node: input, emptied: false };
   const node = input as JsonNode;
+  const keep = (value: unknown) => ({ node: value, emptied: false });
 
   // Inline text — or any other inline node that carries marks, e.g. a hardBreak
   // that fell inside a commented range (addMark marks all inline content, not
@@ -159,31 +200,33 @@ function transformNode(input: unknown, reject: boolean): unknown {
     const deleted = hasMark(node, SUGGESTED_DELETION_MARK);
     if (inserted) {
       // Insertion: dropped on reject, committed (mark stripped) on accept.
-      return reject ? null : stripMarks(node, new Set([SUGGESTED_INSERTION_MARK, COMMENT_ANCHOR_MARK]));
+      return keep(reject ? null : stripMarks(node, new Set([SUGGESTED_INSERTION_MARK, COMMENT_ANCHOR_MARK])));
     }
     if (deleted) {
       // Deletion: kept (mark stripped) on reject, dropped on accept.
-      return reject ? stripMarks(node, new Set([SUGGESTED_DELETION_MARK, COMMENT_ANCHOR_MARK])) : null;
+      return keep(reject ? stripMarks(node, new Set([SUGGESTED_DELETION_MARK, COMMENT_ANCHOR_MARK])) : null);
     }
-    return stripMarks(node, new Set([COMMENT_ANCHOR_MARK]));
+    return keep(stripMarks(node, new Set([COMMENT_ANCHOR_MARK])));
   }
 
   // Block atoms tracked via node attributes.
   const insertRecords = recordArray(node.attrs?.[SUGGESTION_INSERT_RECORDS_ATTR]);
   const deleteRecords = recordArray(node.attrs?.[SUGGESTION_DELETE_RECORDS_ATTR]);
   if (insertRecords.length > 0) {
-    return reject ? null : stripAnnotationAttrs(clearRecordAttr(node, SUGGESTION_INSERT_RECORDS_ATTR));
+    return keep(reject ? null : stripAnnotationAttrs(clearRecordAttr(node, SUGGESTION_INSERT_RECORDS_ATTR)));
   }
   if (deleteRecords.length > 0) {
-    if (!reject) return null;
-    return stripAnnotationAttrs(clearRecordAttr(node, SUGGESTION_DELETE_RECORDS_ATTR));
+    return keep(reject ? stripAnnotationAttrs(clearRecordAttr(node, SUGGESTION_DELETE_RECORDS_ATTR)) : null);
   }
 
   const stripped = stripAnnotationAttrs(node);
   if (Array.isArray(stripped.content)) {
-    return { ...stripped, content: transformNode(stripped.content, reject) as unknown[] };
+    const children = transformChildren(stripped.type, stripped.content, reject);
+    const emptiedTextblock =
+      TEXTBLOCK_TYPES.has(stripped.type ?? "") && stripped.content.length > 0 && children.content.length === 0;
+    return { node: { ...stripped, content: children.content }, emptied: emptiedTextblock || children.emptied };
   }
-  return stripped;
+  return keep(stripped);
 }
 
 // Re-export the tolerant anchor matcher so lib/client code has one import site.

@@ -34,13 +34,42 @@ const WIDGET_PLACEHOLDER_SCHEME = "widget://";
 // minimized: ![widget: <label>](widget://<id> "expanded"). getDocumentMarkdown emits
 // it for expanded widgets, so echoing a placeholder keeps the widget's state.
 export const WIDGET_EXPANDED_TITLE = "expanded";
-// Toggle blocks round-trip as <details><summary>…</summary> … </details>
-// (getDocumentMarkdown). markdown-it runs with html:false, so these markers are cut
-// out before markdown rendering and turned into toggleBlock HTML here.
-const DETAILS_MARKER_PATTERN = /<details>\s*<summary>([\s\S]*?)<\/summary>|<\/details>/gi;
+// Block markers that markdown-it (html:false) would print literally, so they are
+// cut out before markdown rendering and turned into node HTML here:
+//  - toggle blocks round-trip as <details><summary>…</summary> … </details>;
+//  - tabs: <tab title="…"> starts a new tab (a tabBreak) at that point. read_document
+//    wraps each tab as <tab title="…"> … </tab>; the closing tag carries nothing and
+//    is dropped, so echoing a read document keeps its tabs.
+const BLOCK_MARKER_PATTERN =
+  /<details>\s*<summary>([\s\S]*?)<\/summary>|<\/details>|<tab\s+title\s*=\s*(?:"([^"]*)"|'([^']*)')\s*\/?>|<\/tab>/gi;
+const HAS_BLOCK_MARKER = /<details>|<\/?tab\b/i;
+
+// [start, end) offsets of fenced code blocks: markers inside them are content.
+function fencedCodeRanges(text: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  const fence = /^[ \t]{0,3}(`{3,}|~{3,})[^\n]*$/gm;
+  let open: { index: number; marker: string } | null = null;
+  let match: RegExpExecArray | null;
+  while ((match = fence.exec(text)) !== null) {
+    const marker = match[1];
+    if (!open) open = { index: match.index, marker };
+    else if (marker[0] === open.marker[0] && marker.length >= open.marker.length) {
+      ranges.push([open.index, match.index + match[0].length]);
+      open = null;
+    }
+  }
+  if (open) ranges.push([open.index, text.length]);
+  return ranges;
+}
+
+function newTabId() {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `tab-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
 
 function unescapeSummary(text: string) {
-  return text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").trim();
+  return text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&").trim();
 }
 // Pasted (data-URL) images are shown to agents as ![alt](pasted-image://N)
 // placeholders (lib/content.ts getDocumentMarkdown). An echoed placeholder must
@@ -302,29 +331,39 @@ export function buildAiEditInsertContent(input: {
   }
 
   const text = input.replacementText;
-  if (!/<details>/i.test(text)) {
+  if (!HAS_BLOCK_MARKER.test(text)) {
     processChunk(text, input.sourceLinks);
   } else {
-    // Split on toggle-block markers; nesting is tracked so an unbalanced close
+    // Split on block markers; toggle nesting is tracked so an unbalanced close
     // tag is ignored and unclosed blocks are closed at the end.
+    const fenced = fencedCodeRanges(text);
     const openAt: number[] = [];
     let position = 0;
     let marker: RegExpExecArray | null;
-    DETAILS_MARKER_PATTERN.lastIndex = 0;
-    while ((marker = DETAILS_MARKER_PATTERN.exec(text)) !== null) {
-      const isOpen = marker[1] !== undefined;
-      if (!isOpen && openAt.length === 0) continue;
-      processChunk(text.slice(position, marker.index), []);
-      position = marker.index + marker[0].length;
-      if (isOpen) {
+    BLOCK_MARKER_PATTERN.lastIndex = 0;
+    while ((marker = BLOCK_MARKER_PATTERN.exec(text)) !== null) {
+      const at = marker.index;
+      if (fenced.some(([start, end]) => at >= start && at < end)) continue;
+      const token = marker[0];
+      const isDetailsOpen = marker[1] !== undefined;
+      const isTabOpen = marker[2] !== undefined || marker[3] !== undefined;
+      const isDetailsClose = /^<\/details>$/i.test(token);
+      if (isDetailsClose && openAt.length === 0) continue;
+      processChunk(text.slice(position, at), []);
+      position = at + token.length;
+      if (isDetailsOpen) {
         const summary = escapeHtml(unescapeSummary(marker[1] ?? "") || "Details");
         content.push(`<details data-toggle-block data-toggle-summary="${summary}"><summary>${summary}</summary><div data-toggle-content>`);
         openAt.push(content.length);
-      } else {
+      } else if (isDetailsClose) {
         // A toggle block needs at least one child block.
         if (content.length === openAt.pop()) content.push("<p></p>");
         content.push("</div></details>");
+      } else if (isTabOpen) {
+        const title = unescapeSummary(marker[2] ?? marker[3] ?? "") || "Untitled tab";
+        content.push(`<div data-tab-break data-tab-id="${escapeHtml(newTabId())}" data-tab-title="${escapeHtml(title)}"></div>`);
       }
+      // </tab>: nothing to emit.
     }
     processChunk(text.slice(position), []);
     while (openAt.length > 0) {

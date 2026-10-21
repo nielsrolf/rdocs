@@ -4,7 +4,8 @@ import { z } from "zod";
 import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { broadcastDocumentEvent } from "@/lib/collaboration";
 import { db } from "@/lib/db";
-import { aggregateReactions, isReactionEmoji, type RawReaction } from "@/lib/reactions";
+import { toggleCommentReaction } from "@/lib/reaction-data";
+import { aggregateReactions, isReactionEmoji } from "@/lib/reactions";
 
 export const runtime = "nodejs";
 
@@ -28,7 +29,7 @@ export async function POST(request: Request, { params }: RouteContext<{ commentI
 
   const comment = await db.comment.findUnique({
     where: { id: commentId },
-    select: { id: true, threadId: true, thread: { select: { documentId: true } } }
+    select: { id: true, threadId: true, thread: { select: { documentId: true, origin: true } } }
   });
   if (!comment) {
     return NextResponse.json({ error: "Comment not found." }, { status: 404 });
@@ -44,21 +45,24 @@ export async function POST(request: Request, { params }: RouteContext<{ commentI
   }
   const { user } = gate;
 
-  const emoji = parsed.data.emoji;
-  const existing = await db.commentReaction.findUnique({
-    where: { commentId_userId_emoji: { commentId, userId: user.id, emoji } },
-    select: { id: true }
+  const { rows, deletedThreadId } = await toggleCommentReaction({
+    commentId,
+    threadId: comment.threadId,
+    threadOrigin: comment.thread.origin,
+    userId: user.id,
+    emoji: parsed.data.emoji
   });
-  if (existing) {
-    await db.commentReaction.delete({ where: { id: existing.id } });
-  } else {
-    await db.commentReaction.create({ data: { commentId, userId: user.id, emoji } });
-  }
 
-  const rows: RawReaction[] = await db.commentReaction.findMany({
-    where: { commentId },
-    select: { emoji: true, userId: true, user: { select: { name: true } } }
-  });
+  if (deletedThreadId) {
+    // The last reaction on a text reaction went away, and the thread with it.
+    broadcastDocumentEvent(
+      comment.thread.documentId,
+      "thread-deleted",
+      { threadId: deletedThreadId, deletedCommentId: commentId },
+      parsed.data.clientId ?? null
+    );
+    return NextResponse.json({ commentId, threadId: comment.threadId, reactions: [], deletedThreadId });
+  }
 
   // Broadcast the raw rows so every other client can recompute "reactedByMe"
   // against its own viewer; reactions are per-user and not interchangeable.
@@ -72,6 +76,7 @@ export async function POST(request: Request, { params }: RouteContext<{ commentI
   return NextResponse.json({
     commentId,
     threadId: comment.threadId,
-    reactions: aggregateReactions(rows, user.id)
+    reactions: aggregateReactions(rows, user.id),
+    deletedThreadId: null
   });
 }

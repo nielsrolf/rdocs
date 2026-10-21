@@ -15,6 +15,7 @@ import TableRow from "@tiptap/extension-table-row";
 import TaskList from "@tiptap/extension-task-list";
 import Underline from "@tiptap/extension-underline";
 import { getVersion, receiveTransaction, sendableSteps } from "@tiptap/pm/collab";
+import { createNodeFromContent } from "@tiptap/core";
 import { Fragment } from "@tiptap/pm/model";
 import { NodeSelection } from "@tiptap/pm/state";
 import { Step } from "@tiptap/pm/transform";
@@ -56,7 +57,11 @@ import {
 } from "./document-workspace/ai-edit-selections";
 import { buildAiEditRemountTransaction } from "./document-workspace/ai-edit-remount";
 import { startAiEditRun } from "./document-workspace/ai-edit-kickoff";
-import { resolveSuggestionRange, type AgentSuggestionInput } from "./document-workspace/ai-suggestions";
+import {
+  buildRichTrackedReplacementTransaction,
+  resolveSuggestionRange,
+  type AgentSuggestionInput
+} from "./document-workspace/ai-suggestions";
 import { submitPendingReplyThenAskAi } from "./document-workspace/ask-ai-flow";
 import {
   Suggestions,
@@ -64,7 +69,6 @@ import {
   acceptSuggestion,
   collectSuggestionRanges,
   createSuggestionId,
-  markExplicitSuggestion,
   rejectAllSuggestions,
   rejectSuggestion,
   setSuggestionMode,
@@ -134,6 +138,7 @@ import {
 } from "./document-workspace/tabs";
 import { InlineCode } from "@/lib/inline-code-mark";
 import { HIGHLIGHT_COLORS, TextHighlight, type HighlightColor } from "@/lib/text-highlight";
+import { replaceRangeWithBlocks } from "@/lib/structured-replace";
 
 // Upper bound on a single collaboration push. A push that never settles (e.g.
 // the laptop sleeping mid-request) must not be allowed to wedge the in-flight
@@ -2422,11 +2427,24 @@ export function DocumentWorkspace({
   }
 
   async function handleCreateComment() {
-    if (!selection || !composerBody.trim() || !editor) {
+    if (!composerBody.trim()) {
+      return;
+    }
+    emitTourEvent("comment-created");
+    await createAnchoredThread(composerBody.trim(), "studio");
+  }
+
+  // A text reaction is a thread anchored like a comment whose root comment
+  // carries the emoji (see lib/reactions.ts).
+  async function handleCreateReaction(emoji: string) {
+    await createAnchoredThread(emoji, "reaction");
+  }
+
+  async function createAnchoredThread(threadBody: string, origin: "studio" | "reaction") {
+    if (!selection || !editor) {
       return;
     }
 
-    emitTourEvent("comment-created");
     setCommentBusy(true);
     setGlobalError(null);
 
@@ -2488,7 +2506,8 @@ export function DocumentWorkspace({
         },
         body: JSON.stringify({
           threadId,
-          body: composerBody.trim(),
+          body: threadBody,
+          origin,
           anchorText: selectedRange.text.slice(0, 1000),
           anchorContext: selectedRange.context ? selectedRange.context.slice(0, 2000) : selectedRange.context,
           clientId: collabClientIdRef.current,
@@ -2527,9 +2546,10 @@ export function DocumentWorkspace({
         editor.commands.setContent(previousContent, false);
         isApplyingRemoteUpdateRef.current = false;
       }
-      reportClientError(data?.error ?? "Unable to create thread.", "comment-create", {
+      reportClientError(data?.error ?? (origin === "reaction" ? "Unable to add reaction." : "Unable to create thread."), "comment-create", {
         documentId,
         threadId,
+        origin,
         status: response.status,
         serverError: typeof data?.error === "string" ? data.error : null,
         anchorRetries
@@ -2544,7 +2564,9 @@ export function DocumentWorkspace({
       setDocumentUpdatedAt(data.updatedAt);
     }
     setSelection(null);
-    setComposerBody("");
+    if (origin === "studio") {
+      setComposerBody("");
+    }
     setSelectionPopoverMode(null);
     setCommentBusy(false);
   }
@@ -2851,10 +2873,17 @@ export function DocumentWorkspace({
         shareToken,
         existingWidgets: collectExistingWidgets()
       });
+      // Structure-aware splice (lib/structured-replace) instead of insertContentAt,
+      // which split the surrounding paragraph: a rewritten bullet became
+      // "bullet, blank line, text".
+      const fragment = htmlToFragment(insertedContent);
       const applied = editor
         .chain()
         .focus()
-        .insertContentAt(replacementRange, insertedContent)
+        .command(({ tr }) => {
+          replaceRangeWithBlocks(tr, replacementRange.from, replacementRange.to, fragment);
+          return true;
+        })
         .run();
       docSizeAfter = editor.state.doc.content.size;
       logClientEvent({
@@ -2983,6 +3012,14 @@ export function DocumentWorkspace({
   // after the struck range, and the inserted span is flagged as a suggested
   // insertion sharing one id with the deletion (so one accept performs the
   // replacement). Returns false if nothing was applied.
+  // Agent HTML (buildAiEditInsertContent) → nodes of this editor's schema, parsed
+  // exactly like insertContentAt parses it.
+  function htmlToFragment(html: string): Fragment {
+    if (!editor) return Fragment.empty;
+    const parsed = createNodeFromContent(html, editor.schema, { parseOptions: { preserveWhitespace: "full" } });
+    return parsed instanceof Fragment ? parsed : Fragment.from(parsed);
+  }
+
   function applyRichTrackedReplacement(
     range: { from: number; to: number },
     replacementText: string,
@@ -2998,8 +3035,8 @@ export function DocumentWorkspace({
       authorLabel: author.authorLabel,
       createdAt: new Date().toISOString()
     };
-    let insertion: { from: number; to: number } | undefined;
     const replacement = (replacementText ?? "").trim();
+    let content = Fragment.empty;
     if (replacement) {
       const html = buildAiEditInsertContent({
         replacementText,
@@ -3011,25 +3048,12 @@ export function DocumentWorkspace({
         existingWidgets: collectExistingWidgets(),
         appendUnusedImages: false
       });
-      const sizeBefore = editor.state.doc.content.size;
-      // Insert the rich content first (skip-tagged so the suggesting-mode
-      // interceptor doesn't double-mark it), then mark the inserted span below.
-      editor
-        .chain()
-        .insertContentAt(range.to, html, { updateSelection: false })
-        .command(({ tr }) => {
-          tr.setMeta(suggestionPluginKey, { type: "skip" });
-          return true;
-        })
-        .run();
-      const delta = editor.state.doc.content.size - sizeBefore;
-      if (delta > 0) insertion = { from: range.to, to: range.to + delta };
+      content = htmlToFragment(html);
     }
-    const tr = markExplicitSuggestion(editor.state, {
-      deletion: range.to > range.from ? { from: range.from, to: range.to } : undefined,
-      insertion,
-      record
-    });
+    // Strike the range and splice the rich content in after it, structure-aware
+    // (lib/structured-replace): rewriting a bullet keeps one bullet instead of
+    // "bullet, blank line, text".
+    const tr = buildRichTrackedReplacementTransaction(editor.state, range, content, record);
     if (!tr) return false;
     editor.view.dispatch(tr);
     if (applyDirectly) {
@@ -3829,6 +3853,14 @@ export function DocumentWorkspace({
         documentId,
         status: response.status
       });
+      return;
+    }
+
+    // Removing the last emoji of a text reaction deletes its thread.
+    if (typeof data.deletedThreadId === "string") {
+      const deletedThreadId: string = data.deletedThreadId;
+      setThreads((current) => current.filter((thread) => thread.id !== deletedThreadId));
+      setActiveThreadId((activeId) => (activeId === deletedThreadId ? null : activeId));
       return;
     }
 
@@ -5104,6 +5136,8 @@ export function DocumentWorkspace({
                 onEditInstructionChange={setEditInstruction}
                 onSubmitComment={handleCreateComment}
                 onSubmitEdit={handleAiEdit}
+                canReact={canWriteComments && isAuthenticated}
+                onReact={(emoji) => void handleCreateReaction(emoji)}
                 onCancel={() => {
                   setSelectionPopoverMode("menu");
                   setComposerBody("");

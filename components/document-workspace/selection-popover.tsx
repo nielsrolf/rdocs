@@ -1,4 +1,5 @@
 import type { MentionCandidate } from "@/lib/mentions";
+import { REACTION_EMOJIS } from "@/lib/reactions";
 import { truncate } from "@/lib/utils";
 
 import { MentionTextarea } from "./mention-textarea";
@@ -9,6 +10,7 @@ export function SelectionPopover({
   mode,
   canWriteComments,
   canWriteDocument,
+  canReact,
   composerBody,
   commentBusy,
   editInstruction,
@@ -18,12 +20,15 @@ export function SelectionPopover({
   onEditInstructionChange,
   onSubmitComment,
   onSubmitEdit,
+  onReact,
   onCancel
 }: {
   selection: SelectionState;
   mode: SelectionPopoverMode;
   canWriteComments: boolean;
   canWriteDocument: boolean;
+  // Reactions are per user, so anonymous share-link visitors cannot react.
+  canReact: boolean;
   composerBody: string;
   commentBusy: boolean;
   editInstruction: string;
@@ -33,6 +38,7 @@ export function SelectionPopover({
   onEditInstructionChange: (value: string) => void;
   onSubmitComment: () => void;
   onSubmitEdit: () => void;
+  onReact: (emoji: string) => void;
   onCancel: () => void;
 }) {
   return (
@@ -54,6 +60,17 @@ export function SelectionPopover({
               Add comment
             </button>
           ) : null}
+          {canReact ? (
+            <button
+              aria-label="Add reaction"
+              className="selection-bubble selection-bubble-secondary"
+              onClick={() => onModeChange("react")}
+              title="Add reaction"
+              type="button"
+            >
+              ☺+
+            </button>
+          ) : null}
           {canWriteDocument ? (
             <button
               className="selection-bubble selection-bubble-secondary"
@@ -63,6 +80,22 @@ export function SelectionPopover({
               Edit with AI
             </button>
           ) : null}
+        </div>
+      ) : null}
+
+      {mode === "react" ? (
+        <div className="selection-reaction-picker" role="menu">
+          {REACTION_EMOJIS.map((emoji) => (
+            <button
+              className="comment-reaction-option"
+              disabled={commentBusy}
+              key={emoji}
+              onClick={() => onReact(emoji)}
+              type="button"
+            >
+              {emoji}
+            </button>
+          ))}
         </div>
       ) : null}
 

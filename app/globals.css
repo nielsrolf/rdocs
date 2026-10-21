@@ -4120,6 +4120,11 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   transition: background 120ms ease, box-shadow 120ms ease;
 }
 
+.reaction-anchor-highlight {
+  background: rgba(26, 115, 232, 0.12);
+  border-radius: 2px;
+}
+
 .comment-anchor-highlight-active {
   background: rgba(250, 229, 153, 0.98);
   box-shadow:
@@ -4421,6 +4426,36 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .comment-reaction-option:hover {
   background: rgba(60, 64, 67, 0.1);
+}
+
+.selection-reaction-picker {
+  display: flex;
+  gap: 0.15rem;
+  padding: 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: white;
+  box-shadow: 0 6px 18px rgba(60, 64, 67, 0.28);
+}
+
+.selection-reaction-picker .comment-reaction-option {
+  font-size: 1.25rem;
+  padding: 0.3rem;
+}
+
+/* A text reaction in the margin: just the emoji pills, Google Docs style. */
+.reaction-thread-card {
+  border: 0;
+  background: transparent;
+  padding: 0.15rem 0;
+}
+
+.reaction-thread-card .comment-reactions {
+  margin-top: 0;
+}
+
+.reaction-thread-card.comment-thread-card-active {
+  box-shadow: none;
 }
 
 .comment-tag-add {
