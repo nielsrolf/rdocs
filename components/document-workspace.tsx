@@ -136,6 +136,7 @@ import {
   setActiveTab,
   type TabSummary
 } from "./document-workspace/tabs";
+import { CodeBlock } from "@/lib/code-block-node";
 import { InlineCode } from "@/lib/inline-code-mark";
 import { HIGHLIGHT_COLORS, TextHighlight, type HighlightColor } from "@/lib/text-highlight";
 import { replaceRangeWithBlocks } from "@/lib/structured-replace";
@@ -1319,10 +1320,11 @@ export function DocumentWorkspace({
 
   const editor = useEditor({
     extensions: [
-      // Must mirror lib/document-editor-schema.ts: inline code that lets
-      // comment/suggestion/aiEdit marks coexist with it.
-      StarterKit.configure({ code: false }),
+      // Must mirror lib/document-editor-schema.ts: inline code and code
+      // blocks that let comment/suggestion/aiEdit marks coexist with them.
+      StarterKit.configure({ code: false, codeBlock: false }),
       InlineCode,
+      CodeBlock,
       Underline,
       TaskList,
       TaskItem.configure({ nested: true }),

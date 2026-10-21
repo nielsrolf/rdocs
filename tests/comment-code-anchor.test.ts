@@ -7,7 +7,7 @@ import { EditorState } from "@tiptap/pm/state";
 import { Step } from "@tiptap/pm/transform";
 
 import { CommentAnchor, buildCommentAnchorTransaction } from "../components/document-workspace/comment-anchors";
-import { documentHasAnchorForThread } from "../lib/content";
+import { documentHasAnchorForThread, getDocumentMarkdown } from "../lib/content";
 import { createDocumentEditorSchema } from "../lib/document-editor-schema";
 
 // Regression: commenting on inline-code text ("the `print` hack") failed with
@@ -85,4 +85,30 @@ test("buildCommentAnchorTransaction returns null when the anchor mark cannot lan
   const state = EditorState.create({ doc: strictSchema.nodeFromJSON(CODE_DOC) });
   const tr = buildCommentAnchorTransaction(state, CODE_RANGE, "t-strict");
   assert.equal(tr === null, true, "no anchor transaction should be produced when the mark is excluded");
+});
+
+// Regression (2026-10-22): reacting to / commenting on a line inside a code
+// block failed with "Unable to anchor the comment to the selected text." TipTap's
+// CodeBlock node declares `marks: ""`, so addMark(commentAnchor) inside it was a
+// no-op. Code blocks must accept the annotation marks (not formatting).
+const CODE_BLOCK_DOC = {
+  type: "doc",
+  content: [
+    { type: "codeBlock", attrs: { language: null }, content: [{ type: "text", text: "Nailed it, I think.\nParis glows" }] }
+  ]
+};
+
+test("a comment anchor lands on text inside a code block", () => {
+  const state = EditorState.create({ doc: schema.nodeFromJSON(CODE_BLOCK_DOC) });
+  const tr = buildCommentAnchorTransaction(state, { from: 1, to: 19 }, "t-block");
+  assert.ok(tr, "anchor transaction should be produced");
+  assert.equal(documentHasAnchorForThread(tr.doc.toJSON(), "t-block"), true);
+  // The markdown export still renders the block verbatim.
+  assert.match(getDocumentMarkdown(tr.doc.toJSON()), /```\nNailed it, I think\.\nParis glows\n```/);
+});
+
+test("code blocks still reject formatting marks", () => {
+  const doc = schema.nodeFromJSON(CODE_BLOCK_DOC);
+  const tr = EditorState.create({ doc }).tr.addMark(1, 7, schema.marks.bold.create());
+  assert.deepEqual(tr.doc.nodeAt(1)?.marks.map((m) => m.type.name), []);
 });
