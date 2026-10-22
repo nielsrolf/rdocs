@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { getAgentRunner } from "@/lib/agent-runner";
 import { describeAttachmentsForOverview, syncAttachmentsIntoWorktree } from "@/lib/attachments";
-import { syncSkillsIntoWorktree } from "@/lib/skills";
+import { syncDocumentSkillsForRun } from "@/lib/catalog-skills";
 import { db } from "@/lib/db";
 import { resolveGithubIdentity } from "@/lib/github-access";
 import { resolveGithubAuthForDocument } from "@/lib/github-auth";
@@ -513,7 +513,7 @@ export async function ensureLinkedRepositoryWorktree(
   await syncAttachmentsIntoWorktree(documentId, worktree);
   // Materialize the document's agent skills at .claude/skills/<name> so the
   // SDK discovers them as project skills (enabled by name in agent-core).
-  await syncSkillsIntoWorktree(documentId, worktree);
+  await syncDocumentSkillsForRun(documentId, worktree);
 
   return {
     ...linked,
@@ -544,7 +544,7 @@ export async function ensureLinkedRepositoryDurable(
     .then((r) => r.stdout.trim() || "HEAD")
     .catch(() => "HEAD");
   await syncAttachmentsIntoWorktree(documentId, linked.workspace);
-  await syncSkillsIntoWorktree(documentId, linked.workspace);
+  await syncDocumentSkillsForRun(documentId, linked.workspace);
   return {
     ...linked,
     baseWorkspace: linked.workspace,

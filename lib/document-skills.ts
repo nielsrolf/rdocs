@@ -19,9 +19,15 @@ export async function copyOwnerDefaultSkillsToDocument(ownerId: string, document
           documentId,
           name: skill.name,
           description: skill.description,
-          createdById: ownerId
+          createdById: ownerId,
+          catalogName: skill.catalogName,
+          catalogVersion: skill.catalogVersion
         },
-        update: { description: skill.description }
+        update: {
+          description: skill.description,
+          catalogName: skill.catalogName,
+          catalogVersion: skill.catalogVersion
+        }
       });
     } catch (error) {
       console.warn("[skills] failed to copy default skill into new document", {

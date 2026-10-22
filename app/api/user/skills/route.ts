@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { loadCatalogSkill } from "@/lib/skill-catalog";
+import { installCatalogSkillInLibrary, refreshUserCatalogSkills, UNTRACKED_SKILL } from "@/lib/catalog-skills";
 import {
   getUserSkillDir,
   prepareSkillUpload,
@@ -39,6 +39,9 @@ export async function GET() {
   if (!user) {
     return NextResponse.json({ error: "Not signed in." }, { status: 401 });
   }
+  // Keep catalog-installed library skills current (they are copied into new
+  // documents). Fire-and-forget: a cold catalog clone must not stall the page.
+  void refreshUserCatalogSkills(user.id).catch(() => undefined);
   const skills = await db.userSkill.findMany({
     where: { userId: user.id },
     orderBy: { name: "asc" }
@@ -60,29 +63,18 @@ export async function POST(request: Request) {
     if (!catalogName) {
       return NextResponse.json({ error: "Missing catalogName." }, { status: 400 });
     }
-    let prepared;
+    let skill;
     try {
-      prepared = await loadCatalogSkill(catalogName);
+      skill = await installCatalogSkillInLibrary(user.id, catalogName, body?.isDefault === true);
     } catch (error) {
       return NextResponse.json(
         { error: error instanceof Error ? error.message : "Failed to load the skill catalog." },
         { status: 502 }
       );
     }
-    if (!prepared) {
+    if (!skill) {
       return NextResponse.json({ error: "Skill not found in the catalog." }, { status: 404 });
     }
-    await writeSkillToStore(getUserSkillDir(user.id, prepared.name), prepared);
-    const skill = await db.userSkill.upsert({
-      where: { userId_name: { userId: user.id, name: prepared.name } },
-      create: {
-        userId: user.id,
-        name: prepared.name,
-        description: prepared.description,
-        isDefault: body?.isDefault === true
-      },
-      update: { description: prepared.description }
-    });
     return NextResponse.json({ skill: serializeUserSkill(skill) });
   }
 
@@ -113,7 +105,7 @@ export async function POST(request: Request) {
       description: prepared.description,
       isDefault
     },
-    update: { description: prepared.description }
+    update: { description: prepared.description, ...UNTRACKED_SKILL }
   });
 
   return NextResponse.json({ skill: serializeUserSkill(skill) });

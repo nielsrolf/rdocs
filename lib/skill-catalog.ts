@@ -98,26 +98,63 @@ export async function ensureCatalogClone(): Promise<string> {
   return refreshPromise;
 }
 
-/**
- * List installable skills: every top-level directory of the catalog repo that
- * contains a SKILL.md, with name/description read from its frontmatter.
- */
-export async function listCatalogSkills(): Promise<CatalogSkill[]> {
-  const dir = await ensureCatalogClone();
-  const entries = await fs.readdir(dir, { withFileTypes: true });
-  const skills: CatalogSkill[] = [];
+type CatalogEntry = CatalogSkill & {
+  // Directory inside the clone (may differ from the frontmatter name).
+  dir: string;
+  // Git tree id of that directory at the clone's HEAD: changes exactly when
+  // any file of the skill changes, so installs can tell whether to refresh.
+  version: string | null;
+};
+
+async function catalogTreeVersions(cloneDir: string) {
+  const versions = new Map<string, string>();
+  const { stdout } = await execFileAsync("git", ["ls-tree", "HEAD"], { cwd: cloneDir }).catch(() => ({
+    stdout: ""
+  }));
+  for (const line of stdout.split("\n")) {
+    // "<mode> tree <sha>\t<name>"
+    const match = /^\d+ tree ([0-9a-f]+)\t(.+)$/.exec(line);
+    if (match) versions.set(match[2], match[1]);
+  }
+  return versions;
+}
+
+async function readCatalogEntries(cloneDir: string): Promise<CatalogEntry[]> {
+  const entries = await fs.readdir(cloneDir, { withFileTypes: true });
+  const versions = await catalogTreeVersions(cloneDir);
+  const skills: CatalogEntry[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
     const skillMd = await fs
-      .readFile(path.join(dir, entry.name, "SKILL.md"), "utf8")
+      .readFile(path.join(cloneDir, entry.name, "SKILL.md"), "utf8")
       .catch(() => null);
     if (skillMd === null) continue;
     const frontmatter = parseSkillFrontmatter(skillMd);
     const name = sanitizeSkillName(frontmatter.name ?? entry.name);
     if (!name) continue;
-    skills.push({ name, description: frontmatter.description });
+    skills.push({
+      name,
+      description: frontmatter.description,
+      dir: path.join(cloneDir, entry.name),
+      version: versions.get(entry.name) ?? null
+    });
   }
   return skills.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * List installable skills: every top-level directory of the catalog repo that
+ * contains a SKILL.md, with name/description read from its frontmatter.
+ */
+export async function listCatalogSkills(): Promise<CatalogSkill[]> {
+  const entries = await readCatalogEntries(await ensureCatalogClone());
+  return entries.map(({ name, description }) => ({ name, description }));
+}
+
+/** Current catalog version (git tree id) per skill name. */
+export async function catalogSkillVersions(): Promise<Map<string, string | null>> {
+  const entries = await readCatalogEntries(await ensureCatalogClone());
+  return new Map(entries.map((entry) => [entry.name, entry.version]));
 }
 
 async function collectSkillFiles(root: string): Promise<SkillUploadFile[]> {
@@ -145,27 +182,30 @@ async function collectSkillFiles(root: string): Promise<SkillUploadFile[]> {
 }
 
 /**
- * Load one catalog skill as a PreparedSkill ready for writeSkillToStore.
- * `requestedName` is matched against the sanitized catalog listing, so it can
- * never address a path outside the clone. Returns null when no such skill
- * exists in the catalog.
+ * Load one catalog skill as a PreparedSkill ready for writeSkillToStore,
+ * together with its catalog version. `requestedName` is matched against the
+ * sanitized catalog listing, so it can never address a path outside the
+ * clone. Returns null when no such skill exists in the catalog.
  */
-export async function loadCatalogSkill(requestedName: string): Promise<PreparedSkill | null> {
+export async function loadCatalogSkillVersioned(
+  requestedName: string
+): Promise<{ skill: PreparedSkill; version: string | null } | null> {
   const wanted = sanitizeSkillName(requestedName);
   if (!wanted) return null;
-  const dir = await ensureCatalogClone();
-  const entries = await fs.readdir(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-    const skillDir = path.join(dir, entry.name);
-    const skillMd = await fs.readFile(path.join(skillDir, "SKILL.md"), "utf8").catch(() => null);
-    if (skillMd === null) continue;
-    const frontmatter = parseSkillFrontmatter(skillMd);
-    const name = sanitizeSkillName(frontmatter.name ?? entry.name);
-    if (name !== wanted) continue;
-    // Reuse the upload pipeline: same sanitization, size limits and
-    // frontmatter-derived naming as a manual skill folder upload.
-    return prepareSkillUpload(await collectSkillFiles(skillDir));
-  }
-  return null;
+  const entries = await readCatalogEntries(await ensureCatalogClone());
+  const entry = entries.find((candidate) => candidate.name === wanted);
+  if (!entry) return null;
+  // Reuse the upload pipeline: same sanitization, size limits and
+  // frontmatter-derived naming as a manual skill folder upload.
+  return { skill: prepareSkillUpload(await collectSkillFiles(entry.dir)), version: entry.version };
+}
+
+export async function loadCatalogSkill(requestedName: string): Promise<PreparedSkill | null> {
+  return (await loadCatalogSkillVersioned(requestedName))?.skill ?? null;
+}
+
+// Tests: make the next ensureCatalogClone() re-clone instead of serving the
+// TTL-fresh copy.
+export async function expireCatalogCacheForTests() {
+  await fs.rm(path.join(await cloneDirFor(catalogGitUrl()), ".catalog-synced"), { force: true });
 }

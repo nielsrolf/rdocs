@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { db } from "@/lib/db";
-import { loadCatalogSkill } from "@/lib/skill-catalog";
+import { installCatalogSkillOnDocument, UNTRACKED_SKILL } from "@/lib/catalog-skills";
 import {
   copySkillDir,
   getDocumentSkillDir,
@@ -86,29 +86,18 @@ export async function POST(request: Request, { params }: RouteContext<{ id: stri
 
     // One-click install straight from the curated catalog onto the document.
     if (parsed.data.catalogName) {
-      let prepared;
+      let skill;
       try {
-        prepared = await loadCatalogSkill(parsed.data.catalogName);
+        skill = await installCatalogSkillOnDocument(id, parsed.data.catalogName, user.id);
       } catch (error) {
         return NextResponse.json(
           { error: error instanceof Error ? error.message : "Failed to load the skill catalog." },
           { status: 502 }
         );
       }
-      if (!prepared) {
+      if (!skill) {
         return NextResponse.json({ error: "Skill not found in the catalog." }, { status: 404 });
       }
-      await writeSkillToStore(getDocumentSkillDir(id, prepared.name), prepared);
-      const skill = await db.documentSkill.upsert({
-        where: { documentId_name: { documentId: id, name: prepared.name } },
-        create: {
-          documentId: id,
-          name: prepared.name,
-          description: prepared.description,
-          createdById: user.id
-        },
-        update: { description: prepared.description }
-      });
       return NextResponse.json({ skill: serializeDocumentSkill(skill) });
     }
 
@@ -124,9 +113,15 @@ export async function POST(request: Request, { params }: RouteContext<{ id: stri
         documentId: id,
         name: userSkill.name,
         description: userSkill.description,
-        createdById: user.id
+        createdById: user.id,
+        catalogName: userSkill.catalogName,
+        catalogVersion: userSkill.catalogVersion
       },
-      update: { description: userSkill.description }
+      update: {
+        description: userSkill.description,
+        catalogName: userSkill.catalogName,
+        catalogVersion: userSkill.catalogVersion
+      }
     });
 
     return NextResponse.json({ skill: serializeDocumentSkill(skill) });
@@ -168,7 +163,7 @@ export async function POST(request: Request, { params }: RouteContext<{ id: stri
       description: prepared.description,
       createdById: user?.id ?? null
     },
-    update: { description: prepared.description }
+    update: { description: prepared.description, ...UNTRACKED_SKILL }
   });
 
   return NextResponse.json({ skill: serializeDocumentSkill(skill) });

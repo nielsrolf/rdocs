@@ -173,12 +173,24 @@ export function prepareSkillUpload(uploadFiles: SkillUploadFile[]): PreparedSkil
 
 // Write a prepared skill into a store directory, replacing any previous
 // version of the same skill wholesale (uploads are full snapshots).
+// Writes into a temp dir and swaps it in, so a run materializing skills while
+// a catalog refresh rewrites one never copies a half-written skill.
 export async function writeSkillToStore(skillDir: string, skill: PreparedSkill) {
-  await fs.rm(skillDir, { recursive: true, force: true });
-  for (const [relative, bytes] of skill.files) {
-    const target = path.join(skillDir, relative);
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(target, bytes);
+  const suffix = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const tmp = `${skillDir}.tmp-${suffix}`;
+  const old = `${skillDir}.old-${suffix}`;
+  try {
+    for (const [relative, bytes] of skill.files) {
+      const target = path.join(tmp, relative);
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, bytes);
+    }
+    await fs.mkdir(tmp, { recursive: true });
+    await fs.rename(skillDir, old).catch(() => undefined);
+    await fs.rename(tmp, skillDir);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+    await fs.rm(old, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -197,7 +209,9 @@ export async function copySkillDir(sourceDir: string, targetDir: string) {
 async function listStoredSkillDirs(documentId: string) {
   try {
     const entries = await fs.readdir(getDocumentSkillsStoreDir(documentId), { withFileTypes: true });
-    return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+    return entries
+      .filter((entry) => entry.isDirectory() && !/\.(tmp|old)-/.test(entry.name))
+      .map((entry) => entry.name);
   } catch {
     return [];
   }

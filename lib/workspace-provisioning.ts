@@ -118,7 +118,7 @@ export async function createChildWorkspace(input: CreateChildWorkspaceInput): Pr
   const parentSkills = inheritSkills.length
     ? await db.documentSkill.findMany({
         where: { documentId: parent.id, name: { in: inheritSkills } },
-        select: { name: true, description: true }
+        select: { name: true, description: true, catalogName: true, catalogVersion: true }
       })
     : [];
   const missingSkills = inheritSkills.filter((name) => !parentSkills.some((skill) => skill.name === name));
@@ -150,8 +150,8 @@ export async function createChildWorkspace(input: CreateChildWorkspaceInput): Pr
       await copySkillDir(getDocumentSkillDir(parent.id, skill.name), getDocumentSkillDir(child.id, skill.name));
       await db.documentSkill.upsert({
         where: { documentId_name: { documentId: child.id, name: skill.name } },
-        create: { documentId: child.id, name: skill.name, description: skill.description, createdById: input.userId },
-        update: { description: skill.description }
+        create: { documentId: child.id, createdById: input.userId, ...skill },
+        update: { description: skill.description, catalogName: skill.catalogName, catalogVersion: skill.catalogVersion }
       });
     }
     if (inheritEnv.length > 0) await copyEnv(parent.id, child.id, inheritEnv);
