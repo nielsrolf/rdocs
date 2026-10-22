@@ -74,6 +74,12 @@ export class MemoryAdmission {
       minAvailableBytes: number;
       /** Charged for a running container that has no --memory limit. */
       unlimitedContainerBytes: number;
+      /**
+       * Charged for a running gdocs-run-* container (e.g. a blue/green
+       * sibling's run) instead of its --memory limit — the same reservation
+       * our own grants use. Unset → its limit.
+       */
+      runContainerBytes?: number;
       probe: MemoryProbe;
       pollMs?: number;
     }
@@ -101,6 +107,10 @@ export class MemoryAdmission {
     for (const grant of this.grants) reservedBytes += grant.bytes;
     for (const container of containers ?? []) {
       if (ownNames.has(container.name)) continue;
+      if (this.opts.runContainerBytes !== undefined && container.name.startsWith("gdocs-run-")) {
+        reservedBytes += this.opts.runContainerBytes;
+        continue;
+      }
       reservedBytes += container.limitBytes > 0 ? container.limitBytes : this.opts.unlimitedContainerBytes;
     }
     return {
@@ -276,6 +286,14 @@ export function resolveMemoryAdmissionConfig(env: Record<string, string | undefi
   const perRunBytes = parseMemorySize(agentContainerMemory(env)) ?? 4 * 1024 ** 3;
   return {
     perRunBytes,
+    // What a run is charged against the budget. Defaults to its hard limit
+    // (no overcommit). Lower it to admit more runs than limits strictly allow:
+    // most runs stay far below their limit, and AGENT_MIN_AVAILABLE_MEMORY
+    // (plus earlyoom on the host) cover the rare run that actually uses it.
+    reservationBytes: Math.min(
+      parseMemorySize(env.AGENT_CONTAINER_MEMORY_RESERVATION) ?? perRunBytes,
+      perRunBytes
+    ),
     // Default: 60% of physical RAM — the rest is for everything else on the box.
     budgetBytes: parseMemorySize(env.AGENT_MEMORY_BUDGET) ?? Math.floor(os.totalmem() * 0.6),
     minAvailableBytes: parseMemorySize(env.AGENT_MIN_AVAILABLE_MEMORY) ?? 3 * 1024 ** 3
@@ -291,10 +309,12 @@ export function agentMemoryAdmission(): MemoryAdmission {
       budgetBytes: config.budgetBytes,
       minAvailableBytes: config.minAvailableBytes,
       unlimitedContainerBytes: config.perRunBytes,
+      runContainerBytes: config.reservationBytes,
       probe: dockerMemoryProbe(process.env.AGENT_CONTAINER_RUNTIME || "docker")
     });
     console.log(
-      `[agent-memory] budget ${formatGiB(config.budgetBytes)}, ${formatGiB(config.perRunBytes)} per run, ` +
+      `[agent-memory] budget ${formatGiB(config.budgetBytes)}, ${formatGiB(config.reservationBytes)} reserved / ` +
+        `${formatGiB(config.perRunBytes)} limit per run, ` +
         `min free ${formatGiB(config.minAvailableBytes)}`
     );
   }

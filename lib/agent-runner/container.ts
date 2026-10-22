@@ -30,6 +30,8 @@ import {
 } from "./agent-credential";
 import { agentRunSemaphore } from "./concurrency";
 import { agentContainerMemory, agentMemoryAdmission, resolveMemoryAdmissionConfig } from "./memory-admission";
+import { AgentOutOfMemoryError, clearOomKill, startOomWatch, wasOomKilled } from "./oom-watch";
+import { agentScratchEnabled, prepareRunScratch, removeRunScratch } from "./scratch";
 import {
   RunCancelledError,
   deregisterRunMessageInjector,
@@ -239,7 +241,7 @@ export class ContainerRunner implements AgentRunner {
       // fits into the host budget next to everything already running.
       const memory = agentMemoryAdmission();
       releaseMemory = await memory.admit(
-        { name: opts.containerName, bytes: resolveMemoryAdmissionConfig().perRunBytes },
+        { name: opts.containerName, bytes: resolveMemoryAdmissionConfig().reservationBytes },
         {
           signal: opts.signal,
           onQueued: (reason) => {
@@ -271,6 +273,7 @@ export class ContainerRunner implements AgentRunner {
   ): Promise<Record<string, unknown>> {
     const { runtime, image, readOnly } = ctx;
     const tmpDir = await mkdtemp(path.join(os.tmpdir(), "gdocs-agent-"));
+    let scratchDir: string | undefined;
     const envFile = path.join(tmpDir, "env");
     const harness = agentHarnessForModel(opts.agentModel);
     const provider = agentModelProvider(opts.agentModel);
@@ -309,6 +312,10 @@ export class ContainerRunner implements AgentRunner {
         await writeFile(envFile, serializeEnvFile(containerEnv), { mode: 0o600 });
       };
 
+      // /tmp + HOME on disk, not tmpfs (RAM charged to --memory); see scratch.ts.
+      if (agentScratchEnabled()) {
+        scratchDir = await prepareRunScratch(opts.containerName ?? path.basename(tmpDir));
+      }
       const containerUser = resolveContainerUser(process.platform, process.getuid?.(), process.getgid?.());
       // An explicit OCI runtime choice always wins and disables the docker-capable
       // default (AGENT_CONTAINER_OCI_RUNTIME=runc forces the hardened profile).
@@ -325,6 +332,7 @@ export class ContainerRunner implements AgentRunner {
         envFileHostPath: envFile,
         ...containerUser,
         memory: agentContainerMemory(),
+        scratchHostPath: scratchDir,
         cpus: process.env.AGENT_CONTAINER_CPUS || undefined,
         init: process.env.AGENT_CONTAINER_INIT === "1",
         pidsLimit: resolveContainerPidsLimit(process.env),
@@ -348,10 +356,12 @@ export class ContainerRunner implements AgentRunner {
 
       let authRetried = false;
       let transientAttempt = 0;
+      startOomWatch(runtime);
       for (;;) {
         if (opts.signal?.aborted) {
           throw new RunCancelledError();
         }
+        if (opts.containerName) clearOomKill(opts.containerName);
         await prepareEnv();
         try {
           if (detached && sessionSecret) {
@@ -393,6 +403,11 @@ export class ContainerRunner implements AgentRunner {
           if (opts.signal?.aborted) {
             throw new RunCancelledError();
           }
+          // An OOM kill looks like a dropped session; retrying it would hit the
+          // same limit again (and hold a memory-queue slot each time).
+          if (opts.containerName && (await wasOomKilled(opts.containerName))) {
+            throw new AgentOutOfMemoryError(agentContainerMemory());
+          }
           const decision = classifyContainerFailure(error, { harness, usesProviderKey, authRetried, transientAttempt });
           if (decision.action === "auth-retry") {
             authRetried = true;
@@ -422,6 +437,7 @@ export class ContainerRunner implements AgentRunner {
       }
     } finally {
       await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      if (scratchDir) await removeRunScratch(scratchDir, { runtime, image });
     }
   }
 

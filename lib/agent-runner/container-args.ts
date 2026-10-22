@@ -34,6 +34,13 @@ export type ContainerRunSpec = {
   readOnly?: boolean; // read-only rootfs + tmpfs scratch (default true)
   containerWorkspace?: string; // default "/workspace"
   homeDir?: string; // default "/home/agent"
+  /**
+   * Host directory (on disk) whose `tmp/` and `home/` subdirectories are
+   * bind-mounted over /tmp and HOME instead of tmpfs. tmpfs is RAM and counts
+   * toward --memory: agents that built a venv in /tmp/venv or cloned a repo
+   * into /tmp were OOM-killed at the limit (2026-10-20..22). Unset → tmpfs.
+   */
+  scratchHostPath?: string;
   // OCI runtime to select with `--runtime` (e.g. "runsc" for gVisor, which runs
   // a user-space kernel so the agent's syscalls don't hit the host kernel —
   // a stronger boundary for untrusted code). Unset → the engine default (runc).
@@ -242,6 +249,17 @@ export function serializeEnvFile(env: Record<string, string>): string {
   );
 }
 
+function pushScratchMounts(args: string[], spec: ContainerRunSpec, home: string) {
+  if (spec.scratchHostPath) {
+    const root = spec.scratchHostPath.replace(/\/+$/, "");
+    args.push("-v", `${root}/tmp:/tmp:rw`);
+    args.push("-v", `${root}/home:${home}:rw`);
+    return;
+  }
+  args.push("--tmpfs", "/tmp:rw,nosuid,nodev,exec");
+  args.push("--tmpfs", `${home}:rw,nosuid,nodev,exec`);
+}
+
 export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
   const workspace = spec.containerWorkspace ?? "/workspace";
   const home = spec.homeDir ?? "/home/agent";
@@ -289,8 +307,7 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
     // size (64 MiB) would fail the first image pull, hence the explicit cap.
     const storeOpts = `rw,exec,suid,dev,size=${spec.innerDockerTmpfsSize ?? DEFAULT_INNER_DOCKER_TMPFS_SIZE}`;
     args.push("--read-only");
-    args.push("--tmpfs", "/tmp:rw,nosuid,nodev,exec");
-    args.push("--tmpfs", `${home}:rw,nosuid,nodev,exec`);
+    pushScratchMounts(args, spec, home);
     args.push("--tmpfs", `/var/lib/docker:${storeOpts}`);
     args.push("--tmpfs", `/var/lib/containerd:${storeOpts}`);
     args.push("--tmpfs", "/run:rw,exec,suid,dev,size=256m");
@@ -319,8 +336,7 @@ export function buildContainerRunArgs(spec: ContainerRunSpec): string[] {
     // tamper with the image and writes go nowhere persistent except the workspace.
     if (readOnly) {
       args.push("--read-only");
-      args.push("--tmpfs", "/tmp:rw,nosuid,nodev,exec");
-      args.push("--tmpfs", `${home}:rw,nosuid,nodev,exec`);
+      pushScratchMounts(args, spec, home);
     }
   }
 

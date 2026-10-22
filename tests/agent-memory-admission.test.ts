@@ -231,3 +231,47 @@ test("config: budget, per-run size and minimum free memory come from env", () =>
   assert.equal(defaults.perRunBytes, 4 * GiB);
   assert.ok(defaults.budgetBytes > 0);
 });
+
+test("reservation: runs are charged their reservation, not their limit, including other processes' runs", async () => {
+  const config = resolveMemoryAdmissionConfig({
+    AGENT_CONTAINER_MEMORY: "8g",
+    AGENT_CONTAINER_MEMORY_RESERVATION: "3g",
+    AGENT_MEMORY_BUDGET: "18g"
+  });
+  assert.equal(config.perRunBytes, 8 * GiB);
+  assert.equal(config.reservationBytes, 3 * GiB);
+  assert.equal(resolveMemoryAdmissionConfig({ AGENT_CONTAINER_MEMORY: "6g" }).reservationBytes, 6 * GiB);
+  // A reservation above the limit is capped at the limit.
+  assert.equal(
+    resolveMemoryAdmissionConfig({ AGENT_CONTAINER_MEMORY: "6g", AGENT_CONTAINER_MEMORY_RESERVATION: "9g" }).reservationBytes,
+    6 * GiB
+  );
+
+  const { probe } = fakeProbe({
+    containers: [
+      { name: "gdocs-run-sibling", limitBytes: 8 * GiB },
+      { name: "gdocs-durable-x", limitBytes: 8 * GiB }
+    ]
+  });
+  const gate = new MemoryAdmission({
+    budgetBytes: 18 * GiB,
+    minAvailableBytes: 3 * GiB,
+    unlimitedContainerBytes: 8 * GiB,
+    runContainerBytes: 3 * GiB,
+    probe,
+    pollMs: 10
+  });
+  // 3 (sibling run) + 8 (durable, at its limit) + 3 + 3 = 17 <= 18; a third would not fit.
+  const a = await gate.admit({ name: "gdocs-run-a", bytes: 3 * GiB });
+  const b = await gate.admit({ name: "gdocs-run-b", bytes: 3 * GiB });
+  let thirdStarted = false;
+  const c = gate.admit({ name: "gdocs-run-c", bytes: 3 * GiB }).then((r) => {
+    thirdStarted = true;
+    return r;
+  });
+  await settle();
+  assert.equal(thirdStarted, false);
+  a();
+  (await c)();
+  b();
+});

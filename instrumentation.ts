@@ -47,6 +47,21 @@ export async function register() {
         error: error instanceof Error ? error.message : error
       });
     });
+    // Disk scratch (/tmp + HOME) of runs whose process died before cleaning up.
+    try {
+      const { listRunContainerIds, containerNameForRun } = await import("@/lib/agent-runner/container-cleanup");
+      const { sweepOrphanedScratch } = await import("@/lib/agent-runner/scratch");
+      const ids = await listRunContainerIds();
+      if (ids) {
+        await sweepOrphanedScratch({
+          runtime: process.env.AGENT_CONTAINER_RUNTIME || "docker",
+          image: process.env.AGENT_CONTAINER_IMAGE || "gdocs-agent:local",
+          existingContainerNames: new Set(ids.map(containerNameForRun))
+        });
+      }
+    } catch (error) {
+      console.error(`[${label}] scratch sweep failed`, { error: error instanceof Error ? error.message : error });
+    }
   };
 
   // Detached session containers survive the process that started them, so BEFORE
