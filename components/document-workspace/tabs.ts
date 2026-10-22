@@ -41,6 +41,11 @@ export function listTabs(doc: ProseMirrorNode): TabSummary[] {
   return tabs;
 }
 
+// The tab whose content holds `pos` (null for an untabbed document).
+export function tabContainingPos(tabs: TabSummary[], pos: number): TabSummary | null {
+  return tabs.find((tab) => pos >= tab.contentFrom && pos < tab.contentTo) ?? null;
+}
+
 type TabsPluginState = {
   activeTabId: string | null;
 };

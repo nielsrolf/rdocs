@@ -131,9 +131,11 @@ import {
   createTabId,
   createTabsVisibilityExtension,
   ensureTabsHaveContent,
+  getActiveTabId,
   listTabs,
   normalizePreludeTab,
   setActiveTab,
+  tabContainingPos,
   type TabSummary
 } from "./document-workspace/tabs";
 import { CodeBlock } from "@/lib/code-block-node";
@@ -1802,6 +1804,24 @@ export function DocumentWorkspace({
       setDocStats(computeDocStats(editor.getText()));
     }
   }, [editor]);
+
+  // Find bar: switch to the tab holding the match (hidden tabs are display:none,
+  // so there is nothing to scroll to otherwise), then centre it on screen.
+  function revealSearchMatch(match: { from: number }) {
+    if (!editor) return;
+    const tab = tabContainingPos(listTabs(editor.state.doc), match.from);
+    if (tab && tab.id !== getActiveTabId(editor)) {
+      // Dispatch directly so the DOM is visible before we scroll; the state
+      // update keeps the tab strip in sync.
+      setActiveTab(editor, tab.id);
+      setActiveTabIdState(tab.id);
+    }
+    window.requestAnimationFrame(() => {
+      editor.view.dom
+        .querySelector(".search-match-active")
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }
 
   // Intercept Cmd/Ctrl-F to open the in-document find bar instead of the
   // browser's find (which can't see hidden-tab content).
@@ -4444,7 +4464,16 @@ export function DocumentWorkspace({
       ) : null}
 
       {findOpen && editor ? (
-        <FindBar editor={editor} canReplace={canWriteDocument} onClose={() => setFindOpen(false)} />
+        <FindBar
+          editor={editor}
+          canReplace={canWriteDocument}
+          visibleRange={() => {
+            const tab = tabs.find((candidate) => candidate.id === activeTabId);
+            return tab ? { from: tab.contentFrom, to: tab.contentTo } : null;
+          }}
+          onRevealMatch={revealSearchMatch}
+          onClose={() => setFindOpen(false)}
+        />
       ) : null}
 
       {agentPanelOpen ? null : (

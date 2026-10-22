@@ -20,10 +20,12 @@ type SearchMeta = {
   query?: string;
   caseSensitive?: boolean;
   setActiveIndex?: number;
+  // Start at the first match inside this range (the visible tab), if any.
+  preferWithin?: { from: number; to: number } | null;
   step?: 1 | -1;
 };
 
-function findMatches(doc: ProseMirrorNode, query: string, caseSensitive: boolean): SearchMatch[] {
+export function findMatches(doc: ProseMirrorNode, query: string, caseSensitive: boolean): SearchMatch[] {
   const matches: SearchMatch[] = [];
   if (!query) return matches;
   const needle = caseSensitive ? query : query.toLowerCase();
@@ -41,6 +43,14 @@ function findMatches(doc: ProseMirrorNode, query: string, caseSensitive: boolean
     }
   });
   return matches;
+}
+
+// Index of the first match inside `range`, falling back to the first match in
+// the document — so a new query lands in the tab the user is looking at.
+export function pickMatchIndex(matches: SearchMatch[], range: { from: number; to: number } | null): number {
+  if (!range) return 0;
+  const index = matches.findIndex((match) => match.from >= range.from && match.from < range.to);
+  return index === -1 ? 0 : index;
 }
 
 function buildDecorations(doc: ProseMirrorNode, matches: SearchMatch[], activeIndex: number) {
@@ -88,6 +98,10 @@ export const SearchExtension = Extension.create({
                 next = { ...next, activeIndex: meta.setActiveIndex };
               }
               next = recompute(next, newState.doc);
+              if (meta.preferWithin !== undefined && next.matches.length > 0) {
+                const activeIndex = pickMatchIndex(next.matches, meta.preferWithin);
+                next = { ...next, activeIndex, decorations: buildDecorations(newState.doc, next.matches, activeIndex) };
+              }
               if (meta.step && next.matches.length > 0) {
                 const count = next.matches.length;
                 const activeIndex = (next.activeIndex + meta.step + count) % count;
@@ -126,8 +140,14 @@ function setMeta(tr: Transaction, meta: SearchMeta) {
 
 // Imperative helpers (called from the find bar). They dispatch plugin metas and,
 // for replace, real document transactions (which flow through collaboration).
-export function setSearchQuery(state: EditorState, dispatch: (tr: Transaction) => void, query: string, caseSensitive: boolean) {
-  dispatch(setMeta(state.tr, { query, caseSensitive, setActiveIndex: 0 }));
+export function setSearchQuery(
+  state: EditorState,
+  dispatch: (tr: Transaction) => void,
+  query: string,
+  caseSensitive: boolean,
+  preferWithin: { from: number; to: number } | null = null
+) {
+  dispatch(setMeta(state.tr, { query, caseSensitive, setActiveIndex: 0, preferWithin }));
 }
 
 export function stepSearch(state: EditorState, dispatch: (tr: Transaction) => void, step: 1 | -1) {

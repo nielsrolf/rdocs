@@ -6,7 +6,8 @@ import {
   replaceAllMatches,
   replaceCurrentMatch,
   setSearchQuery,
-  stepSearch
+  stepSearch,
+  type SearchMatch
 } from "./search";
 
 // In-document find & replace bar. Replacements go through the editor's normal
@@ -14,10 +15,16 @@ import {
 export function FindBar({
   editor,
   canReplace,
+  visibleRange,
+  onRevealMatch,
   onClose
 }: {
   editor: Editor;
   canReplace: boolean;
+  // Range of the tab on screen; a new query starts at its first match.
+  visibleRange: () => { from: number; to: number } | null;
+  // Bring the active match on screen (switching tabs if needed) and scroll to it.
+  onRevealMatch: (match: SearchMatch) => void;
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
@@ -34,9 +41,23 @@ export function FindBar({
     };
   }, [editor]);
 
-  // Push the query into the search plugin whenever it changes.
+  const revealActive = () => {
+    const search = getSearchState(editor.state);
+    const match = search?.matches[search.activeIndex];
+    if (match) onRevealMatch(match);
+  };
+
+  const step = (direction: 1 | -1) => {
+    stepSearch(editor.state, editor.view.dispatch, direction);
+    revealActive();
+  };
+
+  // Push the query into the search plugin whenever it changes, and jump to the
+  // first match (preferring the tab on screen).
   useEffect(() => {
-    setSearchQuery(editor.state, editor.view.dispatch, query, false);
+    setSearchQuery(editor.state, editor.view.dispatch, query, false, visibleRange());
+    revealActive();
+    // visibleRange/onRevealMatch are read at call time; re-run only on query.
   }, [editor, query]);
 
   // Focus on open; clear the highlights on close.
@@ -73,7 +94,7 @@ export function FindBar({
           onKeyDown={(event) => {
             if (event.key === "Enter") {
               event.preventDefault();
-              stepSearch(editor.state, editor.view.dispatch, event.shiftKey ? -1 : 1);
+              step(event.shiftKey ? -1 : 1);
             }
           }}
         />
@@ -83,7 +104,7 @@ export function FindBar({
         <button
           className="ghost-button"
           disabled={matchCount === 0}
-          onClick={() => stepSearch(editor.state, editor.view.dispatch, -1)}
+          onClick={() => step(-1)}
           type="button"
           aria-label="Previous match"
         >
@@ -92,7 +113,7 @@ export function FindBar({
         <button
           className="ghost-button"
           disabled={matchCount === 0}
-          onClick={() => stepSearch(editor.state, editor.view.dispatch, 1)}
+          onClick={() => step(1)}
           type="button"
           aria-label="Next match"
         >
