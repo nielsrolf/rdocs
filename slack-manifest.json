@@ -13,7 +13,15 @@
     "bot_user": {
       "display_name": "claudex",
       "always_online": true
-    }
+    },
+    "slash_commands": [
+      {
+        "command": "/settings",
+        "description": "Agent settings (scaffold, model, thinking) for a new claudex thread",
+        "usage_hint": "scaffold=claude code model=opus-5-5 thinking=max",
+        "should_escape": false
+      }
+    ]
   },
   "oauth_config": {
     "redirect_urls": ["APP_URL/api/slack/oauth/callback"],
@@ -23,6 +31,7 @@
         "channels:history",
         "channels:read",
         "chat:write",
+        "commands",
         "files:read",
         "files:write",
         "groups:history",

@@ -233,10 +233,14 @@ export const AGENT_EFFORTS = [
   { value: "off", label: "Off", hint: "No extended thinking (fastest)" },
   { value: "low", label: "Low", hint: "Minimal thinking" },
   { value: "medium", label: "Medium", hint: "Moderate thinking" },
-  { value: "high", label: "High", hint: "Deep reasoning" }
+  { value: "high", label: "High", hint: "Deep reasoning" },
+  { value: "xhigh", label: "Extra high", hint: "Deeper reasoning (slower)" },
+  { value: "max", label: "Max", hint: "Maximum reasoning (slowest, supported models only)" }
 ] as const;
 
 export type AgentEffort = (typeof AGENT_EFFORTS)[number]["value"];
+/** The effort levels that turn thinking on (everything but "off"). */
+export type ThinkingEffort = Exclude<AgentEffort, "off">;
 
 export const DEFAULT_AGENT_MODEL = "claude-sonnet-latest";
 export const DEFAULT_CODEX_AGENT_MODEL = "codex/openai/gpt-5.6-terra";
@@ -415,7 +419,7 @@ export function isStorableAgentModel(value: unknown): value is string {
 export type ResolvedCodexAgentConfig = {
   model: string;
   provider: "openai" | "litellm" | "chatgpt";
-  effort?: "low" | "medium" | "high";
+  effort?: ThinkingEffort;
   label: string;
 };
 
@@ -471,14 +475,18 @@ type SdkThinking =
 //   - LiteLLM's /v1/messages maps it onto reasoning_effort / thinkingBudget
 //     for the downstream provider.
 // Budgets are chosen so the tiers land in distinct effort buckets downstream.
-export const THIRD_PARTY_THINKING_BUDGETS: Record<"low" | "medium" | "high", number> = {
+// OpenRouter clamps budgets at 32000, so "xhigh" and "max" share the "high"
+// budget there; the run label still records the level that was asked for.
+export const THIRD_PARTY_THINKING_BUDGETS: Record<ThinkingEffort, number> = {
   low: 4096,
   medium: 12288,
-  high: 32000
+  high: 32000,
+  xhigh: 32000,
+  max: 32000
 };
 
-function parseEffort(effort: string | null | undefined): "low" | "medium" | "high" | null {
-  return effort === "low" || effort === "medium" || effort === "high" ? effort : null;
+function parseEffort(effort: string | null | undefined): ThinkingEffort | null {
+  return effort && isAgentEffort(effort) && effort !== "off" ? effort : null;
 }
 
 function thirdPartyThinking(effort: string | null | undefined): {
@@ -499,7 +507,7 @@ export type ResolvedAgentSdkConfig = {
   provider: AgentModelProvider;
   thinking: SdkThinking;
   /** Only set when extended thinking is enabled. */
-  effort?: "low" | "medium" | "high";
+  effort?: ThinkingEffort;
   /**
    * Stable label persisted on AiRun.model, e.g. "claude-agent-sdk:claude-opus-5-5+high"
    * or "openrouter:openai/gpt-5.2".
@@ -568,8 +576,8 @@ export function resolveAgentSdkConfig(
     };
   }
 
-  const effort = config?.effort;
-  if (effort === "low" || effort === "medium" || effort === "high") {
+  const effort = parseEffort(config?.effort);
+  if (effort) {
     return {
       model: normalized,
       provider: "anthropic",

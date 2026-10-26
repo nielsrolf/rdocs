@@ -4516,6 +4516,8 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .repo-image-caption {
   margin-top: 0.45rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
   color: var(--muted);
   font-size: 0.92rem;
   font-style: italic;
@@ -4535,6 +4537,10 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   line-height: 1.4;
   text-align: center;
   outline: none;
+  resize: none;
+  overflow: hidden;
+  padding: 0;
+  overflow-wrap: anywhere;
 }
 
 .image-caption-input::placeholder {

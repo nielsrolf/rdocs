@@ -345,3 +345,21 @@ test("GPT-6 Astra is selectable on every OpenAI-capable route", () => {
   }
   assert.deepEqual(resolveCodexAgentConfig({ model: "codex/openai/gpt-6-astra", effort: "high" }).model, "gpt-6-astra");
 });
+
+test("extra-high and max thinking reach both harnesses", () => {
+  for (const effort of ["xhigh", "max"] as const) {
+    assert.equal(isAgentEffort(effort), true);
+    const claude = resolveAgentSdkConfig({ model: "claude-opus-5-5", effort });
+    assert.deepEqual(claude.thinking, { type: "adaptive" });
+    assert.equal(claude.effort, effort);
+    assert.equal(claude.label, `claude-agent-sdk:claude-opus-5-5+${effort}`);
+
+    const codex = resolveCodexAgentConfig({ model: "codex/openai/gpt-5.6-terra", effort });
+    assert.equal(codex.effort, effort);
+
+    // Third-party endpoints clamp at the "high" budget; the label keeps the level.
+    const thirdParty = resolveAgentSdkConfig({ model: "openrouter/openai/gpt-5.2", effort });
+    assert.deepEqual(thirdParty.thinking, { type: "enabled", budgetTokens: THIRD_PARTY_THINKING_BUDGETS.high });
+    assert.equal(thirdParty.label, `openrouter:openai/gpt-5.2+${effort}`);
+  }
+});

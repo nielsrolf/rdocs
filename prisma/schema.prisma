@@ -276,6 +276,8 @@ model Document {
   activeAiRunId           String?
   agentModel              String?
   agentEffort             String?
+  // Per-Slack-thread overrides of agentModel/agentEffort (`/settings` in Slack).
+  slackThreadAgentSettings SlackThreadAgentSettings[]
   // "managed" (default): the app owns the repo/worktree and runs the agent on
   // its own container/in-process runner (see lib/agent-runner). "selfHosted":
   // the app never clones or mounts a worktree for this document — it only
@@ -481,6 +483,24 @@ model SlackAccountLink {
 // replies under it (no new row). Inbound DM replies threaded under messageTs
 // are routed back into the document's comment thread instead of starting an
 // agent run (lib/slack/events.ts).
+// Agent settings for ONE Slack thread of a channel document, set with
+// `/settings` (lib/slack/thread-settings.ts). They win over the document's
+// agentModel/agentEffort and the user's defaults for every run in the thread.
+model SlackThreadAgentSettings {
+  id          String   @id @default(cuid())
+  documentId  String
+  // Same key as AiRun.triggerId: "<channel>:<threadTs>".
+  triggerId   String
+  agentModel  String?
+  agentEffort String?
+  updatedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, triggerId])
+}
+
 model SlackCommentNotification {
   id             String        @id @default(cuid())
   slackTeamId    String

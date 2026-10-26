@@ -2,7 +2,7 @@ import { Node, mergeAttributes } from "@tiptap/core";
 import type { Editor } from "@tiptap/core";
 import ImageExtension from "@tiptap/extension-image";
 import { NodeViewContent, NodeViewProps, NodeViewWrapper, ReactNodeViewRenderer, useEditorState } from "@tiptap/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import {
   aiEditSelectionIdsAttributeSpec,
@@ -240,6 +240,28 @@ function ImageCaptionEditor({
 }) {
   const [draft, setDraft] = useState(caption);
   useEffect(() => setDraft(caption), [caption]);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // A textarea (not an <input>) so long captions wrap onto several rows; grow it
+  // to fit its content on every edit and whenever its width changes.
+  useLayoutEffect(() => {
+    const element = textareaRef.current;
+    if (!element) return;
+    const fit = () => {
+      element.style.height = "auto";
+      element.style.height = `${element.scrollHeight}px`;
+    };
+    fit();
+    if (typeof ResizeObserver === "undefined") return;
+    let lastWidth = element.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (element.clientWidth === lastWidth) return;
+      lastWidth = element.clientWidth;
+      fit();
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [draft, editable]);
 
   if (!editable) {
     return caption ? <figcaption className="repo-image-caption">{caption}</figcaption> : null;
@@ -252,12 +274,13 @@ function ImageCaptionEditor({
     setDraft(caption);
   };
   return (
-    <input
+    <textarea
       aria-label="Image caption"
       className="image-caption-input"
       contentEditable={false}
       onBlur={commit}
-      onChange={(event) => setDraft(event.target.value)}
+      // Captions are a single paragraph: strip pasted newlines, Enter commits.
+      onChange={(event) => setDraft(event.target.value.replace(/\s*\n\s*/g, " "))}
       onKeyDown={(event) => {
         if (event.key === "Enter") {
           event.preventDefault();
@@ -272,6 +295,8 @@ function ImageCaptionEditor({
       }}
       onMouseDown={(event) => event.stopPropagation()}
       placeholder="Add caption"
+      ref={textareaRef}
+      rows={1}
       tabIndex={-1}
       value={draft}
     />

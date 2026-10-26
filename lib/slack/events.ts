@@ -27,6 +27,7 @@ import {
   resolveDocumentAccess
 } from "@/lib/permissions";
 import { resolveAgentConfigForUser } from "@/lib/agent-defaults";
+import { isCodexAgentModel } from "@/lib/agent-config";
 import { saveAttachmentToStore } from "@/lib/attachments";
 import { copyOwnerDefaultSkillsToDocument } from "@/lib/document-skills";
 import { recordAiRunEvent } from "@/lib/ai-runs";
@@ -38,6 +39,18 @@ import { createSlackLinkToken, createSlackToolsToken } from "@/lib/slack/link-to
 import { resolveHostDevDir } from "@/lib/slack/dev-mode";
 import { markdownToMrkdwn } from "@/lib/slack/mrkdwn";
 import { queuedFollowUps, steeredRunAnchors } from "@/lib/slack/thread-state";
+import {
+  SETTINGS_USAGE,
+  applyThreadAgentSettings,
+  clearThreadAgentSettings,
+  codexDefaultModelFor,
+  formatAgentSettings,
+  hasThreadAgentSettings,
+  parseSettingsCommand,
+  resolveSettingsUpdate,
+  saveThreadAgentSettings,
+  type SettingsCommand
+} from "@/lib/slack/thread-settings";
 import { RUN_CANCELLED_MESSAGE, cancelAiRun, injectRunMessage } from "@/lib/agent-runner/run-registry";
 import type { SlackClient, SlackMessage } from "@/lib/slack/web";
 
@@ -500,9 +513,12 @@ type StartSlackRunArgs = {
 
 export async function startSlackConversationRun(args: StartSlackRunArgs): Promise<string> {
   const { deps, surface, document, channel, channelName, teamId, triggerId, replyThreadTs } = args;
-  // Doc agent-panel config -> triggering user's default -> app default
-  // (shared resolver, see lib/agent-defaults.ts).
-  const agentConfig = await resolveAgentConfigForUser(document, args.userId);
+  // Thread `/settings` -> doc agent-panel config -> triggering user's default
+  // -> app default (shared resolver, see lib/agent-defaults.ts).
+  const agentConfig = await resolveAgentConfigForUser(
+    await applyThreadAgentSettings(document, triggerId),
+    args.userId
+  );
 
   const aiRun = await db.aiRun.create({
     data: {
@@ -969,6 +985,24 @@ async function handleIncomingSlackMessage(
     select: { id: true }
   });
   const activeRun = activeRuns[0];
+
+  // `@claudex /settings …` configures this thread instead of prompting the agent.
+  const settingsCommand = parseSettingsCommand(instructionBody);
+  if (settingsCommand) {
+    await applyThreadSettingsCommand({
+      deps,
+      command: settingsCommand,
+      document,
+      triggerId,
+      channel: event.channel,
+      threadTs: conversationKey,
+      anchorTs: event.ts,
+      userId: link.userId,
+      hasActiveRun: Boolean(activeRun)
+    });
+    return { handled: true as const, action: "settings" as const, documentId: document.id };
+  }
+
   if (activeRun) {
     if (isInterruptMessage(instructionBody)) {
       // "wait"/"stop" means the whole thread stops, so cancel every active run
@@ -1141,6 +1175,203 @@ async function handleIncomingSlackMessage(
   return { handled: true as const, aiRunId, documentId: document.id };
 }
 
+/**
+ * Apply a parsed `/settings` command to one thread and answer in it. Returns
+ * the reply text (also posted unless `post` is false).
+ */
+async function applyThreadSettingsCommand(args: {
+  deps: SlackEventDeps;
+  command: SettingsCommand;
+  document: { id: string; ownerId: string; agentModel: string | null; agentEffort: string | null };
+  triggerId: string;
+  channel: string;
+  threadTs: string;
+  /** Message to react to (absent for the slash command, which has no message). */
+  anchorTs?: string;
+  userId: string;
+  hasActiveRun: boolean;
+  post?: boolean;
+}): Promise<{ ok: boolean; text: string }> {
+  const { deps, command, document, triggerId } = args;
+  const effective = async () => {
+    const config = await resolveAgentConfigForUser(
+      await applyThreadAgentSettings(document, triggerId),
+      args.userId
+    );
+    return formatAgentSettings(config);
+  };
+  const appliesNote = args.hasActiveRun
+    ? " The run already in progress keeps its settings; they apply from the next one."
+    : "";
+
+  let ok = true;
+  let text: string;
+  if (command.kind === "show") {
+    text = `⚙️ Settings for this thread: ${await effective()}.\n${SETTINGS_USAGE}`;
+  } else if (command.kind === "reset") {
+    await clearThreadAgentSettings(document.id, triggerId);
+    text = `⚙️ Thread settings cleared — back to the channel defaults: ${await effective()}.${appliesNote}`;
+  } else if (command.kind === "invalid") {
+    ok = false;
+    text = `${command.message}\n${SETTINGS_USAGE}`;
+  } else {
+    const before = await resolveAgentConfigForUser(
+      await applyThreadAgentSettings(document, triggerId),
+      args.userId
+    );
+    const resolved = resolveSettingsUpdate({
+      command,
+      current: before,
+      codexDefaultModel: await codexDefaultModelFor({
+        documentId: document.id,
+        userIds: [args.userId, document.ownerId]
+      })
+    });
+    if ("error" in resolved) {
+      ok = false;
+      text = `${resolved.error}\n${SETTINGS_USAGE}`;
+    } else {
+      await saveThreadAgentSettings({ documentId: document.id, triggerId, update: resolved.update, userId: args.userId });
+      const harnessChanged =
+        resolved.update.agentModel !== undefined &&
+        isCodexAgentModel(resolved.update.agentModel) !== isCodexAgentModel(before.model);
+      const hasHistory = harnessChanged
+        ? Boolean(await db.aiRun.findFirst({ where: { documentId: document.id, triggerId }, select: { id: true } }))
+        : false;
+      text =
+        `⚙️ Settings for this thread: ${await effective()}.${appliesNote}` +
+        (hasHistory ? " Switching scaffold starts a fresh agent session; the thread so far is passed along as context." : "");
+      console.log("[slack] thread settings updated", {
+        documentId: document.id,
+        triggerId,
+        userId: args.userId,
+        update: resolved.update
+      });
+    }
+  }
+
+  if (args.post !== false) {
+    await deps.slack.postMessage({ channel: args.channel, threadTs: args.threadTs, text }).catch(() => null);
+    if (args.anchorTs) {
+      await deps.slack
+        .addReaction({ channel: args.channel, ts: args.anchorTs, name: ok ? "gear" : "x" })
+        .catch(() => null);
+    }
+  }
+  return { ok, text };
+}
+
+export type SlackSlashCommand = {
+  teamId: string;
+  channel: string;
+  user: string;
+  /** Everything after the command name. */
+  text: string;
+  /** Present only if Slack ever delivers the command from inside a thread. */
+  threadTs?: string;
+};
+
+/**
+ * The registered `/settings` slash command. Returns the EPHEMERAL text to ack
+ * with. Slack does not run custom slash commands inside threads, so at the top
+ * level `/settings key=value …` opens a new thread (a bot root message) with
+ * the settings pre-applied; replies there run with them.
+ */
+export async function handleSlackSettingsSlashCommand(
+  command: SlackSlashCommand,
+  deps: SlackEventDeps
+): Promise<string> {
+  const link = await db.slackAccountLink.findUnique({
+    where: { slackTeamId_slackUserId: { slackTeamId: command.teamId, slackUserId: command.user } },
+    select: { userId: true }
+  });
+  if (!link) {
+    const token = await createSlackLinkToken({ slackTeamId: command.teamId, slackUserId: command.user });
+    return (
+      `Connect your Slack account to rdocs first: sign in at ${deps.appUrl}, then open ` +
+      `${deps.appUrl.replace(/\/$/, "")}/api/slack/connect?token=${encodeURIComponent(token)}`
+    );
+  }
+  const parsed = parseSettingsCommand(`/settings ${command.text}`) ?? { kind: "show" as const };
+  const surface = command.channel.startsWith("D") ? "dm" : "channel";
+  const channelName = surface === "dm" ? null : (await deps.slack.channelInfo(command.channel))?.name ?? null;
+  const document = await ensureSlackChannelDocument({
+    slackTeamId: command.teamId,
+    slackChannelId: command.channel,
+    channelName,
+    titleFallback: surface === "dm" ? "Slack DM" : undefined,
+    userId: link.userId,
+    surface
+  });
+
+  if (command.threadTs) {
+    const triggerId = `${command.channel}:${command.threadTs}`;
+    const active = await db.aiRun.findFirst({
+      where: { documentId: document.id, triggerId, status: { in: ["RUNNING", "PENDING"] } },
+      select: { id: true }
+    });
+    const result = await applyThreadSettingsCommand({
+      deps,
+      command: parsed,
+      document,
+      triggerId,
+      channel: command.channel,
+      threadTs: command.threadTs,
+      userId: link.userId,
+      hasActiveRun: Boolean(active),
+      post: parsed.kind !== "show" && parsed.kind !== "invalid"
+    });
+    return result.text;
+  }
+
+  if (parsed.kind !== "set") {
+    const defaults = formatAgentSettings(await resolveAgentConfigForUser(document, link.userId));
+    const lead = parsed.kind === "invalid" ? `${parsed.message}
+` : "";
+    return (
+      `${lead}Channel defaults: ${defaults}.\n` +
+      "Slack can't run slash commands inside threads: in a thread, send `@claudex /settings …`; " +
+      "here, `/settings key=value …` opens a new thread with those settings.\n" +
+      SETTINGS_USAGE
+    );
+  }
+
+  // Validate before posting anything, against the channel's effective config.
+  const current = await resolveAgentConfigForUser(document, link.userId);
+  const resolved = resolveSettingsUpdate({
+    command: parsed,
+    current,
+    codexDefaultModel: await codexDefaultModelFor({ documentId: document.id, userIds: [link.userId, document.ownerId] })
+  });
+  if ("error" in resolved) return `${resolved.error}\n${SETTINGS_USAGE}`;
+  const summary = formatAgentSettings({
+    model: resolved.update.agentModel ?? current.model,
+    effort: resolved.update.agentEffort ?? current.effort
+  });
+  const root = await deps.slack
+    .postMessage({
+      channel: command.channel,
+      text: `⚙️ <@${command.user}> opened a thread with ${summary}. Reply in this thread to start.`
+    })
+    .catch((error) => {
+      console.warn("[slack] /settings root message failed", {
+        channel: command.channel,
+        error: error instanceof Error ? error.message : error
+      });
+      return null;
+    });
+  if (!root?.ts) {
+    return "I couldn't post in this channel — invite me first (`/invite @claudex`).";
+  }
+  await saveThreadAgentSettings({
+    documentId: document.id,
+    triggerId: `${root.channel ?? command.channel}:${root.ts}`,
+    update: resolved.update,
+    userId: link.userId
+  });
+  return `Thread opened with ${summary}.`;
+}
+
 export async function handleSlackAppMention(event: SlackIncomingMessage, deps: SlackEventDeps) {
   return handleIncomingSlackMessage(event, deps, "mention");
 }
@@ -1163,11 +1394,15 @@ export async function handleSlackThreadReply(event: SlackIncomingMessage, deps: 
     select: { id: true }
   });
   if (!document) return { handled: false as const, reason: "no-session" as const };
+  const triggerId = `${event.channel}:${event.threadTs}`;
   const session = await db.aiRun.findFirst({
-    where: { documentId: document.id, triggerId: `${event.channel}:${event.threadTs}` },
+    where: { documentId: document.id, triggerId },
     select: { id: true }
   });
-  if (!session) return { handled: false as const, reason: "no-session" as const };
+  // A thread opened by `/settings` has no run yet but is already ours.
+  if (!session && !(await hasThreadAgentSettings(document.id, triggerId))) {
+    return { handled: false as const, reason: "no-session" as const };
+  }
   return handleIncomingSlackMessage(event, deps, "mention");
 }
 

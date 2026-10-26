@@ -7,6 +7,7 @@
 import {
   handleSlackAppMention,
   handleSlackDirectMessage,
+  handleSlackSettingsSlashCommand,
   handleSlackThreadReply,
   type SlackIncomingMessage
 } from "@/lib/slack/events";
@@ -147,6 +148,41 @@ export async function startSlackSocketService() {
       console.error("[slack] dm handler failed", {
         error: error instanceof Error ? error.message : error
       });
+    }
+  });
+
+  // `/settings` (slash command). Socket Mode delivers the command payload as
+  // `body`; the ack payload is the ephemeral reply, so it must come within 3s.
+  socket.on("slash_commands", async ({ body, ack }) => {
+    if (body?.command !== "/settings") {
+      await ack();
+      return;
+    }
+    try {
+      const deps = await teamDeps(body.team_id);
+      if (!deps) {
+        await ack();
+        return;
+      }
+      const text = await handleSlackSettingsSlashCommand(
+        {
+          teamId: body.team_id,
+          channel: body.channel_id,
+          user: body.user_id,
+          text: typeof body.text === "string" ? body.text : "",
+          threadTs: typeof body.thread_ts === "string" ? body.thread_ts : undefined
+        },
+        deps
+      );
+      await ack({ response_type: "ephemeral", text });
+      console.log("[slack] /settings", { channel: body.channel_id, user: body.user_id });
+    } catch (error) {
+      console.error("[slack] /settings handler failed", {
+        error: error instanceof Error ? error.message : error
+      });
+      await ack({ response_type: "ephemeral", text: "Something went wrong applying those settings." }).catch(
+        () => null
+      );
     }
   });
 
