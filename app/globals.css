@@ -3966,10 +3966,22 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   gap: 0.5rem;
 }
 
+/* Centre the checkbox on the item's FIRST line: the label is exactly one
+   line box tall (1lh, with a 1.35em fallback = the editor line-height) and the
+   input's default UA margin is dropped — a fixed margin-top on top of that
+   margin left the box ~3px below the text. */
 .ProseMirror ul[data-type="taskList"] li > label {
   flex: 0 0 auto;
-  margin-top: 0.25rem;
+  display: flex;
+  align-items: center;
+  height: 1.35em;
+  height: 1lh;
+  margin: 0;
   user-select: none;
+}
+
+.ProseMirror ul[data-type="taskList"] li > label input[type="checkbox"] {
+  margin: 0;
 }
 
 .ProseMirror ul[data-type="taskList"] li > div {
