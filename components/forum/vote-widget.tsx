@@ -11,6 +11,8 @@ type VoteWidgetProps = {
   // Signed-out viewers see the scores but can't vote.
   canVote: boolean;
   orientation?: "vertical" | "horizontal";
+  // Lets a surrounding view (the forum outline's comment karma) follow votes.
+  onTallyChange?: (tally: VoteTally) => void;
 };
 
 // How long ▲/▼ must be held before the press becomes a strong vote.
@@ -32,7 +34,8 @@ export function VoteWidget({
   targetId,
   tally: initialTally,
   canVote,
-  orientation = "vertical"
+  orientation = "vertical",
+  onTallyChange
 }: VoteWidgetProps) {
   const [tally, setTally] = useState(initialTally);
   const [busy, setBusy] = useState(false);
@@ -63,7 +66,9 @@ export function VoteWidget({
         body: JSON.stringify({ value, kind })
       });
       if (!response.ok) return;
-      setTally((await response.json()) as VoteTally);
+      const next = (await response.json()) as VoteTally;
+      setTally(next);
+      onTallyChange?.(next);
     } catch {
       // Leave prior state; the next click retries.
     } finally {

@@ -6,6 +6,7 @@ import { MarkdownBody } from "@/components/document-workspace/markdown";
 import type { VoteTally } from "@/lib/forum-votes";
 import { MARKDOWN_SHORTCUT_HINT } from "@/lib/markdown-shortcuts";
 
+import { publishForumComments } from "./forum-comment-store";
 import { VoteWidget } from "./vote-widget";
 import { MentionTextarea } from "./mention-textarea";
 
@@ -101,7 +102,12 @@ const COMMENT_LINK_FLASH_CLASS = "forum-comment-link-flash";
 // Opened via a "#comment-<id>" permalink: scroll that comment into view and
 // briefly highlight it so the reader sees which comment the link meant.
 // Scoped to `root` because a feed renders one ForumComments per quicktake.
-function useCommentLinkFlash(root: RefObject<HTMLElement | null>) {
+// A target inside folded replies is unfolded first (`reveal`), then scrolled
+// to on the next frames once it is laid out again.
+function useCommentLinkFlash(
+  root: RefObject<HTMLElement | null>,
+  reveal: RefObject<(commentId: string) => boolean>
+) {
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const flash = () => {
@@ -109,6 +115,10 @@ function useCommentLinkFlash(root: RefObject<HTMLElement | null>) {
       if (!hash.startsWith(COMMENT_HASH_PREFIX)) return;
       const target = document.getElementById(hash);
       if (!target || !root.current?.contains(target)) return;
+      if (reveal.current?.(hash.slice(COMMENT_HASH_PREFIX.length))) {
+        window.requestAnimationFrame(() => window.requestAnimationFrame(flash));
+        return;
+      }
       const main = target.querySelector<HTMLElement>(":scope > .forum-comment-main") ?? target;
       target.scrollIntoView({ behavior: "smooth", block: "center" });
       // Remove + reflow + re-add restarts the animation on a repeated link.
@@ -124,7 +134,7 @@ function useCommentLinkFlash(root: RefObject<HTMLElement | null>) {
       window.removeEventListener("hashchange", flash);
       if (timer) clearTimeout(timer);
     };
-  }, [root]);
+  }, [root, reveal]);
 }
 
 // Heading-style permalink for a comment: copies the current page URL with a
@@ -160,6 +170,9 @@ function CommentNode({
   canVote,
   onReply,
   onEdit,
+  onTally,
+  folded,
+  onToggleFold,
   busyParentId,
   depth
 }: {
@@ -168,6 +181,9 @@ function CommentNode({
   canVote: boolean;
   onReply: (threadId: string, parentId: string, body: string) => Promise<void>;
   onEdit: (commentId: string, body: string) => Promise<boolean>;
+  onTally: (commentId: string, tally: VoteTally) => void;
+  folded: ReadonlySet<string>;
+  onToggleFold: (commentId: string) => void;
   busyParentId: string | null;
   depth: number;
 }) {
@@ -175,6 +191,9 @@ function CommentNode({
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const busy = busyParentId === comment.id;
+  const isFolded = folded.has(comment.id);
+  const replyCount = countComments(comment.replies);
+  const replyLabel = `${replyCount} ${replyCount === 1 ? "reply" : "replies"}`;
   return (
     <div className="forum-comment" data-depth={depth} id={`comment-${comment.id}`}>
       <div className="forum-comment-main">
@@ -183,6 +202,7 @@ function CommentNode({
           targetId={comment.id}
           tally={comment}
           canVote={canVote}
+          onTallyChange={(tally) => onTally(comment.id, tally)}
         />
         <div className="forum-comment-content">
           <div className="forum-comment-meta">
@@ -214,8 +234,18 @@ function CommentNode({
           ) : (
             <MarkdownBody body={comment.body} className="forum-comment-body markdown-body" />
           )}
-          {(canComment || comment.canEdit) && !editing ? (
+          {(canComment || comment.canEdit || replyCount > 0) && !editing ? (
             <div className="forum-comment-actions">
+              {replyCount > 0 ? (
+                <button
+                  type="button"
+                  className="forum-btn-ghost forum-fold-toggle"
+                  aria-expanded={!isFolded}
+                  onClick={() => onToggleFold(comment.id)}
+                >
+                  {isFolded ? `▸ Show ${replyLabel}` : `▾ Hide ${replyLabel}`}
+                </button>
+              ) : null}
               {canComment ? (
                 <button
                   type="button"
@@ -245,7 +275,16 @@ function CommentNode({
         </div>
       </div>
       {comment.replies.length > 0 ? (
-        <div className="forum-comment-children">
+        // Folded replies stay mounted (hidden) so open reply forms keep their
+        // drafts and permalinks can still find their target to unfold it.
+        <div className="forum-comment-children" hidden={isFolded}>
+          <button
+            type="button"
+            className="forum-thread-line"
+            aria-label={`Hide ${replyLabel}`}
+            title={`Hide ${replyLabel}`}
+            onClick={() => onToggleFold(comment.id)}
+          />
           {comment.replies.map((reply) => (
             <CommentNode
               key={reply.id}
@@ -254,6 +293,9 @@ function CommentNode({
               canVote={canVote}
               onReply={onReply}
               onEdit={onEdit}
+              onTally={onTally}
+              folded={folded}
+              onToggleFold={onToggleFold}
               busyParentId={busyParentId}
               depth={depth + 1}
             />
@@ -276,8 +318,33 @@ export function replaceCommentBody(
   );
 }
 
-function countComments(comments: ForumCommentView[]): number {
+export function patchComment(
+  comments: ForumCommentView[],
+  commentId: string,
+  patch: Partial<ForumCommentView>
+): ForumCommentView[] {
+  return comments.map((comment) =>
+    comment.id === commentId
+      ? { ...comment, ...patch }
+      : { ...comment, replies: patchComment(comment.replies, commentId, patch) }
+  );
+}
+
+export function countComments(comments: ForumCommentView[]): number {
   return comments.reduce((sum, c) => sum + 1 + countComments(c.replies), 0);
+}
+
+// Ids of the comments enclosing `commentId`, outermost first ([] for a
+// top-level comment or an unknown id) — the folds a permalink must open.
+export function forumCommentAncestorIds(comments: ForumCommentView[], commentId: string): string[] {
+  for (const comment of comments) {
+    if (comment.id === commentId) return [];
+    const inner = forumCommentAncestorIds(comment.replies, commentId);
+    if (inner.length > 0 || comment.replies.some((reply) => reply.id === commentId)) {
+      return [comment.id, ...inner];
+    }
+  }
+  return [];
 }
 
 // Bottom-of-post nested comment section for the forum view. Studio-anchored
@@ -293,8 +360,38 @@ export function ForumComments({
   const [busyParentId, setBusyParentId] = useState<string | null>(null);
   const [topBusy, setTopBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set());
   const rootRef = useRef<HTMLElement | null>(null);
-  useCommentLinkFlash(rootRef);
+  // Unfolds whatever hides `commentId`; true when something had to open.
+  const revealRef = useRef<(commentId: string) => boolean>(() => false);
+  revealRef.current = (commentId) => {
+    const closed = forumCommentAncestorIds(comments, commentId).filter((id) => folded.has(id));
+    if (closed.length === 0) return false;
+    setFolded((current) => {
+      const next = new Set(current);
+      closed.forEach((id) => next.delete(id));
+      return next;
+    });
+    return true;
+  };
+  useCommentLinkFlash(rootRef, revealRef);
+
+  useEffect(() => {
+    publishForumComments(documentId, comments);
+  }, [documentId, comments]);
+
+  function toggleFold(commentId: string) {
+    setFolded((current) => {
+      const next = new Set(current);
+      if (next.has(commentId)) next.delete(commentId);
+      else next.add(commentId);
+      return next;
+    });
+  }
+
+  function updateTally(commentId: string, tally: VoteTally) {
+    setComments((current) => patchComment(current, commentId, tally));
+  }
 
   async function refresh() {
     const response = await fetch(`/api/documents/${documentId}/forum-comments`, {
@@ -337,7 +434,7 @@ export function ForumComments({
       setError("Could not save the comment. Please try again.");
       return false;
     }
-    setComments((current) => replaceCommentBody(current, commentId, body));
+    setComments((current) => patchComment(current, commentId, { body }));
     return true;
   }
 
@@ -375,6 +472,9 @@ export function ForumComments({
           canVote={canVote}
           onReply={submitReply}
           onEdit={submitEdit}
+          onTally={updateTally}
+          folded={folded}
+          onToggleFold={toggleFold}
           busyParentId={busyParentId}
           depth={0}
         />

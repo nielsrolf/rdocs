@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { DocumentWorkspace } from "@/components/document-workspace";
+import { ForumCommentOutline } from "@/components/forum/forum-comment-outline";
 import { ForumComments, type ForumCommentView } from "@/components/forum/forum-comments";
 import { VoteWidget } from "@/components/forum/vote-widget";
 import { CommentNotificationBell } from "@/components/notification-bell";
@@ -60,6 +61,7 @@ export default async function ForumDocumentPage({ params }: PageProps) {
       getCollaborationVersion(id, access.document.content, access.document.updatedAt)
     ]);
 
+  const serializedComments = forumComments.map(serializeForumComment);
   const normalizedThreads = threads.map((thread) => ({
     ...thread,
     status: thread.status as ThreadStatusValue
@@ -155,11 +157,12 @@ export default async function ForumDocumentPage({ params }: PageProps) {
           shareToken={null}
           viaShareLink={false}
           forumView
+          forumOutlineFooter={<ForumCommentOutline documentId={id} initialComments={serializedComments} />}
         />
       </div>
       <ForumComments
         documentId={id}
-        initialComments={forumComments.map(serializeForumComment)}
+        initialComments={serializedComments}
         canComment={Boolean(user) && (canComment(access.permission) || access.viaForumPublic)}
         canVote={Boolean(user)}
         currentUserName={user?.name ?? "Guest"}

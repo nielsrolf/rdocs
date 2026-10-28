@@ -1,5 +1,6 @@
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { JSONContent } from "@tiptap/react";
+import type { ReactNode } from "react";
 
 import type { PermissionLevelValue, ThreadStatusValue } from "@/lib/contracts";
 import type { MentionCandidate } from "@/lib/mentions";
@@ -121,6 +122,8 @@ export type DocumentWorkspaceProps = {
   // with the editor read-only and the studio comment rail hidden — forum
   // comments render below the workspace instead (app/forum/[id]).
   forumView?: boolean;
+  // Forum view only: rendered at the bottom of the outline sidebar.
+  forumOutlineFooter?: ReactNode;
   // ISO timestamp when the document was posted to the forum (null = not
   // posted). Seeds the share modal's forum toggle.
   initialForumPostedAt?: string | null;

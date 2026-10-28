@@ -258,6 +258,7 @@ export function DocumentWorkspace({
   shareToken,
   viaShareLink,
   forumView = false,
+  forumOutlineFooter,
   initialForumPostedAt = null,
   initialForumPublic = false,
   initialDocumentNotificationsEnabled = false,
@@ -5134,6 +5135,7 @@ export function DocumentWorkspace({
             onDeleteTab={handleDeleteTab}
             onReorderTab={handleReorderTab}
             onMoveTab={handleMoveTab}
+            footer={forumView ? forumOutlineFooter : undefined}
           />
         )}
         <div className="editor-page-shell">

@@ -118,12 +118,12 @@ body.public-view-shell .document-page-shell {
   gap: 0.2rem;
   padding: 0.2rem;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 10px;
   background: rgba(255, 255, 255, 0.7);
 }
 
 .topbar-mode-link {
-  border-radius: 999px;
+  border-radius: 7px;
   padding: 0.38rem 0.9rem;
   font-size: 0.9rem;
   font-weight: 600;
@@ -155,8 +155,8 @@ body.public-view-shell .document-page-shell {
 
 .primary-button,
 .ghost-button {
-  border-radius: 999px;
-  padding: 0.72rem 1.05rem;
+  border-radius: 8px;
+  padding: 0.5rem 0.9rem;
   border: 1px solid transparent;
   transition: transform 120ms ease, background 120ms ease, border-color 120ms ease;
 }
@@ -6399,8 +6399,105 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .dashboard-tabs-bar {
   display: flex;
+  align-items: flex-end;
   gap: 0.4rem;
   border-bottom: 1px solid var(--border);
+}
+
+.dashboard-tabs-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-bottom: 0.4rem;
+}
+
+/* Compact document list: one bordered panel with divider rows, not a card per row. */
+.dashboard-list.surface-card {
+  padding: 0;
+  border-radius: 10px;
+  box-shadow: none;
+  overflow: hidden;
+}
+
+.dashboard-list .doc-list {
+  gap: 0;
+}
+
+.dashboard-list .doc-row {
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+}
+
+.dashboard-list .doc-row:last-child {
+  border-bottom: none;
+}
+
+.dashboard-list .doc-row:hover {
+  background: rgba(60, 64, 67, 0.04);
+}
+
+.dashboard-list .doc-row-has-unread {
+  border-color: var(--border);
+}
+
+.dashboard-list .doc-row-unified .doc-row-main {
+  padding: 0.5rem 0.9rem;
+}
+
+.dashboard-list .doc-row strong {
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.dashboard-list .doc-row .doc-row-meta {
+  font-size: 0.8rem;
+  gap: 0.3rem;
+}
+
+.dashboard-list .doc-row-text strong {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dashboard-list .doc-row .permission-pill,
+.dashboard-list .doc-row .slack-pill,
+.dashboard-list .doc-row .unread-badge,
+.dashboard-list .doc-row .mention-badge {
+  border-radius: 6px;
+  padding: 0.12rem 0.5rem;
+  font-size: 0.75rem;
+}
+
+/* `.doc-row span` (muted) otherwise beats the badges' own text colour. */
+.dashboard-list .doc-row .unread-badge {
+  color: #fff;
+}
+
+.dashboard-list .doc-row .mention-badge {
+  color: #3c2d00;
+}
+
+.dashboard-list .doc-row-delete {
+  border-left: none;
+  border-radius: 0;
+  padding: 0 0.8rem;
+  font-size: 0.85rem;
+  opacity: 0;
+}
+
+.dashboard-list .doc-row:hover .doc-row-delete,
+.dashboard-list .doc-row-delete:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .dashboard-list .doc-row-delete {
+    opacity: 1;
+  }
 }
 
 .dashboard-tab {
@@ -7205,6 +7302,118 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   padding-left: 0.9rem;
 }
 
+.forum-comment-children[hidden] {
+  display: none;
+}
+
+/* Reddit-style: the reply thread's left rule is itself a "fold" control. */
+.forum-comment-children {
+  position: relative;
+}
+
+.forum-thread-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -7px;
+  width: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.forum-thread-line::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 2px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+.forum-thread-line:hover::after,
+.forum-thread-line:focus-visible::after {
+  background: var(--accent-strong, #8a6d3b);
+}
+
+.forum-fold-toggle {
+  color: #777;
+}
+
+/* Forum outline sidebar: comment list under the tabs/headings. */
+.forum-outline-comments {
+  margin-top: 0.9rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid rgba(60, 64, 67, 0.14);
+}
+
+.forum-outline-comments-heading {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 0 0.35rem 0.35rem;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.forum-outline-comment-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.forum-outline-comment {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  padding: 0.22rem 0.5rem;
+  text-align: left;
+  font: inherit;
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+
+.forum-outline-comment:hover {
+  background: rgba(60, 64, 67, 0.08);
+  color: var(--text);
+}
+
+.forum-outline-comment-score {
+  min-width: 1.5em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: #9a9a9a;
+}
+
+.forum-outline-comment-author {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.forum-outline-comment-replies {
+  font-size: 0.75rem;
+  color: #9a9a9a;
+}
+
 .forum-comment-content {
   min-width: 0;
   flex: 1;
@@ -7911,4 +8120,16 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 .schedules-menu-panel {
   max-height: min(70vh, 720px);
   overflow: auto;
+}
+
+@media (max-width: 720px) {
+  .dashboard-tabs-bar {
+    flex-wrap: wrap;
+  }
+
+  .dashboard-tabs-actions {
+    order: -1;
+    width: 100%;
+    justify-content: flex-end;
+  }
 }

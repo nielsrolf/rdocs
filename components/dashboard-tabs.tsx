@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { CommentInbox, type InboxThreadView } from "@/components/comment-inbox";
 import { DocumentList, type DashboardDoc } from "@/components/document-list";
@@ -13,13 +13,16 @@ type DashboardTabsProps = {
   inboxThreads: InboxThreadView[];
   inboxTags: string[];
   initialTab?: DashboardTab;
+  /** Page-level buttons, right-aligned in the tab bar. */
+  actions?: ReactNode;
 };
 
 export function DashboardTabs({
   documents,
   inboxThreads,
   inboxTags,
-  initialTab = "documents"
+  initialTab = "documents",
+  actions
 }: DashboardTabsProps) {
   const [tab, setTab] = useState<DashboardTab>(initialTab);
   const channelDocs = documents.filter((d) => d.kind === "slack_channel");
@@ -64,6 +67,7 @@ export function DashboardTabs({
         >
           Comments
         </button>
+        {actions ? <div className="dashboard-tabs-actions">{actions}</div> : null}
       </div>
 
       {tab === "documents" ? (

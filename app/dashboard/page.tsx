@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import type { InboxThreadView } from "@/components/comment-inbox";
@@ -68,26 +67,17 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
 
   return (
     <main className="dashboard-shell">
-      <section className="dashboard-header">
-        <div>
-          <span className="eyebrow">Workspace</span>
-          <h1>Your documents</h1>
-          <p>Create new docs, open shared work, and manage collaboration from a single dashboard.</p>
-        </div>
-        <div className="dashboard-header-actions">
-          <Link className="ghost-button" href="/forum">
-            Forum
-          </Link>
-          <TourRestartButton />
-          <NewDocumentButton />
-        </div>
-      </section>
-
       <DashboardTabs
         documents={documents}
         inboxThreads={inboxThreads}
         inboxTags={inbox.tags}
         initialTab={initialTab}
+        actions={
+          <>
+            <TourRestartButton />
+            <NewDocumentButton />
+          </>
+        }
       />
       <OnboardingTour surface="list" autoOffer={documents.length === 0} />
     </main>

@@ -1,5 +1,5 @@
 import type { Editor } from "@tiptap/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { createHeadingHashNav } from "./heading-hash-nav";
 import { flashHeadingAt } from "./heading-flash";
@@ -44,7 +44,8 @@ export function DocOutline({
   onCreateTab,
   onDeleteTab,
   onReorderTab,
-  onMoveTab
+  onMoveTab,
+  footer
 }: {
   editor: Editor | null;
   collapsed: boolean;
@@ -60,6 +61,8 @@ export function DocOutline({
   onDeleteTab?: (tabId: string) => void;
   onReorderTab?: (tabId: string, direction: TabReorderDirection) => void;
   onMoveTab?: (tabId: string, targetIndex: number) => void;
+  // Extra section under the outline (the forum view's comment list).
+  footer?: ReactNode;
 }) {
   const dragStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -468,7 +471,7 @@ export function DocOutline({
             })}
           </ul>
         ) : entries.length === 0 ? (
-          <p className="doc-outline-empty">Add headings to navigate this document.</p>
+          footer ? null : <p className="doc-outline-empty">Add headings to navigate this document.</p>
         ) : (
           <ul className="doc-outline-list">
             {entries.map((entry) => renderHeadingItem(entry, Math.max(0, entry.level - 1)))}
@@ -484,6 +487,7 @@ export function DocOutline({
             + Add tab
           </button>
         ) : null}
+        {footer}
       </div>
       <div
         aria-label="Resize outline sidebar"
