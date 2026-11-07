@@ -2,6 +2,18 @@
 
 A Next.js (App Router) + Prisma/SQLite + TipTap app that runs either the Claude Agent SDK or OpenAI Codex SDK for document edits, comment replies, and repo work. See `README.md` for the product description.
 
+## Always end with a commit
+
+Finish every task by committing your work — don't leave it uncommitted in the working
+tree. Several Claude instances often work in the same checkout at once, and a deploy
+builds whatever is on disk: another instance's deploy will ship your half-finished,
+uncommitted edits (or stash them away), and nobody can tell finished work from
+in-progress work. Commit only the files you changed (`git add <paths>`, never
+`git add -A`), so you don't sweep up another instance's work. If the work is not
+finished, say so in the commit message rather than leaving it uncommitted.
+
+Shipping to prod is then `git push origin <sha>:release` — `deploy/release-watch.sh` deploys it within ~2 min (check `logs/release-watch.log`).
+
 ## Running the app
 
 The service is deployed blue/green via `./deploy/deploy.sh` (see `deploy/README.md`): Caddy on `:14141` load-balances to app instances on `:14142`/`:14143`. `./manage.sh <start|stop|restart|status|logs>` wraps this for day-to-day operation, and `../manager.sh r-docs <command>` delegates to it — `restart` runs a zero-downtime deploy, never a kill-and-relaunch.

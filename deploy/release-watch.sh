@@ -22,7 +22,12 @@ if ! git merge-base --is-ancestor "$HEAD_SHA" "$TARGET"; then
   log "origin/release ($TARGET) is not a fast-forward of HEAD ($HEAD_SHA); skipping"
   exit 0
 fi
-[ -f .deploy-active ] && { log "a deploy is already active; retry next tick"; exit 0; }
+# deploy.sh's single-flight lock is .deploy.lock (held for the whole deploy).
+# NOT .deploy-active: that file permanently stores the active color, so testing
+# for it skipped every release once one deploy had ever run (2026-11-07).
+if ! flock -n .deploy.lock true; then
+  log "a deploy is already running (holding .deploy.lock); retry next tick"; exit 0
+fi
 
 log "deploying origin/release $TARGET (from $HEAD_SHA)"
 if ! git merge -q --ff-only "$TARGET" >>"$LOG" 2>&1; then
