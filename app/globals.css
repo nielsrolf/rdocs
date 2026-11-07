@@ -7344,7 +7344,9 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   padding-left: 0.9rem;
 }
 
-.forum-comment-children[hidden] {
+/* until-found (folded replies) must keep its box so Ctrl-F can search it;
+   the UA's content-visibility:hidden collapses it to zero height. */
+.forum-comment-children[hidden]:not([hidden="until-found"]) {
   display: none;
 }
 

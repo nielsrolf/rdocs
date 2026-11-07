@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
 import { MarkdownBody } from "@/components/document-workspace/markdown";
 import type { VoteTally } from "@/lib/forum-votes";
@@ -277,7 +277,7 @@ function CommentNode({
       {comment.replies.length > 0 ? (
         // Folded replies stay mounted (hidden) so open reply forms keep their
         // drafts and permalinks can still find their target to unfold it.
-        <div className="forum-comment-children" hidden={isFolded}>
+        <FoldedChildren folded={isFolded} onReveal={() => onToggleFold(comment.id)}>
           <button
             type="button"
             className="forum-thread-line"
@@ -300,8 +300,48 @@ function CommentNode({
               depth={depth + 1}
             />
           ))}
-        </div>
+        </FoldedChildren>
       ) : null}
+    </div>
+  );
+}
+
+// Folded replies are `hidden="until-found"`, not plain `hidden`: the browser's
+// Cmd/Ctrl-F still searches them and fires `beforematch` on a hit, which
+// unfolds the thread. React 18 only renders boolean `hidden`, so the attribute
+// is managed on the node directly. Browsers without until-found treat it as
+// plain `hidden`.
+function FoldedChildren({
+  folded,
+  onReveal,
+  children
+}: {
+  folded: boolean;
+  onReveal: () => void;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const onRevealRef = useRef(onReveal);
+  onRevealRef.current = onReveal;
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    if (folded) node.setAttribute("hidden", "until-found");
+    else node.removeAttribute("hidden");
+  }, [folded]);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const handler = () => {
+      // The browser has already removed `hidden`; sync the fold state.
+      if (node.dataset.folded === "true") onRevealRef.current();
+    };
+    node.addEventListener("beforematch", handler);
+    return () => node.removeEventListener("beforematch", handler);
+  }, []);
+  return (
+    <div ref={ref} className="forum-comment-children" data-folded={folded ? "true" : "false"}>
+      {children}
     </div>
   );
 }
