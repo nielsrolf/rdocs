@@ -275,27 +275,28 @@ async function formatTranscript(
   return lines.join("\n");
 }
 
-async function buildChannelContext(
-  deps: SlackEventDeps,
-  event: SlackIncomingMessage
-): Promise<string | null> {
-  try {
-    const history = await deps.slack.channelHistory({ channel: event.channel, limit: 30 });
-    return await formatTranscript(deps, history, event.ts);
-  } catch {
-    return null;
-  }
-}
-
+// Context for the FIRST run in a thread (later runs resume the SDK session,
+// which already holds the whole conversation incl. tool calls). Only THIS
+// thread is injected — never other top-level channel messages: those are
+// separate conversations, and the agent can read them on demand with
+// read_slack_channel / read_slack_thread. The root message that started the
+// thread is always kept, even when the recent-replies window would drop it.
 async function buildThreadContext(
   deps: SlackEventDeps,
   event: SlackIncomingMessage
 ): Promise<string | null> {
   if (!event.threadTs || event.threadTs === event.ts) return null;
   try {
-    const replies = await deps.slack.threadReplies({ channel: event.channel, ts: event.threadTs, limit: 20 });
-    const transcript = await formatTranscript(deps, replies, event.ts);
-    return transcript ? `Recent messages in this Slack thread (for context):\n${transcript}` : null;
+    const replies = await deps.slack.threadReplies({ channel: event.channel, ts: event.threadTs, limit: 200 });
+    const root = replies.find((message) => message.ts === event.threadTs);
+    const rest = replies.filter((message) => message.ts !== event.threadTs);
+    const rootLine = root ? await formatTranscript(deps, [root], event.ts) : null;
+    const transcript = await formatTranscript(deps, rest, event.ts);
+    const parts = [
+      rootLine ? `Message that started this Slack thread:\n${rootLine}` : null,
+      transcript ? `Recent messages in this Slack thread (for context):\n${transcript}` : null
+    ].filter(Boolean);
+    return parts.length > 0 ? parts.join("\n\n") : null;
   } catch {
     return null;
   }
@@ -1168,7 +1169,7 @@ async function handleIncomingSlackMessage(
     userId: link.userId,
     slackUserId: event.user,
     parentRunId: previousRun?.id ?? null,
-    channelContext: await buildChannelContext(deps, event),
+    channelContext: null,
     hostDevDir
   });
 

@@ -524,12 +524,10 @@ test("run input carries slack context and interim messages post as mrkdwn", asyn
 
   assert.equal(runs[0].slackContext?.surface, "channel");
   assert.equal(runs[0].slackContext?.channelName, "research");
-  assert.match(runs[0].slackContext?.recentMessages ?? "", /\[name-of-UCAROL\]: yesterday's run crashed/);
-  assert.doesNotMatch(
-    runs[0].slackContext?.recentMessages ?? "",
-    /summarize the latest results/,
-    "the triggering message is not duplicated into channel context"
-  );
+  // Other top-level channel messages are separate conversations: they are
+  // NOT injected (the agent can read them with read_slack_channel on demand).
+  assert.equal(runs[0].slackContext?.recentMessages ?? null, null);
+  assert.doesNotMatch(runs[0].message, /yesterday's run crashed/);
 
   await runs[0].onSlackMessage?.("**Update**: still digging");
   assert.equal(posted.at(-1)!.text, "*Update*: still digging");
@@ -538,6 +536,30 @@ test("run input carries slack context and interim messages post as mrkdwn", asyn
   // Final replies are converted too.
   await runs[0].onFinished?.({ status: "SUCCEEDED", reply: "It **worked**, see [run](https://x.io)", error: null });
   assert.equal(posted.at(-1)!.text, "It *worked*, see <https://x.io|run>");
+});
+
+test("a new thread starts with the thread's root message, not other threads", async () => {
+  const teamId = `T-${crypto.randomUUID()}`;
+  const alice = await makeUser("slack-alice-root");
+  await db.slackAccountLink.create({
+    data: { slackTeamId: teamId, slackUserId: "UALICE", userId: alice.id }
+  });
+  const replies: SlackMessage[] = [{ ts: "1000.000", user: "UALICE", text: "ROOT: plan the 2027 budget" }];
+  for (let i = 1; i <= 25; i++) replies.push({ ts: `1000.${String(i).padStart(3, "0")}`, user: "UBOB", text: `reply ${i}` });
+  replies.push({ ts: "1001.000", user: "UALICE", text: `<@${BOT_USER_ID}> what do you think?` });
+  const { client } = makeFakeSlack(replies, [
+    { ts: "900.000", user: "UCAROL", text: "an unrelated earlier thread" }
+  ]);
+  const runs: ConversationRunInput[] = [];
+  const result = await handleSlackAppMention(
+    mention({ teamId, ts: "1001.000", threadTs: "1000.000", text: `<@${BOT_USER_ID}> what do you think?` }),
+    depsWith(client, runs)
+  );
+  assert.equal(result.handled, true);
+  assert.match(runs[0].message, /ROOT: plan the 2027 budget/, "the root message must survive the reply window");
+  assert.match(runs[0].message, /reply 25/);
+  assert.doesNotMatch(runs[0].message, /unrelated earlier thread/);
+  assert.equal(runs[0].slackContext?.recentMessages ?? null, null);
 });
 
 test("agent prompt includes slack context and post_slack_message guidance", () => {
