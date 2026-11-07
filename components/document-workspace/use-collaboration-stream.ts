@@ -189,6 +189,31 @@ export function useCollaborationStream(params: {
       );
     });
 
+    // The server is handing this stream over to a freshly deployed process
+    // (blue/green drain). It ends the response right after this event; the
+    // EventSource reconnects on its own, so don't flash the reconnect notice.
+    let handingOver = false;
+    let reconnecting = false;
+    stream.addEventListener("reconnect", () => {
+      handingOver = true;
+    });
+
+    let readyCount = 0;
+    stream.addEventListener("ready", () => {
+      readyCount += 1;
+      if (readyCount === 1) return;
+      // Re-attached after a drop or a drain handover. The new stream only
+      // carries FUTURE steps, and a handover moved us to another process whose
+      // room we weren't subscribed to: catch up on what we missed and re-announce
+      // our cursor there.
+      void pullCollaborationSteps();
+      sendPresence(false, true);
+      if (reconnecting) {
+        reconnecting = false;
+        setRemoteNotice(null);
+      }
+    });
+
     const handlePresence = (event: Event) => {
       markSse();
       const payload = JSON.parse((event as MessageEvent).data) as { presence?: RemotePresenceView[] };
@@ -201,6 +226,11 @@ export function useCollaborationStream(params: {
     stream.onerror = () => {
       // Stream dropped — force the polling fallback back on until it recovers.
       lastSseAtRef.current = 0;
+      if (handingOver) {
+        handingOver = false;
+        return;
+      }
+      reconnecting = true;
       setRemoteNotice("Reconnecting live collaboration...");
     };
     sendPresence(false, true);

@@ -129,3 +129,55 @@ test("a failing stopIntake does not abort the drain", async () => {
   assert.equal(exitCode, 0);
   resetDrainStateForTests();
 });
+
+// Collaboration rooms live in process memory. After the LB switches, a tab
+// whose SSE stream is still attached to the DRAINING process keeps getting
+// pings (so it looks healthy) but never sees steps pushed to the new process —
+// collaborators' edits only arrive in a lump when the tab next types (409 +
+// missing steps). The drain must hand every live stream over to the new
+// process: tell it to reconnect, then close it.
+test("drain tells live collaboration streams to reconnect and closes them", async () => {
+  resetDrainStateForTests();
+  const { subscribeToCollaboration, broadcastDocumentEvent } = await import("../lib/collaboration");
+  const { serializeDocumentContent } = await import("../lib/content");
+  const documentId = `drain-room-${Date.now()}`;
+  const events: string[] = [];
+  let closed = 0;
+  subscribeToCollaboration({
+    documentId,
+    rawContent: serializeDocumentContent({ type: "doc", content: [{ type: "paragraph" }] }),
+    clientId: "tab-on-old-process",
+    send: (event) => {
+      events.push(event);
+    },
+    close: () => {
+      closed += 1;
+    }
+  });
+
+  let exitCode: number | null = null;
+  beginDrain({
+    stopIntake: async () => {},
+    countActiveRuns: () => 1, // a long agent run pins the old process
+    exit: (code) => {
+      exitCode = code;
+    },
+    pollMs: 10,
+    maxMs: 300,
+    graceMs: 5
+  });
+
+  // The handover must happen right away, not when the drain finally exits.
+  await waitFor(() => closed > 0, 200);
+  assert.ok(events.includes("reconnect"), `expected a reconnect event, got ${events.join(",")}`);
+  assert.equal(closed, 1);
+  assert.equal(exitCode, null, "streams are handed over while runs are still draining");
+
+  // The closed subscriber left the room: later broadcasts don't reach it.
+  const before = events.length;
+  broadcastDocumentEvent(documentId, "comment-created", { ok: true });
+  assert.equal(events.length, before);
+
+  await waitFor(() => exitCode !== null, 5000);
+  resetDrainStateForTests();
+});

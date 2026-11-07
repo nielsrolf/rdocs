@@ -1,20 +1,20 @@
 import { Extension } from "@tiptap/core";
 import { collab, getVersion, sendableSteps } from "@tiptap/pm/collab";
-import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Plugin, PluginKey, type EditorState } from "@tiptap/pm/state";
 import { Mapping } from "@tiptap/pm/transform";
 import type { Mappable, Step } from "@tiptap/pm/transform";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import type { MutableRefObject } from "react";
 
-// A few characters of text immediately before/after a position, captured within
-// the position's text block. Used to re-anchor a remote cursor/selection if OT
-// mapping drifts during sync (the "jumping cursor" fix).
-export type PositionContext = { before: string; after: string };
-
-export type SelectionContext = {
-  from: PositionContext;
-  to: PositionContext;
-  head: PositionContext;
+export type RemoteSelection = {
+  anchor: number;
+  head: number;
+  from: number;
+  to: number;
+  // The collab version the positions are expressed against: the sender's
+  // CONFIRMED version, with positions mapped back out of their unconfirmed
+  // steps (see buildPresenceSelection).
+  version: number;
 };
 
 export type RemotePresenceView = {
@@ -22,82 +22,10 @@ export type RemotePresenceView = {
   userId: string | null;
   userName: string;
   color: string;
-  selection: {
-    anchor: number;
-    head: number;
-    from: number;
-    to: number;
-    version: number;
-    context?: SelectionContext | null;
-  } | null;
+  selection: RemoteSelection | null;
   typing: boolean;
   lastSeen: number;
 };
-
-// Correct a mapped remote position by locating its captured surrounding text
-// within the SAME text block. ProseMirror positions and plain-text offsets line
-// up 1:1 inside a single text block, so `blockStart + textIndex` is an exact
-// position. If the text at the mapped spot already matches the context it's a
-// no-op; if the context can't be found we keep the mapped position. This makes
-// the function a safe corrective layer over OT mapping — it only moves a cursor
-// when it can prove the better spot, eliminating the transient "jump" without
-// risking worse placement. Pure, so it's unit-testable with plain strings.
-export function reanchorWithinBlock(
-  blockText: string,
-  blockStart: number,
-  mappedPos: number,
-  ctx: PositionContext | undefined,
-  // True when the remote peer's presence is at a newer collab version than ours
-  // — i.e. they've made edits (typically the char they just typed at the cursor)
-  // that we haven't received yet. In that window `before` holds text absent from
-  // our block, so we pin the cursor to the still-stable text AFTER it instead of
-  // letting it render ahead of content that hasn't arrived.
-  remoteAhead = false
-): number {
-  if (!ctx) return mappedPos;
-  const target = ctx.before + ctx.after;
-  if (!target) return mappedPos;
-
-  const guess = mappedPos - blockStart; // text index the OT mapping points at
-  const here = blockText.slice(Math.max(0, guess - ctx.before.length), guess + ctx.after.length);
-  if (here === target) return mappedPos; // already correct — no jump needed
-
-  let bestPos = mappedPos;
-  let bestDist = Infinity;
-  for (let idx = blockText.indexOf(target); idx !== -1; idx = blockText.indexOf(target, idx + 1)) {
-    const candidate = blockStart + idx + ctx.before.length;
-    const dist = Math.abs(candidate - mappedPos);
-    if (dist < bestDist) {
-      bestDist = dist;
-      bestPos = candidate;
-    }
-  }
-  if (bestDist !== Infinity) return bestPos; // exact full-context match wins
-
-  if (remoteAhead) {
-    // The remote's just-typed char(s) aren't in our block yet, so the full
-    // context can't match. Anchor to the start of the stable `after` text (the
-    // cursor sits immediately before it) so we don't draw past missing content.
-    if (ctx.after) {
-      let bestAfter = -1;
-      let bestAfterDist = Infinity;
-      for (let idx = blockText.indexOf(ctx.after); idx !== -1; idx = blockText.indexOf(ctx.after, idx + 1)) {
-        const candidate = blockStart + idx;
-        const dist = Math.abs(candidate - mappedPos);
-        if (dist < bestAfterDist) {
-          bestAfterDist = dist;
-          bestAfter = candidate;
-        }
-      }
-      if (bestAfter !== -1) return bestAfter;
-    }
-    // Typing at the end of the block (no stable `after`): clamp to the current
-    // block end rather than one char past it.
-    return Math.min(mappedPos, blockStart + blockText.length);
-  }
-
-  return bestPos;
-}
 
 // Maximum collaboration steps allowed in a single /collaboration push. A large
 // edit (a big AI reformat, a paste of a long document) can produce hundreds of
@@ -141,6 +69,10 @@ export function planDivergenceRecovery(input: {
 export type ReceivedMappingEntry = {
   versionBefore: number;
   mapping: Mapping;
+  // Author of each step (parallel to mapping.maps). Lets a remote cursor follow
+  // its OWNER's typing (assoc +1) while staying put when someone else inserts
+  // at the same spot.
+  clientIds?: ReadonlyArray<string | number>;
 };
 
 // Build the received-mapping buffer entry for a confirmed batch of steps
@@ -155,10 +87,16 @@ export type ReceivedMappingEntry = {
 // work the two are identical, so step maps are correct in every case.
 export function buildReceivedMappingEntry(
   versionBefore: number,
-  steps: readonly Step[]
+  steps: readonly Step[],
+  clientIds?: ReadonlyArray<string | number>
 ): ReceivedMappingEntry {
-  return { versionBefore, mapping: new Mapping(steps.map((step) => step.getMap())) };
+  return {
+    versionBefore,
+    mapping: new Mapping(steps.map((step) => step.getMap())),
+    ...(clientIds ? { clientIds } : {})
+  };
 }
+
 
 // Shape of a /collaboration step push/pull response (and the SSE "steps" event).
 export type CollaborationStepResponse = {
@@ -170,33 +108,32 @@ export type CollaborationStepResponse = {
   updatedAt?: string | null;
 };
 
-// Map a remote collaborator's position (captured at `remoteVersion`) into the
-// local document's current coordinate space. This is the core of correct remote
-// cursor/selection rendering: when the local user edits an EARLIER part of the
-// document, every remote position after the insertion must shift by the same
-// amount, otherwise the remote cursor/selection is drawn at the wrong place.
+// Map a remote collaborator's position (expressed at `remoteVersion`) into the
+// local document's current coordinate space: through every confirmed step at or
+// after the remote's version, then through our own not-yet-confirmed steps.
 //
-// We apply (a) the mappings we received for steps at or after the remote's
-// version, then (b) our own not-yet-confirmed local step maps. Exported as a
-// pure function so it can be regression-tested headlessly.
+// `bias` decides which side of an insertion at exactly this point the position
+// ends up on. When `ownerClientId` is given, steps authored by the presence's
+// owner use +1 instead, so their caret follows their own typing.
 export function mapRemotePosition(
   pos: number,
   remoteVersion: number,
   bias: number,
   localVersion: number,
   receivedMappings: ReceivedMappingEntry[],
-  unconfirmedMaps: Mappable[]
+  unconfirmedMaps: Mappable[],
+  ownerClientId?: string
 ): number {
   let result = pos;
   if (remoteVersion < localVersion) {
     for (const entry of receivedMappings) {
-      const stepCount = entry.mapping.maps.length;
-      if (entry.versionBefore >= remoteVersion) {
-        result = entry.mapping.map(result, bias);
-      } else if (entry.versionBefore + stepCount > remoteVersion) {
-        // The batch straddles the remote's version: apply only the step maps
-        // for versions the remote has not yet incorporated.
-        result = entry.mapping.slice(remoteVersion - entry.versionBefore).map(result, bias);
+      const maps = entry.mapping.maps;
+      for (let index = 0; index < maps.length; index += 1) {
+        if (entry.versionBefore + index < remoteVersion) continue;
+        const author = entry.clientIds?.[index];
+        const assoc =
+          ownerClientId !== undefined && author !== undefined && String(author) === ownerClientId ? 1 : bias;
+        result = maps[index].map(result, assoc);
       }
     }
   }
@@ -204,6 +141,63 @@ export function mapRemotePosition(
     result = map.map(result, bias);
   }
   return result;
+}
+
+// The local selection as presence, in the coordinates of our CONFIRMED version.
+//
+// Our editor positions already include our unconfirmed (not yet accepted by
+// the server) steps, but the only version a receiver can map from is the
+// confirmed one. Sending local positions labelled with the confirmed version
+// made receivers apply our edit twice once our steps reached them: the cursor
+// was drawn ahead of text they didn't have yet, then jumped, and a selection
+// made after an edit stayed on the wrong text (2026-11-07 report). So map the
+// selection back out of the unconfirmed steps; receivers then map it forward
+// through the same steps when they arrive and land exactly on it.
+export function buildPresenceSelection(state: EditorState): RemoteSelection {
+  const sendable = sendableSteps(state);
+  const inverse =
+    sendable && sendable.steps.length > 0
+      ? new Mapping(sendable.steps.map((step) => step.getMap())).invert()
+      : null;
+  const back = (pos: number, assoc: number) => (inverse ? inverse.map(pos, assoc) : pos);
+  const { anchor, head, from, to } = state.selection;
+  return {
+    anchor: back(anchor, -1),
+    head: back(head, -1),
+    from: back(from, -1),
+    to: back(to, 1),
+    version: getVersion(state)
+  };
+}
+
+// Where to draw a remote peer's selection in OUR document.
+export function mapRemoteSelection(
+  selection: { from: number; to: number; head: number; version: number },
+  localVersion: number,
+  receivedMappings: ReceivedMappingEntry[],
+  unconfirmedMaps: Mappable[],
+  ownerClientId?: string
+) {
+  const map = (pos: number, bias: number) =>
+    mapRemotePosition(pos, selection.version, bias, localVersion, receivedMappings, unconfirmedMaps, ownerClientId);
+  return { from: map(selection.from, -1), to: map(selection.to, 1), head: map(selection.head, -1) };
+}
+
+// Presence and steps travel separately, so a peer's presence can arrive
+// claiming a version we haven't applied yet: its positions refer to text that
+// isn't in our document. Drawing it then is the "cursor offset applied before
+// the document diff" jump. Keep showing their last presence we CAN map until
+// the steps arrive (the decorations recompute when they do).
+export function pickRenderablePresence(
+  current: RemotePresenceView,
+  previous: RemotePresenceView | undefined,
+  localVersion: number
+): RemotePresenceView | null {
+  if (!current.selection || current.selection.version <= localVersion) return current;
+  if (previous?.selection && previous.selection.version <= localVersion) {
+    return { ...current, selection: previous.selection };
+  }
+  return null;
 }
 
 export function createCollaborationExtension(version: number, clientID: string) {
@@ -256,16 +250,28 @@ function hideLabelsCoveringLocalCaret(view: EditorView) {
   });
 }
 
+// How long a remote cursor's name label shows when the cursor first appears;
+// afterwards it shows only while hovered (labels sat on top of the text people
+// were typing).
+export const REMOTE_CURSOR_LABEL_INTRO_MS = 1000;
+export const REMOTE_CURSOR_LABEL_INTRO_CLASS = "remote-collab-cursor-label-intro";
+
 export function createRemotePresenceExtension(
   remotePresenceRef: MutableRefObject<RemotePresenceView[]>,
   receivedMappingsRef: MutableRefObject<ReceivedMappingEntry[]>
 ) {
+  const refreshKey = new PluginKey("remotePresence");
+  // Per remote client: the last presence we could map (see
+  // pickRenderablePresence) and until when its name label is shown.
+  const lastRenderable = new Map<string, RemotePresenceView>();
+  const labelIntroUntil = new Map<string, number>();
+
   return Extension.create({
     name: "remotePresence",
     addProseMirrorPlugins() {
       return [
         new Plugin({
-          key: new PluginKey("remotePresence"),
+          key: refreshKey,
           props: {
             decorations(state) {
               const decorations: Decoration[] = [];
@@ -274,47 +280,40 @@ export function createRemotePresenceExtension(
               const unconfirmed = sendableSteps(state);
               const unconfirmedMaps = unconfirmed?.steps.map((step) => step.getMap()) ?? [];
               const buffer = receivedMappingsRef.current;
+              const now = Date.now();
 
-              const mapPosition = (pos: number, remoteVersion: number, bias: number) =>
-                mapRemotePosition(pos, remoteVersion, bias, localVersion, buffer, unconfirmedMaps);
+              const present = new Set(remotePresenceRef.current.map((presence) => presence.clientId));
+              for (const clientId of Array.from(lastRenderable.keys())) {
+                if (!present.has(clientId)) lastRenderable.delete(clientId);
+              }
+              for (const clientId of Array.from(labelIntroUntil.keys())) {
+                if (!present.has(clientId)) labelIntroUntil.delete(clientId);
+              }
 
-              // Correct OT drift by re-finding the captured surrounding text in
-              // the same block. A no-op when the mapped spot already matches, and
-              // a safe fallback (returns the mapped position) when it doesn't.
-              const reanchor = (mappedPos: number, ctx?: PositionContext, remoteAhead = false) => {
-                if (!ctx) return mappedPos;
-                const clamped = Math.max(0, Math.min(mappedPos, maxPos));
-                try {
-                  const resolved = state.doc.resolve(clamped);
-                  if (!resolved.parent.isTextblock) return clamped;
-                  const blockStart = resolved.start();
-                  const blockText = state.doc.textBetween(blockStart, resolved.end());
-                  return reanchorWithinBlock(blockText, blockStart, clamped, ctx, remoteAhead);
-                } catch {
-                  return clamped;
+              remotePresenceRef.current.forEach((incoming) => {
+                const presence = pickRenderablePresence(
+                  incoming,
+                  lastRenderable.get(incoming.clientId),
+                  localVersion
+                );
+                if (!presence) return;
+                if (presence.selection === incoming.selection) {
+                  lastRenderable.set(incoming.clientId, incoming);
                 }
-              };
-
-              remotePresenceRef.current.forEach((presence) => {
                 const selection = presence.selection;
                 if (!selection) {
                   return;
                 }
 
-                const remoteVersion = selection.version;
-                const context = selection.context ?? undefined;
-                // The peer reports a newer version than we've applied: they've
-                // edited (usually typed at their cursor) ahead of the steps we've
-                // received, so pin positions to stable text instead of rendering
-                // ahead of not-yet-arrived content.
-                const remoteAhead = remoteVersion > localVersion;
-                const mappedFrom = reanchor(mapPosition(selection.from, remoteVersion, -1), context?.from, remoteAhead);
-                const mappedTo = reanchor(mapPosition(selection.to, remoteVersion, 1), context?.to, remoteAhead);
-                const mappedHead = reanchor(mapPosition(selection.head, remoteVersion, -1), context?.head, remoteAhead);
+                if (!labelIntroUntil.has(presence.clientId)) {
+                  labelIntroUntil.set(presence.clientId, now + REMOTE_CURSOR_LABEL_INTRO_MS);
+                }
+                const showLabel = now < (labelIntroUntil.get(presence.clientId) ?? 0);
 
-                const from = Math.max(0, Math.min(mappedFrom, maxPos));
-                const to = Math.max(from, Math.min(mappedTo, maxPos));
-                const head = Math.max(0, Math.min(mappedHead, maxPos));
+                const mapped = mapRemoteSelection(selection, localVersion, buffer, unconfirmedMaps, presence.clientId);
+                const from = Math.max(0, Math.min(mapped.from, maxPos));
+                const to = Math.max(from, Math.min(mapped.to, maxPos));
+                const head = Math.max(0, Math.min(mapped.head, maxPos));
 
                 if (to > from) {
                   decorations.push(
@@ -334,15 +333,19 @@ export function createRemotePresenceExtension(
                       cursor.style.borderColor = presence.color;
                       cursor.style.setProperty("--remote-collab-color", presence.color);
                       const label = document.createElement("span");
-                      label.className = REMOTE_CURSOR_LABEL_CLASS;
-                      label.textContent = presence.typing
-                        ? `${presence.userName} is typing`
-                        : presence.userName;
+                      label.className = showLabel
+                        ? `${REMOTE_CURSOR_LABEL_CLASS} ${REMOTE_CURSOR_LABEL_INTRO_CLASS}`
+                        : REMOTE_CURSOR_LABEL_CLASS;
+                      // Rendered by CSS (::after) so the name never becomes
+                      // document text (copy, find, a11y, text assertions).
+                      label.dataset.name = presence.userName;
                       cursor.appendChild(label);
                       return cursor;
                     },
                     {
-                      key: `remote-cursor:${presence.clientId}:${presence.lastSeen}`,
+                      // Stable across presence updates, so moving the cursor
+                      // doesn't rebuild DOM next to the local caret.
+                      key: `remote-cursor:${presence.clientId}:${presence.color}:${presence.userName}:${showLabel ? "intro" : "idle"}`,
                       side: -1
                     }
                   )
@@ -355,20 +358,37 @@ export function createRemotePresenceExtension(
           // A peer's name label floats above their caret and can sit right on
           // top of OUR caret (e.g. we're on the line above). Hide any label
           // that covers the local caret; it reappears once we move away.
+          // Also re-render when a label's intro period ends.
           view: (editorView) => {
             let frame: number | null = null;
+            let introTimer: ReturnType<typeof setTimeout> | null = null;
+            const scheduleIntroEnd = (view: EditorView) => {
+              const now = Date.now();
+              const next = Math.min(
+                ...Array.from(labelIntroUntil.values()).filter((until) => until > now)
+              );
+              if (!Number.isFinite(next) || introTimer !== null) return;
+              introTimer = setTimeout(() => {
+                introTimer = null;
+                if (!view.isDestroyed) {
+                  view.dispatch(view.state.tr.setMeta("remote-presence-refresh", Date.now()));
+                }
+              }, next - now + 20);
+            };
             const schedule = (view: EditorView) => {
               if (frame !== null) cancelAnimationFrame(frame);
               frame = requestAnimationFrame(() => {
                 frame = null;
                 hideLabelsCoveringLocalCaret(view);
               });
+              scheduleIntroEnd(view);
             };
             schedule(editorView);
             return {
               update: schedule,
               destroy: () => {
                 if (frame !== null) cancelAnimationFrame(frame);
+                if (introTimer !== null) clearTimeout(introTimer);
               }
             };
           }

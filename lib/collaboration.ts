@@ -55,6 +55,9 @@ type DurableVersionRow = {
 type RoomSubscriber = {
   clientId: string;
   send: (event: string, payload: unknown) => void;
+  // Ends the subscriber's SSE response. Used to hand a live stream over to the
+  // new process on a blue/green drain (the browser's EventSource reconnects).
+  close?: () => void;
 };
 
 type CollaborationRoom = {
@@ -778,11 +781,13 @@ export function subscribeToCollaboration(input: {
   currentUpdatedAt?: Date | string | null;
   clientId: string;
   send: (event: string, payload: unknown) => void;
+  close?: () => void;
 }) {
   const room = getCollaborationRoom(input.documentId, input.rawContent, input.currentUpdatedAt);
   const subscriber: RoomSubscriber = {
     clientId: input.clientId,
-    send: input.send
+    send: input.send,
+    close: input.close
   };
 
   room.subscribers.add(subscriber);
@@ -801,6 +806,39 @@ export function subscribeToCollaboration(input: {
     }
     reapRoomIfIdle(input.documentId);
   };
+}
+
+// Hand every live SSE stream of this process over to its successor. Rooms are
+// per-process memory, so after a blue/green switch a tab still attached to the
+// DRAINING process gets pings (looks healthy) but never sees steps pushed to the
+// new process — collaborators' edits then arrive in one lump whenever the tab
+// next types (409 + missing steps), for as long as the drain lasts (up to
+// DRAIN_MAX_MS while an agent run finishes). Called at drain start: each
+// subscriber gets a "reconnect" event and its response is ended, so the
+// browser's EventSource reconnects through the load balancer (to the new
+// process) and catches up with a pull. Returns the number of streams closed.
+export function closeAllCollaborationStreams() {
+  const state = getGlobalState();
+  let closed = 0;
+  for (const [documentId, room] of Array.from(state.rooms.entries())) {
+    for (const subscriber of Array.from(room.subscribers)) {
+      room.subscribers.delete(subscriber);
+      try {
+        subscriber.send("reconnect", { reason: "server-draining" });
+      } catch {
+        // Connection already gone — nothing to hand over.
+      }
+      try {
+        subscriber.close?.();
+      } catch {
+        // Already closed.
+      }
+      room.presence.delete(subscriber.clientId);
+      closed += 1;
+    }
+    reapRoomIfIdle(documentId);
+  }
+  return closed;
 }
 
 export function updateCollaborationPresence(input: {

@@ -1,6 +1,8 @@
 import { requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { subscribeToCollaboration } from "@/lib/collaboration";
 
+const STREAM_RETRY_MS = 1000;
+
 export async function GET(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
   const url = new URL(request.url);
@@ -27,13 +29,32 @@ export async function GET(request: Request, { params }: RouteContext<{ id: strin
           encoder.encode(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`)
         );
       };
+      // Server-initiated end (blue/green drain handover): stop pinging and end
+      // the response so the browser's EventSource reconnects — through the
+      // load balancer, i.e. to the new process.
+      const close = () => {
+        if (keepAlive) {
+          clearInterval(keepAlive);
+          keepAlive = null;
+        }
+        try {
+          controller.close();
+        } catch {
+          // Already closed by the client.
+        }
+      };
+
+      // Reconnect quickly after a drop or a drain handover (browser default is
+      // ~3-5 s, during which the tab falls back to 500 ms polling).
+      controller.enqueue(encoder.encode(`retry: ${STREAM_RETRY_MS}\n\n`));
 
       unsubscribe = subscribeToCollaboration({
         documentId: id,
         rawContent: access.document.content,
         currentUpdatedAt: access.document.updatedAt,
         clientId,
-        send
+        send,
+        close
       });
 
       keepAlive = setInterval(() => {

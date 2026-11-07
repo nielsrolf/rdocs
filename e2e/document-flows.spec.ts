@@ -144,7 +144,9 @@ test("a comment can be created and survives a reload", async ({ baseURL, browser
     // Select the paragraph, open the comment composer, post a comment.
     await selectFirstParagraph(page);
     await page.getByRole("button", { name: "Add comment" }).click();
-    await page.getByPlaceholder("Add a comment").fill("This is my comment");
+    // The composer is a rich (TipTap) editor, not a <textarea>.
+    await page.locator(".comment-composer-popover .ProseMirror").click();
+    await page.keyboard.type("This is my comment");
     await page.getByRole("button", { name: "Comment", exact: true }).click();
 
     // The comment is displayed in the rail.

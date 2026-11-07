@@ -40,6 +40,9 @@ export function drainingSince(): Date | null {
 
 type DrainDeps = {
   stopIntake?: () => Promise<void>;
+  // Ends this process's live collaboration SSE streams so open tabs reconnect
+  // to the new process (rooms are per-process; see closeAllCollaborationStreams).
+  handOverLiveStreams?: () => Promise<void>;
   countActiveRuns?: () => number;
   exit?: (code: number) => void;
   pollMs?: number;
@@ -73,9 +76,25 @@ export function beginDrain(deps: DrainDeps = {}): { alreadyDraining: boolean } {
       stopSchedulerLoop();
     });
 
+  const handOverLiveStreams =
+    deps.handOverLiveStreams ??
+    (async () => {
+      const { closeAllCollaborationStreams } = await import("@/lib/collaboration");
+      const closed = closeAllCollaborationStreams();
+      console.log("[drain] handed over live collaboration streams", { closed });
+    });
+
   console.log("[drain] begin", { pid: process.pid, activeRuns: countActiveRuns() });
 
   void (async () => {
+    try {
+      await handOverLiveStreams();
+    } catch (error) {
+      console.error("[drain] handing over live streams failed (continuing)", {
+        error: error instanceof Error ? error.message : error
+      });
+    }
+
     try {
       await stopIntake();
     } catch (error) {

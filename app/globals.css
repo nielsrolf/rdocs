@@ -4717,6 +4717,19 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   position: relative;
 }
 
+/* An 8px-wide invisible hover target around the 2px caret, so its name can be
+   revealed on hover (the caret itself stays click-through). */
+.remote-collab-cursor::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -5px;
+  width: 8px;
+  pointer-events: auto;
+  cursor: default;
+}
+
 .remote-collab-cursor-label {
   position: absolute;
   left: -2px;
@@ -4733,8 +4746,20 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   font-weight: 700;
   line-height: 1.2;
   z-index: 5;
-  transition: opacity 120ms ease;
+  transition: opacity 160ms ease;
   user-select: none;
+  pointer-events: none;
+  /* Names only show briefly when a cursor appears (…-intro) and on hover:
+     a permanent label sat on top of the text people were typing. */
+  opacity: 0;
+}
+
+.remote-collab-cursor-label::after {
+  content: attr(data-name);
+}
+
+.remote-collab-cursor-label.remote-collab-cursor-label-intro {
+  opacity: 1;
 }
 
 /* Faded out (not removed) while it would cover the local caret — see
@@ -4742,6 +4767,11 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
    measurable, so the label returns as soon as the caret moves away. */
 .remote-collab-cursor-label.remote-collab-cursor-label-hidden {
   opacity: 0;
+}
+
+/* Hover wins over both the idle and the covers-your-caret fade. */
+.remote-collab-cursor:hover .remote-collab-cursor-label {
+  opacity: 1;
 }
 
 .heading-copy-button {

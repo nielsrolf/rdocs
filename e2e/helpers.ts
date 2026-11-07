@@ -75,8 +75,10 @@ export async function authenticate(context: BrowserContext, baseURL: string, use
   ]);
 }
 
+// The DOCUMENT editor. Comment composers/replies are TipTap editors too, so a
+// bare `.ProseMirror` matches several elements once a comment exists.
 export function editor(page: Page) {
-  return page.locator(".ProseMirror");
+  return page.locator(".ProseMirror.gdocs-prosemirror");
 }
 
 export function saveIndicator(page: Page) {

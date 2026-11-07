@@ -19,7 +19,7 @@ import { createNodeFromContent } from "@tiptap/core";
 import { Fragment } from "@tiptap/pm/model";
 import { NodeSelection } from "@tiptap/pm/state";
 import { Step } from "@tiptap/pm/transform";
-import { EditorContent, JSONContent, useEditor, type Editor } from "@tiptap/react";
+import { EditorContent, JSONContent, useEditor, useEditorState, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -141,6 +141,13 @@ import {
 import { CodeBlock } from "@/lib/code-block-node";
 import { InlineCode } from "@/lib/inline-code-mark";
 import { HIGHLIGHT_COLORS, TextHighlight, type HighlightColor } from "@/lib/text-highlight";
+import {
+  createTrailingThrottle,
+  DOC_DERIVED_REFRESH_MS,
+  keepIfUnchanged,
+  tabsEqual
+} from "./document-workspace/render-coalescing";
+import { selectToolbarState } from "./document-workspace/toolbar-state";
 import { replaceRangeWithBlocks } from "@/lib/structured-replace";
 
 // Upper bound on a single collaboration push. A push that never settles (e.g.
@@ -302,10 +309,17 @@ export function DocumentWorkspace({
   const [workspaceLinkLoaded, setWorkspaceLinkLoaded] = useState(false);
   const [workspaceLinkChoice, setWorkspaceLinkChoice] = useState("");
   const [workspaceLinkBusy, setWorkspaceLinkBusy] = useState(false);
-  // Bumped on every doc-changing transaction (local or remote) so anchor-derived
+  // Bumped after doc-changing transactions (local or remote) so anchor-derived
   // memos (e.g. visibleThreads) recompute when content — and its comment anchors —
   // is deleted. Keeps orphaned comments from lingering after a select-all delete.
+  // Coalesced by docDerivedRefreshRef (at most every DOC_DERIVED_REFRESH_MS).
   const [docRevision, setDocRevision] = useState(0);
+  // Runs the doc-derived refresh against the CURRENT editor (reassigned each
+  // render below, once `editor` exists).
+  const docDerivedRunRef = useRef<() => void>(() => undefined);
+  const docDerivedRefreshRef = useRef(
+    createTrailingThrottle(() => docDerivedRunRef.current(), DOC_DERIVED_REFRESH_MS)
+  );
   // Comment ids to briefly flash-highlight (arrived via a mention notification).
   const [flashCommentIds, setFlashCommentIds] = useState<Set<string>>(
     () => new Set(initialMentionedCommentIds)
@@ -322,7 +336,6 @@ export function DocumentWorkspace({
   } | null>(null);
   const docMentionRef = useRef<typeof docMention>(null);
   docMentionRef.current = docMention;
-  const [documentUpdatedAt, setDocumentUpdatedAt] = useState(initialDocumentUpdatedAt);
   const [selection, setSelection] = useState<SelectionState | null>(null);
   const [selectionPopoverMode, setSelectionPopoverMode] = useState<SelectionPopoverMode | null>(null);
   const [composerBody, setComposerBody] = useState("");
@@ -699,9 +712,12 @@ export function DocumentWorkspace({
     }
   }, [outlineWidth]);
 
-  useEffect(() => {
-    documentUpdatedAtRef.current = documentUpdatedAt;
-  }, [documentUpdatedAt]);
+  // The server updatedAt of the content we hold. A ref, not state: nothing
+  // renders it, and setting state on every applied remote step re-rendered the
+  // whole workspace per collaborator keystroke.
+  const setDocumentUpdatedAt = useCallback((value: string) => {
+    documentUpdatedAtRef.current = value;
+  }, []);
 
   useEffect(() => {
     if (!globalError) return;
@@ -907,7 +923,7 @@ export function DocumentWorkspace({
       // Tell the suggestions interceptor to ignore this apply — foreign steps
       // already carry their author's marks; we must not re-mark them as ours.
       receiveTr.setMeta(suggestionPluginKey, { type: "skip" });
-      recordReceivedMapping(buildReceivedMappingEntry(versionBefore, steps));
+      recordReceivedMapping(buildReceivedMappingEntry(versionBefore, steps, clientIds));
       editor.view.dispatch(receiveTr);
       if (typeof payload.updatedAt === "string") {
         setDocumentUpdatedAt(payload.updatedAt);
@@ -1241,14 +1257,15 @@ export function DocumentWorkspace({
 
   function applyRemoteSnapshot(snapshot: {
     title: string;
-    content: JSONContent;
     updatedAt: string;
     threads: ThreadView[];
     activeAiRun: ActiveAiRunView | null;
     activeAiRuns?: ActiveAiRunView[];
     aiRuns?: ActiveAiRunView[];
   }) {
-    setThreads(snapshot.threads);
+    // The poll returns fresh identities every 2 s; re-setting threads re-rendered
+    // the workspace and re-dispatched comment-highlight decorations each time.
+    setThreads((current) => keepIfUnchanged(current, snapshot.threads));
     syncAiRuns(snapshot.aiRuns ?? snapshot.activeAiRuns ?? (snapshot.activeAiRun ? [snapshot.activeAiRun] : []));
     setAiRunsLoaded(true);
     setActiveThreadId((currentThreadId) =>
@@ -1379,6 +1396,14 @@ export function DocumentWorkspace({
       tabsVisibilityExtension
     ],
     immediatelyRender: false,
+    // Never re-render this (very large) component per transaction: with a
+    // collaborator typing, every remote step, presence refresh and local
+    // keystroke used to re-render it 1-several times, which is what made typing
+    // feel laggy and "jumpy" during live collaboration. Render-time reads of
+    // editor state go through useEditorState (toolbar) or the throttled
+    // doc-derived refresh (docDerivedRefreshRef); child components subscribe
+    // to editor events themselves.
+    shouldRerenderOnTransaction: false,
     // Comment-access users are editable too, but locked into suggesting mode (the
     // Suggestions plugin rewrites their edits into tracked changes, and the collab
     // route enforces that they only change suggestions, never committed content).
@@ -1554,7 +1579,6 @@ export function DocumentWorkspace({
       }
 
       setTableControlsActive(editor.isActive("table"));
-      setDocStats(computeDocStats(editor.getText()));
       hasUnsavedChangesRef.current = true;
       setSaveState("saving");
       scheduleCollaborationFlush();
@@ -1575,12 +1599,47 @@ export function DocumentWorkspace({
     onTransaction: ({ transaction }) => {
       // Fires for every transaction including remote/collab applies and
       // programmatic edits (which onUpdate skips while applying remote updates).
-      // Bump a revision only when the doc actually changed so anchor-derived
-      // memos recompute and orphaned comments disappear.
+      // Refresh doc-derived state (comment anchors, tab list, word count,
+      // suggestion list) only when the doc actually changed, and at most every
+      // DOC_DERIVED_REFRESH_MS — not once per keystroke / remote step.
       if (transaction.docChanged) {
-        setDocRevision((value) => value + 1);
+        docDerivedRefreshRef.current.schedule();
       }
     }
+  });
+
+  function syncTabList() {
+    if (!editor) return;
+    const next = listTabs(editor.state.doc);
+    setTabs((previous) => (tabsEqual(previous, next) ? previous : next));
+    setActiveTabIdState((current) => {
+      if (next.length === 0) return null;
+      if (current && next.some((tab) => tab.id === current)) return current;
+      return next[0].id;
+    });
+  }
+
+  // One batched render for everything derived from the document text, instead
+  // of one or more per keystroke / remote step.
+  docDerivedRunRef.current = () => {
+    if (!editor || editor.isDestroyed) return;
+    setDocRevision((value) => value + 1);
+    const stats = computeDocStats(editor.getText());
+    setDocStats((previous) =>
+      previous.words === stats.words && previous.characters === stats.characters ? previous : stats
+    );
+    syncTabList();
+  };
+  useEffect(() => {
+    const refresh = docDerivedRefreshRef.current;
+    return () => refresh.cancel();
+  }, []);
+
+  // Formatting-toolbar flags. Only computed while the format bar is open, and
+  // useEditorState re-renders only when one of them flips.
+  const toolbarState = useEditorState({
+    editor,
+    selector: ({ editor: current }) => (formatBarOpen && current ? selectToolbarState(current) : null)
   });
 
   // Push the current suggesting mode + author into the suggestions plugin so its
@@ -1597,7 +1656,8 @@ export function DocumentWorkspace({
       setSuggestionSummaries([]);
       return;
     }
-    setSuggestionSummaries(collectSuggestionRanges(editor.state.doc));
+    const next = collectSuggestionRanges(editor.state.doc);
+    setSuggestionSummaries((previous) => keepIfUnchanged(previous, next));
   }, [editor, docRevision]);
 
   useEffect(() => {
@@ -1618,16 +1678,13 @@ export function DocumentWorkspace({
           return;
         }
       }
-      const next = listTabs(editor.state.doc);
-      setTabs(next);
-      setActiveTabIdState((current) => {
-        if (next.length === 0) return null;
-        if (current && next.some((tab) => tab.id === current)) return current;
-        return next[0].id;
-      });
+      // The tab LIST is refreshed by the throttled doc-derived refresh
+      // (syncTabList), not on every keystroke: its positions shift with every
+      // edit before a tab, so it used to re-render the workspace per keystroke.
     }
 
     refreshTabs();
+    syncTabList();
     editor.on("update", refreshTabs);
     return () => {
       editor.off("update", refreshTabs);
@@ -1825,8 +1882,11 @@ export function DocumentWorkspace({
   }
 
   // Intercept Cmd/Ctrl-F to open the in-document find bar instead of the
-  // browser's find (which can't see hidden-tab content).
+  // browser's find (which can't see hidden-tab content). Not in the forum
+  // view: it renders every tab, and the browser's find is the only one that
+  // also searches the comment section below the post.
   useEffect(() => {
+    if (forumView) return;
     const handler = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") {
         event.preventDefault();
@@ -1835,7 +1895,7 @@ export function DocumentWorkspace({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, []);
+  }, [forumView]);
 
   // Warn before navigating away with unsaved local edits or a pending collab
   // flush, so a tab close mid-save doesn't silently lose work.
@@ -1887,8 +1947,9 @@ export function DocumentWorkspace({
 
   useEffect(() => {
     const pollInterval = window.setInterval(async () => {
-      const shareQuery = shareToken ? `?share=${encodeURIComponent(shareToken)}` : "";
-      const response = await fetch(`/api/documents/${documentId}${shareQuery}`, {
+      const shareQuery = shareToken ? `&share=${encodeURIComponent(shareToken)}` : "";
+      // Metadata only — content stays live through the collab stream.
+      const response = await fetch(`/api/documents/${documentId}?content=0${shareQuery}`, {
         cache: "no-store"
       }).catch(() => null);
 
@@ -1903,7 +1964,6 @@ export function DocumentWorkspace({
 
       applyRemoteSnapshot({
         title: data.document.title,
-        content: data.document.content as JSONContent,
         updatedAt: data.document.updatedAt,
         threads: data.threads as ThreadView[],
         activeAiRun: data.activeAiRun ?? null,
@@ -4646,25 +4706,25 @@ export function DocumentWorkspace({
             <div className="editor-toolbar" role="toolbar" aria-label="Document formatting">
               <div className="editor-toolbar-group">
                 <ToolbarButton
-                  active={editor?.isActive("heading", { level: 1 }) ?? false}
+                  active={toolbarState?.h1 ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="Title"
                   onClick={() => editor?.chain().focus().toggleHeading({ level: 1 }).run()}
                 />
                 <ToolbarButton
-                  active={editor?.isActive("heading", { level: 2 }) ?? false}
+                  active={toolbarState?.h2 ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="H2"
                   onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}
                 />
                 <ToolbarButton
-                  active={editor?.isActive("heading", { level: 3 }) ?? false}
+                  active={toolbarState?.h3 ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="H3"
                   onClick={() => editor?.chain().focus().toggleHeading({ level: 3 }).run()}
                 />
                 <ToolbarButton
-                  active={editor?.isActive("paragraph") ?? false}
+                  active={toolbarState?.paragraph ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="Text"
                   onClick={() => editor?.chain().focus().setParagraph().run()}
@@ -4673,39 +4733,39 @@ export function DocumentWorkspace({
 
               <div className="editor-toolbar-group">
                 <ToolbarButton
-                  active={editor?.isActive("bold") ?? false}
+                  active={toolbarState?.bold ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="B"
                   onClick={() => editor?.chain().focus().toggleBold().run()}
                 />
                 <ToolbarButton
-                  active={editor?.isActive("italic") ?? false}
+                  active={toolbarState?.italic ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="I"
                   onClick={() => editor?.chain().focus().toggleItalic().run()}
                 />
                 <ToolbarButton
-                  active={editor?.isActive("underline") ?? false}
+                  active={toolbarState?.underline ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="U"
                   onClick={() => editor?.chain().focus().toggleUnderline().run()}
                 />
                 <ToolbarButton
-                  active={editor?.isActive("strike") ?? false}
+                  active={toolbarState?.strike ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="S"
                   title="Strikethrough"
                   onClick={() => editor?.chain().focus().toggleStrike().run()}
                 />
                 <ToolbarButton
-                  active={editor?.isActive("code") ?? false}
+                  active={toolbarState?.code ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="</>"
                   title="Inline code"
                   onClick={() => editor?.chain().focus().toggleCode().run()}
                 />
                 <ToolbarButton
-                  active={editor?.isActive("link") ?? false}
+                  active={toolbarState?.link ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="Link"
                   title="Add or remove link"
@@ -4729,7 +4789,7 @@ export function DocumentWorkspace({
                 {HIGHLIGHT_COLORS.map((color) => (
                   <button
                     aria-label={`${color} highlight`}
-                    aria-pressed={editor?.isActive("textHighlight", { color }) ?? false}
+                    aria-pressed={toolbarState?.highlight[color] ?? false}
                     className={`editor-highlight-button editor-highlight-${color}`}
                     disabled={!canWriteDocument || !editor}
                     key={color}
@@ -4748,39 +4808,39 @@ export function DocumentWorkspace({
 
               <div className="editor-toolbar-group">
                 <ToolbarButton
-                  active={editor?.isActive("bulletList") ?? false}
+                  active={toolbarState?.bulletList ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="Bullets"
                   onClick={() => editor?.chain().focus().toggleBulletList().run()}
                 />
                 <ToolbarButton
-                  active={editor?.isActive("orderedList") ?? false}
+                  active={toolbarState?.orderedList ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="Numbered"
                   onClick={() => editor?.chain().focus().toggleOrderedList().run()}
                 />
                 <ToolbarButton
-                  active={editor?.isActive("taskList") ?? false}
+                  active={toolbarState?.taskList ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="Tasks"
                   title="Task list"
                   onClick={() => editor?.chain().focus().toggleTaskList().run()}
                 />
                 <ToolbarButton
-                  active={editor?.isActive("blockquote") ?? false}
+                  active={toolbarState?.blockquote ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="Quote"
                   onClick={() => editor?.chain().focus().toggleBlockquote().run()}
                 />
                 <ToolbarButton
-                  active={editor?.isActive("toggleBlock") ?? false}
+                  active={toolbarState?.toggleBlock ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="Toggle"
                   title="Collapsible details"
                   onClick={() => editor?.chain().focus().toggleWrap("toggleBlock").run()}
                 />
                 <ToolbarButton
-                  active={editor?.isActive("codeBlock") ?? false}
+                  active={toolbarState?.codeBlock ?? false}
                   disabled={!canWriteDocument || !editor}
                   label="Code"
                   title="Code block"

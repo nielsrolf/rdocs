@@ -183,6 +183,11 @@ export async function DELETE(_request: Request, { params }: RouteContext<{ id: s
 
 export async function GET(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
+  // `?content=0`: the editor's 2 s metadata poll (threads, runs, title) never
+  // uses the body — the collab stream keeps content live — and shipping/parsing
+  // a multi-MB document (pasted images are inline base64) every 2 s per tab
+  // stalled the browser's main thread while people typed.
+  const includeContent = new URL(request.url).searchParams.get("content") !== "0";
   const gate = await requireDocumentAccess(request, id, "VIEW");
   if (!gate.ok) {
     return gate.response;
@@ -221,7 +226,7 @@ export async function GET(request: Request, { params }: RouteContext<{ id: strin
     document: {
       id: access.document.id,
       title: access.document.title,
-      content: parseDocumentContent(access.document.content),
+      ...(includeContent ? { content: parseDocumentContent(access.document.content) } : {}),
       collaborationVersion,
       repoUrl: access.document.repoUrl,
       repoBranch: access.document.repoBranch,
