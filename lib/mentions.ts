@@ -85,26 +85,49 @@ export function findActiveMentionQuery(text: string, caret: number): ActiveMenti
 }
 
 /**
- * Prefix-match candidates against `query` by display name or email
- * (case-insensitive). An empty query returns everyone (typing a bare `@`).
- * Sorted shortest-name-first so exact/short matches surface first; capped.
+ * How well a person matches a typed query, or null for no match. Matches any
+ * WORD of the display name ("lov" finds "Ada Lovelace"), the full name
+ * ("ada lo"), or the email / any word of its local part ("lovelace" finds
+ * "ada.lovelace@x.org"). Lower is better: 0 = full-name prefix, 1 = name-word
+ * prefix, 2 = email prefix, 3 = email-word prefix. Shared by the mention
+ * dropdown and the people search (`lib/user-search.ts`). Pure.
+ */
+export function personMatchRank(
+  query: string,
+  person: { name?: string | null; email?: string | null }
+): number | null {
+  const needle = query.trim().toLowerCase();
+  const name = (person.name ?? "").trim().toLowerCase();
+  const email = (person.email ?? "").trim().toLowerCase();
+  if (!name && !email) return null;
+  if (needle === "") return 0;
+  if (name.startsWith(needle)) return 0;
+  if (name.split(/[\s.\-_'()]+/).some((word) => word && word.startsWith(needle))) return 1;
+  if (email.startsWith(needle)) return 2;
+  const local = email.split("@")[0] ?? "";
+  if (local.split(/[.\-_+]+/).some((word) => word && word.startsWith(needle))) return 3;
+  return null;
+}
+
+/**
+ * Match candidates against `query` (see `personMatchRank`). An empty query
+ * returns everyone (typing a bare `@`). Best rank first, then shortest name, so
+ * exact/short matches surface first; capped.
  */
 export function filterMentionCandidates(
   query: string,
   candidates: MentionCandidate[],
   limit = 8
 ): MentionCandidate[] {
-  const needle = query.trim().toLowerCase();
-  const matches = candidates.filter((candidate) => {
-    const name = (candidate.name ?? "").trim().toLowerCase();
-    const email = (candidate.email ?? "").trim().toLowerCase();
-    if (!name && !email) return false;
-    if (needle === "") return true;
-    return name.startsWith(needle) || email.startsWith(needle);
-  });
-  return matches
-    .sort((a, b) => (a.name ?? "").length - (b.name ?? "").length)
-    .slice(0, limit);
+  return candidates
+    .map((candidate) => ({ candidate, rank: personMatchRank(query, candidate) }))
+    .filter((entry): entry is { candidate: MentionCandidate; rank: number } => entry.rank !== null)
+    .sort(
+      (a, b) =>
+        a.rank - b.rank || (a.candidate.name ?? "").length - (b.candidate.name ?? "").length
+    )
+    .slice(0, limit)
+    .map((entry) => entry.candidate);
 }
 
 /** The handle inserted for a mention: the display name, or the email if unnamed. */

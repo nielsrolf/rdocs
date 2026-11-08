@@ -1,13 +1,20 @@
 import { db } from "@/lib/db";
 import { extractMentionedUserIds, type MentionCandidate } from "@/lib/mentions";
 
-/** Everyone who can be @mentioned in a document: its owner + members. */
+/** Everyone who can be @mentioned in a document: its owner, direct members,
+ * and everyone with access through a group the document is shared with (the
+ * group's owner + members) — "share with my team" creates no membership rows,
+ * so without the last part teammates could not be tagged at all. */
 export async function loadMentionCandidates(documentId: string): Promise<MentionCandidate[]> {
+  const person = { select: { id: true, name: true, email: true } } as const;
   const document = await db.document.findUnique({
     where: { id: documentId },
     select: {
-      owner: { select: { id: true, name: true, email: true } },
-      memberships: { select: { user: { select: { id: true, name: true, email: true } } } }
+      owner: person,
+      memberships: { select: { user: person } },
+      groupAccess: {
+        select: { group: { select: { owner: person, members: { select: { user: person } } } } }
+      }
     }
   });
   if (!document) return [];
@@ -15,6 +22,10 @@ export async function loadMentionCandidates(documentId: string): Promise<Mention
   byId.set(document.owner.id, document.owner);
   for (const membership of document.memberships) {
     byId.set(membership.user.id, membership.user);
+  }
+  for (const access of document.groupAccess) {
+    byId.set(access.group.owner.id, access.group.owner);
+    for (const member of access.group.members) byId.set(member.user.id, member.user);
   }
   return [...byId.values()];
 }

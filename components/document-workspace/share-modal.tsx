@@ -1,6 +1,8 @@
 import { permissionLevels, type PermissionLevelValue } from "@/lib/contracts";
 import { permissionLabel } from "@/lib/utils";
 
+import { UserPickerInput } from "@/components/user-picker-input";
+
 import { ShareGroupsSection } from "./share-groups-section";
 import type { MemberView, ShareLinkView } from "./types";
 import { useDialogDismiss } from "./use-dialog-dismiss";
@@ -71,18 +73,15 @@ export function ShareModal({
         </div>
 
         <div className="member-invite-form">
-          <input
-            list="frequent-collaborators"
-            onChange={(event) => onChangeInviteEmail(event.target.value)}
-            placeholder="Collaborator email"
-            type="email"
+          <UserPickerInput
+            excludeIds={members.map((member) => member.user.id)}
+            onChange={onChangeInviteEmail}
+            onSubmit={() => {
+              if (!inviteBusy && inviteEmail.trim()) onInvite();
+            }}
+            placeholder="Name or email"
             value={inviteEmail}
           />
-          <datalist id="frequent-collaborators">
-            {suggestedPeople.map((person) => (
-              <option key={person.id} value={person.email}>{person.name} · {person.count} shared doc{person.count === 1 ? "" : "s"}</option>
-            ))}
-          </datalist>
           {suggestedPeople.length > 0 ? (
             <div className="frequent-collaborators" aria-label="Frequent collaborators">
               {suggestedPeople.slice(0, 5).map((person) => (

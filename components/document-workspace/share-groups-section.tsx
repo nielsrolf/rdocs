@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { permissionLevels, type PermissionLevelValue } from "@/lib/contracts";
+import { UserPickerInput } from "@/components/user-picker-input";
 import { permissionLabel } from "@/lib/utils";
 
 type GroupSummary = {
@@ -136,8 +137,8 @@ export function ShareGroupsSection({
     }
   }
 
-  async function addMember(groupId: string) {
-    const email = memberEmail.trim();
+  async function addMember(groupId: string, pickedEmail?: string) {
+    const email = (pickedEmail ?? memberEmail).trim();
     if (!email) return;
     setBusy(true);
     setError(null);
@@ -342,10 +343,13 @@ export function ShareGroupsSection({
                 ))}
                 {managingGroup.isOwner ? (
                   <div className="comment-composer-actions">
-                    <input
-                      onChange={(event) => setMemberEmail(event.target.value)}
-                      placeholder="Member email"
-                      type="email"
+                    <UserPickerInput
+                      disabled={busy}
+                      excludeIds={managingGroup.members.map((member) => member.userId)}
+                      onChange={setMemberEmail}
+                      onPick={(picked) => void addMember(managingGroup.id, picked.email)}
+                      onSubmit={() => void addMember(managingGroup.id)}
+                      placeholder="Name or email"
                       value={memberEmail}
                     />
                     <button

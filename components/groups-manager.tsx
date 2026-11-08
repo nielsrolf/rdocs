@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 
+import { UserPickerInput } from "@/components/user-picker-input";
 import { permissionLabel } from "@/lib/utils";
 
 type GroupMemberView = { userId: string; name: string; email: string; role: string };
@@ -96,8 +97,8 @@ export function GroupsManager({ initialGroups }: { initialGroups: GroupView[] })
     }, "Could not delete the group.");
   }
 
-  function addMember(groupId: string) {
-    const email = (memberEmails[groupId] ?? "").trim();
+  function addMember(groupId: string, pickedEmail?: string) {
+    const email = (pickedEmail ?? memberEmails[groupId] ?? "").trim();
     if (!email) return;
     void run(async () => {
       const response = await fetch(`/api/groups/${groupId}/members`, {
@@ -246,15 +247,13 @@ export function GroupsManager({ initialGroups }: { initialGroups: GroupView[] })
 
           {group.isOwner ? (
             <div className="comment-composer-actions">
-              <input
-                onChange={(event) =>
-                  setMemberEmails((prev) => ({ ...prev, [group.id]: event.target.value }))
-                }
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") addMember(group.id);
-                }}
-                placeholder="Member email"
-                type="email"
+              <UserPickerInput
+                disabled={busy}
+                excludeIds={group.members.map((member) => member.userId)}
+                onChange={(value) => setMemberEmails((prev) => ({ ...prev, [group.id]: value }))}
+                onPick={(picked) => addMember(group.id, picked.email)}
+                onSubmit={() => addMember(group.id)}
+                placeholder="Name or email"
                 value={memberEmails[group.id] ?? ""}
               />
               <button

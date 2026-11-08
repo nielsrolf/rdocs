@@ -6001,6 +6001,21 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   color: var(--muted);
 }
 
+/* People autocomplete input (components/user-picker-input.tsx); the dropdown
+   reuses the mention-suggest styles and is positioned under the input. */
+.user-picker {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.user-picker > input {
+  width: 100%;
+}
+.user-picker .mention-suggest {
+  max-width: none;
+  right: 0;
+}
+
 /* Flash a comment that the user was @mentioned in (deep-link from a notification). */
 .comment-bubble-mention-flash {
   animation: mention-flash 2.4s ease-out 3;
