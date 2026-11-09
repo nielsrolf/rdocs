@@ -17,10 +17,19 @@ flock -n 9 || exit 0
 git fetch -q origin release 2>>"$LOG" || exit 0          # no release branch yet: nothing to do
 TARGET=$(git rev-parse -q --verify origin/release 2>/dev/null) || exit 0
 HEAD_SHA=$(git rev-parse HEAD)
-[ "$TARGET" = "$HEAD_SHA" ] && exit 0
-if ! git merge-base --is-ancestor "$HEAD_SHA" "$TARGET"; then
-  log "origin/release ($TARGET) is not a fast-forward of HEAD ($HEAD_SHA); skipping"
-  exit 0
+# Compare against what is DEPLOYED (.deploy-sha, written by deploy.sh), not
+# HEAD: agents commit directly in this checkout and then push to release, so
+# HEAD already equals release and a HEAD comparison skipped every such release
+# (nothing shipped 2026-11-08..09). No .deploy-sha yet = unknown = deploy.
+DEPLOYED_SHA=$(cat .deploy-sha 2>/dev/null || true)
+[ "$TARGET" = "$DEPLOYED_SHA" ] && exit 0
+if [ "$HEAD_SHA" != "$TARGET" ]; then
+  if ! git merge-base --is-ancestor "$HEAD_SHA" "$TARGET"; then
+    # HEAD has commits that are not on release (or diverged): deploying would
+    # ship unreleased work, and a reset would destroy it. Leave it alone.
+    log "HEAD ($HEAD_SHA) is not an ancestor of origin/release ($TARGET); skipping"
+    exit 0
+  fi
 fi
 # deploy.sh's single-flight lock is .deploy.lock (held for the whole deploy).
 # NOT .deploy-active: that file permanently stores the active color, so testing
@@ -30,7 +39,7 @@ if ! flock -n .deploy.lock true; then
 fi
 
 log "deploying origin/release $TARGET (from $HEAD_SHA)"
-if ! git merge -q --ff-only "$TARGET" >>"$LOG" 2>&1; then
+if [ "$HEAD_SHA" != "$TARGET" ] && ! git merge -q --ff-only "$TARGET" >>"$LOG" 2>&1; then
   log "ff merge failed (dirty tree?) — see $LOG"; exit 1
 fi
 if NODE_OPTIONS="--max-old-space-size=8192" ./deploy/deploy.sh >>"$LOG" 2>&1; then

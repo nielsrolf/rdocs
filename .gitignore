@@ -36,6 +36,7 @@ dev.db-shm
 .lb.pid
 .deploy-active
 .deploy-lockhash
+.deploy-sha
 deploy/caddy.json
 scripts/_*
 

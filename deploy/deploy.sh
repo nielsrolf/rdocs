@@ -119,6 +119,10 @@ fi
 # runtime (next start lazily loads packages per route) — that would be
 # downtime through the back door. Use non-destructive `npm install`, and only
 # when the lockfile actually changed.
+# The commit this deploy builds, recorded on success for release-watch.sh (it
+# compares origin/release against what is DEPLOYED, not against HEAD — agents
+# commit straight into this checkout, so HEAD == release says nothing).
+BUILT_SHA="$(git rev-parse HEAD 2>/dev/null || true)"
 LOCK_HASH="$(shasum -a 256 package-lock.json | awk '{print $1}')"
 if [ ! -d node_modules ] || [ "$(cat "$LOCKHASH_FILE" 2>/dev/null || true)" != "$LOCK_HASH" ]; then
   log "package-lock.json changed (or first deploy) — npm install"
@@ -279,6 +283,7 @@ else
 fi
 
 echo "$NEW" > "$STATE_FILE"
+[ -n "$BUILT_SHA" ] && echo "$BUILT_SHA" > .deploy-sha
 log "traffic now on $NEW: $(curl -s "http://localhost:$LB_PORT/api/health")"
 
 # ---------------------------------------------------------------- drain old
