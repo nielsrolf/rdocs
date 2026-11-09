@@ -197,19 +197,22 @@ function CommentNode({
   return (
     <div className="forum-comment" data-depth={depth} id={`comment-${comment.id}`}>
       <div className="forum-comment-main">
-        <VoteWidget
-          targetType="comment"
-          targetId={comment.id}
-          tally={comment}
-          canVote={canVote}
-          onTallyChange={(tally) => onTally(comment.id, tally)}
-        />
         <div className="forum-comment-content">
           <div className="forum-comment-meta">
             <span className="forum-comment-author">{comment.authorName}</span>
             {comment.isAi ? <span className="forum-badge-ai">AI</span> : null}
             <span className="forum-comment-date">{formatDate(comment.createdAt)}</span>
             <CommentLinkButton commentId={comment.id} />
+            {/* Votes live in the header row (LessWrong-style) so a short
+                comment isn't stretched to the height of a stacked widget. */}
+            <VoteWidget
+              targetType="comment"
+              targetId={comment.id}
+              tally={comment}
+              canVote={canVote}
+              orientation="horizontal"
+              onTallyChange={(tally) => onTally(comment.id, tally)}
+            />
           </div>
           {comment.anchorQuote ? (
             <blockquote className="forum-anchor-quote">{comment.anchorQuote}</blockquote>

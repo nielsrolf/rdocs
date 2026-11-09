@@ -165,12 +165,6 @@ export function QuicktakeCard({
   const commentLabel = `${take.commentCount} comment${take.commentCount === 1 ? "" : "s"}`;
   return (
     <article className="quicktake-card" id={`quicktake-${take.id}`}>
-      <VoteWidget
-        targetType="document"
-        targetId={take.id}
-        tally={take}
-        canVote={canVote}
-      />
       <div className="quicktake-content">
         <div className="quicktake-meta">
           <span className="quicktake-author">{take.owner.name}</span>
@@ -180,6 +174,13 @@ export function QuicktakeCard({
           <span className="quicktake-visibility">
             {take.isPublic ? "Public" : take.groupName ? `Group: ${take.groupName}` : "Private"}
           </span>
+          <VoteWidget
+            targetType="document"
+            targetId={take.id}
+            tally={take}
+            canVote={canVote}
+            orientation="horizontal"
+          />
         </div>
         {editing ? (
           <form

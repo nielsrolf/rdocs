@@ -7177,6 +7177,18 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   font-size: 0.75rem;
 }
 
+/* Header-row placement (comments, quicktakes): pushed to the right edge. */
+.forum-comment-meta .forum-vote,
+.quicktake-meta .forum-vote {
+  margin-left: auto;
+  align-self: center;
+}
+
+.forum-comment-meta .forum-vote-score,
+.quicktake-meta .forum-vote-score {
+  font-size: 0.85rem;
+}
+
 .forum-vote-agreement-score {
   font-size: 0.8rem;
   font-weight: 500;
@@ -7480,6 +7492,7 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .forum-comment-meta {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   align-items: baseline;
   font-family: Arial, Helvetica, sans-serif;
