@@ -7074,6 +7074,7 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .forum-post-body {
   min-width: 0;
+  flex: 1;
 }
 
 .forum-post-title {
@@ -7092,6 +7093,7 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .forum-post-meta {
   display: flex;
+  align-items: baseline;
   gap: 0.4rem;
   color: #8a8a8a;
   font-size: 0.82rem;
@@ -7179,13 +7181,15 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 /* Header-row placement (comments, quicktakes): pushed to the right edge. */
 .forum-comment-meta .forum-vote,
-.quicktake-meta .forum-vote {
+.quicktake-meta .forum-vote,
+.forum-post-meta .forum-vote {
   margin-left: auto;
   align-self: center;
 }
 
 .forum-comment-meta .forum-vote-score,
-.quicktake-meta .forum-vote-score {
+.quicktake-meta .forum-vote-score,
+.forum-post-meta .forum-vote-score {
   font-size: 0.85rem;
 }
 
@@ -7308,6 +7312,11 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   gap: 1rem;
   align-items: flex-start;
   margin-bottom: 1.25rem;
+}
+
+.forum-post-header-main {
+  flex: 1;
+  min-width: 0;
 }
 
 /* Forum view of a doc: the studio's tab + heading outline, parked in the page's

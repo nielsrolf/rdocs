@@ -38,12 +38,6 @@ function formatDate(value: string) {
 export function ForumPostCard({ post, canVote }: { post: ForumPostView; canVote: boolean }) {
   return (
     <article className="forum-post-card">
-      <VoteWidget
-        targetType="document"
-        targetId={post.id}
-        tally={post}
-        canVote={canVote}
-      />
       <div className="forum-post-body">
         <Link href={`/forum/${post.id}`} className="forum-post-title">
           {post.title || "Untitled"}
@@ -56,6 +50,13 @@ export function ForumPostCard({ post, canVote }: { post: ForumPostView; canVote:
           <span>
             {post.commentCount} comment{post.commentCount === 1 ? "" : "s"}
           </span>
+          <VoteWidget
+            targetType="document"
+            targetId={post.id}
+            tally={post}
+            canVote={canVote}
+            orientation="horizontal"
+          />
         </div>
         {post.excerpt ? <p className="forum-post-excerpt">{post.excerpt}</p> : null}
       </div>

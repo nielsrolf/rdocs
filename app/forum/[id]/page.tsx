@@ -96,13 +96,7 @@ export default async function ForumDocumentPage({ params }: PageProps) {
         </nav>
       </header>
       <div className="forum-post-header">
-        <VoteWidget
-          targetType="document"
-          targetId={id}
-          tally={voteTally}
-          canVote={Boolean(user)}
-        />
-        <div>
+        <div className="forum-post-header-main">
           <h1 className="forum-title">{access.document.title || "Untitled"}</h1>
           <div className="forum-post-meta">
             <span>{owner?.name ?? "Unknown"}</span>
@@ -118,6 +112,13 @@ export default async function ForumDocumentPage({ params }: PageProps) {
                 </span>
               </>
             ) : null}
+            <VoteWidget
+              targetType="document"
+              targetId={id}
+              tally={voteTally}
+              canVote={Boolean(user)}
+              orientation="horizontal"
+            />
           </div>
         </div>
       </div>
