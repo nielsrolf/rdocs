@@ -175,13 +175,26 @@ log "building into $NEXT_DIST_DIR"
 # an explicit NODE_OPTIONS from the caller still wins.
 NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=8192}" npm run build
 
+# Long-lived children must not live in the CALLER's cgroup: release-watch runs
+# this script inside a Type=oneshot user unit, and when that unit finished,
+# systemd SIGTERMed then SIGKILLed the freshly started next-server along with
+# it — 40 min of 502 (2026-11-09). The same applies to an agent's shell or a
+# terminal tab. `systemd-run --scope` execs the command in place (so $! stays
+# the real pid) inside its own transient scope that ends only when the process
+# does. Falls back to plain nohup where no user systemd manager is reachable.
+if systemd-run --user --scope --quiet true >/dev/null 2>&1; then
+  detached() { local name="$1"; shift; systemd-run --user --scope --quiet --collect --unit="rdocs-$name-$(date +%s)" nohup "$@"; }
+else
+  detached() { shift; nohup "$@"; }
+fi
+
 mkdir -p logs
 APP_LOG="logs/service_${NEW}_$(date +%Y%m%d_%H%M%S).log"
 log "starting $NEW on :$NEW_PORT (log: $APP_LOG)"
 # 9>&- closes the .deploy.lock fd: a long-lived child inherits it and would
 # otherwise hold the single-flight lock for its entire lifetime, making
 # every subsequent deploy fail with "another deploy is already running".
-PORT=$NEW_PORT NEXT_DIST_DIR=".next-$NEW" nohup npm run start 9>&- > "$APP_LOG" 2>&1 &
+PORT=$NEW_PORT NEXT_DIST_DIR=".next-$NEW" detached "app-$NEW" npm run start 9>&- > "$APP_LOG" 2>&1 &
 NEW_PID=$!
 echo "$NEW_PID" > ".service_${NEW}.pid"
 
@@ -272,7 +285,7 @@ else
   fi
   write_caddy_config "$NEW_PORT"
   CADDY_LOG="logs/caddy_$(date +%Y%m%d_%H%M%S).log"
-  nohup caddy run --config "$CADDY_CONFIG" 9>&- > "$CADDY_LOG" 2>&1 &
+  detached lb caddy run --config "$CADDY_CONFIG" 9>&- > "$CADDY_LOG" 2>&1 &
   echo $! > .lb.pid
   log "started Caddy (log: $CADDY_LOG)"
   DEADLINE=$(( $(date +%s) + 30 ))
