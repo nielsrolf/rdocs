@@ -6,6 +6,9 @@
 # is strictly ahead; a non-fast-forward (local commits not on release) is
 # logged and left alone — never force anything on the production checkout.
 set -uo pipefail
+# The user systemd manager's PATH lacks ~/.local/bin, where caddy/node/npm live
+# on this host; without it deploy.sh dies with "caddy not found" (2026-11-09).
+export PATH="$HOME/.local/bin:$PATH"
 cd "$(dirname "$0")/.."
 LOG=logs/release-watch.log
 mkdir -p logs
