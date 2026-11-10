@@ -215,6 +215,11 @@ async function isLinkedWorktreeGitfile(gitFile: string) {
   return Boolean(real) && real === expected;
 }
 
+/** Remove the pinned GitHub credential from a run checkout (per-run credential policy). */
+export async function stripWorkspaceGithubAuth(workspace: string) {
+  await applyWorkspaceGithubAuth(workspace, null);
+}
+
 // Run checkouts live under <root>/<documentId>/worktrees/; those are the ones
 // bind-mounted read-write into agent containers.
 function agentWritableCheckout(candidate: string | undefined) {

@@ -272,8 +272,15 @@ export async function loadRunMcpServerInputs(args: {
   userId?: string | null;
   env: DocumentEnv;
   runServers?: AgentMcpServerInput[] | null;
+  /**
+   * Per-run credential policy: when set, only the named document/workspace/
+   * user servers are inherited. Servers passed for this run always stay.
+   */
+  allowInherited?: string[] | null;
 }): Promise<AgentMcpServerInput[]> {
-  const document = await loadDocumentMcpServerInputs(args.documentId, args.env);
+  const allowed = args.allowInherited ? new Set(args.allowInherited) : null;
+  const keep = (servers: AgentMcpServerInput[]) => (allowed ? servers.filter((server) => allowed.has(server.name)) : servers);
+  const document = keep(await loadDocumentMcpServerInputs(args.documentId, args.env));
 
   let workspace: AgentMcpServerInput[] = [];
   const workspaceDocumentId = await resolveWorkspaceDocumentId(args.documentId).catch(() => null);
@@ -281,11 +288,11 @@ export async function loadRunMcpServerInputs(args: {
     const servers = await listDocumentMcpServers(workspaceDocumentId);
     if (servers.length > 0) {
       const workspaceEnv = await loadDocumentEnv(workspaceDocumentId).catch(() => ({}) as DocumentEnv);
-      workspace = resolveMcpServerInputs(servers, { ...workspaceEnv, ...args.env });
+      workspace = keep(resolveMcpServerInputs(servers, { ...workspaceEnv, ...args.env }));
     }
   }
 
-  const user = args.userId ? await loadUserMcpServerInputs(args.userId) : [];
+  const user = keep(args.userId ? await loadUserMcpServerInputs(args.userId) : []);
   return mergeMcpServerInputs({ run: args.runServers ?? [], document, workspace, user });
 }
 

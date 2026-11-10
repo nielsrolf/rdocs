@@ -15,6 +15,7 @@ import { db } from "@/lib/db";
 import { headlessEditNote, withDocumentBridge } from "@/lib/document-run-token";
 import { MAX_MCP_SERVERS_PER_RUN, resolveRunMcpServerInputs, type RunMcpServerInput } from "@/lib/document-mcp-servers";
 import type { AgentMcpServerInput } from "@/agent-core/mcp-servers";
+import { runCredentialPolicySchema, type RunCredentialPolicy } from "@/lib/run-credential-policy";
 
 /** Body of POST /api/agent-channels/:triggerId/runs. */
 export const channelRunMessageSchema = z.object({
@@ -38,7 +39,12 @@ export const channelRunMessageSchema = z.object({
     )
     .max(MAX_MCP_SERVERS_PER_RUN)
     .optional()
-    .nullable()
+    .nullable(),
+  /**
+   * Choose exactly which credentials THIS run gets (lib/run-credential-policy.ts).
+   * Omitted = the document's and user's full configuration, as before.
+   */
+  credentials: runCredentialPolicySchema.optional().nullable()
 });
 
 /** Validate the request's per-run servers; throws McpServerValidationError (→ 400 in the route). */
@@ -56,6 +62,7 @@ export async function startAgentChannelRun(args: {
   previousRunId?: string | null;
   /** Already validated per-run servers (channelRunMcpServers). */
   mcpServers?: AgentMcpServerInput[] | null;
+  credentialPolicy?: RunCredentialPolicy | null;
 }): Promise<string> {
   const { channel, message } = args;
   const previousRunId = args.previousRunId ?? null;
@@ -79,7 +86,10 @@ export async function startAgentChannelRun(args: {
   const mcpServers = await withDocumentBridge(args.mcpServers ?? undefined, {
     userId: channel.createdById,
     documentId: channel.documentId,
-    aiRunId: aiRun.id
+    aiRunId: aiRun.id,
+    // A restricted run may edit its document but not schedule tasks, change
+    // workspace env or mint keys: those would outlive or widen the restriction.
+    ...(args.credentialPolicy ? { toolset: "document-only" as const } : {})
   });
 
   void runAgentConversationInBackground({
@@ -93,7 +103,8 @@ export async function startAgentChannelRun(args: {
     agentConfig: await resolveAgentConfigForUser(channel.document, channel.createdById),
     agentAccessMode: "workspace",
     runnerMode: channel.document.runnerMode,
-    mcpServers
+    mcpServers,
+    credentialPolicy: args.credentialPolicy ?? null
   }).catch((error) => {
     console.error("[agent-api] background run threw", {
       channelId: channel.id,

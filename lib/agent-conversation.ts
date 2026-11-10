@@ -13,6 +13,7 @@ import {
 } from "@/lib/ai-runs";
 import { withAgentRunLifecycle } from "@/lib/agent-run-lifecycle";
 import { loadRunMcpServerInputs } from "@/lib/document-mcp-servers";
+import { describeRunCredentialPolicy, type RunCredentialPolicy } from "@/lib/run-credential-policy";
 import { withWorkspacesBridge } from "@/lib/document-run-token";
 import { planSessionResume, recordRunSessionId, withConversationLock } from "@/lib/agent-sessions";
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
@@ -58,6 +59,9 @@ export type ConversationRunInput = {
   // Per-run MCP servers supplied by an API caller (already validated); merged
   // above document/workspace/user servers of the same name. Never persisted.
   mcpServers?: ClaudeResearchAgentInput["mcpServers"];
+  // Per-run credential selection (lib/run-credential-policy.ts). Null = the
+  // document's and user's full configuration.
+  credentialPolicy?: RunCredentialPolicy | null;
   // Live delivery of interim Slack updates the agent posts mid-run.
   onSlackMessage?: (text: string) => Promise<void> | void;
   // Called once after the run reaches a terminal state (bookkeeping already
@@ -142,6 +146,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
     slackContext,
     slackTools,
     mcpServers: runMcpServers,
+    credentialPolicy,
     onSlackMessage,
     onFinished
   } = input;
@@ -158,6 +163,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
       // both are somehow set, since it explicitly wants the deployment's own
       // checkout.
       hostDevDir,
+      credentialPolicy,
       // The heartbeat starts once this run holds the session lock (below), not
       // when the background function starts: a run queued behind another run of
       // the same conversation is doing nothing, and must look silent so the
@@ -261,8 +267,20 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
         documentId,
         userId: createdById,
         env: agentEnv,
-        runServers: runMcpServers
+        runServers: runMcpServers,
+        allowInherited: credentialPolicy ? credentialPolicy.allowMcpServers : null
       });
+      if (credentialPolicy) {
+        const inherited = new Set((runMcpServers ?? []).map((server) => server.name));
+        await recordAiRunEvent({
+          aiRunId,
+          role: "system",
+          message: describeRunCredentialPolicy(
+            Object.keys(agentEnv).sort(),
+            loadedMcpServers.map((server) => server.name).filter((name) => !inherited.has(name))
+          )
+        });
+      }
       // Workspace provisioning (create_workspace, env hand-over, LiteLLM keys)
       // for interactive runs; Slack and headless runs already carry these
       // tools on their rdocs/doc bridge.

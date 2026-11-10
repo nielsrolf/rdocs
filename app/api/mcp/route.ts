@@ -66,7 +66,7 @@ export async function POST(request: Request) {
   const authorization = request.headers.get("authorization");
   let user = (await resolveApiTokenUser(authorization)) ?? (await resolveSlackRunUser(authorization));
   let scopeDocumentId: string | undefined;
-  let toolset: "workspaces" | undefined;
+  let toolset: "workspaces" | "document-only" | undefined;
   if (!user) {
     const documentRun = await resolveDocumentRunUser(authorization);
     if (!documentRun) {

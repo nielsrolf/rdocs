@@ -143,3 +143,43 @@ test("host allowlist never admits a host credential", async () => {
     process.env.AGENT_REQUIRE_USER_CREDENTIAL = "1";
   }
 });
+
+// --- Per-run credential policy (lib/run-credential-policy.ts) --------------
+
+test("a run credential policy withholds everything the caller did not allow", async () => {
+  const user = await makeUser("cred-policy");
+  await connectAnthropicKey(user.id, "sk-ant-policy-key");
+  await connectHuggingFaceToken(user.id, "hf_policy_token");
+  const doc = await makeDoc(user.id);
+
+  const full = await loadAgentEnvForDocument(doc.id, "claude-sonnet-5", user.id);
+  assert.equal(full.HF_TOKEN, "hf_policy_token", "without a policy the user's token reaches the run");
+
+  const restricted = await loadAgentEnvForDocument(doc.id, "claude-sonnet-5", user.id, {
+    allowEnv: ["ANTHROPIC_API_KEY"],
+    env: { RUNPOD_API_KEY: "rp_for_this_run" },
+    allowMcpServers: []
+  });
+  assert.deepEqual(restricted, { ANTHROPIC_API_KEY: "sk-ant-policy-key", RUNPOD_API_KEY: "rp_for_this_run" });
+});
+
+test("a policy that withholds the model's own credential fails before the run starts", async () => {
+  const user = await makeUser("cred-policy-missing");
+  await connectAnthropicKey(user.id, "sk-ant-policy-key");
+  const doc = await makeDoc(user.id);
+  await assert.rejects(
+    loadAgentEnvForDocument(doc.id, "claude-sonnet-5", user.id, { allowEnv: [], env: {}, allowMcpServers: [] }),
+    /credential/i
+  );
+});
+
+test("the model credential can come from the per-run env alone", async () => {
+  const user = await makeUser("cred-policy-run-only");
+  const doc = await makeDoc(user.id);
+  const env = await loadAgentEnvForDocument(doc.id, "claude-sonnet-5", user.id, {
+    allowEnv: [],
+    env: { ANTHROPIC_API_KEY: "sk-ant-run-scoped" },
+    allowMcpServers: []
+  });
+  assert.deepEqual(env, { ANTHROPIC_API_KEY: "sk-ant-run-scoped" });
+});

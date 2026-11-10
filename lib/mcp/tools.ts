@@ -63,7 +63,7 @@ export type McpToolContext = {
    * interactive conversation runs, whose document edits must keep going
    * through reviewable suggestions rather than the bridge's direct edits.
    */
-  toolset?: "workspaces";
+  toolset?: "workspaces" | "document-only";
 };
 
 export class McpToolError extends Error {}
@@ -1235,8 +1235,18 @@ export const WORKSPACE_TOOL_NAMES: ReadonlySet<string> = new Set([
 // (McpToolContext.scopeDocumentId) neither sees nor may call them.
 const SCOPE_REFUSED_TOOLS = new Set(["list_documents", "list_quicktakes", "create_document"]);
 
+// "document-only" (runs with a per-run credential policy): reading and editing
+// the run's document, nothing that outlives the run. Scheduling tasks, editing
+// workspace env, creating workspaces and minting LiteLLM keys would each let a
+// prompt-injected agent persist itself or widen its own credentials.
+const DOCUMENT_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "read_document", "read_image", "replace_in_document", "append_to_document", "replace_document",
+  "upload_files", "create_widget", "list_comments", "add_comment", "reply_to_comment"
+]);
+
 function toolAllowed(name: string, ctx: Pick<McpToolContext, "scopeDocumentId" | "toolset">): boolean {
   if (ctx.scopeDocumentId && SCOPE_REFUSED_TOOLS.has(name)) return false;
+  if (ctx.toolset === "document-only" && !DOCUMENT_ONLY_TOOL_NAMES.has(name)) return false;
   if (ctx.toolset === "workspaces" && !WORKSPACE_TOOL_NAMES.has(name)) return false;
   return true;
 }

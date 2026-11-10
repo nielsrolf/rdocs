@@ -29,7 +29,13 @@ export async function POST(request: Request, { params }: { params: Promise<{ tri
     if (error instanceof McpServerValidationError) return NextResponse.json({ error: error.message }, { status: 400 });
     throw error;
   }
-  const aiRunId = await startAgentChannelRun({ channel, message, previousRunId, mcpServers });
+  const aiRunId = await startAgentChannelRun({
+    channel,
+    message,
+    previousRunId,
+    mcpServers,
+    credentialPolicy: parsed.data.credentials ?? null
+  });
 
   const created = await db.aiRun.findUnique({
     where: { id: aiRunId },

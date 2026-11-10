@@ -17,6 +17,8 @@
 // order is part of the observable contract (agent-timeline.tsx and tests match
 // these strings verbatim; keep them byte-identical).
 
+import { policyAllowsGithub, type RunCredentialPolicy } from "@/lib/run-credential-policy";
+import { stripWorkspaceGithubAuth } from "@/lib/research-workspace";
 import type { AgentAccessMode, ClaudeAgentProgressEvent } from "@/agent-core";
 import { isCodexAgentModel } from "@/agent-core";
 import { createDeferredHeartbeat, recordAiRunEvent } from "@/lib/ai-runs";
@@ -127,6 +129,8 @@ export type AgentRunLifecycleOptions = {
   // selfHosted if both are somehow set, since it explicitly wants a live
   // host checkout.
   hostDevDir?: string | null;
+  // Per-run credential selection; null = full document/user configuration.
+  credentialPolicy?: RunCredentialPolicy | null;
   // Commit message used when saving workspace changes after `fn` threw.
   failureCommitMessage: string;
   // Logged (via the hook) when that failure-path commit itself fails; omit to
@@ -291,6 +295,13 @@ export async function withAgentRunLifecycle<T>(
           message: hostDevRunNotice(hostDevDir)
         });
       }
+      // The run checkout's git config carries the GitHub token so the agent can
+      // push. A run that was not granted GitHub access must not find it there.
+      // The base checkout keeps its auth, so the host still pushes the merged
+      // result; only the run's own branch stays local.
+      if (state.linkedRepo && !durable && !policyAllowsGithub(opts.credentialPolicy)) {
+        await stripWorkspaceGithubAuth(state.linkedRepo.workspace);
+      }
       if (state.linkedRepo) {
         await db.aiRun.update({
           where: { id: aiRunId },
@@ -317,7 +328,8 @@ export async function withAgentRunLifecycle<T>(
         usedProviderFallback
       } = await loadAgentEnvWithFreeFallback(documentId, agentConfig, createdById, {
         aiRunId,
-        runnerMode: runner.mode
+        runnerMode: runner.mode,
+        credentialPolicy: opts.credentialPolicy ?? null
       });
       if (usedFreeFallback) {
         await recordAiRunEvent({

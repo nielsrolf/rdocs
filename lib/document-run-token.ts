@@ -32,7 +32,7 @@ export type DocumentRunClaims = {
   documentId: string;
   aiRunId: string;
   /** Restrict the bridge to one toolset (McpToolContext.toolset). */
-  toolset?: "workspaces";
+  toolset?: "workspaces" | "document-only";
 };
 
 /**
@@ -65,7 +65,8 @@ export async function verifyDocumentRunToken(token: string): Promise<DocumentRun
       userId: payload.userId,
       documentId: payload.documentId,
       aiRunId: payload.aiRunId,
-      ...(payload.toolset === "workspaces" ? { toolset: "workspaces" as const } : {})
+      ...(payload.toolset === "workspaces" ? { toolset: "workspaces" as const } : {}),
+      ...(payload.toolset === "document-only" ? { toolset: "document-only" as const } : {})
     };
   } catch {
     return null;

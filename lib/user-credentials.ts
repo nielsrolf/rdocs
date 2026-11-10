@@ -6,6 +6,7 @@ import {
   DEFAULT_AGENT_MODEL,
   resolveLatestAnthropicAlias
 } from "@/agent-core";
+import { applyRunCredentialPolicy, policyAllowsGithub, type RunCredentialPolicy } from "@/lib/run-credential-policy";
 import {
   anthropicCatalogCredentialFromEnv,
   refreshLatestAnthropicModels
@@ -573,8 +574,12 @@ export async function resolveGithubAuthForUser(
 export async function loadAgentEnvForDocument(
   documentId: string,
   agentModel: string | null | undefined,
-  runnerUserId: string | null = null
+  runnerUserId: string | null = null,
+  credentialPolicy: RunCredentialPolicy | null = null
 ): Promise<DocumentEnv> {
+  if (credentialPolicy) {
+    return loadRestrictedAgentEnv(documentId, agentModel, runnerUserId, credentialPolicy);
+  }
   const env = await resolveModelCredentialEnv(documentId, agentModel, runnerUserId);
   // GitHub auth for the run: the host token is no longer allowlisted into the
   // agent env, so whatever the per-document resolution yields (possibly
@@ -584,6 +589,40 @@ export async function loadAgentEnvForDocument(
     if (!env.GITHUB_TOKEN?.trim()) env.GITHUB_TOKEN = githubAuth.token;
     if (!env.GH_TOKEN?.trim()) env.GH_TOKEN = githubAuth.token;
   }
+  return env;
+}
+
+/**
+ * loadAgentEnvForDocument under a per-run credential policy: resolve as usual,
+ * then keep only what the caller allowed plus what they supplied for this run.
+ * The model's own credential is not exempt, so a policy that withholds it
+ * fails here with the same typed errors as a missing credential (and the
+ * caller sees which variable to allow) instead of deep inside the sandbox.
+ */
+async function loadRestrictedAgentEnv(
+  documentId: string,
+  agentModel: string | null | undefined,
+  runnerUserId: string | null,
+  policy: RunCredentialPolicy
+): Promise<DocumentEnv> {
+  let resolved: DocumentEnv;
+  try {
+    resolved = await resolveModelCredentialEnv(documentId, agentModel, runnerUserId);
+  } catch (error) {
+    // Nothing configured for this model: the per-run env may still supply it.
+    if (!isAgentCredentialError(error)) throw error;
+    resolved = await loadDocumentEnv(documentId);
+  }
+  if (policyAllowsGithub(policy)) {
+    const githubAuth = await resolveGithubAuthForDocument(documentId, runnerUserId);
+    if (githubAuth) {
+      if (!resolved.GITHUB_TOKEN?.trim()) resolved = { ...resolved, GITHUB_TOKEN: githubAuth.token };
+      if (!resolved.GH_TOKEN?.trim()) resolved = { ...resolved, GH_TOKEN: githubAuth.token };
+    }
+  }
+  const { env } = applyRunCredentialPolicy(resolved, policy);
+  const failure = credentialRequirementFailure(env, agentModel) ?? providerKeyRequirementFailure(env, agentModel);
+  if (failure) throw new AgentCredentialError(failure);
   return env;
 }
 
@@ -801,11 +840,12 @@ export async function loadAgentEnvWithFreeFallback(
   documentId: string,
   agentConfig: { model: string | null; effort: string | null },
   runnerUserId: string | null = null,
-  opts: { aiRunId?: string; runnerMode?: string } = {}
+  opts: { aiRunId?: string; runnerMode?: string; credentialPolicy?: RunCredentialPolicy | null } = {}
 ): Promise<AgentRunEnvResolution> {
+  const policy = opts.credentialPolicy ?? null;
   const resolved = await (async (): Promise<AgentRunEnvResolution> => {
     try {
-      const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model, runnerUserId);
+      const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model, runnerUserId, policy);
       return { agentEnv, agentConfig, usedFreeFallback: false, usedProviderFallback: false };
     } catch (error) {
       const isMissingOpenAi =
@@ -819,7 +859,7 @@ export async function loadAgentEnvWithFreeFallback(
       if (litellmModel) {
         const fallbackConfig = { model: litellmModel, effort: agentConfig.effort };
         try {
-          const agentEnv = await loadAgentEnvForDocument(documentId, litellmModel, runnerUserId);
+          const agentEnv = await loadAgentEnvForDocument(documentId, litellmModel, runnerUserId, policy);
           return {
             agentEnv,
             agentConfig: fallbackConfig,
@@ -837,7 +877,7 @@ export async function loadAgentEnvWithFreeFallback(
         throw error;
       }
       const fallbackConfig = { model: fallbackModel, effort: agentConfig.effort };
-      const agentEnv = await loadAgentEnvForDocument(documentId, fallbackModel, runnerUserId);
+      const agentEnv = await loadAgentEnvForDocument(documentId, fallbackModel, runnerUserId, policy);
       return {
         agentEnv,
         agentConfig: fallbackConfig,

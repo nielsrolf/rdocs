@@ -188,6 +188,18 @@ none), managed at Settings → AI → "Your MCP servers" (`GET/POST/DELETE /api/
 keeps it, `authToken:null` clears it). The document route's GET also returns `inherited`
 (workspace + user servers with a `shadowed` flag) so the environment menu can show why a run
 has a tool. Tests: `tests/document-mcp-servers.test.ts`.
+**Per-run credentials** (2026-11-10, `lib/run-credential-policy.ts`): `POST /api/agent-channels/:triggerId/runs`
+accepts `credentials: { allowEnv: [names], env: {NAME: value}, allowMcpServers: [names] }`. When present, the run
+gets ONLY the allowlisted normally-resolved env vars (plus `*_BASE_URL` routing settings), the per-run `env` values
+(never persisted) and the named inherited MCP servers; the user's GitHub PAT, `HF_TOKEN`, Codex auth and user MCP
+servers are withheld unless named. The model's own credential is not exempt: withholding it fails the run up front
+with the usual credential error. Such a run's `doc` bridge is limited to the `document-only` toolset (no scheduling,
+workspace env, workspace creation or LiteLLM key tools), and unless GitHub is allowed the token is stripped from the
+run checkout's git config (the host still pushes the merged result from the base checkout; the run branch stays
+local). Use this for any run whose instructions come from a third party. Omitting `credentials` keeps the old
+behaviour. Not persisted: a `previousRunId` follow-up must resend it. Only channel runs take it so far (no UI,
+no scheduled runs). Related hardening the same day: document-run tokens are rejected once their run is no longer
+RUNNING, and host-side git never trusts a run checkout's `.git` (`hardenAgentGitDir`).
 A channel can also hold **standing jobs**: `GET/POST /api/agent-channels/:triggerId/schedules`
 and `DELETE .../schedules/:taskId` (channel token) manage `ScheduledTask` rows with
 `contextType: "api_channel"` (no Slack fields — `slackTeamId`/`slackChannelId` are nullable
