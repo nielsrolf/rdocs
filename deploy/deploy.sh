@@ -65,7 +65,19 @@ fail() { echo "[deploy] ERROR: $*" >&2; exit 1; }
 # grep match nothing → pipeline exit 1 → the $(…) assignment kills the script
 # silently (this happened on the first run of this helper).
 port_listeners() {
-  ss -tlnpH "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true
+  local pids
+  pids=$(ss -tlnpH "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true)
+  # ss only names the owner of a socket whose /proc/<pid>/fd it may read, and
+  # that needs the same uid AND gid. A deploy running under `sg docker` (see
+  # above) is blind to an app started with the normal primary group and vice
+  # versa: on 2026-11-10 the stale-listener kill and the drain were both
+  # skipped silently, the old green kept :14143 and three releases in a row
+  # failed. An app instance reports its own pid on /api/health, so ask it.
+  if [ -z "$pids" ]; then
+    pids=$(curl -s -m 3 "http://localhost:$1/api/health" 2>/dev/null | grep -o '"pid":[0-9]*' | cut -d: -f2 || true)
+  fi
+  [ -n "$pids" ] && echo "$pids"
+  return 0
 }
 
 # True if $1 is $2 or a descendant of $2 (walks the ppid chain). NOTE: do not
