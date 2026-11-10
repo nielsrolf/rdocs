@@ -30,7 +30,11 @@ ROOT="$(pwd)"
 # produced an app whose agent runs failed with "permission denied while trying
 # to connect to the docker API" (2026-11-10). Group lists are fixed at login,
 # so re-exec the whole deploy under `sg docker`, which picks the membership up
-# from the group database.
+# from the group database. Side effect: `sg` makes docker the PRIMARY gid
+# (and a nested `sg niels` drops it again), so such an app writes files as
+# niels:docker and runs agent containers as --user 1000:<docker gid>. Owner
+# stays niels, so nothing breaks; the clean fix is a fresh user manager
+# (reboot, or `sudo systemctl restart user@1000` — kills every user process).
 has_group() { tr ' ' '\n' | grep -qx docker; }
 if ! id -Gn | has_group; then
   if [ -z "${RDOCS_DOCKER_GROUP_REEXEC:-}" ] && id -Gn "$(id -un)" | has_group && command -v sg >/dev/null 2>&1; then
