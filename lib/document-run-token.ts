@@ -72,6 +72,21 @@ export async function verifyDocumentRunToken(token: string): Promise<DocumentRun
   }
 }
 
+/**
+ * A document-run token is only as alive as its run. The 12h expiry is an upper
+ * bound; without this check a token copied out of a container (or leaked by a
+ * prompt-injected agent) kept acting as the user on that document long after
+ * the run had finished. Mirrors the credential broker's rule
+ * (resolveBrokerRequest): every termination path cuts access, no revoke needed.
+ */
+export async function isDocumentRunTokenLive(
+  claims: DocumentRunClaims,
+  findRun: (aiRunId: string) => Promise<{ status: string; documentId: string } | null>
+): Promise<boolean> {
+  const run = await findRun(claims.aiRunId);
+  return Boolean(run) && run!.status === "RUNNING" && run!.documentId === claims.documentId;
+}
+
 /** Where agent containers reach /api/mcp (same override as Slack runs). */
 export function documentBridgeUrl(): string {
   const override = process.env.SLACK_AGENT_MCP_URL?.trim();

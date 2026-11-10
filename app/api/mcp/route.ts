@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { resolveApiTokenUser } from "@/lib/api-tokens";
 import { db } from "@/lib/db";
-import { verifyDocumentRunToken } from "@/lib/document-run-token";
+import { isDocumentRunTokenLive, verifyDocumentRunToken } from "@/lib/document-run-token";
 import { handleMcpBody } from "@/lib/mcp/server";
 import { getPublicOrigin } from "@/lib/request-origin";
 import { verifySlackToolsToken } from "@/lib/slack/link-token";
@@ -33,6 +33,10 @@ async function resolveDocumentRunUser(authorizationHeader: string | null) {
   if (!match || match[1].startsWith("gdai_")) return null;
   const claims = await verifyDocumentRunToken(match[1]);
   if (!claims) return null;
+  const live = await isDocumentRunTokenLive(claims, (aiRunId) =>
+    db.aiRun.findUnique({ where: { id: aiRunId }, select: { status: true, documentId: true } })
+  );
+  if (!live) return null;
   const user = await db.user.findUnique({
     where: { id: claims.userId },
     select: { id: true, email: true, name: true }
