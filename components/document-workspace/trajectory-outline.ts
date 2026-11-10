@@ -1,6 +1,7 @@
 import { truncate } from "@/lib/utils";
 
 import {
+  extractJsonStringField,
   findFinalReplyIndex,
   groupAgentEvents,
   parseToolMessage,
@@ -41,7 +42,12 @@ function firstLine(text: string): string {
     .split("\n")
     .map((part) => part.trim())
     .find((part) => part && !/^```/.test(part));
-  return (line ?? "").replace(/^#+\s*/, "").replace(/[*_`]/g, "");
+  return line ?? "";
+}
+
+/** First line of prose, without Markdown decoration. */
+function proseLine(text: string): string {
+  return firstLine(text).replace(/^#+\s*/, "").replace(/\*\*|__|`/g, "");
 }
 
 /** What a shell command is for, in a few words. */
@@ -53,7 +59,12 @@ export function describeShellCommand(command: string): string {
   if (heredoc && /^\s*(?:mkdir\s[^;&]*(?:&&|;)\s*)?(?:cat|tee)\b/.test(body)) {
     return `Write ${basename(heredoc[1])}`;
   }
-  return firstLine(body);
+  const lines = body.split("\n").map((part) => part.trim()).filter(Boolean);
+  // An inline script (`python3 - <<EOF`, `python3 -c "`) says nothing on its
+  // first line; show the interpreter and the first line of the script.
+  const inline = lines[0]?.match(/^(.*?\b(?:python3?|node|bash|sh|ruby)\b)\s+(?:-\s*<<-?\s*['"]?\w+['"]?|-[ce]\s+["']?)$/);
+  if (inline && lines[1]) return `${inline[1]}: ${lines[1]}`;
+  return lines[0] ?? "";
 }
 
 type Action = { label: string; fold?: string };
@@ -61,9 +72,12 @@ type Action = { label: string; fold?: string };
 function describeAction(item: Extract<GroupedAgentEvent, { kind: "tool" }>): Action | null {
   const parsed = parseToolMessage(item.call.message);
   if (!parsed) return { label: firstLine(item.call.message) };
-  const { name, args } = parsed;
+  const { name, args, body } = parsed;
   if (PLAN_TOOLS.has(name)) return null; // the plan section shows these
-  const str = (key: string) => (args && typeof args[key] === "string" ? (args[key] as string) : null);
+  // Long inputs are clipped at the event cap mid-JSON (args === null); the
+  // leading fields are still recoverable.
+  const str = (key: string) =>
+    args ? (typeof args[key] === "string" ? (args[key] as string) : null) : extractJsonStringField(body, key);
   const file = str("file_path") ?? str("path") ?? str("notebook_path");
   if (EXPLORE_TOOLS.has(name)) {
     const target = file ? basename(file) : str("pattern");
@@ -84,7 +98,7 @@ function describeAction(item: Extract<GroupedAgentEvent, { kind: "tool" }>): Act
   if (name === "WebFetch") return { label: `Fetch ${str("url") ?? ""}`.trim() };
   const detail = str("description") ?? str("title") ?? str("text") ?? str("query");
   const display = toolDisplayName(name);
-  return { label: detail ? `${display}: ${firstLine(detail)}` : display };
+  return { label: detail ? `${display}: ${proseLine(detail)}` : display };
 }
 
 export function buildTrajectoryOutline(events: AiRunEventView[], isRunning: boolean): TrajectoryEntry[] {
@@ -124,7 +138,7 @@ export function buildTrajectoryOutline(events: AiRunEventView[], isRunning: bool
     }
     if (item.kind !== "message") return; // steps and system notes are plumbing
     fold = null;
-    const label = truncate(firstLine(item.event.message) || "(empty)", 110);
+    const label = truncate(proseLine(item.event.message) || "(empty)", 110);
     const kind =
       item.role === "user" ? "prompt" : item.role === "error" ? "error" : idx === finalReplyIdx ? "reply" : "agent";
     const previous = entries[entries.length - 1];

@@ -51,4 +51,6 @@ test("shell commands are summarized by what they do", () => {
   assert.equal(describeShellCommand("cd /workspace/results; python3 analyze.py"), "python3 analyze.py");
   assert.equal(describeShellCommand("mkdir -p out && cat > out/tasks.py <<'EOF'\nx\nEOF\npython out/tasks.py"), "Write tasks.py");
   assert.equal(describeShellCommand("sleep 240; cat log.txt"), "sleep 240; cat log.txt");
+  assert.equal(describeShellCommand("cd results; python3 - <<'EOF'\nimport json\nEOF"), "python3: import json");
+  assert.equal(describeShellCommand('python3 -c "\nprint(raw_ablation)\n"'), "python3: print(raw_ablation)");
 });

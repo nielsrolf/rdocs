@@ -339,8 +339,12 @@ export type RunUsageSummary = {
 // aggregates the runs that are still writing usage rows.
 const USAGE_CACHE_KEY = Symbol.for("gdocs.runUsageSummaryCache");
 const USAGE_CACHE_LIMIT = 500;
-function usageCache(): Map<string, RunUsageSummary | null> {
-  const store = globalThis as unknown as Record<symbol, Map<string, RunUsageSummary | null> | undefined>;
+// A live run is re-aggregated at most this often (the scan is ~0.5s for 15k
+// usage rows — far too much for every 2s poll of every viewer).
+const LIVE_USAGE_TTL_MS = 20_000;
+type UsageCacheEntry = { summary: RunUsageSummary | null; settled: boolean; at: number };
+function usageCache(): Map<string, UsageCacheEntry> {
+  const store = globalThis as unknown as Record<symbol, Map<string, UsageCacheEntry> | undefined>;
   return (store[USAGE_CACHE_KEY] ??= new Map());
 }
 
@@ -357,9 +361,10 @@ export async function summarizeRunUsage(
   const result = new Map<string, RunUsageSummary>();
   const pending: string[] = [];
   for (const id of runIds) {
-    if (settledRunIds.has(id) && cache.has(id)) {
-      const hit = cache.get(id);
-      if (hit) result.set(id, hit);
+    const hit = cache.get(id);
+    // A total cached while the run was live is stale once the run settles.
+    if (hit && (hit.settled || (!settledRunIds.has(id) && Date.now() - hit.at < LIVE_USAGE_TTL_MS))) {
+      if (hit.summary) result.set(id, hit.summary);
     } else {
       pending.push(id);
     }
@@ -406,9 +411,9 @@ export async function summarizeRunUsage(
     result.set(row.aiRunId, summary);
   }
   for (const id of pending) {
-    if (!settledRunIds.has(id)) continue;
+    cache.delete(id);
     if (cache.size >= USAGE_CACHE_LIMIT) cache.delete(cache.keys().next().value as string);
-    cache.set(id, result.get(id) ?? null);
+    cache.set(id, { summary: result.get(id) ?? null, settled: settledRunIds.has(id), at: Date.now() });
   }
   return result;
 }
