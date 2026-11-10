@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 
 import { removeRunContainers, type ContainerCleanupOptions } from "@/lib/agent-runner/container-cleanup";
 import { revokeBrokerKeysForRun } from "@/lib/credential-broker";
@@ -317,6 +317,102 @@ export const AI_RUN_LIST_LIMIT = 200;
 export const AI_RUN_EVENT_RUNS = 12;
 export const AI_RUN_EVENT_WINDOW = 80;
 
+// The credential broker records one `[usage] {...}` system event per brokered
+// model call (lib/credential-broker/proxy.ts). They are accounting, not
+// timeline: a run whose own code makes thousands of LLM calls writes thousands
+// of them, and they used to fill the whole event window — the agent view then
+// showed no prompt and no tool calls at all. Every timeline query filters them
+// out with this clause; `summarizeRunUsage` returns them as totals instead.
+export const USAGE_EVENT_PREFIX = "[usage] ";
+export const TIMELINE_EVENT_WHERE = { NOT: { message: { startsWith: USAGE_EVENT_PREFIX } } } as const;
+
+export type RunUsageSummary = {
+  calls: number;
+  /** null when no call reported a cost (e.g. direct Anthropic/OAuth). */
+  costUsd: number | null;
+  inputTokens: number;
+  outputTokens: number;
+  models: Array<{ model: string; calls: number; costUsd: number | null; inputTokens: number; outputTokens: number }>;
+};
+
+// Totals of finished runs never change again; cache them so the 2s poll only
+// aggregates the runs that are still writing usage rows.
+const USAGE_CACHE_KEY = Symbol.for("gdocs.runUsageSummaryCache");
+const USAGE_CACHE_LIMIT = 500;
+function usageCache(): Map<string, RunUsageSummary | null> {
+  const store = globalThis as unknown as Record<symbol, Map<string, RunUsageSummary | null> | undefined>;
+  return (store[USAGE_CACHE_KEY] ??= new Map());
+}
+
+/**
+ * Per-run totals of the brokered usage events, grouped by model. Aggregated in
+ * SQLite (json_extract) so thousands of rows never leave the database.
+ * `settledRunIds` are runs in a terminal state whose totals may be cached.
+ */
+export async function summarizeRunUsage(
+  runIds: string[],
+  settledRunIds: ReadonlySet<string> = new Set()
+): Promise<Map<string, RunUsageSummary>> {
+  const cache = usageCache();
+  const result = new Map<string, RunUsageSummary>();
+  const pending: string[] = [];
+  for (const id of runIds) {
+    if (settledRunIds.has(id) && cache.has(id)) {
+      const hit = cache.get(id);
+      if (hit) result.set(id, hit);
+    } else {
+      pending.push(id);
+    }
+  }
+  if (pending.length === 0) return result;
+
+  type Row = { aiRunId: string; model: string | null; calls: bigint | number; cost: number | null; inputTokens: number | null; outputTokens: number | null };
+  let rows: Row[] = [];
+  try {
+    const offset = USAGE_EVENT_PREFIX.length + 1;
+    rows = await db.$queryRaw<Row[]>(Prisma.sql`
+      SELECT "aiRunId",
+             json_extract(substr("message", ${offset}), '$.model') AS model,
+             count(*) AS calls,
+             sum(json_extract(substr("message", ${offset}), '$.costUsd')) AS cost,
+             sum(json_extract(substr("message", ${offset}), '$.inputTokens')) AS inputTokens,
+             sum(json_extract(substr("message", ${offset}), '$.outputTokens')) AS outputTokens
+      FROM "AiRunEvent"
+      WHERE "aiRunId" IN (${Prisma.join(pending)})
+        AND "message" LIKE ${`${USAGE_EVENT_PREFIX}%`}
+        AND json_valid(substr("message", ${offset}))
+      GROUP BY 1, 2
+      ORDER BY calls DESC`);
+  } catch (error) {
+    console.warn("[ai-runs] usage summary failed", { error: String(error) });
+    return result;
+  }
+
+  for (const row of rows) {
+    const summary = result.get(row.aiRunId) ?? { calls: 0, costUsd: null, inputTokens: 0, outputTokens: 0, models: [] };
+    const calls = Number(row.calls);
+    const cost = typeof row.cost === "number" ? row.cost : null;
+    summary.calls += calls;
+    if (cost !== null) summary.costUsd = (summary.costUsd ?? 0) + cost;
+    summary.inputTokens += Number(row.inputTokens ?? 0);
+    summary.outputTokens += Number(row.outputTokens ?? 0);
+    summary.models.push({
+      model: row.model ?? "unknown",
+      calls,
+      costUsd: cost,
+      inputTokens: Number(row.inputTokens ?? 0),
+      outputTokens: Number(row.outputTokens ?? 0)
+    });
+    result.set(row.aiRunId, summary);
+  }
+  for (const id of pending) {
+    if (!settledRunIds.has(id)) continue;
+    if (cache.size >= USAGE_CACHE_LIMIT) cache.delete(cache.keys().next().value as string);
+    cache.set(id, result.get(id) ?? null);
+  }
+  return result;
+}
+
 // Cap on the ?run= deep-link parent walk below — a corrupt parent chain
 // (cycle, absurd depth) degrades to the deepest run reached, never loops.
 const ROOT_RUN_WALK_LIMIT = 50;
@@ -382,8 +478,9 @@ export async function fetchDocumentAiRuns(documentId: string) {
       take: AI_RUN_EVENT_RUNS,
       select: {
         ...runSelect,
-        _count: { select: { events: true } },
+        _count: { select: { events: { where: TIMELINE_EVENT_WHERE } } },
         events: {
+          where: TIMELINE_EVENT_WHERE,
           // Newest N, then flipped back to chronological below — asc+take would
           // pin the window to a long run's FIRST N events and freeze the timeline.
           orderBy: [{ createdAt: "desc" as const }, { id: "desc" as const }],
@@ -410,9 +507,15 @@ export async function fetchDocumentAiRuns(documentId: string) {
     })
   ]);
 
+  const settled = new Set(
+    recentRuns.filter((run) => run.status !== "RUNNING" && run.status !== "PENDING").map((run) => run.id)
+  );
+  const usage = await summarizeRunUsage(recentRuns.map((run) => run.id), settled);
+
   return [
     ...recentRuns.map(({ _count, ...run }) => ({
       ...run,
+      usage: usage.get(run.id) ?? null,
       agentComments: parseAgentComments(run.agentComments),
       events: [...run.events].reverse(),
       eventsOmitted: false,
@@ -423,6 +526,7 @@ export async function fetchDocumentAiRuns(documentId: string) {
     })),
     ...olderRuns.map((run) => ({
       ...run,
+      usage: null as RunUsageSummary | null,
       agentComments: parseAgentComments(run.agentComments),
       events: [] as Array<{ id: string; role: string; message: string; createdAt: Date }>,
       eventsOmitted: true,

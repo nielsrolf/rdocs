@@ -344,3 +344,41 @@ test("extractJsonStringField decodes escapes and stops at closing quote", () => 
   assert.equal(extractJsonStringField(text, "content"), 'a\nb"c');
   assert.equal(extractJsonStringField(text, "missing"), null);
 });
+
+// Regression (2026-11-10): a long-running Bash call is followed by a
+// task_started echo of its command (role system) and "Using Bash." heartbeats
+// every 30s BEFORE its result arrives. Pairing a result only with the event
+// directly before it orphaned the result (dropped) and rendered a bogus extra
+// "Using Bash" row — exactly the calls one most wants to inspect lost output.
+test("a tool result finds its call across heartbeats and the background-task echo", () => {
+  const command = "cat > run_eval.py <<'EOF'\nprint(1)\nEOF\npython run_eval.py";
+  const grouped = groupAgentEvents([
+    ev("tool", `Bash: ${JSON.stringify({ command })}`),
+    ev("system", command),
+    ev("tool", "Using Bash."),
+    ev("tool", "Using Bash."),
+    ev("tool_result", '{"stdout":"done","stderr":""}'),
+    ev("agent", "Finished the eval.")
+  ]);
+  assert.deepEqual(grouped.map((item) => item.kind), ["tool", "message"]);
+  const tool = grouped[0];
+  assert.ok(tool.kind === "tool");
+  assert.match(tool.call.message, /^Bash: /);
+  assert.match(tool.result?.message ?? "", /done/);
+});
+
+test("parallel tool calls each get their own result, in order", () => {
+  const grouped = groupAgentEvents([
+    ev("tool", 'Read: {"file_path":"/a"}'),
+    ev("tool", 'Read: {"file_path":"/b"}'),
+    ev("tool_result", "content of a"),
+    ev("tool_result", "content of b")
+  ]);
+  assert.deepEqual(
+    grouped.map((item) => (item.kind === "tool" ? [item.call.message, item.result?.message] : null)),
+    [
+      ['Read: {"file_path":"/a"}', "content of a"],
+      ['Read: {"file_path":"/b"}', "content of b"]
+    ]
+  );
+});

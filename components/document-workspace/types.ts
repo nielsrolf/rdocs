@@ -168,6 +168,14 @@ export type AiRunEventView = {
   createdAt: string | Date;
 };
 
+export type RunUsageView = {
+  calls: number;
+  costUsd: number | null;
+  inputTokens: number;
+  outputTokens: number;
+  models: Array<{ model: string; calls: number; costUsd: number | null; inputTokens: number; outputTokens: number }>;
+};
+
 export type ActiveAiRunView = {
   id: string;
   triggerType: string;
@@ -191,6 +199,8 @@ export type ActiveAiRunView = {
   /** Comments the agent has left so far ({threadId, findText}); grows mid-run. */
   agentComments?: Array<{ threadId: string; findText: string }>;
   events?: AiRunEventView[];
+  /** Totals of the run's brokered model calls (its own and those of code it ran). */
+  usage?: RunUsageView | null;
   /** True when the poll dropped this run's events (older run) — the panel lazy-loads them from the run-detail route. */
   eventsOmitted?: boolean;
   /** True when the run outgrew the poll's per-run event window — its EARLIEST events are missing; the panel lazy-loads the full timeline and merges. */

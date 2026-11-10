@@ -1243,7 +1243,7 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 .agent-plan {
   grid-row: 2;
   grid-column: 2;
-  width: 15rem;
+  width: 17rem;
   min-height: 0;
   overflow-y: auto;
   padding: 0.9rem 0.75rem 1.5rem;
@@ -1253,6 +1253,255 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 
 .agent-plan-collapsed {
   width: auto;
+}
+
+.agent-plan-section + .agent-plan-section {
+  margin-top: 0.9rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--border);
+}
+
+.agent-plan-section-title {
+  margin: 0 0 0.3rem;
+  padding: 0 0.4rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* --- Trajectory outline: messages are headings, tool work hangs below --- */
+
+.agent-trajectory-item {
+  padding: 0.16rem 0.4rem;
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+
+.agent-trajectory-item .agent-plan-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-trajectory-action {
+  padding-left: 1rem;
+}
+
+.agent-trajectory-prompt,
+.agent-trajectory-agent,
+.agent-trajectory-reply,
+.agent-trajectory-error {
+  margin-top: 0.35rem;
+  color: var(--foreground);
+  font-size: 0.78rem;
+}
+
+.agent-trajectory-prompt .agent-plan-text,
+.agent-trajectory-agent .agent-plan-text,
+.agent-trajectory-reply .agent-plan-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+}
+
+.agent-trajectory-prompt {
+  font-weight: 600;
+}
+
+.agent-trajectory-prompt .agent-plan-mark,
+.agent-trajectory-agent .agent-plan-mark {
+  color: #7555cc;
+}
+
+.agent-trajectory-reply .agent-plan-mark {
+  color: #3f9d5f;
+}
+
+.agent-trajectory-error,
+.agent-trajectory-failed,
+.agent-trajectory-error .agent-plan-mark,
+.agent-trajectory-failed .agent-plan-mark {
+  color: var(--danger);
+}
+
+.agent-trajectory-hint {
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  opacity: 0.8;
+}
+
+.agent-trajectory-item-active {
+  background: rgba(117, 85, 204, 0.12);
+  box-shadow: inset 2px 0 0 #7555cc;
+}
+
+/* --- Collapsed system notes --- */
+
+.agent-notes {
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.agent-notes > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.12rem 0.5rem;
+  list-style: none;
+  cursor: pointer;
+}
+
+.agent-notes > summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-notes[open] > summary .agent-tool-caret {
+  transform: rotate(90deg);
+}
+
+.agent-notes-plain > summary {
+  cursor: default;
+}
+
+.agent-notes-plain .agent-tool-caret {
+  visibility: hidden;
+}
+
+.agent-notes-first {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-notes[open] .agent-notes-first,
+.agent-notes[open] .agent-notes-more {
+  display: none;
+}
+
+.agent-notes[open] > summary::after {
+  content: "System notes";
+}
+
+.agent-notes-more {
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.agent-notes-body {
+  padding: 0.1rem 0.5rem 0.3rem 1.85rem;
+}
+
+.agent-notes-body p {
+  margin: 0.25rem 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.agent-timeline > .agent-notes + .agent-step,
+.agent-timeline > .agent-step + .agent-notes,
+.agent-timeline > .agent-step + .agent-tool,
+.agent-timeline > .agent-notes + .agent-tool {
+  margin-top: -0.6rem;
+}
+
+/* --- Tool row extras: failure flag, wall-clock time --- */
+
+.agent-tool-failed > summary .agent-tool-name {
+  color: var(--danger);
+}
+
+.agent-tool-failed-chip {
+  flex: 0 0 auto;
+  font-size: 0.66rem;
+  font-weight: 600;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  color: var(--danger);
+  background: rgba(197, 34, 31, 0.1);
+}
+
+.agent-tool-duration {
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.agent-timeline > .agent-jump-latest {
+  position: sticky;
+  bottom: 0.25rem;
+  width: auto;
+  align-self: center;
+  margin-inline: auto;
+  padding: 0.3rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-strong);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+/* --- Model-call usage chip in the conversation header --- */
+
+.agent-usage {
+  position: relative;
+}
+
+.agent-usage > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(117, 85, 204, 0.1);
+  white-space: nowrap;
+}
+
+.agent-usage > summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-usage-table {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.35rem);
+  z-index: 20;
+  border-collapse: collapse;
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14);
+  font-size: 0.74rem;
+  white-space: nowrap;
+}
+
+.agent-usage-table th,
+.agent-usage-table td {
+  padding: 0.3rem 0.6rem;
+  text-align: right;
+}
+
+.agent-usage-table th:first-child,
+.agent-usage-table td:first-child {
+  text-align: left;
+}
+
+.agent-usage-table th {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
 }
 
 .agent-plan-header {

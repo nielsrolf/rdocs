@@ -84,3 +84,53 @@ test("the run list keeps old conversations visible, with events inline only for 
     await db.user.delete({ where: { id: user.id } }).catch(() => null);
   }
 });
+
+// Regression (2026-11-10): the credential broker records one `[usage] {...}`
+// event per brokered model call. A run whose own code makes thousands of LLM
+// calls (an eval) wrote ~9,700 of them, which filled the poll's newest-80
+// window AND the detail route's cap — the agent view showed nothing but usage
+// lines: no prompt, no tool calls, no results. Usage rows are accounting, not
+// timeline; they must never occupy the event window, and come back summarized.
+test("brokered usage events never crowd the prompt and tool calls out of the timeline", async () => {
+  const { user, document, runIds } = await makeDocWithRuns(1);
+  const runId = runIds[0];
+  try {
+    await db.aiRunEvent.deleteMany({ where: { aiRunId: runId } });
+    const t0 = Date.now() - 60_000;
+    await db.aiRunEvent.createMany({
+      data: [
+        { aiRunId: runId, role: "user", message: "Run the eval.", createdAt: new Date(t0) },
+        { aiRunId: runId, role: "tool", message: 'Bash: {"command":"python run_eval.py"}', createdAt: new Date(t0 + 1) },
+        ...Array.from({ length: 300 }, (_, i) => ({
+          aiRunId: runId,
+          role: "system",
+          message: `[usage] ${JSON.stringify({
+            requestId: `r${i}`, provider: "litellm", costUsd: 0.0001, model: i % 3 === 0 ? "model-b" : "model-a",
+            inputTokens: 10, outputTokens: 2, cachedInputTokens: 0, cacheWriteTokens: 0, complete: true
+          })}`,
+          createdAt: new Date(t0 + 10 + i)
+        }))
+      ]
+    });
+
+    const [run] = await fetchDocumentAiRuns(document.id);
+    assert.deepEqual(
+      run.events.map((event) => event.role),
+      ["user", "tool"],
+      "the prompt and the tool call are in the window; usage rows are not"
+    );
+    assert.equal(run.eventsClipped, false, "usage rows do not count toward the window");
+    assert.ok(run.usage, "usage comes back as a summary");
+    assert.equal(run.usage.calls, 300);
+    assert.equal(run.usage.inputTokens, 3000);
+    assert.equal(run.usage.outputTokens, 600);
+    assert.ok(Math.abs((run.usage.costUsd ?? 0) - 0.03) < 1e-9);
+    assert.deepEqual(
+      run.usage.models.map((entry) => [entry.model, entry.calls]),
+      [["model-a", 200], ["model-b", 100]]
+    );
+  } finally {
+    await db.document.delete({ where: { id: document.id } }).catch(() => null);
+    await db.user.delete({ where: { id: user.id } }).catch(() => null);
+  }
+});

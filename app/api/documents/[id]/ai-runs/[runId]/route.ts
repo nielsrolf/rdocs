@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { jsonError, requireDocumentAccess, type RouteContext } from "@/lib/api-helpers";
 import { cancelAiRun } from "@/lib/agent-runner/run-registry";
+import { summarizeRunUsage, TIMELINE_EVENT_WHERE } from "@/lib/ai-runs";
 import { db } from "@/lib/db";
 import { canComment, canEdit } from "@/lib/permissions";
 
@@ -72,7 +73,10 @@ export async function GET(request: Request, { params }: RouteContext<RunRoutePar
       // (`eventsClipped`) and omits events on older runs (`eventsOmitted`);
       // the agent panel lazy-loads complete timelines from here, so this
       // route must not apply the poll's per-run window.
+      // Brokered `[usage]` rows are excluded (they once filled this whole cap,
+      // hiding the prompt and every tool call) and returned as `usage` totals.
       events: {
+        where: TIMELINE_EVENT_WHERE,
         orderBy: [{ createdAt: "desc" as const }, { id: "desc" as const }],
         take: AI_RUN_DETAIL_EVENT_CAP,
         select: {
@@ -101,9 +105,13 @@ export async function GET(request: Request, { params }: RouteContext<RunRoutePar
   // client anchors each one as soon as it appears.
   const agentComments = parseJsonArray<{ threadId: string; findText: string }>(run.agentComments);
 
+  const settled = run.status === "RUNNING" || run.status === "PENDING" ? [] : [run.id];
+  const usage = (await summarizeRunUsage([run.id], new Set(settled))).get(run.id) ?? null;
+
   return NextResponse.json({
     aiRun: {
       id: run.id,
+      usage,
       documentId: run.documentId,
       triggerType: run.triggerType,
       triggerId: run.triggerId,

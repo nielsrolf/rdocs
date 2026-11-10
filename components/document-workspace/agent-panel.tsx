@@ -288,6 +288,65 @@ function parseScheduledFiring(instruction: string): { title: string; id: string;
   return { title: match[1], id: match[2], body: instruction.slice(match[0].length) };
 }
 
+function formatTokens(value: number): string {
+  if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
+  if (value >= 1e3) return `${Math.round(value / 1e3)}k`;
+  return String(value);
+}
+
+function formatUsd(value: number): string {
+  return value >= 1 ? `$${value.toFixed(2)}` : value >= 0.01 ? `$${value.toFixed(3)}` : `$${value.toFixed(4)}`;
+}
+
+/**
+ * Model calls of the conversation — the agent's own and those made by code it
+ * ran through the credential broker — as one chip, with a per-model breakdown
+ * on click. These used to be thousands of raw `[usage]` lines in the timeline.
+ */
+function RunUsageChip({ runs }: { runs: ActiveAiRunView[] }) {
+  const byModel = new Map<string, { calls: number; costUsd: number | null; inputTokens: number; outputTokens: number }>();
+  let calls = 0;
+  let cost: number | null = null;
+  for (const run of runs) {
+    if (!run.usage) continue;
+    calls += run.usage.calls;
+    if (run.usage.costUsd !== null) cost = (cost ?? 0) + run.usage.costUsd;
+    for (const entry of run.usage.models) {
+      const current = byModel.get(entry.model) ?? { calls: 0, costUsd: null, inputTokens: 0, outputTokens: 0 };
+      current.calls += entry.calls;
+      if (entry.costUsd !== null) current.costUsd = (current.costUsd ?? 0) + entry.costUsd;
+      current.inputTokens += entry.inputTokens;
+      current.outputTokens += entry.outputTokens;
+      byModel.set(entry.model, current);
+    }
+  }
+  if (calls === 0) return null;
+  return (
+    <details className="agent-usage">
+      <summary title="Model calls made through the credential broker">
+        {calls.toLocaleString()} model {calls === 1 ? "call" : "calls"}
+        {cost !== null ? ` · ${formatUsd(cost)}` : ""}
+      </summary>
+      <table className="agent-usage-table">
+        <thead>
+          <tr><th>Model</th><th>Calls</th><th>In</th><th>Out</th><th>Cost</th></tr>
+        </thead>
+        <tbody>
+          {[...byModel.entries()].map(([model, entry]) => (
+            <tr key={model}>
+              <td>{model}</td>
+              <td>{entry.calls.toLocaleString()}</td>
+              <td>{formatTokens(entry.inputTokens)}</td>
+              <td>{formatTokens(entry.outputTokens)}</td>
+              <td>{entry.costUsd !== null ? formatUsd(entry.costUsd) : "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </details>
+  );
+}
+
 type ComposeMode = "selected" | "new";
 
 type AgentConversationOptions = {
@@ -838,6 +897,7 @@ export function AgentPanel({
                       {stoppingRunId === selectedConversation.latestRun.id ? "Stopping…" : "◼ Stop"}
                     </button>
                   ) : null}
+                  <RunUsageChip runs={selectedConversation.runs} />
                   {selectedConversation.branchName ? (
                     <span><span className="agent-meta-label">branch</span> {selectedConversation.branchName}</span>
                   ) : null}
@@ -880,7 +940,7 @@ export function AgentPanel({
                 }
               />
 
-              <AgentTodoOutline events={selectedConversation.events} />
+              <AgentTodoOutline events={selectedConversation.events} isRunning={selectedIsRunning} />
 
               {canWriteComments ? (
                 (() => {

@@ -169,6 +169,7 @@ import {
   type ActiveAiRunView,
   type AiEditImage,
   type AiRunEventView,
+  type RunUsageView,
   type AiEditWidget,
   type CommentTagFilterValue,
   type DocumentWorkspaceProps,
@@ -433,6 +434,9 @@ export function DocumentWorkspace({
   // 2s poll (which never carries the missing events) can't clobber them.
   const [archivedRunEvents, setArchivedRunEvents] = useState<Record<string, AiRunEventView[]>>({});
   const archivedRunEventsRequestedRef = useRef<Set<string>>(new Set());
+  // Usage totals of older runs arrive with the same lazy fetch (the poll only
+  // aggregates the recent runs); written right before the events state update.
+  const archivedRunUsageRef = useRef<Record<string, RunUsageView>>({});
   const [composeMode, setComposeMode] = useState<"selected" | "new">("selected");
   const [agentMessage, setAgentMessage] = useState("");
   const [agentBusy, setAgentBusy] = useState(false);
@@ -4070,7 +4074,7 @@ export function DocumentWorkspace({
       const archived = archivedRunEvents[run.id];
       if (!archived) return run;
       if (run.eventsOmitted) {
-        return { ...run, events: archived, eventsOmitted: false };
+        return { ...run, events: archived, eventsOmitted: false, usage: archivedRunUsageRef.current[run.id] ?? run.usage };
       }
       if (run.eventsClipped) {
         return {
@@ -4110,6 +4114,7 @@ export function DocumentWorkspace({
         .then((data) => {
           const events = data?.aiRun?.events;
           if (Array.isArray(events)) {
+            if (data.aiRun.usage) archivedRunUsageRef.current[run.id] = data.aiRun.usage;
             setArchivedRunEvents((previous) => ({ ...previous, [run.id]: events }));
           } else {
             archivedRunEventsRequestedRef.current.delete(run.id);
