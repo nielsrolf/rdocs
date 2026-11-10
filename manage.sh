@@ -16,7 +16,16 @@ LB_PORT=14141
 BLUE_PORT=14142
 GREEN_PORT=14143
 
-listeners() { lsof -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null || true; }
+# ss-based helpers shared with deploy.sh. NOT lsof: on this host it silently
+# omits the listeners (docker netns), so `status` reported every port "down"
+# and `stop` killed nothing.
+# shellcheck disable=SC1091
+. ./deploy/port-listeners.sh
+listeners() {
+    # /api/health names the app's pid when ss cannot; on the LB port that
+    # endpoint is answered by the app behind Caddy, so never use it there.
+    if [ "$1" = "$LB_PORT" ]; then port_listeners "$1"; else app_port_listeners "$1"; fi
+}
 
 health() { curl -sf --max-time 5 "http://localhost:$LB_PORT/api/health" 2>/dev/null || true; }
 

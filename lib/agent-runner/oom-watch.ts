@@ -55,13 +55,40 @@ export async function wasOomKilled(containerName: string, waitMs = 3000): Promis
   }
 }
 
+// $@ = the runtime command. fd 3 keeps our stdin for the EOF watcher (a
+// background job's stdin is /dev/null unless redirected explicitly).
+const WATCH_WRAPPER = [
+  'exec 3<&0',
+  '"$@" </dev/null &',
+  'runtime=$!',
+  '{ cat >/dev/null; kill "$runtime"; } <&3 >/dev/null 2>&1 &',
+  'watcher=$!',
+  'exec 3<&-',
+  'wait "$runtime"',
+  'pkill -P "$watcher" 2>/dev/null; kill "$watcher" 2>/dev/null',
+  'exit 0'
+].join("\n");
+
 /** Start the `docker events` listener once per process. Restarts if it exits. */
 export function startOomWatch(runtime = process.env.AGENT_CONTAINER_RUNTIME || "docker") {
   const s = state();
   if (s.child || s.restartTimer) return;
-  const child = spawn(runtime, ["events", "--filter", "event=oom", "--format", "{{.Actor.Attributes.name}}"], {
-    stdio: ["ignore", "pipe", "ignore"]
+  // The watcher must die with this process, however it ends. `docker events`
+  // by itself does not: it only notices its closed stdout when it next writes,
+  // and OOM events are rare, so every replaced server and every finished job
+  // script left one behind (2026-11-10: eleven on the host, two of them
+  // pinning the systemd scopes of long-gone app colors). The wrapper holds our
+  // stdin pipe: the kernel closes it when we exit — SIGKILL included — `cat`
+  // sees EOF and the wrapper kills the runtime. If the runtime exits first,
+  // the wrapper exits too and the restart below fires.
+  const child = spawn("sh", ["-c", WATCH_WRAPPER, "oom-watch", runtime, "events", "--filter", "event=oom", "--format", "{{.Actor.Attributes.name}}"], {
+    stdio: ["pipe", "pipe", "ignore"]
   });
+  child.stdin?.on("error", () => {});
+  // Neither pipe may keep the event loop alive: a script that merely ran a
+  // container (scripts/run-agent-job.ts) has to be able to exit.
+  (child.stdin as unknown as { unref?: () => void } | null)?.unref?.();
+  (child.stdout as unknown as { unref?: () => void } | null)?.unref?.();
   s.child = child;
   let buffer = "";
   child.stdout?.on("data", (chunk: Buffer) => {

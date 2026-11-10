@@ -51,4 +51,6 @@ claudex.env
 dev-data/
 .next-dev
 .release-watch.lock
+.release-watch-failed
+.release-watch-note
 .agent-scratch/
