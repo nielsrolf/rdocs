@@ -23,6 +23,24 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 
+# The app spawns agent containers, so it needs the `docker` group. A caller
+# whose process predates the user's group membership does not have it — on
+# this host the user systemd manager (started before niels joined `docker`),
+# and therefore release-watch and everything it starts: every release deploy
+# produced an app whose agent runs failed with "permission denied while trying
+# to connect to the docker API" (2026-11-10). Group lists are fixed at login,
+# so re-exec the whole deploy under `sg docker`, which picks the membership up
+# from the group database.
+has_group() { tr ' ' '\n' | grep -qx docker; }
+if ! id -Gn | has_group; then
+  if [ -z "${RDOCS_DOCKER_GROUP_REEXEC:-}" ] && id -Gn "$(id -un)" | has_group && command -v sg >/dev/null 2>&1; then
+    echo "[deploy] this process lacks the docker group; re-executing under 'sg docker'"
+    export RDOCS_DOCKER_GROUP_REEXEC=1
+    exec sg docker -c "$(printf '%q ' "$ROOT/deploy/deploy.sh" "$@")"
+  fi
+  echo "[deploy] WARNING: no docker group access — agent container runs will fail on this build" >&2
+fi
+
 LB_PORT=14141
 BLUE_PORT=14142
 GREEN_PORT=14143
