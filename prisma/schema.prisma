@@ -818,6 +818,7 @@ model AiRun {
   comments           Comment[]
   versions           DocumentVersion[]
   events             AiRunEvent[]
+  outline            AiRunOutline?
   brokerKeys         AgentBrokerKey[]
 
   @@index([documentId, startedAt])
@@ -834,6 +835,23 @@ model AiRunEvent {
   aiRun     AiRun    @relation(fields: [aiRunId], references: [id], onDelete: Cascade)
 
   @@index([aiRunId, createdAt])
+}
+
+// The model-annotated outline of a run's timeline (lib/run-outline.ts): a few
+// high-level sections, each anchored to the event it starts at. Generated on
+// demand when someone opens the run, extended while the run is live.
+model AiRunOutline {
+  aiRunId        String   @id
+  // JSON: [{ startEventId, title }]
+  sections       String
+  // Last timeline event the sections cover; later events are not annotated yet.
+  coveredEventId String?
+  eventCount     Int      @default(0)
+  // Generated after the run ended and covering all of it: never regenerated.
+  final          Boolean  @default(false)
+  model          String?
+  updatedAt      DateTime @updatedAt
+  aiRun          AiRun    @relation(fields: [aiRunId], references: [id], onDelete: Cascade)
 }
 
 // A recurring or one-shot agent task scheduled from Slack (schedule_task

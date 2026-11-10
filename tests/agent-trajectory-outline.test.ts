@@ -54,3 +54,49 @@ test("shell commands are summarized by what they do", () => {
   assert.equal(describeShellCommand("cd results; python3 - <<'EOF'\nimport json\nEOF"), "python3: import json");
   assert.equal(describeShellCommand('python3 -c "\nprint(raw_ablation)\n"'), "python3: print(raw_ablation)");
 });
+
+test("outline markers: model sections where present, every prompt kept, tool tallies per stretch", async () => {
+  const { buildOutlineMarkers } = await import("../components/document-workspace/agent-todo-outline");
+  let n = 0;
+  const e = (role: string, message: string) => {
+    n += 1;
+    return { id: `m${n}`, role, message, createdAt: new Date(1_700_000_000_000 + n * 1000).toISOString() };
+  };
+  const events = [
+    e("user", "Run the eval"), // m1
+    e("tool", 'Bash: {"command":"pip install x"}'), // m2
+    e("tool_result", "Error: Exit code 1"),
+    e("tool", 'Bash: {"command":"pip install --user x"}'), // m4
+    e("tool_result", '{"stdout":"ok","stderr":""}'),
+    e("agent", "Installed."), // m6
+    e("tool", 'Write: {"file_path":"/w/run.py","content":"x"}'), // m7
+    e("tool_result", "ok"),
+    e("user", "Also plot it"), // m9
+    e("tool", 'Bash: {"command":"python plot.py"}'), // m10
+    e("tool_result", '{"stdout":"ok","stderr":""}'),
+    e("agent", "Done.") // m12
+  ];
+  // No model outline: the rule-based headings (messages), never one marker per tool call.
+  const fallback = buildOutlineMarkers(events, [], false);
+  assert.deepEqual(fallback.map((marker) => marker.anchorEventId), ["m1", "m6", "m9", "m12"]);
+  assert.deepEqual(fallback.map((marker) => [marker.toolCalls, marker.failed]), [[2, 1], [1, 0], [1, 0], [0, 0]]);
+
+  // Model sections replace the agent headings; a prompt they do not start at stays; unknown anchors are dropped.
+  const markers = buildOutlineMarkers(
+    events,
+    [
+      { startEventId: "m1", title: "Install dependencies" },
+      { startEventId: "m7", title: "Write the eval script" },
+      { startEventId: "gone", title: "Not loaded" }
+    ],
+    false
+  );
+  assert.deepEqual(
+    markers.map((marker) => [marker.kind, marker.title, marker.toolCalls, marker.failed]),
+    [
+      ["section", "Install dependencies", 2, 1],
+      ["section", "Write the eval script", 1, 0],
+      ["prompt", "Also plot it", 1, 0]
+    ]
+  );
+});

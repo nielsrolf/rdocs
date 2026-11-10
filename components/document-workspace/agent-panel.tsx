@@ -545,8 +545,8 @@ export function AgentPanel({
   return (
     <div className="agent-screen" role="region" aria-label="Agents">
       <header className="agent-screen-topbar">
-        <button className="agent-back-button" onClick={onClose} type="button">
-          ← Back to document
+        <button className="agent-back-button" onClick={onClose} title="Back to document" type="button">
+          ← Document
         </button>
         <div className="agent-screen-title">
           <span className="agent-screen-title-eyebrow">Agents</span>
@@ -568,7 +568,7 @@ export function AgentPanel({
           {canManageAutomation ? <DurableAppMenu documentId={documentId} isOwner={isOwner} /> : null}
           {canManageAutomation ? <SchedulesMenu documentId={documentId} documentKind={documentKind} /> : null}
           <label className="agent-config-field">
-            <span className="agent-config-label">Harness</span>
+            <span className="agent-config-label agent-config-label-hidden">Harness</span>
             <select
               className="agent-config-select"
               disabled={!canWriteDocument}
@@ -588,7 +588,7 @@ export function AgentPanel({
             </select>
           </label>
           <label className="agent-config-field">
-            <span className="agent-config-label">Model</span>
+            <span className="agent-config-label agent-config-label-hidden">Model</span>
             <select
               className="agent-config-select"
               disabled={!canWriteDocument}
@@ -739,7 +739,7 @@ export function AgentPanel({
           </label>
           {canWriteDocument ? (
             <label className="agent-config-field">
-              <span className="agent-config-label">Document changes</span>
+              <span className="agent-config-label">Edits</span>
               <select
                 className="agent-config-select"
                 onChange={(event) => onAgentEditModeChange(event.target.value as "suggest" | "edit")}
@@ -940,7 +940,13 @@ export function AgentPanel({
                 }
               />
 
-              <AgentTodoOutline events={selectedConversation.events} isRunning={selectedIsRunning} />
+              <AgentTodoOutline
+                documentId={documentId}
+                events={selectedConversation.events}
+                isRunning={selectedIsRunning}
+                runs={selectedConversation.runs}
+                shareToken={shareToken ?? null}
+              />
 
               {canWriteComments ? (
                 (() => {

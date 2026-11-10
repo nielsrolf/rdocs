@@ -6,12 +6,14 @@ import {
   extractJsonStringField,
   extractToolDiff,
   findFinalReplyIndex,
+  foldToolRuns,
   formatToolResult,
   groupAgentEvents,
   lifecycleStepLabel,
   parseToolMessage,
   parseToolResultData,
   slackMessageField,
+  summarizeToolRun,
   toolDisplayName
 } from "../components/document-workspace/agent-timeline";
 import { mergeRunEventTimelines } from "../components/document-workspace/conversations";
@@ -381,4 +383,51 @@ test("parallel tool calls each get their own result, in order", () => {
       ['Read: {"file_path":"/b"}', "content of b"]
     ]
   );
+});
+
+// Regression (2026-11-10): a Bash call whose command is a long heredoc is
+// stored clipped at the event cap, so its JSON does not parse. The row then
+// showed the raw `{ "command": "cat > …` text and could not be expanded — the
+// command was not inspectable at all.
+test("a tool call clipped mid-JSON still yields its arguments", () => {
+  const full = `Bash: ${JSON.stringify({ command: "cat > run_eval.py <<'EOF'\n\"\"\"Run all eval conditions.\"\"\"\nimport json", description: "Write the eval script" })}`;
+  const clipped = full.slice(0, full.indexOf("import json") + 6);
+  const parsed = parseToolMessage(clipped);
+  assert.equal(parsed?.name, "Bash");
+  assert.equal(parsed?.clipped, true);
+  assert.equal(parsed?.args?.command, "cat > run_eval.py <<'EOF'\n\"\"\"Run all eval conditions.\"\"\"\nimport");
+  // A complete call is not flagged.
+  assert.equal(parseToolMessage(full)?.clipped, false);
+  // The background-task echo of a clipped call is still recognised as an echo.
+  const grouped = groupAgentEvents([
+    ev("tool", clipped),
+    ev("system", "cat > run_eval.py <<'EOF'"),
+    ev("tool_result", '{"stdout":"","stderr":""}')
+  ]);
+  assert.deepEqual(grouped.map((item) => item.kind), ["tool"]);
+});
+
+test("consecutive tool calls fold into one run; messages and single calls stay", () => {
+  const grouped = groupAgentEvents([
+    ev("user", "Do the thing"),
+    ev("tool", 'Bash: {"command":"ls"}'),
+    ev("tool_result", '{"stdout":"a","stderr":""}'),
+    ev("tool", 'Bash: {"command":"false"}'),
+    ev("tool_result", "Error: Exit code 1"),
+    ev("tool", 'Write: {"file_path":"/w/a.py","content":"x"}'),
+    ev("tool_result", "ok"),
+    ev("agent", "Halfway."),
+    ev("tool", 'Read: {"file_path":"/w/a.py"}'),
+    ev("tool_result", "x"),
+    ev("agent", "Done.")
+  ]);
+  const folded = foldToolRuns(grouped);
+  assert.deepEqual(folded.map((item) => item.kind), ["message", "toolRun", "message", "tool", "message"]);
+  const run = folded[1];
+  assert.ok(run.kind === "toolRun");
+  assert.equal(run.items.length, 3);
+  const summary = summarizeToolRun(run.items);
+  assert.equal(summary.count, 3);
+  assert.equal(summary.failed, 1);
+  assert.equal(summary.breakdown, "Bash ×2, Write");
 });

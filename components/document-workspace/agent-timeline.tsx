@@ -1,66 +1,31 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { lifecycleStepLabel, SUBMIT_STEP_LABEL } from "@/agent-core/lifecycle-messages";
+import { lifecycleStepLabel } from "@/agent-core/lifecycle-messages";
 import { cn, truncate } from "@/lib/utils";
 
 import { MarkdownBody } from "./markdown";
+import {
+  extractJsonStringField,
+  findFinalReplyIndex,
+  foldToolRuns,
+  formatDuration,
+  groupAgentEvents,
+  parseToolMessage,
+  summarizeToolRun,
+  toolDisplayName,
+  toolDuration,
+  toolResultFailed,
+  unwrapToolResultText,
+  type ParsedToolCall,
+  type ToolItem
+} from "./timeline-model";
 import { normalizeTodoItem, todoStatusMark } from "./todo-outline";
 import type { AiRunEventView } from "./types";
+
+// The pure half of this module lives in timeline-model.ts; re-exported so
+// existing importers (and tests) keep their entry point.
+export * from "./timeline-model";
 import { basename, formatRelativeTime } from "./utils";
-
-export type ParsedToolCall = {
-  name: string;
-  args: Record<string, unknown> | null;
-  body: string;
-};
-
-export function parseToolMessage(message: string): ParsedToolCall | null {
-  const trimmed = message.trim();
-  const usingMatch = trimmed.match(/^Using\s+([A-Za-z][A-Za-z0-9_]*)\.?$/);
-  if (usingMatch) {
-    return { name: usingMatch[1], args: null, body: "" };
-  }
-  const colonIdx = trimmed.indexOf(": ");
-  if (colonIdx < 1 || colonIdx > 60) {
-    return null;
-  }
-  const name = trimmed.slice(0, colonIdx).trim();
-  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(name)) {
-    return null;
-  }
-  const body = trimmed.slice(colonIdx + 2).trim();
-  let args: Record<string, unknown> | null = null;
-  if (body.startsWith("{")) {
-    try {
-      const parsed = JSON.parse(body);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        args = parsed as Record<string, unknown>;
-      }
-    } catch {
-      args = null;
-    }
-  }
-  return { name, args, body };
-}
-
-export function isUsingProgressMessage(message: string): boolean {
-  return /^Using\s+[A-Za-z][A-Za-z0-9_]*\.?\s*$/.test(message.trim());
-}
-
-/**
- * Human-oriented tool label. MCP tools arrive as `mcp__server__tool_name`;
- * render them as `server: tool name` so "mcp__gdocs__post_slack_message"
- * reads as "gdocs: post slack message".
- */
-export function toolDisplayName(name: string): string {
-  if (name.startsWith("mcp__")) {
-    const parts = name.split("__");
-    const server = parts[1] || "mcp";
-    const tool = parts.slice(2).join("__").replace(/_/g, " ") || "tool";
-    return `${server}: ${tool}`;
-  }
-  return name;
-}
 
 /** file edits extracted from Edit / MultiEdit / Write tool inputs, for diff rendering. */
 export type ToolDiff = {
@@ -220,47 +185,6 @@ export function renderToolSummary(parsed: ParsedToolCall): ReactNode {
   return <code className="agent-tool-arg">{truncate(JSON.stringify(args), 80)}</code>;
 }
 
-/**
- * Pull the human-readable payload out of a content-block tool result:
- * `[{"tool_use_id":…,"type":"tool_result","content":"…"}]`. This is the shape
- * emitted for tool calls that arrive on the content-block path (subagents, and
- * the Task* tool family) — as opposed to the object-shaped `tool_use_result`.
- * Returns null when the message is not that shape.
- */
-export function unwrapToolResultText(message: string): string | null {
-  const trimmed = message.trim();
-  if (!trimmed.startsWith("[")) return null;
-  const stringOf = (value: unknown): string | null => {
-    if (typeof value === "string") return value;
-    if (Array.isArray(value)) {
-      const parts = value
-        .map((inner) =>
-          inner && typeof inner === "object" && typeof (inner as { text?: unknown }).text === "string"
-            ? (inner as { text: string }).text
-            : null
-        )
-        .filter((part): part is string => Boolean(part));
-      return parts.length ? parts.join("\n") : null;
-    }
-    return null;
-  };
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (!Array.isArray(parsed)) return null;
-    const parts = parsed
-      .map((block) => {
-        if (!block || typeof block !== "object") return null;
-        const record = block as Record<string, unknown>;
-        return stringOf(record.text) ?? stringOf(record.content);
-      })
-      .filter((part): part is string => Boolean(part));
-    return parts.length ? parts.join("\n") : null;
-  } catch {
-    // Clipped at the event cap mid-JSON — recover what was stored.
-    return extractJsonStringField(trimmed, "content") ?? extractJsonStringField(trimmed, "text");
-  }
-}
-
 export function formatToolResult(message: string): string {
   const trimmed = message.trim();
   if (!trimmed) {
@@ -290,49 +214,6 @@ function describeToolResult(resultText: string): string {
   }
   const lines = resultText.split("\n").length;
   return lines === 1 ? truncate(resultText, 40) : `${lines} lines`;
-}
-
-/**
- * Decode the JSON string value of `key` inside `text`, tolerating text that is
- * NOT valid JSON because the event was clipped at the storage cap mid-string.
- * Returns everything decoded up to the truncation point. This is what lets
- * historical runs (whose tool_use_result payloads were stored as possibly
- * truncated JSON) still render file views, diffs and terminal output.
- */
-export function extractJsonStringField(text: string, key: string): string | null {
-  const keyIdx = text.indexOf(`"${key}"`);
-  if (keyIdx === -1) return null;
-  let i = text.indexOf(":", keyIdx + key.length + 2);
-  if (i === -1) return null;
-  i++;
-  while (i < text.length && /\s/.test(text[i])) i++;
-  if (text[i] !== '"') return null;
-  i++;
-  let out = "";
-  while (i < text.length) {
-    const ch = text[i];
-    if (ch === '"') return out;
-    if (ch === "\\") {
-      const next = text[i + 1];
-      if (next === undefined) break;
-      if (next === "n") out += "\n";
-      else if (next === "t") out += "\t";
-      else if (next === "r") out += "\r";
-      else if (next === "u") {
-        const hex = text.slice(i + 2, i + 6);
-        if (!/^[0-9a-fA-F]{4}$/.test(hex)) break;
-        out += String.fromCharCode(parseInt(hex, 16));
-        i += 6;
-        continue;
-      } else out += next;
-      i += 2;
-      continue;
-    }
-    out += ch;
-    i++;
-  }
-  // Ran off the end: the stored event was clipped inside this string.
-  return out || null;
 }
 
 export type ToolResultData =
@@ -909,6 +790,9 @@ const AgentToolBlock = memo(
         </summary>
         {hasDetails ? (
           <div className="agent-tool-body">
+            {parsed?.clipped ? (
+              <div className="agent-tool-truncated">input clipped for the timeline: the beginning is shown</div>
+            ) : null}
             {customBody ?? (
               <>
                 {argsPretty ? (
@@ -938,142 +822,53 @@ const AgentToolBlock = memo(
     prev.running === next.running
 );
 
-export type GroupedAgentEvent =
-  | { kind: "message"; role: "user" | "agent" | "error"; event: AiRunEventView; key: string }
-  /** Consecutive system notes (worktree path, credential policy, …) — one collapsed row. */
-  | { kind: "notes"; events: AiRunEventView[]; event: AiRunEventView; key: string }
-  | { kind: "step"; label: string; event: AiRunEventView; key: string }
-  | { kind: "tool"; call: AiRunEventView; result: AiRunEventView | null; key: string };
-
-type ToolItem = Extract<GroupedAgentEvent, { kind: "tool" }>;
-
-function normalizeForEcho(text: string): string {
-  return text.replace(/…$/, "").replace(/\s+/g, " ").trim().slice(0, 80);
-}
-
-/** The SDK's `task_started` frame echoes the command (or description) of a
- * call that is still running as a `system` event — pure duplication. */
-function isEchoOfOpenCall(message: string, open: ToolItem[]): boolean {
-  const echo = normalizeForEcho(message);
-  if (!echo) return false;
-  return open.some((item) => {
-    const args = parseToolMessage(item.call.message)?.args;
-    if (!args) return false;
-    return [args.command, args.description, args.prompt].some(
-      (value) => typeof value === "string" && normalizeForEcho(value).startsWith(echo.slice(0, 60))
-    );
-  });
-}
-
-export function groupAgentEvents(events: AiRunEventView[]): GroupedAgentEvent[] {
-  const out: GroupedAgentEvent[] = [];
-  // Calls still waiting for their result, oldest first. A result is NOT always
-  // the next event: a long call is followed by "Using X." heartbeats and a
-  // background-task echo first, and parallel calls are emitted as call, call,
-  // result, result. Results therefore attach to the oldest open call.
-  let open: ToolItem[] = [];
-  let prevRaw: AiRunEventView | null = null;
-  for (let i = 0; i < events.length; i++) {
-    const ev = events[i];
-    // Exact consecutive duplicates (e.g. a submit retried after validation)
-    // add nothing but noise.
-    if (prevRaw && prevRaw.role === ev.role && prevRaw.message === ev.message) {
-      continue;
-    }
-    prevRaw = ev;
-    if (ev.role === "tool") {
-      if (isUsingProgressMessage(ev.message)) {
-        // Heartbeat of a call that is already on screen.
-        const name = parseToolMessage(ev.message)?.name;
-        if (open.some((item) => parseToolMessage(item.call.message)?.name === name)) continue;
-        // "Using Read." is a low-value progress signal — keep only when a richer
-        // "Read: {...}" event isn't right next to it.
-        const neighborHasDetails = [events[i - 1], events[i + 1]].some((neighbor) => {
-          if (!neighbor || neighbor.role !== "tool") return false;
-          if (isUsingProgressMessage(neighbor.message)) return false;
-          return true;
-        });
-        if (neighborHasDetails) continue;
-      }
-      const item: ToolItem = { kind: "tool", call: ev, result: null, key: ev.id };
-      out.push(item);
-      open.push(item);
-      continue;
-    }
-    if (ev.role === "tool_result") {
-      // Orphan tool_results (no open call) have no context — skip.
-      const target = open.shift();
-      if (target) target.result = ev;
-      continue;
-    }
-    if (!ev.message.trim()) continue;
-    if (ev.role === "system") {
-      if (isEchoOfOpenCall(ev.message, open)) continue;
-      const step = lifecycleStepLabel(ev.message);
-      if (step) {
-        out.push({ kind: "step", label: step, event: ev, key: ev.id });
-        continue;
-      }
-      const last = out[out.length - 1];
-      if (last?.kind === "notes") {
-        last.events.push(ev);
-      } else {
-        out.push({ kind: "notes", events: [ev], event: ev, key: ev.id });
-      }
-      continue;
-    }
-    // A new turn of prose means every earlier call has returned; a call still
-    // open here never got a result (cancelled, lost frame) and must not steal
-    // a later one.
-    open = [];
-    const role: "user" | "agent" | "error" = ev.role === "user" || ev.role === "error" ? ev.role : "agent";
-    out.push({ kind: "message", role, event: ev, key: ev.id });
-  }
-  return out;
-}
-
-/** A tool result that reports failure (non-zero exit, tool error). */
-export function toolResultFailed(result: AiRunEventView | null): boolean {
-  if (!result) return false;
-  const text = (unwrapToolResultText(result.message) ?? result.message).trimStart();
-  return /^(Error\b|<tool_use_error>)/.test(text) || /"is_error"\s*:\s*true/.test(result.message.slice(0, 400));
-}
-
-export function formatDuration(ms: number): string {
-  const seconds = Math.round(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
-  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
-}
-
-/** Wall-clock time of a call, when it took long enough to be worth showing. */
-export function toolDuration(call: AiRunEventView, result: AiRunEventView | null): string | null {
-  if (!result) return null;
-  const ms = new Date(result.createdAt).getTime() - new Date(call.createdAt).getTime();
-  return ms >= 5000 ? formatDuration(ms) : null;
-}
-
 /**
- * The agent's final reply is recorded as a plain `agent` event after the
- * submit lifecycle steps — indistinguishable from interim commentary without
- * this: the last agent message after the last "Submitting final response"
- * step (and after the last user message) is the submitted reply. Returns the
- * grouped index to badge, or -1 (e.g. while the run is still streaming).
+ * A run of consecutive tool calls, folded: "Ran 16 tool calls" with what they
+ * were, how many failed and how long they took. Collapsed by default — the
+ * prose around it carries the story; the calls are one click away.
  */
-export function findFinalReplyIndex(grouped: GroupedAgentEvent[], isRunning: boolean): number {
-  if (isRunning) return -1;
-  let lastSubmit = -1;
-  let lastUser = -1;
-  let lastAgent = -1;
-  for (let i = 0; i < grouped.length; i++) {
-    const item = grouped[i];
-    if (item.kind === "step" && item.label === SUBMIT_STEP_LABEL) lastSubmit = i;
-    if (item.kind === "message" && item.role === "user") lastUser = i;
-    if (item.kind === "message" && item.role === "agent") lastAgent = i;
-  }
-  if (lastSubmit === -1 || lastSubmit < lastUser) return -1;
-  return lastAgent > lastSubmit ? lastAgent : -1;
+function AgentToolRun({
+  documentId,
+  items,
+  live,
+  running
+}: {
+  documentId?: string;
+  items: ToolItem[];
+  /** The run is still growing (last item of a running conversation). */
+  live: boolean;
+  running: boolean;
+}) {
+  const summary = summarizeToolRun(items);
+  const latest = live ? parseToolMessage(items[items.length - 1].call.message) : null;
+  return (
+    <details className={cn("agent-tool-run", summary.failed > 0 && "agent-tool-run-failed")}>
+      <summary className="agent-tool-run-header">
+        <span className="agent-tool-caret" aria-hidden />
+        <span className="agent-tool-run-title">
+          {live ? "Running" : "Ran"} {summary.count} tool calls
+        </span>
+        <span className="agent-tool-run-breakdown">
+          {latest ? (
+            <>
+              <span className="agent-tool-run-now">now</span> {toolDisplayName(latest.name)} {renderToolSummary(latest)}
+            </>
+          ) : (
+            summary.breakdown
+          )}
+        </span>
+        {summary.failed > 0 ? <span className="agent-tool-failed-chip">{summary.failed} failed</span> : null}
+        {summary.durationMs !== null && summary.durationMs >= 5000 ? (
+          <span className="agent-tool-duration">{formatDuration(summary.durationMs)}</span>
+        ) : null}
+      </summary>
+      <div className="agent-tool-run-body">
+        {items.map((item) => (
+          <AgentToolBlock call={item.call} documentId={documentId} key={item.key} result={item.result} running={running} />
+        ))}
+      </div>
+    </details>
+  );
 }
 
 export function agentDisplayName(model: string | null | undefined): string {
@@ -1102,7 +897,11 @@ export function AgentTimeline({
 }) {
   const grouped = useMemo(() => groupAgentEvents(events), [events]);
   const isRunning = status === "RUNNING";
-  const finalReplyIdx = useMemo(() => findFinalReplyIndex(grouped, isRunning), [grouped, isRunning]);
+  const finalReplyEventId = useMemo(() => {
+    const idx = findFinalReplyIndex(grouped, isRunning);
+    return idx >= 0 ? grouped[idx].key : null;
+  }, [grouped, isRunning]);
+  const items = useMemo(() => foldToolRuns(grouped), [grouped]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   // Scrolled away from the live end: offer a way back instead of yanking.
   const [awayFromEnd, setAwayFromEnd] = useState(false);
@@ -1138,7 +937,18 @@ export function AgentTimeline({
   return (
     <div className="agent-timeline" ref={scrollRef}>
       {intro}
-      {grouped.map((item, idx) => {
+      {items.map((item, idx) => {
+        if (item.kind === "toolRun") {
+          return (
+            <AgentToolRun
+              documentId={documentId}
+              items={item.items}
+              key={item.key}
+              live={isRunning && idx === items.length - 1}
+              running={isRunning}
+            />
+          );
+        }
         if (item.kind === "tool") {
           return <AgentToolBlock
               call={item.call}
@@ -1149,7 +959,7 @@ export function AgentTimeline({
             />;
         }
         if (item.kind === "step") {
-          const active = isRunning && idx === grouped.length - 1;
+          const active = isRunning && idx === items.length - 1;
           return (
             <div
               className={cn("agent-step", active && "agent-step-active")}
@@ -1191,7 +1001,7 @@ export function AgentTimeline({
           );
         }
         const { event, role } = item;
-        const prev = idx > 0 ? grouped[idx - 1] : null;
+        const prev = idx > 0 ? items[idx - 1] : null;
         const isContinuation =
           prev?.kind === "message" && prev.role === role && (role === "user" || role === "agent");
         if (role === "user") {
@@ -1212,7 +1022,7 @@ export function AgentTimeline({
           );
         }
         if (role === "agent") {
-          const isFinalReply = idx === finalReplyIdx;
+          const isFinalReply = item.key === finalReplyEventId;
           return (
             <div
               className={cn(

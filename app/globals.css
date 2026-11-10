@@ -360,8 +360,8 @@ body.public-view-shell .document-page-shell {
 .agent-screen-topbar {
   display: flex;
   align-items: center;
-  gap: 1rem;
-  padding: 0.6rem 1rem;
+  gap: 0.75rem;
+  padding: 0.45rem 0.9rem;
   border-bottom: 1px solid var(--border);
   background: var(--surface-strong);
 }
@@ -377,6 +377,8 @@ body.public-view-shell .document-page-shell {
   color: var(--text);
   font-size: 0.85rem;
   font-weight: 500;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .agent-back-button:hover {
@@ -384,11 +386,19 @@ body.public-view-shell .document-page-shell {
 }
 
 .agent-screen-title {
-  flex: 1 1 auto;
+  /* Takes what the configurator leaves, and clips instead of spilling under
+     it when that is nothing. */
+  flex: 1 1 0;
   display: flex;
   align-items: baseline;
   gap: 0.55rem;
   min-width: 0;
+  /* One line high and wrapping: a document title with no room left drops to
+     the clipped second line instead of showing a one-letter stub. */
+  flex-wrap: wrap;
+  height: 1.3rem;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .agent-screen-title-eyebrow {
@@ -400,6 +410,8 @@ body.public-view-shell .document-page-shell {
 }
 
 .agent-screen-title-doc {
+  flex: 1 1 7rem;
+  min-width: 7rem;
   font-size: 0.95rem;
   font-weight: 600;
   overflow: hidden;
@@ -409,10 +421,34 @@ body.public-view-shell .document-page-shell {
 }
 
 .agent-config {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  justify-content: flex-end;
+  gap: 0.3rem 0.5rem;
+}
+
+/* Self-explanatory pickers ("Claude Code", "Opus 5.5") keep their label for
+   screen readers only. */
+.agent-config-label-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.agent-screen-topbar .agent-config-label {
+  font-size: 0.62rem;
+}
+
+.agent-screen-topbar .agent-config-select {
+  max-width: 10.5rem;
+  padding: 0.2rem 0.35rem;
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
 }
 
 .agent-config-field {
@@ -1251,10 +1287,6 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   background: #f7f8fa;
 }
 
-.agent-plan-collapsed {
-  width: auto;
-}
-
 .agent-plan-section + .agent-plan-section {
   margin-top: 0.9rem;
   padding-top: 0.7rem;
@@ -1271,75 +1303,248 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   color: var(--muted);
 }
 
-/* --- Trajectory outline: messages are headings, tool work hangs below --- */
+/* --- Outline rail: a strip of section markers, titles on hover --- */
 
-.agent-trajectory-item {
-  padding: 0.16rem 0.4rem;
-  font-size: 0.74rem;
+.agent-plan-strip {
+  width: 2.1rem;
+  padding: 0.5rem 0 1rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  overflow-x: hidden;
+}
+
+.agent-plan-strip .agent-plan-header {
+  position: static;
+  margin: 0;
+  padding: 0;
+  background: none;
+}
+
+.agent-plan-strip .agent-plan-toggle {
+  width: 1.5rem;
+  height: 1.5rem;
+  justify-content: center;
+  align-items: center;
+  border-radius: 6px;
+}
+
+.agent-plan-toggle:hover {
+  color: var(--text);
+}
+
+.agent-plan-strip .agent-plan-toggle:hover {
+  background: rgba(60, 64, 67, 0.08);
+}
+
+.agent-plan-chevron {
+  font-size: 0.95rem;
+  line-height: 1;
+  margin-left: auto;
+}
+
+.agent-plan-strip .agent-plan-chevron {
+  margin-left: 0;
+}
+
+.agent-outline-plan-chip {
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
   color: var(--muted);
 }
 
-.agent-trajectory-item .agent-plan-text {
+.agent-outline-plan-chip:hover {
+  color: var(--text);
+}
+
+.agent-outline-markers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+}
+
+.agent-outline-marker {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+  height: 0.85rem;
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.agent-outline-dash {
+  display: block;
+  flex: 0 0 auto;
+  width: 0.7rem;
+  height: 2px;
+  border-radius: 2px;
+  background: rgba(60, 64, 67, 0.32);
+  transition: width 0.12s ease, background 0.12s ease;
+}
+
+.agent-outline-prompt .agent-outline-dash {
+  background: #7555cc;
+}
+
+.agent-outline-has-failures .agent-outline-dash,
+.agent-outline-error .agent-outline-dash {
+  background: var(--danger);
+}
+
+.agent-outline-marker:hover .agent-outline-dash,
+.agent-outline-marker:focus-visible .agent-outline-dash,
+.agent-outline-marker.agent-outline-active .agent-outline-dash {
+  width: 1.15rem;
+  height: 3px;
+}
+
+.agent-outline-marker.agent-outline-active .agent-outline-dash {
+  background: var(--text);
+}
+
+.agent-outline-marker.agent-outline-active.agent-outline-prompt .agent-outline-dash {
+  background: #7555cc;
+}
+
+.agent-outline-marker.agent-outline-active.agent-outline-has-failures .agent-outline-dash {
+  background: var(--danger);
+}
+
+.agent-outline-annotating {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: #7555cc;
+  animation: agent-outline-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes agent-outline-pulse {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 1; }
+}
+
+.agent-outline-tip {
+  position: fixed;
+  z-index: 60;
+  transform: translateY(-50%);
+  max-width: 20rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.35rem 0.55rem;
+  border-radius: 7px;
+  background: #202124;
+  color: #fff;
+  font-size: 0.78rem;
+  line-height: 1.3;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+  pointer-events: none;
+}
+
+.agent-outline-tip-meta {
+  font-size: 0.68rem;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+/* Expanded rail: the same sections as a list of titles. */
+.agent-plan-item.agent-outline-row {
+  align-items: baseline;
+  padding: 0.22rem 0.4rem;
+  font-size: 0.78rem;
+}
+
+.agent-outline-row .agent-outline-dash {
+  position: relative;
+  top: -0.2rem;
+}
+
+.agent-outline-row .agent-plan-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.agent-outline-row.agent-outline-prompt {
+  font-weight: 600;
+}
+
+.agent-outline-row.agent-outline-active {
+  background: rgba(117, 85, 204, 0.12);
+  box-shadow: inset 2px 0 0 #7555cc;
+}
+
+/* --- Folded runs of tool calls: "Ran 16 tool calls" --- */
+
+.agent-tool-run {
+  font-size: 0.82rem;
+  border-radius: 6px;
+}
+
+.agent-tool-run > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.28rem 0.5rem;
+  border-radius: 6px;
+  color: var(--muted);
+}
+
+.agent-tool-run > summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-tool-run > summary:hover {
+  background: rgba(60, 64, 67, 0.05);
+}
+
+.agent-tool-run[open] > summary .agent-tool-caret {
+  transform: rotate(90deg);
+}
+
+.agent-tool-run-title {
+  flex: 0 0 auto;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.agent-tool-run-breakdown {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 0.76rem;
 }
 
-.agent-trajectory-action {
-  padding-left: 1rem;
-}
-
-.agent-trajectory-prompt,
-.agent-trajectory-agent,
-.agent-trajectory-reply,
-.agent-trajectory-error {
-  margin-top: 0.35rem;
-  color: var(--foreground);
-  font-size: 0.78rem;
-}
-
-.agent-trajectory-prompt .agent-plan-text,
-.agent-trajectory-agent .agent-plan-text,
-.agent-trajectory-reply .agent-plan-text {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  white-space: normal;
-}
-
-.agent-trajectory-prompt {
-  font-weight: 600;
-}
-
-.agent-trajectory-prompt .agent-plan-mark,
-.agent-trajectory-agent .agent-plan-mark {
+.agent-tool-run-now {
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
   color: #7555cc;
 }
 
-.agent-trajectory-reply .agent-plan-mark {
-  color: #3f9d5f;
-}
-
-.agent-trajectory-error,
-.agent-trajectory-failed,
-.agent-trajectory-error .agent-plan-mark,
-.agent-trajectory-failed .agent-plan-mark {
-  color: var(--danger);
-}
-
-.agent-trajectory-hint {
-  flex: 0 0 auto;
-  font-size: 0.68rem;
-  font-variant-numeric: tabular-nums;
-  color: var(--muted);
-  opacity: 0.8;
-}
-
-.agent-trajectory-item-active {
-  background: rgba(117, 85, 204, 0.12);
-  box-shadow: inset 2px 0 0 #7555cc;
+.agent-tool-run-body {
+  display: flex;
+  flex-direction: column;
+  margin: 0.1rem 0 0.2rem 0.55rem;
+  padding-left: 0.45rem;
+  border-left: 2px solid var(--border);
 }
 
 /* --- Collapsed system notes --- */
@@ -1411,7 +1616,9 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 .agent-timeline > .agent-notes + .agent-step,
 .agent-timeline > .agent-step + .agent-notes,
 .agent-timeline > .agent-step + .agent-tool,
-.agent-timeline > .agent-notes + .agent-tool {
+.agent-timeline > .agent-notes + .agent-tool,
+.agent-timeline > .agent-step + .agent-tool-run,
+.agent-timeline > .agent-notes + .agent-tool-run {
   margin-top: -0.6rem;
 }
 

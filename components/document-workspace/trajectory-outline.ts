@@ -9,7 +9,7 @@ import {
   toolDuration,
   toolResultFailed,
   type GroupedAgentEvent
-} from "./agent-timeline";
+} from "./timeline-model";
 import type { AiRunEventView } from "./types";
 import { basename } from "./utils";
 
