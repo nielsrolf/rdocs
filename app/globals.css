@@ -6844,6 +6844,112 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   color: #d93025;
 }
 
+/* Settings → Notifications. Own layout on purpose: the global
+   `input { width: 100% }` stretches checkboxes/radios across a flex row. */
+.notification-settings-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.notification-settings-status {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.notification-settings-intro {
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.notification-settings-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.notification-setting-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.6rem 1.5rem;
+  padding: 0.85rem 0;
+  border-top: 1px solid var(--border);
+}
+
+label.notification-setting-row {
+  cursor: pointer;
+}
+
+.notification-setting-row-stacked {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.notification-setting-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+.notification-setting-text .muted-copy {
+  font-size: 0.82rem;
+}
+
+.notification-settings input[type="checkbox"],
+.notification-settings input[type="radio"] {
+  width: 1.05rem;
+  height: 1.05rem;
+  margin: 0;
+  padding: 0;
+  flex: none;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.notification-settings input:disabled,
+.notification-settings select:disabled {
+  cursor: not-allowed;
+}
+
+.notification-setting-row select {
+  width: auto;
+  max-width: 100%;
+}
+
+.notification-workspace-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.notification-workspace-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.notification-workspace-option:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+@media (max-width: 560px) {
+  .notification-setting-row:has(select) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .notification-setting-row select {
+    width: 100%;
+  }
+}
+
 .slack-connect-card {
   width: min(100%, 680px);
   display: flex;

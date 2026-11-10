@@ -110,75 +110,95 @@ export function NotificationSettings({
     }
   ];
 
+  const status = error ? (
+    <span className="notification-settings-status forum-settings-error">{error}</span>
+  ) : saving ? (
+    <span className="notification-settings-status">Saving…</span>
+  ) : saved ? (
+    <span className="notification-settings-status">Saved</span>
+  ) : null;
+
   return (
-    <section className="credentials-section">
-      <strong className="credentials-section-title">Slack direct messages</strong>
-      <p className="muted-copy">Choose which activity should send you a Slack DM.</p>
+    <section className="credentials-section notification-settings">
+      <div className="notification-settings-header">
+        <strong className="credentials-section-title">Slack direct messages</strong>
+        <span aria-live="polite">{status}</span>
+      </div>
+      <p className="muted-copy notification-settings-intro">
+        {slackLinked
+          ? "Choose which activity should send you a Slack DM."
+          : "Connect your Slack account first to enable notifications."}
+      </p>
 
-      <label className="quicktake-visibility-select">
-        <span>
-          <strong>Default for comments</strong>
-          <br />
-          <span className="muted-copy">
-            Applies to documents and quick takes without their own setting. &quot;Only threads I&apos;m involved
-            in&quot; means comments on my own items, threads I started or replied in, and mentions of me. The bell on a
-            document or quick take overrides this for that item.
-          </span>
-        </span>{" "}
-        <select
-          disabled={saving || !slackLinked}
-          onChange={(event) => void updateScope(event.target.value as CommentNotificationScope)}
-          value={settings.commentNotificationScope}
-        >
-          {SCOPE_OPTIONS.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      {toggles.map((toggle) => (
-        <label className="quicktake-visibility-select" key={toggle.key}>
-          <input
-            checked={settings[toggle.key]}
-            disabled={saving || !slackLinked}
-            onChange={(event) => void updateSetting(toggle.key, event.target.checked)}
-            type="checkbox"
-          />{" "}
-          <span><strong>{toggle.title}</strong><br /><span className="muted-copy">{toggle.description}</span></span>
-        </label>
-      ))}
-
-      {linkedWorkspaces.length > 1 ? (
-        <fieldset className="quicktake-visibility-select">
-          <legend>
-            <strong>Send my DMs in</strong>
-            <br />
+      <div className="notification-settings-list">
+        <label className="notification-setting-row">
+          <span className="notification-setting-text">
+            <strong>Comments</strong>
             <span className="muted-copy">
-              Your Slack account is linked in several workspaces where claudex is installed. Notifications go to
-              exactly one of them.
+              The default for documents and quick takes. The bell on an item overrides it for that item.
+              {settings.commentNotificationScope === "participating"
+                ? " Involved means comments on my own items, threads I started or replied in, and mentions of me."
+                : ""}
             </span>
-          </legend>
-          {linkedWorkspaces.map((workspace) => (
-            <label key={workspace.teamId}>
-              <input
-                checked={effectiveWorkspaceTeamId === workspace.teamId}
-                disabled={saving}
-                name="notification-slack-workspace"
-                onChange={() => void updateWorkspace(workspace.teamId)}
-                type="radio"
-              />{" "}
-              {workspace.teamName ?? workspace.teamId}
-            </label>
-          ))}
-        </fieldset>
-      ) : null}
+          </span>
+          <select
+            disabled={saving || !slackLinked}
+            onChange={(event) => void updateScope(event.target.value as CommentNotificationScope)}
+            value={settings.commentNotificationScope}
+          >
+            {SCOPE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
 
-      {!slackLinked ? <p className="muted-copy">Connect your Slack account first to enable notifications.</p> : null}
-      {saving ? <p className="muted-copy">Saving…</p> : null}
-      {saved && !saving ? <p className="muted-copy">Saved.</p> : null}
-      {error ? <p className="muted-copy forum-settings-error">{error}</p> : null}
+        {toggles.map((toggle) => (
+          <label className="notification-setting-row" key={toggle.key}>
+            <span className="notification-setting-text">
+              <strong>{toggle.title}</strong>
+              <span className="muted-copy">{toggle.description}</span>
+            </span>
+            <input
+              checked={settings[toggle.key]}
+              disabled={saving || !slackLinked}
+              onChange={(event) => void updateSetting(toggle.key, event.target.checked)}
+              type="checkbox"
+            />
+          </label>
+        ))}
+
+        {linkedWorkspaces.length > 1 ? (
+          <div
+            aria-labelledby="notification-workspace-title"
+            className="notification-setting-row notification-setting-row-stacked"
+            role="radiogroup"
+          >
+            <span className="notification-setting-text">
+              <strong id="notification-workspace-title">Send my DMs in</strong>
+              <span className="muted-copy">
+                Your Slack account is linked in several workspaces where claudex is installed. Notifications go to
+                exactly one of them.
+              </span>
+            </span>
+            <div className="notification-workspace-options">
+              {linkedWorkspaces.map((workspace) => (
+                <label className="notification-workspace-option" key={workspace.teamId}>
+                  <input
+                    checked={effectiveWorkspaceTeamId === workspace.teamId}
+                    disabled={saving}
+                    name="notification-slack-workspace"
+                    onChange={() => void updateWorkspace(workspace.teamId)}
+                    type="radio"
+                  />
+                  <span>{workspace.teamName ?? `Workspace ${workspace.teamId}`}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </div>
     </section>
   );
 }
