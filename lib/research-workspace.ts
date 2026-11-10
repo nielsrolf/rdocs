@@ -84,18 +84,145 @@ export async function withWorkspaceLock<T>(workspace: string, task: () => Promis
   }
 }
 
+// Host-side git runs inside checkouts that an agent container had write access
+// to, INCLUDING their .git directory. Git executes programs named by repo
+// config (hooks, core.fsmonitor, filters, core.sshCommand, gpg.program,
+// core.askPass, ...), so an unhardened `git status` / `git commit` there is
+// code execution as the app user, outside the sandbox. Three layers:
+//   1. a minimal environment, so nothing a stray program could read is there;
+//   2. command-line overrides, which outrank repo config and (unlike
+//      GIT_CONFIG_COUNT) propagate into submodule invocations;
+//   3. hardenAgentGitDir, which rewrites the repo config from an allowlist.
+const GIT_ENV_ALLOWLIST = [
+  "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "XDG_CONFIG_HOME",
+  "SSH_AUTH_SOCK", "SSL_CERT_FILE", "GIT_SSL_CAINFO",
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"
+];
+
 function buildGitEnv() {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  // Strip VS Code's askpass plumbing so background git doesn't try (and fail
-  // with ECONNREFUSED) on a dead IPC socket inherited from the launching shell.
-  delete env.GIT_ASKPASS;
-  delete env.SSH_ASKPASS;
-  delete env.VSCODE_GIT_ASKPASS_NODE;
-  delete env.VSCODE_GIT_ASKPASS_EXTRA_ARGS;
-  delete env.VSCODE_GIT_ASKPASS_MAIN;
-  delete env.VSCODE_GIT_IPC_HANDLE;
+  const env: Record<string, string | undefined> = {};
+  for (const key of GIT_ENV_ALLOWLIST) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
   env.GIT_TERMINAL_PROMPT = "0";
-  return env;
+  return env as NodeJS.ProcessEnv;
+}
+
+const GIT_HARDENING_ARGS = [
+  "-c", "core.hooksPath=/dev/null",
+  "-c", "core.fsmonitor=false",
+  "-c", "core.sshCommand=ssh",
+  "-c", "core.askPass=",
+  "-c", "core.editor=true",
+  "-c", "core.pager=cat",
+  "-c", "commit.gpgSign=false",
+  "-c", "tag.gpgSign=false",
+  "-c", "push.gpgSign=false",
+  // Never descend into nested repositories an agent may have registered as
+  // submodules: their config is agent-written too.
+  "-c", "submodule.recurse=false",
+  "-c", "diff.ignoreSubmodules=all",
+  "-c", "status.submoduleSummary=false",
+  "-c", "protocol.ext.allow=never"
+];
+
+const SAFE_GIT_CONFIG_KEYS = new Set([
+  "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates",
+  "core.ignorecase", "core.precomposeunicode", "core.symlinks", "extensions.objectformat",
+  "user.name", "user.email", "remote.origin.url", "remote.origin.fetch",
+  "http.https://github.com/.extraheader"
+]);
+
+function isSafeGitConfigEntry(key: string, value: string) {
+  if (/^branch\..+\.(remote|merge)$/.test(key)) return !value.startsWith("-");
+  if (!SAFE_GIT_CONFIG_KEYS.has(key)) return false;
+  // Transport helpers ("ext::sh -c ...") and option-looking values are never legitimate here.
+  if (key === "remote.origin.url") return !value.includes("::") && !value.startsWith("-");
+  return true;
+}
+
+/**
+ * Make a checkout that an agent could write to safe for host-side git.
+ * Refuses checkouts whose .git is not a plain directory (a gitfile or symlink
+ * could point host git at any repository) and rewrites .git/config so only
+ * allowlisted keys survive. Idempotent and cheap when the config is clean.
+ */
+export async function hardenAgentGitDir(checkout: string) {
+  const gitDir = path.join(checkout, ".git");
+  const gitStat = await fs.lstat(gitDir).catch(() => null);
+  if (!gitStat) return; // not a checkout (yet); git itself will report that
+  if (!gitStat.isDirectory()) {
+    // Legacy `git worktree add` checkouts have a gitfile pointing into the base
+    // repository, whose git dir was never mounted into a container. Accept one
+    // only if the base's own (host-owned) back-pointer names this checkout, so
+    // an agent cannot aim host git at some other repository by editing the file.
+    if (gitStat.isFile() && (await isLinkedWorktreeGitfile(gitDir))) return;
+    throw new Error(`Refusing to run git in ${checkout}: .git is not a directory.`);
+  }
+  const configPath = path.join(gitDir, "config");
+  const configStat = await fs.lstat(configPath).catch(() => null);
+  if (!configStat || !configStat.isFile()) {
+    throw new Error(`Refusing to run git in ${checkout}: .git/config is not a regular file.`);
+  }
+  // `--file` reads exactly this file: no includes, no repository discovery, nothing executed.
+  const listed = await runCommand("git", ["config", "--file", configPath, "--no-includes", "--list", "-z"], {
+    cwd: path.dirname(checkout),
+    trusted: true
+  });
+  const entries = listed.stdout
+    .split("\0")
+    .filter(Boolean)
+    .map((entry) => {
+      const newline = entry.indexOf("\n");
+      return newline === -1 ? { key: entry, value: "" } : { key: entry.slice(0, newline), value: entry.slice(newline + 1) };
+    });
+  const raw = await fs.readFile(configPath, "utf8");
+  const clean = entries.every((entry) => isSafeGitConfigEntry(entry.key, entry.value));
+  if (clean && !/^\s*\[include/im.test(raw)) return;
+
+  const dropped = entries.filter((entry) => !isSafeGitConfigEntry(entry.key, entry.value)).map((entry) => entry.key);
+  console.warn("[research-workspace] removed unexpected git config from agent-writable checkout", { checkout, dropped });
+  const rebuilt = `${configPath}.host-${process.pid}-${Date.now()}`;
+  await fs.writeFile(rebuilt, "", { mode: 0o600 });
+  try {
+    for (const entry of entries) {
+      if (!isSafeGitConfigEntry(entry.key, entry.value)) continue;
+      await runCommand("git", ["config", "--file", rebuilt, "--add", entry.key, entry.value], {
+        cwd: path.dirname(checkout),
+        trusted: true
+      });
+    }
+    await fs.rename(rebuilt, configPath);
+  } catch (error) {
+    await fs.rm(rebuilt, { force: true });
+    throw error;
+  }
+}
+
+async function isLinkedWorktreeGitfile(gitFile: string) {
+  const content = await fs.readFile(gitFile, "utf8").catch(() => "");
+  const match = /^gitdir: (.+)\n?$/.exec(content);
+  if (!match || !path.isAbsolute(match[1])) return false;
+  const target = path.resolve(match[1]);
+  if (!/[\\/]\.git[\\/]worktrees[\\/][^\\/]+$/.test(target)) return false;
+  const checkout = path.dirname(gitFile);
+  if (!path.relative(checkout, target).startsWith("..")) return false; // must live outside the mount
+  const backPointer = await fs.readFile(path.join(target, "gitdir"), "utf8").catch(() => "");
+  const [real, expected] = await Promise.all([
+    fs.realpath(backPointer.trim()).catch(() => null),
+    fs.realpath(gitFile).catch(() => null)
+  ]);
+  return Boolean(real) && real === expected;
+}
+
+// Run checkouts live under <root>/<documentId>/worktrees/; those are the ones
+// bind-mounted read-write into agent containers.
+function agentWritableCheckout(candidate: string | undefined) {
+  if (!candidate || !path.isAbsolute(candidate)) return null;
+  const relative = path.relative(WORKSPACE_ROOT, path.resolve(candidate));
+  const parts = relative.split(path.sep);
+  if (relative.startsWith("..") || parts.length < 3 || parts[1] !== "worktrees") return null;
+  return path.join(WORKSPACE_ROOT, parts[0], "worktrees", parts[2]);
 }
 
 // Git auth is per-document, NOT global. The old behavior — stamping the host
@@ -133,12 +260,23 @@ export function isReadOnlyRepoUrl(repoUrl: string | null | undefined) {
 function runCommand(
   command: string,
   args: string[],
-  options: { cwd?: string; timeoutMs?: number } = {}
+  options: { cwd?: string; timeoutMs?: number; trusted?: boolean } = {}
 ): Promise<GitResult> {
   const isGit = command === "git";
   const env = isGit ? buildGitEnv() : process.env;
+  const spawnArgs = isGit ? [...GIT_HARDENING_ARGS, ...args] : args;
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    void (async () => {
+      // Safety net for every call site: sanitise any run checkout this command
+      // will read, whether it is the cwd or a path argument (fetch <checkout>).
+      if (isGit && !options.trusted) {
+        const targets = new Set(
+          [options.cwd, ...args].map(agentWritableCheckout).filter((target): target is string => Boolean(target))
+        );
+        for (const target of targets) await hardenAgentGitDir(target);
+      }
+    })().then(() => {
+    const child = spawn(command, spawnArgs, {
       cwd: options.cwd ?? process.cwd(),
       env
     });
@@ -168,6 +306,7 @@ function runCommand(
       }
       resolve({ stdout, stderr });
     });
+    }, reject);
   });
 }
 
@@ -738,6 +877,7 @@ export async function syncBranchToBaseWorkspace(
   // mounted alone in a container. Import their commit into the base object
   // database before attempting the merge.
   if (sourceWorkspace && path.resolve(sourceWorkspace) !== path.resolve(baseWorkspace)) {
+    await hardenAgentGitDir(sourceWorkspace);
     await runCommand("git", ["fetch", "--no-tags", sourceWorkspace, commitSha], {
       cwd: baseWorkspace,
       timeoutMs: 300_000
@@ -819,6 +959,7 @@ async function preserveUnmergedCommit(
       .then(() => true)
       .catch(() => false);
   if (!(await hasCommit())) {
+    await hardenAgentGitDir(sourceWorkspace);
     await runCommand("git", ["fetch", "--no-tags", sourceWorkspace, commitSha], {
       cwd: baseWorkspace,
       timeoutMs: 300_000
@@ -842,6 +983,7 @@ export async function commitWorkspaceChanges(input: {
   // works for runner setups that need none.
   resolveConflicts?: (baseWorkspace: string, commitSha: string) => Promise<void>;
 }): Promise<CommitResult> {
+  await hardenAgentGitDir(input.workspace);
   const status = await runCommand("git", ["status", "--porcelain"], { cwd: input.workspace });
   if (!status.stdout.trim()) {
     return {
