@@ -402,6 +402,10 @@ model AgentApiChannel {
   createdById String
   tokenHash   String    @unique
   label       String?
+  // Credential ceiling (JSON {allowEnv, allowMcpServers}, lib/run-credential-policy.ts)
+  // chosen by the user when the channel was set up. When set, EVERY run of this
+  // channel is restricted to it; the integration holding the token cannot widen it.
+  credentialPolicy String?
   createdAt   DateTime  @default(now())
   lastUsedAt  DateTime?
   revokedAt   DateTime?

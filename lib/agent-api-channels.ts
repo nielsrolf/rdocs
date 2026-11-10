@@ -13,6 +13,8 @@ export async function upsertAgentApiChannel(args: {
   documentId: string;
   createdById: string;
   label?: string | null;
+  /** Serialized ChannelCredentialCeiling; null/omitted = unrestricted channel. */
+  credentialPolicy?: string | null;
 }) {
   const token = `${TOKEN_PREFIX}${crypto.randomBytes(24).toString("hex")}`;
   const channel = await db.agentApiChannel.upsert({
@@ -21,12 +23,15 @@ export async function upsertAgentApiChannel(args: {
       documentId: args.documentId,
       createdById: args.createdById,
       label: args.label?.trim().slice(0, 120) || null,
+      credentialPolicy: args.credentialPolicy ?? null,
       tokenHash: hashAgentApiToken(token)
     },
     update: {
       createdById: args.createdById,
       label: args.label?.trim().slice(0, 120) || null,
       tokenHash: hashAgentApiToken(token),
+      // Rotating the token (no policy passed) must keep an existing ceiling.
+      ...(args.credentialPolicy !== undefined ? { credentialPolicy: args.credentialPolicy } : {}),
       revokedAt: null,
       lastUsedAt: null
     },

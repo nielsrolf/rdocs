@@ -60,3 +60,85 @@ export function describeRunCredentialPolicy(envNames: string[], inheritedMcpServ
     `Inherited MCP servers: ${list(inheritedMcpServers)}. Everything else configured on the document or account is withheld.`
   );
 }
+
+// --- Channel ceiling --------------------------------------------------------
+//
+// A per-run policy is chosen by the caller, so it protects the user only when
+// the caller is trusted. For a channel handed to an external service the user
+// instead fixes a CEILING when they set the channel up (the /agent-setup
+// consent page): the names below are the most any run of that channel can get.
+// It is stored on AgentApiChannel.credentialPolicy and applied to every run,
+// whether or not the caller sends `credentials`.
+
+export const channelCredentialCeilingSchema = z.object({
+  allowEnv: z.array(envName).max(100).default([]),
+  allowMcpServers: z.array(z.string().min(1).max(64)).max(20).default([])
+});
+
+export type ChannelCredentialCeiling = z.infer<typeof channelCredentialCeilingSchema>;
+
+export function parseChannelCredentialCeiling(stored: string | null | undefined): ChannelCredentialCeiling | null {
+  if (!stored) return null;
+  try {
+    const parsed = channelCredentialCeilingSchema.safeParse(JSON.parse(stored));
+    // A ceiling we cannot read must not turn into "unrestricted".
+    return parsed.success ? parsed.data : { allowEnv: [], allowMcpServers: [] };
+  } catch {
+    return { allowEnv: [], allowMcpServers: [] };
+  }
+}
+
+/**
+ * The policy a channel run actually gets. Without a ceiling this is the
+ * caller's policy unchanged (possibly none). With one, the run is always
+ * restricted: a caller list narrows the ceiling (an empty or missing list
+ * means "everything the ceiling allows"), and per-run `env` values pass
+ * through, since those are the caller's own values, not the user's secrets.
+ */
+export function effectiveChannelRunPolicy(
+  ceiling: ChannelCredentialCeiling | null,
+  requested: RunCredentialPolicy | null | undefined
+): RunCredentialPolicy | null {
+  if (!ceiling) return requested ?? null;
+  const narrow = (allowed: string[], asked: string[] | undefined) =>
+    asked && asked.length ? allowed.filter((name) => asked.includes(name)) : [...allowed];
+  return {
+    allowEnv: narrow(ceiling.allowEnv, requested?.allowEnv),
+    env: { ...(requested?.env ?? {}) },
+    allowMcpServers: narrow(ceiling.allowMcpServers, requested?.allowMcpServers)
+  };
+}
+
+/**
+ * What the consent page offers: one entry per credential the user connected,
+ * with the env var names it becomes inside a run. `model` marks credentials
+ * that can authenticate the agent's own model (pre-ticked); the rest are tool
+ * credentials the user opts into.
+ */
+export type RunCredentialChoice = { id: string; label: string; envNames: string[]; model: boolean };
+
+export function runCredentialChoices(
+  connected: Array<{ provider: string; kind: string }>
+): RunCredentialChoice[] {
+  const choices: RunCredentialChoice[] = [];
+  for (const { provider, kind } of connected) {
+    if (provider === "anthropic") {
+      choices.push(kind === "oauth"
+        ? { id: provider, label: "Claude subscription token", envNames: ["CLAUDE_CODE_OAUTH_TOKEN"], model: true }
+        : { id: provider, label: "Anthropic API key", envNames: ["ANTHROPIC_API_KEY"], model: true });
+    } else if (provider === "openai") {
+      choices.push({ id: provider, label: "OpenAI API key", envNames: ["OPENAI_API_KEY"], model: true });
+    } else if (provider === "openai-chatgpt") {
+      choices.push({ id: provider, label: "ChatGPT (Codex) sign-in", envNames: ["CODEX_CHATGPT_AUTH_JSON"], model: true });
+    } else if (provider === "openrouter") {
+      choices.push({ id: provider, label: "OpenRouter API key", envNames: ["OPENROUTER_API_KEY"], model: true });
+    } else if (provider === "litellm") {
+      choices.push({ id: provider, label: "LiteLLM key", envNames: ["LITELLM_API_KEY"], model: true });
+    } else if (provider === "huggingface") {
+      choices.push({ id: provider, label: "Hugging Face token", envNames: ["HF_TOKEN"], model: false });
+    } else if (provider === "github") {
+      choices.push({ id: provider, label: "GitHub token", envNames: ["GITHUB_TOKEN", "GH_TOKEN"], model: false });
+    }
+  }
+  return choices;
+}

@@ -200,6 +200,14 @@ local). Use this for any run whose instructions come from a third party. Omittin
 behaviour. Not persisted: a `previousRunId` follow-up must resend it. Only channel runs take it so far (no UI,
 no scheduled runs). Related hardening the same day: document-run tokens are rejected once their run is no longer
 RUNNING, and host-side git never trusts a run checkout's `.git` (`hardenAgentGitDir`).
+**Channel credential ceiling** (2026-11-10): a per-run policy only protects the user when the caller is trusted, so a
+channel handed to an external service can carry a ceiling instead. `/agent-setup?…&credentials=choose` shows the user
+a picker (their connected credentials via `runCredentialChoices`, plus free NAME/value rows that become document env)
+and posts the choice as `credentials: {allowEnv, allowMcpServers}` to `POST /api/agent-setups`; it is stored in
+`AgentApiChannel.credentialPolicy` (JSON). `startAgentChannelRun` then restricts EVERY run of that channel
+(`effectiveChannelRunPolicy`: caller lists can only narrow it, per-run `env` passes through; scheduled channel runs
+included), token rotation keeps it, and an unreadable value fails closed to "nothing allowed". First user:
+research-backlog's "Run with r-docs agent" (`../research-backlog`). Tests: `tests/channel-credential-ceiling.test.ts`.
 A channel can also hold **standing jobs**: `GET/POST /api/agent-channels/:triggerId/schedules`
 and `DELETE .../schedules/:taskId` (channel token) manage `ScheduledTask` rows with
 `contextType: "api_channel"` (no Slack fields — `slackTeamId`/`slackChannelId` are nullable

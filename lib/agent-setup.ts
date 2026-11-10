@@ -13,6 +13,7 @@ import { db } from "@/lib/db";
 import { upsertDocumentEnv } from "@/lib/document-env";
 import { MAX_MCP_SERVERS_PER_DOCUMENT, upsertDocumentMcpServer } from "@/lib/document-mcp-servers";
 import { applyMarkdownEdit } from "@/lib/mcp/apply-edit";
+import { channelCredentialCeilingSchema } from "@/lib/run-credential-policy";
 import { getDocumentSkillDir, prepareSkillUpload, writeSkillToStore } from "@/lib/skills";
 
 export const agentSetupSchema = z.object({
@@ -30,7 +31,10 @@ export const agentSetupSchema = z.object({
   mcpServers: z
     .array(z.object({ name: z.string().min(1).max(64), url: z.string().min(1).max(2000), authEnvKey: z.string().max(128).optional().nullable() }))
     .max(MAX_MCP_SERVERS_PER_DOCUMENT)
-    .optional()
+    .optional(),
+  // The user's choice on the consent page of which credentials runs of the new
+  // channel may use. Stored as the channel's ceiling; omitted = unrestricted.
+  credentials: channelCredentialCeilingSchema.optional().nullable()
 });
 
 export type AgentSetupInput = z.infer<typeof agentSetupSchema>;
@@ -88,7 +92,8 @@ export async function provisionAgentSetup(userId: string, input: AgentSetupInput
     const api = await upsertAgentApiChannel({
       documentId: document.id,
       createdById: userId,
-      label: input.channelLabel
+      label: input.channelLabel,
+      credentialPolicy: input.credentials ? JSON.stringify(input.credentials) : null
     });
     if (!isAllowedAgentSetupUrl(input.callbackUrl)) {
       throw new Error("Integration callback origin is not allowed.");

@@ -15,7 +15,12 @@ import { db } from "@/lib/db";
 import { headlessEditNote, withDocumentBridge } from "@/lib/document-run-token";
 import { MAX_MCP_SERVERS_PER_RUN, resolveRunMcpServerInputs, type RunMcpServerInput } from "@/lib/document-mcp-servers";
 import type { AgentMcpServerInput } from "@/agent-core/mcp-servers";
-import { runCredentialPolicySchema, type RunCredentialPolicy } from "@/lib/run-credential-policy";
+import {
+  effectiveChannelRunPolicy,
+  parseChannelCredentialCeiling,
+  runCredentialPolicySchema,
+  type RunCredentialPolicy
+} from "@/lib/run-credential-policy";
 
 /** Body of POST /api/agent-channels/:triggerId/runs. */
 export const channelRunMessageSchema = z.object({
@@ -52,7 +57,8 @@ export function channelRunMcpServers(servers: RunMcpServerInput[] | null | undef
   return resolveRunMcpServerInputs(servers);
 }
 
-export type ChannelWithDocument = Pick<AgentApiChannel, "id" | "documentId" | "createdById"> & {
+export type ChannelWithDocument = Pick<AgentApiChannel, "id" | "documentId" | "createdById"> &
+  Partial<Pick<AgentApiChannel, "credentialPolicy">> & {
   document: Pick<Document, "id" | "title" | "content" | "runnerMode" | "agentModel" | "agentEffort">;
 };
 
@@ -66,6 +72,12 @@ export async function startAgentChannelRun(args: {
 }): Promise<string> {
   const { channel, message } = args;
   const previousRunId = args.previousRunId ?? null;
+  // A channel set up with a credential ceiling restricts every run, including
+  // scheduled ones and callers that send no `credentials` at all.
+  const credentialPolicy = effectiveChannelRunPolicy(
+    parseChannelCredentialCeiling(channel.credentialPolicy),
+    args.credentialPolicy
+  );
   const aiRun = await db.aiRun.create({
     data: {
       documentId: channel.documentId,
@@ -89,7 +101,7 @@ export async function startAgentChannelRun(args: {
     aiRunId: aiRun.id,
     // A restricted run may edit its document but not schedule tasks, change
     // workspace env or mint keys: those would outlive or widen the restriction.
-    ...(args.credentialPolicy ? { toolset: "document-only" as const } : {})
+    ...(credentialPolicy ? { toolset: "document-only" as const } : {})
   });
 
   void runAgentConversationInBackground({
@@ -104,7 +116,7 @@ export async function startAgentChannelRun(args: {
     agentAccessMode: "workspace",
     runnerMode: channel.document.runnerMode,
     mcpServers,
-    credentialPolicy: args.credentialPolicy ?? null
+    credentialPolicy
   }).catch((error) => {
     console.error("[agent-api] background run threw", {
       channelId: channel.id,

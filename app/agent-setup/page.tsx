@@ -2,6 +2,8 @@ import { redirect } from "next/navigation";
 
 import { AgentSetupClient } from "./agent-setup-client";
 import { getCurrentUser } from "@/lib/auth";
+import { runCredentialChoices } from "@/lib/run-credential-policy";
+import { getUserCredentialsMasked } from "@/lib/user-credentials";
 
 export default async function AgentSetupPage({
   searchParams
@@ -19,7 +21,13 @@ export default async function AgentSetupPage({
     redirect(`/sign-in?next=${encodeURIComponent(`/agent-setup?${setupQuery}`)}`);
   }
   const sourceUrl = get("source_url").replace(/\/$/, "");
+  // `credentials=choose`: the integration runs third-party instructions, so the
+  // user picks here which of their keys the new channel may ever use.
+  const credentialChoices = get("credentials") === "choose"
+    ? runCredentialChoices(await getUserCredentialsMasked(user!.id))
+    : null;
   return <AgentSetupClient
     manifestUrl={get("manifest_url") || sourceUrl}
+    credentialChoices={credentialChoices}
   />;
 }
