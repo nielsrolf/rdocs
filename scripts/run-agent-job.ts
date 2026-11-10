@@ -41,7 +41,12 @@ async function main() {
     throw error;
   } finally { clearTimeout(timer); }
 }
-main().catch((error) => {
-  process.stdout.write(JSON.stringify({ type: "error", message: String(error) }) + "\n");
-  process.exitCode = 1;
-});
+// Exit explicitly once the frame is flushed: the runner leaves helpers behind (the
+// `docker events` OOM watcher) that keep the event loop alive, so callers waiting for this
+// process to end never saw a finished job complete (research-backlog judge, 2026-11-10).
+main().then(
+  () => process.stdout.write("", () => process.exit(0)),
+  (error) => {
+    process.stdout.write(JSON.stringify({ type: "error", message: String(error) }) + "\n", () => process.exit(1));
+  }
+);
