@@ -15,15 +15,19 @@ ROOT="$(pwd)"
 log() { echo "[start-active] $*"; }
 fail() { echo "[start-active] ERROR: $*" >&2; exit 1; }
 
-# Same docker-group rule as deploy.sh: the app must be able to reach the
-# docker socket, and a caller started before the group membership cannot.
-has_group() { tr ' ' '\n' | grep -qx docker; }
-if ! id -Gn | has_group; then
-  if [ -z "${RDOCS_DOCKER_GROUP_REEXEC:-}" ] && id -Gn "$(id -un)" | has_group && command -v sg >/dev/null 2>&1; then
-    export RDOCS_DOCKER_GROUP_REEXEC=1
-    exec sg docker -c "$(printf '%q ' "$ROOT/deploy/start-active.sh" "$@")"
-  fi
-  echo "[start-active] WARNING: no docker group access — agent container runs will fail" >&2
+# The app spawns agent containers, so it needs the `docker` group. A caller
+# whose process predates the user's group membership does not have it (group
+# lists are fixed at login): on 2026-11-10 that was the systemd user manager,
+# so every release-watch deploy produced an app whose agent runs failed with
+# "permission denied while trying to connect to the docker API". Refuse to
+# deploy such an app. Do NOT work around it with `sg docker`: that makes
+# docker the PRIMARY gid, which blinds `ss -p` to the other color and broke
+# three deploys the same day.
+if ! id -Gn | tr ' ' '\n' | grep -qx docker; then
+  echo "[start-active] ERROR: this process is not in the docker group, so the app could not start agent containers." >&2
+  echo "[start-active]   If 'id -Gn $(id -un)' lists docker, the caller is stale: restart it (for the systemd" >&2
+  echo "[start-active]   user manager: sudo systemctl restart user@$(id -u), then ./deploy/start-active.sh)." >&2
+  exit 1
 fi
 
 # shellcheck disable=SC1091
