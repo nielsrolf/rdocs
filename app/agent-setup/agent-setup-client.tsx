@@ -105,31 +105,38 @@ export function AgentSetupClient(props: Props) {
 
   return (
     <main className="auth-shell">
-      <section className="auth-card" style={{ maxWidth: 680 }}>
+      <section className="auth-card agent-setup-card">
         <h1>Connect {title}</h1>
         <p>This creates a configured r-docs workspace, attaches the integration skill, and gives the external service a narrowly scoped trigger credential.</p>
         {choices && state !== "done" ? (
-          <div style={{ display: "grid", gap: "0.6rem", margin: "1rem 0" }}>
-            <h2 style={{ fontSize: "1rem", margin: 0 }}>Keys this agent may use</h2>
-            <p style={{ margin: 0 }}>
+          <div className="agent-setup-keys">
+            <h2>Keys this agent may use</h2>
+            <p className="agent-setup-hint">
               The agent follows instructions written by someone else. It gets only the keys you tick or add here.
               Your other keys, your MCP servers and your other documents stay out of reach, and this cannot be widened later.
             </p>
-            {choices.length ? choices.map((choice) => (
-              <label key={choice.id} style={{ display: "flex", gap: "0.5rem", alignItems: "baseline" }}>
-                <input
-                  type="checkbox"
-                  checked={Boolean(picked[choice.id])}
-                  onChange={(event) => setPicked({ ...picked, [choice.id]: event.target.checked })}
-                />
-                <span>{choice.label} <code>{choice.envNames[0]}</code></span>
-              </label>
-            )) : <p style={{ margin: 0 }}>You have no keys connected in r-docs. Connect a model credential under Settings → AI first, or the run cannot start.</p>}
+            {choices.length ? (
+              <div className="agent-setup-key-list">
+                {choices.map((choice) => (
+                  <label className="agent-setup-key" key={choice.id}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(picked[choice.id])}
+                      onChange={(event) => setPicked({ ...picked, [choice.id]: event.target.checked })}
+                    />
+                    <span className="agent-setup-key-text">
+                      <span>{choice.label}</span>
+                      <code>{choice.envNames[0]}</code>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            ) : <p>You have no keys connected in r-docs. Connect a model credential under Settings → AI first, or the run cannot start.</p>}
             {choices.length && !choices.some((choice) => choice.model && picked[choice.id]) ? (
-              <p className="auth-error" style={{ margin: 0 }}>No model credential is ticked, so the run cannot start its model.</p>
+              <p className="auth-error">No model credential is ticked, so the run cannot start its model.</p>
             ) : null}
             {extraKeys.map((key, index) => (
-              <div key={index} style={{ display: "grid", gridTemplateColumns: "minmax(0, 2fr) minmax(0, 3fr) auto", gap: "0.4rem" }}>
+              <div className="agent-setup-extra-key" key={index}>
                 <input
                   aria-label="Key name" placeholder="RUNPOD_API_KEY" value={key.name} autoComplete="off"
                   onChange={(event) => setExtraKeys(extraKeys.map((item, i) => i === index ? { ...item, name: event.target.value } : item))}
@@ -138,20 +145,20 @@ export function AgentSetupClient(props: Props) {
                   aria-label="Key value" placeholder="value" type="password" value={key.value} autoComplete="off"
                   onChange={(event) => setExtraKeys(extraKeys.map((item, i) => i === index ? { ...item, value: event.target.value } : item))}
                 />
-                <button type="button" onClick={() => setExtraKeys(extraKeys.filter((_, i) => i !== index))}>Remove</button>
+                <button className="ghost-button" type="button" onClick={() => setExtraKeys(extraKeys.filter((_, i) => i !== index))}>Remove</button>
               </div>
             ))}
-            <div>
-              <button type="button" onClick={() => setExtraKeys([...extraKeys, { name: "", value: "" }])}>Add another key</button>
-            </div>
-            <p style={{ margin: 0, opacity: 0.75 }}>Added keys are stored encrypted with the new workspace and are not sent to the other service.</p>
+            <button className="ghost-button agent-setup-add-key" type="button" onClick={() => setExtraKeys([...extraKeys, { name: "", value: "" }])}>
+              + Add another key
+            </button>
+            <p className="agent-setup-hint">Added keys are stored encrypted with the new workspace and are not sent to the other service.</p>
           </div>
         ) : null}
         {error ? <p className="auth-error">{error}</p> : null}
         {state === "done" ? (
-          <p><a href={documentUrl}>Open the new agent workspace →</a></p>
+          <p><a className="primary-button" href={documentUrl}>Open the new agent workspace →</a></p>
         ) : (
-          <button type="button" onClick={provision} disabled={state === "working" || missingCredential}>
+          <button className="primary-button wide-button" type="button" onClick={provision} disabled={state === "working" || missingCredential}>
             {state === "working" ? "Creating agent…" : "Create agent in r-docs"}
           </button>
         )}
