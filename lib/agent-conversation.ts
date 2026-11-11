@@ -22,7 +22,7 @@ import type { AgentAccessMode, ClaudeResearchAgentInput } from "@/agent-core";
 import type { AgentComment } from "@/agent-core/ai-edit-submission";
 import { normalizeAgentImages } from "@/lib/ai-edit-submission";
 import { createLiveCommentRecorder } from "@/lib/agent-comments";
-import { flattenDocumentAnchorText } from "@/lib/suggestion-content";
+import { flattenDocumentAnchorText, listDocumentTabTitles } from "@/lib/suggestion-content";
 import { getWorkspaceOverview } from "@/lib/research-workspace";
 import { getLinkedWorkspaceDocContext } from "@/lib/workspace-link";
 import { persistRefreshedCodexAuth } from "@/lib/user-credentials";
@@ -238,6 +238,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
         ? `${documentText}\n\n===== Linked project document: "${linkedWorkspaceDoc.title}" (this channel shares its workspace) =====\n${linkedWorkspaceDoc.text}`
         : documentText;
       const suggestionAnchorText = flattenDocumentAnchorText(parsedContent);
+      const documentTabTitles = listDocumentTabTitles(parsedContent);
       const documentBlocks = getDocumentAiBlocks(parsedContent);
       const unresolvedThreads = await db.commentThread.findMany({
         where: {
@@ -336,7 +337,7 @@ export async function runAgentConversationInBackground(input: ConversationRunInp
         containerName: `gdocs-run-${aiRunId}`,
         documentId,
         aiRunId,
-        validation: { kind: "conversation", documentText: suggestionAnchorText },
+        validation: { kind: "conversation", documentText: suggestionAnchorText, tabTitles: documentTabTitles },
         onComment: commentRecorder.onComment,
         onSlackMessage,
         // Persist the run's SDK session id (recorded at init, so failed and

@@ -57,8 +57,11 @@ import {
 } from "./document-workspace/ai-edit-selections";
 import { buildAiEditRemountTransaction } from "./document-workspace/ai-edit-remount";
 import { startAiEditRun } from "./document-workspace/ai-edit-kickoff";
+import { deleteTabAtBreak, tabRangeAtBreak } from "@/lib/tab-ranges";
+import { tabMarkerTitle } from "@/agent-core/anchor-text";
 import {
   buildRichTrackedReplacementTransaction,
+  buildTabDeletionSuggestionTransaction,
   resolveSuggestionRange,
   type AgentSuggestionInput
 } from "./document-workspace/ai-suggestions";
@@ -1781,6 +1784,12 @@ export function DocumentWorkspace({
     if (pos === null) return;
     const node = editor.state.doc.nodeAt(pos);
     if (!node) return;
+    // A tab is its break PLUS its content: deleting only the break merged the
+    // content into the previous tab (lib/tab-ranges.ts).
+    const range = tabRangeAtBreak(editor.state.doc, pos);
+    if (!range) return;
+    const hasContent = editor.state.doc.textBetween(range.from + node.nodeSize, range.to, "\n", " ").trim() !== "";
+    if (hasContent && !window.confirm(`Delete the tab "${node.attrs.title || "Untitled tab"}" and all its content?`)) return;
     const wasActive = activeTabId === tabId;
     // Find previous tab to switch to.
     const previousTab = (() => {
@@ -1789,7 +1798,8 @@ export function DocumentWorkspace({
       if (idx === 0 && tabs.length > 1) return tabs[1];
       return null;
     })();
-    const tr = editor.state.tr.delete(pos, pos + node.nodeSize);
+    const tr = editor.state.tr;
+    deleteTabAtBreak(tr, pos);
     editor.view.dispatch(tr);
     if (wasActive) setActiveTabIdState(previousTab?.id ?? null);
   }
@@ -3167,7 +3177,31 @@ export function DocumentWorkspace({
     // earlier offsets stay valid as later ones insert content.
     const resolved: Array<{ suggestion: AgentSuggestionInput; from: number; to: number }> = [];
     const skipped: AgentSuggestionInput[] = [];
+    // Whole-tab deletions (findText is exactly a <tab title="…"> line, empty
+    // replacement) only add marks/attrs, so positions stay valid for the rest.
+    let tabDeletions = 0;
     for (const suggestion of suggestions) {
+      const tabTitle = suggestion.replacementText.trim() ? null : tabMarkerTitle(suggestion.findText);
+      if (tabTitle !== null) {
+        const record = {
+          suggestionId: createSuggestionId(),
+          authorId: author.authorId,
+          authorLabel: author.authorLabel,
+          createdAt: new Date().toISOString()
+        };
+        const tr = buildTabDeletionSuggestionTransaction(editor.state, tabTitle, record);
+        if (!tr) {
+          skipped.push(suggestion);
+          continue;
+        }
+        editor.view.dispatch(tr);
+        if (applyDirectly) {
+          const accepted = acceptSuggestion(editor.state, record.suggestionId);
+          if (accepted) editor.view.dispatch(accepted);
+        }
+        tabDeletions += 1;
+        continue;
+      }
       const range = resolveSuggestionRange(editor.state.doc, suggestion.findText);
       if (!range) {
         skipped.push(suggestion);
@@ -3191,7 +3225,7 @@ export function DocumentWorkspace({
         scope: "ai-suggestion-anchor-lost",
         level: "warn",
         message: "agent suggestions could not be placed",
-        data: { documentId, aiRunId, applied: resolved.length, skipped: skipped.length, total: suggestions.length }
+        data: { documentId, aiRunId, applied: resolved.length + tabDeletions, skipped: skipped.length, total: suggestions.length }
       });
       reportClientError(
         `${skipped.length} of ${suggestions.length} AI suggestion(s) could not be placed in the document.`,

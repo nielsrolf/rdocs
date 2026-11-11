@@ -24,15 +24,18 @@ import { runWidgetBuild } from "./widget-build";
 // flattenDocumentAnchorText — text nodes joined with newlines at block
 // boundaries) the client resolves anchors against — present on every kind so
 // suggestion anchors can be validated wherever the agent runs.
+// `tabTitles` (the document's tab titles, in order) lets whole-tab deletion
+// suggestions be validated; optional so a job from an older app still parses.
 export type SubmissionValidationSpec =
   | {
       kind: "edit_selection";
       selectedText: string;
       assetIntent: EditAssetIntent;
       documentText: string;
+      tabTitles?: string[];
     }
-  | { kind: "comment_reply"; documentText: string }
-  | { kind: "conversation"; documentText: string };
+  | { kind: "comment_reply"; documentText: string; tabTitles?: string[] }
+  | { kind: "conversation"; documentText: string; tabTitles?: string[] };
 
 /** Build the agent's widget, then confirm it produced its embed_source. */
 export async function buildAndVerifyWidget(
@@ -61,7 +64,7 @@ export function buildSubmissionValidator(
   return async (submission) => {
     // Suggestion anchors are validated in every mode (edit_selection, comment_reply,
     // conversation) — agents may propose tracked-change edits anywhere.
-    const suggestionError = validateSuggestions(submission.suggestions, spec.documentText);
+    const suggestionError = validateSuggestions(submission.suggestions, spec.documentText, spec.tabTitles);
     if (suggestionError) {
       return suggestionError;
     }

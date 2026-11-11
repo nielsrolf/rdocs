@@ -642,7 +642,7 @@ function TabRow({
                 aria-label="Delete tab"
                 className="doc-tab-action doc-tab-action-danger"
                 onClick={() => onDelete?.(tab.id)}
-                title="Delete tab (merges content into previous tab)"
+                title="Delete tab and its content"
                 type="button"
               >
                 ✕

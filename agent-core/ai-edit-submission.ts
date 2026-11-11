@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { findAnchorMatch } from "./anchor-text";
+import { findAnchorMatch, tabMarkerTitle } from "./anchor-text";
 
 // Node-safe helpers for validating and normalizing an agent's edit_selection
 // submission. Extracted from the ai-edit route so the guard logic (which decides
@@ -266,7 +266,11 @@ export function validateAgentComments(
 // to the agent (so it can fix anchors and resubmit) or null. Never throws.
 export function validateSuggestions(
   suggestions: AgentSuggestion[] | undefined,
-  documentText: string
+  documentText: string,
+  // The document's tab titles in order (lib/suggestion-content listDocumentTabTitles).
+  // Undefined = unknown (an older caller): whole-tab deletions are then not checked
+  // here and the client reports one it cannot place.
+  tabTitles?: string[]
 ): string | null {
   if (!suggestions || suggestions.length === 0) return null;
   if (suggestions.length > MAX_SUGGESTIONS) {
@@ -278,6 +282,28 @@ export function validateSuggestions(
     const label = `Suggestion #${i + 1}`;
     if (!findText) {
       errors.push(`${label}: findText is empty. Provide a substring of the document to anchor the edit.`);
+      continue;
+    }
+    // A lone <tab title="…"> line names a whole tab: the only edit it supports
+    // is deleting that tab with all its content.
+    const tabTitle = tabMarkerTitle(findText);
+    if (tabTitle !== null) {
+      if (replacementText.trim()) {
+        errors.push(
+          `${label}: a findText that is only a <tab title="…"> line deletes that whole tab, so it needs an empty replacementText. To change the tab's content, anchor on its text instead.`
+        );
+        continue;
+      }
+      if (tabTitles) {
+        const count = tabTitles.filter((title) => title === tabTitle).length;
+        if (count === 0) {
+          errors.push(
+            `${label}: there is no tab titled "${tabTitle}". Existing tabs: ${tabTitles.map((title) => `"${title}"`).join(", ") || "none"}.`
+          );
+        } else if (count > 1) {
+          errors.push(`${label}: ${count} tabs are titled "${tabTitle}", so the deletion is ambiguous. Ask the user which one to delete.`);
+        }
+      }
       continue;
     }
     const error = anchorError(label, findText, documentText);

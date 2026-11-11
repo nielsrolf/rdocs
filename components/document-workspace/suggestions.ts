@@ -13,6 +13,7 @@ import {
   type SuggestionRecord
 } from "@/lib/suggestion-content";
 import { isListItemType, isListType } from "@/lib/structured-replace";
+import { deleteTabAtBreak, tabRangeAtBreak } from "@/lib/tab-ranges";
 
 export type { SuggestionRecord };
 
@@ -618,6 +619,8 @@ type AccumulatedTargets = {
   removeMark: Array<{ from: number; to: number; type: MarkType }>;
   deleteRanges: Array<{ from: number; to: number }>;
   clearAtomAttr: Array<{ pos: number; attr: string; records: SuggestionRecord[] }>;
+  // Accepted whole-tab deletions: break + every block up to the next tab.
+  deleteTabs: Array<{ from: number; to: number }>;
 };
 
 function collectTargets(
@@ -625,11 +628,25 @@ function collectTargets(
   predicate: (suggestionId: string) => boolean,
   resolution: "accept" | "reject"
 ): AccumulatedTargets {
-  const targets: AccumulatedTargets = { removeMark: [], deleteRanges: [], clearAtomAttr: [] };
+  const targets: AccumulatedTargets = { removeMark: [], deleteRanges: [], clearAtomAttr: [], deleteTabs: [] };
   const insertMark = state.schema.marks[SUGGESTED_INSERTION_MARK];
   const deleteMark = state.schema.marks[SUGGESTED_DELETION_MARK];
+  // Inside an accepted whole-tab deletion nothing else needs resolving.
+  let skipUntil = -1;
 
   state.doc.descendants((node, pos) => {
+    if (pos < skipUntil) return false;
+    if (resolution === "accept" && node.type.name === "tabBreak") {
+      const tabRecord = nodeRecords(node, SUGGESTION_DELETE_RECORDS_ATTR).find(
+        (record) => record.scope === "tab" && predicate(record.suggestionId)
+      );
+      const range = tabRecord ? tabRangeAtBreak(state.doc, pos) : null;
+      if (range) {
+        targets.deleteTabs.push(range);
+        skipUntil = range.to;
+        return false;
+      }
+    }
     if (node.isInline && !isAtomNode(node)) {
       const insertion = node.marks.find((m) => m.type.name === SUGGESTED_INSERTION_MARK);
       const deletion = node.marks.find((m) => m.type.name === SUGGESTED_DELETION_MARK);
@@ -680,7 +697,12 @@ function collectTargets(
 }
 
 function applyTargets(state: EditorState, targets: AccumulatedTargets): Transaction | null {
-  if (targets.removeMark.length === 0 && targets.deleteRanges.length === 0 && targets.clearAtomAttr.length === 0) {
+  if (
+    targets.removeMark.length === 0 &&
+    targets.deleteRanges.length === 0 &&
+    targets.clearAtomAttr.length === 0 &&
+    targets.deleteTabs.length === 0
+  ) {
     return null;
   }
   const emptied = collectEmptiedTextblocks(state.doc, targets.deleteRanges);
@@ -692,9 +714,12 @@ function applyTargets(state: EditorState, targets: AccumulatedTargets): Transact
   for (const target of targets.clearAtomAttr) {
     tr.setNodeAttribute(target.pos, target.attr, target.records);
   }
-  // Deletions high → low to keep earlier offsets valid.
-  for (const range of [...targets.deleteRanges].sort((a, b) => b.from - a.from)) {
-    tr.delete(range.from, range.to);
+  // Deletions high → low to keep earlier offsets valid. Whole tabs never overlap
+  // the other ranges (collectTargets skips their content).
+  const tabStarts = new Set(targets.deleteTabs.map((range) => range.from));
+  for (const range of [...targets.deleteRanges, ...targets.deleteTabs].sort((a, b) => b.from - a.from)) {
+    if (tabStarts.has(range.from)) deleteTabAtBreak(tr, range.from);
+    else tr.delete(range.from, range.to);
   }
   // Blocks whose whole text this resolution removed go too (high → low), so a
   // rewritten paragraph/bullet leaves no empty husk. Mirrors the committed view

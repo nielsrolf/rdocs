@@ -14,6 +14,7 @@ import { db } from "@/lib/db";
 import { createDocumentEditorSchema } from "@/lib/document-editor-schema";
 import { markdownToDocNodes } from "@/lib/mcp/markdown-doc";
 import { replaceRangeWithBlocks } from "@/lib/structured-replace";
+import { deleteTabAtBreak } from "@/lib/tab-ranges";
 
 const schema = createDocumentEditorSchema();
 
@@ -252,6 +253,13 @@ export function buildEditSteps(input: {
     fragment.child(0).type.name === "tabBreak"
   ) {
     tr.setNodeMarkup(from, undefined, { ...matched.attrs, title: fragment.child(0).attrs.title });
+    return tr;
+  }
+
+  // Deleting a tab: its marker replaced by nothing removes the tab WITH its
+  // content (deleting only the break merged the content into the previous tab).
+  if (matched?.type.name === "tabBreak" && to === from + matched.nodeSize && input.nodes.length === 0) {
+    deleteTabAtBreak(tr, from);
     return tr;
   }
 

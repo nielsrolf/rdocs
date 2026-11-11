@@ -2,7 +2,13 @@ import { Fragment, type Node as PMNode } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 
 import { insertBlocksAfterRange } from "@/lib/structured-replace";
-import { SUGGESTED_DELETION_MARK, SUGGESTED_INSERTION_MARK, findAnchorMatch } from "@/lib/suggestion-content";
+import {
+  SUGGESTED_DELETION_MARK,
+  SUGGESTED_INSERTION_MARK,
+  SUGGESTION_DELETE_RECORDS_ATTR,
+  findAnchorMatch
+} from "@/lib/suggestion-content";
+import { tabRangeAtBreak } from "@/lib/tab-ranges";
 import { addSuggestionMarks, type SuggestionAuthor, type SuggestionRecord } from "./suggestions";
 
 // Applies an AGENT's anchored find/replace suggestions to the live editor as
@@ -189,6 +195,34 @@ export function buildRichTrackedReplacementTransaction(
   if (deletionTo > range.from) addSuggestionMarks(tr, { from: range.from, to: deletionTo }, "delete", record);
   for (const span of inserted) addSuggestionMarks(tr, span, "insert", record);
   return tr.docChanged ? tr : null;
+}
+
+// Tracked deletion of a WHOLE tab, from an agent suggestion whose findText is
+// exactly that tab's <tab title="…"> line and whose replacement is empty
+// (agent-core/anchor-text.ts tabMarkerTitle). The tab's content is struck so a
+// reviewer sees what goes, and the break carries a `scope: "tab"` delete record so
+// accepting removes the break and every block up to the next tab — including
+// content no deletion mark can carry (empty paragraphs, rules, code blocks).
+// Null when the title does not name exactly one tab.
+export function buildTabDeletionSuggestionTransaction(
+  state: EditorState,
+  title: string,
+  record: SuggestionRecord
+): Transaction | null {
+  const wanted = title.trim() || "Untitled tab";
+  const matches: number[] = [];
+  state.doc.forEach((child, offset) => {
+    if (child.type.name !== "tabBreak") return;
+    const childTitle = (typeof child.attrs.title === "string" && child.attrs.title.trim()) || "Untitled tab";
+    if (childTitle === wanted) matches.push(offset);
+  });
+  if (matches.length !== 1) return null;
+  const range = tabRangeAtBreak(state.doc, matches[0]);
+  if (!range) return null;
+  const tr = state.tr;
+  addSuggestionMarks(tr, range, "delete", record);
+  tr.setNodeAttribute(range.from, SUGGESTION_DELETE_RECORDS_ATTR, [{ ...record, scope: "tab" }]);
+  return tr;
 }
 
 function isEmptyParagraph(node: PMNode) {

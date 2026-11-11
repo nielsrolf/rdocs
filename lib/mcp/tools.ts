@@ -87,7 +87,7 @@ const MARKDOWN_CONTRACT = [
   "Images: reference files committed to the document workspace as ![alt](path/in/repo.png) — upload them with upload_files first.",
   "Interactive widgets: insert the placeholder ![widget: <label>](widget://<widget_id>) on its own line — create the widget with create_widget first, or reuse a widget id from read_document. Widgets render minimized; add the title \"expanded\" to show one inline: ![widget: <label>](widget://<widget_id> \"expanded\").",
   "Collapsible sections: <details>\\n<summary>Title</summary>\\n\\n…markdown…\\n\\n</details> becomes a toggle block (collapsed until a reader opens it).",
-  "Tabs: read_document shows each document tab as <tab title=\"Name\"> … </tab>. A line <tab title=\"Name\"> (blank lines around it) starts a NEW tab at that point; the markdown after it is that tab's content, and a closing </tab> is optional. Rename a tab with replace_in_document: find_text <tab title=\"Old\">, replacement <tab title=\"New\">. Delete a tab (its content joins the previous tab) by replacing its <tab title=…> marker with an empty string."
+  "Tabs: read_document shows each document tab as <tab title=\"Name\"> … </tab>. A line <tab title=\"Name\"> (blank lines around it) starts a NEW tab at that point; the markdown after it is that tab's content, and a closing </tab> is optional. Rename a tab with replace_in_document: find_text <tab title=\"Old\">, replacement <tab title=\"New\">. Delete a tab TOGETHER WITH all its content by replacing its <tab title=…> marker (find_text exactly that one line) with an empty string; to keep some of the content, move it into another tab first."
 ].join(" ");
 
 function parseDocumentRef(ref: string): string {

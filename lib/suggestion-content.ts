@@ -29,7 +29,30 @@ export type SuggestionRecord = {
   authorId: string | null;
   authorLabel: string | null;
   createdAt: string | null;
+  // Only on a tabBreak's delete record: the suggestion deletes the WHOLE tab, so
+  // accepting it removes the break and every block up to the next tab (including
+  // empty paragraphs, rules and code blocks that carry no deletion mark).
+  scope?: "tab";
 };
+
+export function isWholeTabDeletion(node: { type?: { name?: string } | string; attrs?: Record<string, unknown> | null }): boolean {
+  const typeName = typeof node.type === "string" ? node.type : node.type?.name;
+  if (typeName !== "tabBreak") return false;
+  return recordArray(node.attrs?.[SUGGESTION_DELETE_RECORDS_ATTR]).some((record) => record.scope === "tab");
+}
+
+// Titles of the document's tabs in order, as the agent's views print them
+// (lib/content.ts tabMarker). Used to validate whole-tab deletion suggestions.
+export function listDocumentTabTitles(content: unknown): string[] {
+  const root = content as JsonNode | null;
+  if (!root || !Array.isArray(root.content)) return [];
+  return root.content
+    .filter((child): child is JsonNode => Boolean(child) && (child as JsonNode).type === "tabBreak")
+    .map((child) => {
+      const title = child.attrs?.title;
+      return (typeof title === "string" && title.trim()) || "Untitled tab";
+    });
+}
 
 type JsonNode = {
   type?: string;
@@ -156,7 +179,19 @@ function transformChildren(parentType: string | undefined, children: unknown[], 
   emptied: boolean;
 } {
   const transformed: Array<{ node: unknown; emptied: boolean }> = [];
+  // Accepting a whole-tab deletion drops the break and every block up to the
+  // next tab (mirrors collectTargets in components/document-workspace/suggestions.ts).
+  let droppingTab = false;
+  let droppedTab = false;
   for (const child of children) {
+    if (!reject && parentType === "doc") {
+      const childNode = child as JsonNode;
+      if (childNode?.type === "tabBreak") droppingTab = isWholeTabDeletion(childNode);
+      if (droppingTab) {
+        droppedTab = true;
+        continue;
+      }
+    }
     const result = transformBlock(child, reject);
     if (result.node !== null) transformed.push(result);
   }
@@ -172,6 +207,7 @@ function transformChildren(parentType: string | undefined, children: unknown[], 
       parentEmptied = true;
     }
   }
+  if (droppedTab && transformed.length === 0) transformed.push({ node: { type: "paragraph" }, emptied: false });
   return {
     content: mergeAdjacentTextNodes(transformed.map((entry) => entry.node)),
     emptied: parentEmptied

@@ -20,7 +20,7 @@ import {
 import { getDocumentAiBlocks, getDocumentPlainText, parseDocumentContent } from "@/lib/content";
 import { db } from "@/lib/db";
 import { createLiveCommentRecorder } from "@/lib/agent-comments";
-import { flattenDocumentAnchorText } from "@/lib/suggestion-content";
+import { flattenDocumentAnchorText, listDocumentTabTitles } from "@/lib/suggestion-content";
 import { getWorkspaceOverview } from "@/lib/research-workspace";
 import { normalizeSourceLinks } from "@/lib/sources";
 import { persistRefreshedCodexAuth } from "@/lib/user-credentials";
@@ -141,6 +141,7 @@ export async function runAiEditInBackground(input: {
       const documentContent = parseDocumentContent(documentContentRaw);
       const documentText = getDocumentPlainText(documentContent);
       const suggestionAnchorText = flattenDocumentAnchorText(documentContent);
+      const documentTabTitles = listDocumentTabTitles(documentContent);
       const documentBlocks = getDocumentAiBlocks(documentContent);
       const unresolvedThreads = await db.commentThread.findMany({
         where: { documentId, status: "OPEN" },
@@ -228,7 +229,8 @@ export async function runAiEditInBackground(input: {
             kind: "edit_selection",
             selectedText: parsed.selectedText,
             assetIntent,
-            documentText: suggestionAnchorText
+            documentText: suggestionAnchorText,
+            tabTitles: documentTabTitles
           }
         }
       );

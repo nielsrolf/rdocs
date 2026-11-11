@@ -134,6 +134,25 @@ function normalizedMatch(haystack: string, needle: string): AnchorMatchResult {
 }
 
 /**
+ * A findText that is exactly ONE tab marker line — `<tab title="Name">` as the
+ * document views print it (an optional `</tab>` is tolerated) — names a whole
+ * tab: with an empty replacement it is a request to delete that tab. Returns the
+ * unescaped title, or null for anything else (a marker followed by text is an
+ * ordinary anchor; stripMarkdownSyntax drops the marker line from it).
+ */
+export function tabMarkerTitle(findText: string): string | null {
+  const match = /^\s*<tab\s+title\s*=\s*(?:"([^"]*)"|'([^']*)')\s*\/?>\s*(?:<\/tab>\s*)?$/i.exec(findText);
+  if (!match) return null;
+  const title = (match[1] ?? match[2] ?? "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&")
+    .trim();
+  return title || "Untitled tab";
+}
+
+/**
  * Removes markdown syntax the agent may have copied from a markdown rendition
  * of the document (MCP read_document): links/images keep their visible text,
  * backslash escapes are unescaped, line-leading block markers (headings,

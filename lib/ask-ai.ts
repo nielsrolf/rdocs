@@ -23,7 +23,7 @@ import type { AgentAccessMode } from "@/agent-core";
 import { normalizeAgentImages } from "@/lib/ai-edit-submission";
 import { createLiveCommentRecorder } from "@/lib/agent-comments";
 import { notifyCommentPosted } from "@/lib/comment-notifications";
-import { flattenDocumentAnchorText } from "@/lib/suggestion-content";
+import { flattenDocumentAnchorText, listDocumentTabTitles } from "@/lib/suggestion-content";
 import { normalizeSourceLinks, serializeSourceLinks } from "@/lib/sources";
 import { getWorkspaceOverview } from "@/lib/research-workspace";
 import { persistRefreshedCodexAuth } from "@/lib/user-credentials";
@@ -153,6 +153,7 @@ export async function runAskAiInBackground(input: {
       const documentContent = parseDocumentContent(thread.document.content);
       const documentText = getDocumentPlainText(documentContent);
       const suggestionAnchorText = flattenDocumentAnchorText(documentContent);
+      const documentTabTitles = listDocumentTabTitles(documentContent);
       const documentBlocks = getDocumentAiBlocks(documentContent);
       const derivedAnchorContext =
         thread.anchorContext || getContextAroundMatch(documentText, thread.anchorText);
@@ -233,7 +234,7 @@ export async function runAskAiInBackground(input: {
         containerName: `gdocs-run-${aiRunId}`,
         documentId: thread.documentId,
         aiRunId,
-        validation: { kind: "comment_reply", documentText: suggestionAnchorText },
+        validation: { kind: "comment_reply", documentText: suggestionAnchorText, tabTitles: documentTabTitles },
         onComment: commentRecorder.onComment,
         onProgress: ctx.onProgress,
         // ChatGPT-subscription Codex runs rotate the auth.json refresh token;

@@ -684,7 +684,8 @@ Suggesting edits (available in every mode):
 - Do not use suggestions to restate the selection you were asked to replace — use the top-level replacementText for that. Use suggestions for changes elsewhere in the document.
 
 Document tabs:
-- The document may be split into tabs. In the document above, each tab starts at a line <tab title="Tab name">; everything up to the next such line belongs to that tab. Tab titles are not document text, so never put a <tab …> line in findText.
+- The document may be split into tabs. In the document above, each tab starts at a line <tab title="Tab name">; everything up to the next such line belongs to that tab. Tab titles are not document text, so never put a <tab …> line in an ordinary findText.
+- To delete a whole tab together with all its content, add a suggestion whose findText is exactly that tab's line, e.g. findText: "<tab title=\"Old notes\">", with an empty replacementText. The reviewer sees the tab's content struck through and accepting removes the tab. Never rename a tab (e.g. to "DELETE ME") as a stand-in for deleting it.
 - To create a new tab, put a line <tab title="New tab name"> on its own (blank lines around it) inside a replacementText at the point where the tab should start; the Markdown after it becomes the new tab's content. To add a tab at the END, anchor on the last words of the document, repeat them, then add the tab, e.g. replacementText: "<last words>\n\n<tab title=\"Appendix\">\n\nAppendix content…".
 
 Leaving comments (available in every mode):
