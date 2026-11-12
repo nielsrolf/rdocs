@@ -15,6 +15,15 @@ import { createDocumentEditorSchema } from "@/lib/document-editor-schema";
 import { markdownToDocNodes } from "@/lib/mcp/markdown-doc";
 import { replaceRangeWithBlocks } from "@/lib/structured-replace";
 import { deleteTabAtBreak } from "@/lib/tab-ranges";
+import {
+  deleteTableRows,
+  isPipeRows,
+  pipeRowsAsTableMarkdown,
+  pipeRowsToCellText,
+  replaceTableRows,
+  TableRowEditError,
+  tableRowSpan
+} from "@/lib/table-row-edit";
 
 const schema = createDocumentEditorSchema();
 
@@ -185,6 +194,12 @@ export function findTextRange(doc: ProseMirrorNode, findText: string): { from: n
     if (stripped && !needleCandidates.includes(stripped)) {
       needleCandidates.push(stripped);
     }
+    // Table rows copied as `| a | b |` lines: match the cells' text.
+    const cellText = pipeRowsToCellText(needle);
+    const cells = cellText === null ? "" : stripMarkdownSyntax(cellText).replace(/\s+/g, " ").trim();
+    if (cells && !needleCandidates.includes(cells)) {
+      needleCandidates.push(cells);
+    }
     let matched = false;
     for (const normNeedle of needleCandidates) {
       const normalized = matchesOf(normText, normNeedle);
@@ -223,6 +238,8 @@ export function buildEditSteps(input: {
   mode: MarkdownEditMode;
   findText?: string;
   nodes: JSONContent[];
+  /** The replacement parsed as table rows (see pipeRowsAsTableMarkdown), when it is only `| … |` lines. */
+  tableRows?: { node: JSONContent; explicitHeader: boolean } | null;
 }) {
   const docSchema = input.doc.type.schema;
   const tr = new Transform(input.doc);
@@ -261,6 +278,40 @@ export function buildEditSteps(input: {
   if (matched?.type.name === "tabBreak" && to === from + matched.nodeSize && input.nodes.length === 0) {
     deleteTabAtBreak(tr, from);
     return tr;
+  }
+
+  // A match inside a table: rows are replaced as rows, never spliced as prose
+  // across cells (lib/table-row-edit.ts).
+  const span = tableRowSpan(input.doc, from, to);
+  const rowMatch = span !== null && span.wholeRows && (span.multiCell || isPipeRows(input.findText));
+  if (span && (span.multiCell || rowMatch)) {
+    const tableRows =
+      input.tableRows ??
+      (input.nodes.length === 1 && input.nodes[0].type === "table"
+        ? { node: input.nodes[0], explicitHeader: true }
+        : null);
+    try {
+      if (rowMatch && input.nodes.length === 0) {
+        deleteTableRows(tr, span);
+        return tr;
+      }
+      if (rowMatch && tableRows) {
+        replaceTableRows(tr, span, docSchema.nodeFromJSON(tableRows.node), tableRows);
+        return tr;
+      }
+      if (span.wholeTable) {
+        tr.replaceWith(span.tablePos, span.tablePos + span.table.nodeSize, fragment);
+        return tr;
+      }
+    } catch (error) {
+      if (error instanceof TableRowEditError) throw new McpEditError(error.message);
+      throw error;
+    }
+    if (span.multiCell) {
+      throw new McpEditError(
+        "find_text spans several cells of a table. To change table rows, copy the whole row(s) from read_document as `| a | b |` lines into find_text and give the new row(s) in the same form (an empty replacement deletes them); to change one cell, match only text inside that cell."
+      );
+    }
   }
 
   // Empty replacement deletes the matched range (e.g. removing a widget
@@ -310,6 +361,18 @@ export async function applyMarkdownEdit(input: {
     throw new McpEditError("The markdown produced no content.");
   }
 
+  // Only `| a | b |` lines: also parse them as table rows, used when find_text
+  // matched rows of a table (rows without a header delimiter are a paragraph to
+  // markdown-it).
+  const rowsMarkdown = input.mode === "replace" && !blank ? pipeRowsAsTableMarkdown(input.markdown) : null;
+  const rowsNode = rowsMarkdown
+    ? markdownToDocNodes({ markdown: rowsMarkdown.markdown, documentId: input.documentId, widgetRows: [] })
+    : [];
+  const tableRows =
+    rowsMarkdown && rowsNode.length === 1 && rowsNode[0].type === "table"
+      ? { node: rowsNode[0], explicitHeader: rowsMarkdown.explicitHeader }
+      : null;
+
   const clientId = `mcp-${input.userId}-${Date.now().toString(36)}`;
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -323,7 +386,7 @@ export async function applyMarkdownEdit(input: {
 
     const version = await getCollaborationVersion(input.documentId, document.content, document.updatedAt);
     const doc = schema.nodeFromJSON(parseDocumentContent(document.content));
-    const tr = buildEditSteps({ doc, mode: input.mode, findText: input.findText, nodes });
+    const tr = buildEditSteps({ doc, mode: input.mode, findText: input.findText, nodes, tableRows });
 
     if (tr.steps.length === 0) {
       return { version };
