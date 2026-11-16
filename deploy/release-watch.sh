@@ -74,4 +74,3 @@ else
   log "DEPLOY FAILED (attempt $FAILS/$MAX_ATTEMPTS for $TARGET) — old color keeps serving; see $LOG"
   exit 1
 fi
-./deploy/refresh-dev-data.sh >>"$LOG" 2>&1 || log "dev data refresh failed (non-fatal)"

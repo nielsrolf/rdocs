@@ -20,6 +20,16 @@ cd "$(dirname "$0")/.."
 log() { echo "[refresh-dev-data] $*"; }
 
 if [ -f .env ]; then set -a; . ./.env; set +a; fi
+
+# The dev instance is a durable app. While durable apps are switched off
+# (DURABLE_APP_ALLOWED_EMAILS empty) nothing can read the copy, and making it
+# is not free: backing up the 5 GB prod DB next to the live server made its
+# writes time out for minutes after every deploy (2026-11-16).
+# FORCE_DEV_REFRESH=1 overrides.
+if [ -z "${DURABLE_APP_ALLOWED_EMAILS:-}" ] && [ "${FORCE_DEV_REFRESH:-0}" != "1" ]; then
+  log "durable apps are off (DURABLE_APP_ALLOWED_EMAILS empty), so the dev instance cannot run; skipping"
+  exit 0
+fi
 DEV_DOC="${DEV_WORKSPACE_DOCUMENT_ID:-cmrtjzahr0003c3tnabv91vqh}"
 WS="${DEV_WORKSPACE_DIR:-.research-workspaces/$DEV_DOC/rdocs}"
 DB_FILE="${DB_FILE:-prisma/dev.db}"
