@@ -152,15 +152,71 @@ export function tabMarkerTitle(findText: string): string | null {
   return title || "Untitled tab";
 }
 
+const PIPE_ROW = /^\s*\|.*\|\s*$/;
+const DELIMITER_ROW = /^\s*\|(\s*:?-+:?\s*\|)+\s*$/;
+
+/** True for one `| a | b |` table line of the markdown views. */
+export function isPipeRowLine(line: string): boolean {
+  return PIPE_ROW.test(line);
+}
+
+/** True for the `| --- | --- |` line under a markdown table's header row. */
+export function isDelimiterRowLine(line: string): boolean {
+  return DELIMITER_ROW.test(line);
+}
+
+/** Cells of one `| a | b |` line (unescaped `|` separates, `\|` is a literal pipe). */
+export function splitPipeRow(line: string): string[] {
+  const inner = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  const cells: string[] = [];
+  let current = "";
+  for (let i = 0; i < inner.length; i += 1) {
+    if (inner[i] === "\\" && inner[i + 1] === "|") {
+      current += "|";
+      i += 1;
+    } else if (inner[i] === "|") {
+      cells.push(current.trim());
+      current = "";
+    } else {
+      current += inner[i];
+    }
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
+/**
+ * Table rows copied from a markdown table → the document text they stand for:
+ * cells become separate lines (cell boundaries are block boundaries in the anchor
+ * text) and the `| --- |` delimiter row, which is not in the document, is
+ * dropped. Returns null when no line is a table row.
+ */
+export function pipeRowsToCellText(needle: string): string | null {
+  let changed = false;
+  const lines: string[] = [];
+  for (const line of needle.split("\n")) {
+    if (!PIPE_ROW.test(line)) {
+      lines.push(line);
+      continue;
+    }
+    changed = true;
+    if (DELIMITER_ROW.test(line)) continue;
+    lines.push(splitPipeRow(line).join("\n"));
+  }
+  return changed ? lines.join("\n") : null;
+}
+
 /**
  * Removes markdown syntax the agent may have copied from a markdown rendition
- * of the document (MCP read_document): links/images keep their visible text,
+ * of the document (MCP read_document): table rows become their cells' text,
+ * links/images keep their visible text,
  * backslash escapes are unescaped, line-leading block markers (headings,
  * blockquotes, list bullets/numbers) are dropped, emphasis and inline code
  * markers are unwrapped. Exported for tests.
  */
 export function stripMarkdownSyntax(input: string): string {
-  let out = input;
+  // Table rows first: their `\|` escapes must be read before the generic unescape.
+  let out = pipeRowsToCellText(input) ?? input;
   // Structure markers of the markdown view that are not document text: tab
   // starts/ends and toggle-block wrappers (their summary lives in an attribute).
   out = out.replace(/^[ \t]*(?:<tab\b[^>\n]*>|<\/tab>|<details>|<\/details>|<summary>[^\n]*<\/summary>)[ \t]*$/gim, "");

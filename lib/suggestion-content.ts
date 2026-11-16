@@ -167,13 +167,28 @@ export function computeCommittedContent(content: unknown, options: { reject?: bo
 const TEXTBLOCK_TYPES = new Set(["paragraph", "heading", "codeBlock"]);
 const LIST_TYPES = new Set(["bulletList", "orderedList", "taskList"]);
 const LIST_ITEM_TYPES = new Set(["listItem", "taskItem"]);
+const TABLE_CELL_TYPES = new Set(["tableCell", "tableHeader"]);
+
+// A cell holding nothing but empty textblocks (mirrors isBlankTableRow in
+// components/document-workspace/suggestions.ts).
+function isBlankCell(cell: unknown): boolean {
+  const content = (cell as JsonNode | null)?.content;
+  if (!Array.isArray(content)) return true;
+  return content.every((child) => {
+    const node = child as JsonNode | null;
+    return TEXTBLOCK_TYPES.has(node?.type ?? "") && (!Array.isArray(node?.content) || node.content.length === 0);
+  });
+}
 
 // Blocks the resolution emptied are removed, mirroring the editor's accept/reject
 // (components/document-workspace/suggestions.ts removeEmptiedBlock): a textblock
 // that had content and lost all of it disappears; an only child takes its list
 // item / list with it (signalled upward as "emptied"); a list item's first
 // paragraph stays while the item has other children; no other container is
-// emptied. Children are processed last → first, like the editor's high → low pass.
+// emptied — except in tables: a cell's only block signals the cell as emptied, a
+// row with an emptied cell and only blank cells is removed (never a single cell),
+// and the table goes with its last row. Children are processed last → first, like
+// the editor's high → low pass.
 function transformChildren(parentType: string | undefined, children: unknown[], reject: boolean): {
   content: unknown[];
   emptied: boolean;
@@ -195,6 +210,12 @@ function transformChildren(parentType: string | undefined, children: unknown[], 
     const result = transformBlock(child, reject);
     if (result.node !== null) transformed.push(result);
   }
+  if (parentType === "tableRow") {
+    return {
+      content: transformed.map((entry) => entry.node),
+      emptied: transformed.some((entry) => entry.emptied) && transformed.every((entry) => isBlankCell(entry.node))
+    };
+  }
   let parentEmptied = false;
   for (let index = transformed.length - 1; index >= 0; index -= 1) {
     if (!transformed[index].emptied) continue;
@@ -203,7 +224,14 @@ function transformChildren(parentType: string | undefined, children: unknown[], 
       transformed.splice(index, 1);
       continue;
     }
-    if (parentType && parentType !== "doc" && (LIST_ITEM_TYPES.has(parentType) || LIST_TYPES.has(parentType))) {
+    if (
+      parentType &&
+      parentType !== "doc" &&
+      (LIST_ITEM_TYPES.has(parentType) ||
+        LIST_TYPES.has(parentType) ||
+        TABLE_CELL_TYPES.has(parentType) ||
+        parentType === "table")
+    ) {
       parentEmptied = true;
     }
   }

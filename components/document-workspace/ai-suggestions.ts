@@ -9,6 +9,14 @@ import {
   findAnchorMatch
 } from "@/lib/suggestion-content";
 import { tabRangeAtBreak } from "@/lib/tab-ranges";
+import {
+  buildReplacementRows,
+  isPipeRows,
+  pipeRowsAsTableMarkdown,
+  TableRowEditError,
+  tableRowOffset,
+  tableRowSpan
+} from "@/lib/table-row-edit";
 import { addSuggestionMarks, type SuggestionAuthor, type SuggestionRecord } from "./suggestions";
 
 // Applies an AGENT's anchored find/replace suggestions to the live editor as
@@ -194,6 +202,109 @@ export function buildRichTrackedReplacementTransaction(
   const inserted = nodes.length > 0 ? insertBlocksAfterRange(tr, range.from, deletionTo, nodes) : [];
   if (deletionTo > range.from) addSuggestionMarks(tr, { from: range.from, to: deletionTo }, "delete", record);
   for (const span of inserted) addSuggestionMarks(tr, span, "insert", record);
+  return tr.docChanged ? tr : null;
+}
+
+// Tracked change of whole TABLE ROWS: the anchor covers one or more rows (copied
+// as `| a | b |` lines, or their cells' text) and the replacement is rows in the
+// same form. Each cell that differs gets its old text struck and the new text
+// inserted in place, so the table keeps its shape and the other cells are
+// untouched; extra replacement rows are inserted below as tracked rows, surplus
+// matched rows (or all of them, for an empty replacement) are struck. Accept /
+// reject remove a row they leave blank (removeEmptiedBlock). A whole table whose
+// columns change is struck and the new one inserted after it.
+//
+// Returns `undefined` when the range is not a row change (inside one cell, or not
+// in a table) so the caller takes the ordinary path, and `null` when it spans
+// cells but cannot be placed as rows — spliced as prose it would land in the
+// first cell and leave the others as they were.
+export function buildTableRowSuggestionTransaction(
+  state: EditorState,
+  range: { from: number; to: number },
+  findText: string,
+  replacementText: string,
+  record: SuggestionRecord,
+  parseMarkdown: (markdown: string) => Fragment
+): Transaction | null | undefined {
+  const span = tableRowSpan(state.doc, range.from, range.to);
+  if (!span) return undefined;
+  const rowMatch = span.wholeRows && (span.multiCell || isPipeRows(findText));
+  if (!span.multiCell && !rowMatch) return undefined;
+  if (!rowMatch) return null;
+
+  const tr = state.tr;
+  const { table, tablePos, startRow, endRow } = span;
+  const rowPos = (row: number) => tableRowOffset(table, tablePos, row);
+  const strikeRows = (fromRow: number, toRow: number) => {
+    if (toRow > fromRow) addSuggestionMarks(tr, { from: rowPos(fromRow), to: rowPos(toRow) }, "delete", record);
+  };
+
+  const replacement = replacementText.trim();
+  if (!replacement) {
+    strikeRows(startRow, endRow);
+    return tr.docChanged ? tr : null;
+  }
+
+  const rowsMarkdown = pipeRowsAsTableMarkdown(replacement);
+  const parsed = rowsMarkdown ? parseMarkdown(rowsMarkdown.markdown) : null;
+  const newTable = parsed && parsed.childCount === 1 && parsed.child(0).type.name === "table" ? parsed.child(0) : null;
+  const columns = table.child(0).childCount;
+  let rows: PMNode[] | null = null;
+  if (newTable && rowsMarkdown && !(span.wholeTable && newTable.child(0).childCount !== columns)) {
+    try {
+      rows = buildReplacementRows(span, newTable, rowsMarkdown);
+    } catch (error) {
+      if (!(error instanceof TableRowEditError)) throw error;
+    }
+  }
+
+  if (!rows) {
+    if (!span.wholeTable) return null;
+    // The whole table gives way to other content (a table with other columns, prose).
+    const content = newTable ? Fragment.from(newTable) : parseMarkdown(replacement);
+    if (content.size === 0) return null;
+    const after = tablePos + table.nodeSize;
+    tr.insert(after, content);
+    addSuggestionMarks(tr, { from: tablePos, to: after }, "delete", record);
+    addSuggestionMarks(tr, { from: after, to: after + content.size }, "insert", record);
+    return tr;
+  }
+
+  // High → low, so earlier positions stay valid.
+  const matched = endRow - startRow;
+  if (rows.length > matched) {
+    const added = Fragment.fromArray(rows.slice(matched));
+    const at = rowPos(endRow);
+    tr.insert(at, added);
+    addSuggestionMarks(tr, { from: at, to: at + added.size }, "insert", record);
+  }
+  strikeRows(startRow + rows.length, endRow);
+  for (let index = Math.min(rows.length, matched) - 1; index >= 0; index -= 1) {
+    const oldRow = table.child(startRow + index);
+    const newRow = rows[index];
+    const cellStarts: number[] = [];
+    let cellPos = rowPos(startRow + index) + 1;
+    oldRow.forEach((cell) => {
+      cellStarts.push(cellPos);
+      cellPos += cell.nodeSize;
+    });
+    for (let column = Math.min(oldRow.childCount, newRow.childCount) - 1; column >= 0; column -= 1) {
+      const oldCell = oldRow.child(column);
+      const newCell = newRow.child(column);
+      if (oldCell.textContent.trim() === newCell.textContent.trim()) continue;
+      const last = oldCell.lastChild;
+      if (!last || !last.isTextblock || last.type.spec.code) return null;
+      const contentFrom = cellStarts[column] + 1;
+      // End of the cell's last textblock: the new text goes right after the old.
+      const insertAt = cellStarts[column] + oldCell.nodeSize - 2;
+      const inline = newCell.firstChild?.isTextblock ? newCell.firstChild.content : Fragment.empty;
+      if (inline.size > 0) {
+        tr.insert(insertAt, inline);
+        addSuggestionMarks(tr, { from: insertAt, to: insertAt + inline.size }, "insert", record);
+      }
+      addSuggestionMarks(tr, { from: contentFrom, to: insertAt }, "delete", record);
+    }
+  }
   return tr.docChanged ? tr : null;
 }
 

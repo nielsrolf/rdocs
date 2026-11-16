@@ -61,6 +61,7 @@ import { deleteTabAtBreak, tabRangeAtBreak } from "@/lib/tab-ranges";
 import { tabMarkerTitle } from "@/agent-core/anchor-text";
 import {
   buildRichTrackedReplacementTransaction,
+  buildTableRowSuggestionTransaction,
   buildTabDeletionSuggestionTransaction,
   resolveSuggestionRange,
   type AgentSuggestionInput
@@ -3123,7 +3124,10 @@ export function DocumentWorkspace({
     author: SuggestionAuthor,
     runImages: AiEditImage[],
     runSources: string[],
-    applyDirectly = false
+    applyDirectly = false,
+    // The agent's anchor, when the range comes from one: lets a table-row anchor
+    // (`| a | b |`) be applied as a row change.
+    findText?: string
   ): boolean {
     if (!editor) return false;
     const record = {
@@ -3133,20 +3137,41 @@ export function DocumentWorkspace({
       createdAt: new Date().toISOString()
     };
     const replacement = (replacementText ?? "").trim();
-    let content = Fragment.empty;
-    if (replacement) {
-      const html = buildAiEditInsertContent({
-        replacementText,
-        sourceLinks: runSources,
-        images: runImages,
-        widgets: [],
-        documentId,
-        shareToken,
-        existingWidgets: collectExistingWidgets(),
-        appendUnusedImages: false
-      });
-      content = htmlToFragment(html);
+    const markdownToFragment = (markdown: string) =>
+      htmlToFragment(
+        buildAiEditInsertContent({
+          replacementText: markdown,
+          sourceLinks: runSources,
+          images: runImages,
+          widgets: [],
+          documentId,
+          shareToken,
+          existingWidgets: collectExistingWidgets(),
+          appendUnusedImages: false
+        })
+      );
+    if (findText !== undefined) {
+      // Whole table rows change cell by cell; an anchor that spans cells any other
+      // way is not placed (spliced as prose it would land in the first cell).
+      const rowTr = buildTableRowSuggestionTransaction(
+        editor.state,
+        range,
+        findText,
+        replacement,
+        record,
+        markdownToFragment
+      );
+      if (rowTr === null) return false;
+      if (rowTr) {
+        editor.view.dispatch(rowTr);
+        if (applyDirectly) {
+          const accepted = acceptSuggestion(editor.state, record.suggestionId);
+          if (accepted) editor.view.dispatch(accepted);
+        }
+        return true;
+      }
     }
+    const content = replacement ? markdownToFragment(replacementText) : Fragment.empty;
     // Strike the range and splice the rich content in after it, structure-aware
     // (lib/structured-replace): rewriting a bullet keeps one bullet instead of
     // "bullet, blank line, text".
@@ -3210,22 +3235,28 @@ export function DocumentWorkspace({
       resolved.push({ suggestion, from: range.from, to: range.to });
     }
     resolved.sort((a, b) => b.from - a.from);
+    let applied = tabDeletions;
     for (const op of resolved) {
-      applyRichTrackedReplacement(
+      const placed = applyRichTrackedReplacement(
         { from: op.from, to: op.to },
         op.suggestion.replacementText,
         author,
         runImages,
         runSources,
-        applyDirectly
+        applyDirectly,
+        op.suggestion.findText
       );
+      if (placed) applied += 1;
+      // Not placeable as written: an anchor spanning table cells that is not a
+      // whole-row change.
+      else if (resolveSuggestionRange(editor.state.doc, op.suggestion.findText)) skipped.push(op.suggestion);
     }
     if (skipped.length > 0) {
       logClientEvent({
         scope: "ai-suggestion-anchor-lost",
         level: "warn",
         message: "agent suggestions could not be placed",
-        data: { documentId, aiRunId, applied: resolved.length + tabDeletions, skipped: skipped.length, total: suggestions.length }
+        data: { documentId, aiRunId, applied, skipped: skipped.length, total: suggestions.length }
       });
       reportClientError(
         `${skipped.length} of ${suggestions.length} AI suggestion(s) could not be placed in the document.`,

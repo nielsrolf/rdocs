@@ -1,6 +1,12 @@
 import { Fragment, type Node as PMNode } from "@tiptap/pm/model";
 import type { Transform } from "@tiptap/pm/transform";
 
+import { isDelimiterRowLine, isPipeRowLine, pipeRowsToCellText, splitPipeRow } from "../agent-core/anchor-text";
+
+// The string half (row lines ↔ cell text) lives in agent-core/anchor-text.ts: the
+// submission validator inside the agent images needs it and ships only agent-core.
+export { pipeRowsToCellText, splitPipeRow };
+
 // Row-level table edits for agent markdown (MCP replace_in_document).
 //
 // A table is read as GFM (`| a | b |` lines), so an agent edits it by copying
@@ -9,60 +15,16 @@ import type { Transform } from "@tiptap/pm/transform";
 // replacement landed in the first cell and the other cells kept their old text
 // ("the doc editor only replaces within one cell", 2026-11-12).
 
-const PIPE_ROW = /^\s*\|.*\|\s*$/;
-const DELIMITER_ROW = /^\s*\|(\s*:?-+:?\s*\|)+\s*$/;
-
 export class TableRowEditError extends Error {}
 
 function nonBlankLines(markdown: string) {
   return markdown.split("\n").filter((line) => line.trim() !== "");
 }
 
-/** Cells of one `| a | b |` line (unescaped `|` separates, `\|` is a literal pipe). */
-export function splitPipeRow(line: string): string[] {
-  const inner = line.trim().replace(/^\|/, "").replace(/\|$/, "");
-  const cells: string[] = [];
-  let current = "";
-  for (let i = 0; i < inner.length; i += 1) {
-    if (inner[i] === "\\" && inner[i + 1] === "|") {
-      current += "|";
-      i += 1;
-    } else if (inner[i] === "|") {
-      cells.push(current.trim());
-      current = "";
-    } else {
-      current += inner[i];
-    }
-  }
-  cells.push(current.trim());
-  return cells;
-}
-
 /** True when every non-blank line is a table row (`| … |`). */
 export function isPipeRows(markdown: string): boolean {
   const lines = nonBlankLines(markdown);
-  return lines.length > 0 && lines.every((line) => PIPE_ROW.test(line));
-}
-
-/**
- * find_text copied from a markdown table → the document text it stands for: cells
- * become separate lines (cell boundaries are block boundaries in the text index)
- * and the `| --- |` delimiter row, which is not in the document, is dropped.
- * Returns null when no line is a table row.
- */
-export function pipeRowsToCellText(needle: string): string | null {
-  let changed = false;
-  const lines: string[] = [];
-  for (const line of needle.split("\n")) {
-    if (!PIPE_ROW.test(line)) {
-      lines.push(line);
-      continue;
-    }
-    changed = true;
-    if (DELIMITER_ROW.test(line)) continue;
-    lines.push(splitPipeRow(line).join("\n"));
-  }
-  return changed ? lines.join("\n") : null;
+  return lines.length > 0 && lines.every(isPipeRowLine);
 }
 
 /**
@@ -73,10 +35,10 @@ export function pipeRowsToCellText(needle: string): string | null {
 export function pipeRowsAsTableMarkdown(markdown: string): { markdown: string; explicitHeader: boolean } | null {
   if (!isPipeRows(markdown)) return null;
   const lines = nonBlankLines(markdown);
-  if (lines.length > 1 && DELIMITER_ROW.test(lines[1])) {
+  if (lines.length > 1 && isDelimiterRowLine(lines[1])) {
     return { markdown: lines.join("\n"), explicitHeader: true };
   }
-  const rows = lines.filter((line) => !DELIMITER_ROW.test(line));
+  const rows = lines.filter((line) => !isDelimiterRowLine(line));
   if (rows.length === 0) return null;
   // GFM truncates body rows to the header's width, so the header is padded to
   // the widest row.
@@ -138,7 +100,7 @@ function hasMergedCells(table: PMNode) {
   return merged;
 }
 
-function rowOffset(table: PMNode, tablePos: number, row: number) {
+export function tableRowOffset(table: PMNode, tablePos: number, row: number) {
   let pos = tablePos + 1;
   for (let i = 0; i < row; i += 1) pos += table.child(i).nodeSize;
   return pos;
@@ -156,26 +118,20 @@ export function deleteTableRows(tr: Transform, span: TableRowSpan) {
     tr.delete(span.tablePos, span.tablePos + span.table.nodeSize);
     return;
   }
-  tr.delete(rowOffset(span.table, span.tablePos, span.startRow), rowOffset(span.table, span.tablePos, span.endRow));
+  tr.delete(tableRowOffset(span.table, span.tablePos, span.startRow), tableRowOffset(span.table, span.tablePos, span.endRow));
 }
 
 /**
- * Replace the matched rows with the rows of `replacement` (a table node). New
- * cells take the node type and attrs (header-ness, column width) of the cell
- * they replace; short rows are padded, wider rows are refused unless the whole
- * table is replaced.
+ * The rows that take the place of the matched rows, built from `replacement` (a
+ * table node). New cells take the node type and attrs (header-ness, column
+ * width) of the cell they replace; short rows are padded, wider rows refused.
  */
-export function replaceTableRows(
-  tr: Transform,
+export function buildReplacementRows(
   span: TableRowSpan,
   replacement: PMNode,
   options: { explicitHeader: boolean }
-) {
-  const { table, tablePos, startRow, endRow } = span;
-  if (span.wholeTable) {
-    tr.replaceWith(tablePos, tablePos + table.nodeSize, replacement);
-    return;
-  }
+): PMNode[] {
+  const { table, startRow, endRow } = span;
   if (hasMergedCells(table)) {
     throw new TableRowEditError(
       "This table has merged cells, so its rows cannot be replaced one by one. Edit the text inside one cell at a time, or replace the whole table."
@@ -191,7 +147,7 @@ export function replaceTableRows(
 
   const columns = table.child(0).childCount;
   const schema = table.type.schema;
-  const built = newRows.map((newRow, index) => {
+  return newRows.map((newRow, index) => {
     // Trailing empty cells are padding (markdown-it pads to the header width).
     let used = newRow.childCount;
     while (used > columns && newRow.child(used - 1).textContent.trim() === "") used -= 1;
@@ -212,10 +168,23 @@ export function replaceTableRows(
     }
     return template.type.create(template.attrs, cells);
   });
+}
 
+/** Replace the matched rows with the rows of `replacement` (the whole table when all rows are matched). */
+export function replaceTableRows(
+  tr: Transform,
+  span: TableRowSpan,
+  replacement: PMNode,
+  options: { explicitHeader: boolean }
+) {
+  const { table, tablePos, startRow, endRow } = span;
+  if (span.wholeTable) {
+    tr.replaceWith(tablePos, tablePos + table.nodeSize, replacement);
+    return;
+  }
   tr.replaceWith(
-    rowOffset(table, tablePos, startRow),
-    rowOffset(table, tablePos, endRow),
-    Fragment.fromArray(built)
+    tableRowOffset(table, tablePos, startRow),
+    tableRowOffset(table, tablePos, endRow),
+    Fragment.fromArray(buildReplacementRows(span, replacement, options))
   );
 }

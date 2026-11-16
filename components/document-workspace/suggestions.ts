@@ -725,7 +725,10 @@ function applyTargets(state: EditorState, targets: AccumulatedTargets): Transact
   // rewritten paragraph/bullet leaves no empty husk. Mirrors the committed view
   // (lib/suggestion-content.ts transformNode) — keep the two rules in lockstep.
   for (const pos of emptied.sort((a, b) => b - a)) {
-    removeEmptiedBlock(tr, tr.mapping.map(pos, 1));
+    // A block that went with an earlier removal (its table row) is gone: its
+    // position would map onto whatever follows.
+    const mapped = tr.mapping.mapResult(pos, 1);
+    if (!mapped.deleted) removeEmptiedBlock(tr, mapped.pos);
   }
   tr.setMeta(suggestionPluginKey, { type: "skip" } satisfies SuggestionPluginMeta);
   return tr;
@@ -752,10 +755,24 @@ function collectEmptiedTextblocks(doc: PMNode, ranges: Array<{ from: number; to:
   return positions;
 }
 
+const TABLE_CELL_TYPES = new Set(["tableCell", "tableHeader"]);
+
+function isBlankTableRow(row: PMNode) {
+  let blank = true;
+  row.forEach((cell) => {
+    cell.forEach((child) => {
+      if (!child.isTextblock || child.content.size > 0) blank = false;
+    });
+  });
+  return blank;
+}
+
 // Removes the (now empty) textblock at `pos`. An only child takes its list item
 // (and an emptied list) with it; a list item's first paragraph stays while the
-// item has other children; nothing else that would empty a container (or the
-// document) is removed.
+// item has other children; a table cell's only block takes its ROW with it when
+// every cell of that row is blank (a rejected added row, an accepted row
+// deletion), and the table with its last row; nothing else that would empty a
+// container (or the document) is removed.
 function removeEmptiedBlock(tr: Transaction, pos: number) {
   const node = tr.doc.nodeAt(pos);
   if (!node || !node.isTextblock || node.content.size > 0) return;
@@ -765,12 +782,22 @@ function removeEmptiedBlock(tr: Transaction, pos: number) {
   for (let depth = $pos.depth; depth >= 0; depth -= 1) {
     const parent = $pos.node(depth);
     const index = $pos.index(depth);
+    if (parent.type.name === "tableRow") {
+      // A cell is never removed on its own — the row goes, or nothing does.
+      if (!isBlankTableRow(parent)) return;
+      from = $pos.before(depth);
+      to = $pos.after(depth);
+      continue;
+    }
     if (parent.childCount > 1) {
       if (isListItemType(parent.type.name) && index === 0) return;
       tr.delete(from, to);
       return;
     }
-    if (depth === 0 || !(isListItemType(parent.type.name) || isListType(parent.type.name))) return;
+    const name = parent.type.name;
+    if (depth === 0 || !(isListItemType(name) || isListType(name) || TABLE_CELL_TYPES.has(name) || name === "table")) {
+      return;
+    }
     from = $pos.before(depth);
     to = $pos.after(depth);
   }
