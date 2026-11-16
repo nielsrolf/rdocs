@@ -105,3 +105,14 @@ test("toggleReactionLocal is its own inverse (rollback)", () => {
   const twice = toggleReactionLocal(once, "➕", "Ann");
   assert.deepEqual(twice, start);
 });
+
+test("a text-reaction pill first reveals its anchor; only the next click toggles", async () => {
+  const { reactionPillClickAction } = await import("../lib/reactions");
+  // Margin pill of a text reaction whose anchor is not highlighted yet.
+  assert.equal(reactionPillClickAction({ textReaction: true, threadActive: false }), "focus");
+  // Anchor already highlighted: now the click is a vote.
+  assert.equal(reactionPillClickAction({ textReaction: true, threadActive: true }), "toggle");
+  // Reactions on ordinary comments are unchanged.
+  assert.equal(reactionPillClickAction({ textReaction: false, threadActive: false }), "toggle");
+  assert.equal(reactionPillClickAction({ textReaction: false, threadActive: true }), "toggle");
+});

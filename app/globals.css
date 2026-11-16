@@ -4720,7 +4720,8 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
 }
 
 .reaction-anchor-highlight {
-  background: rgba(26, 115, 232, 0.12);
+  background: rgba(26, 115, 232, 0.2);
+  box-shadow: 0 0 0 1px rgba(26, 115, 232, 0.28);
   border-radius: 2px;
 }
 

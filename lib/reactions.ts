@@ -27,6 +27,22 @@ export function isReactionEmoji(value: unknown): value is ReactionEmoji {
 export const REACTION_THREAD_ORIGIN = "reaction";
 
 /**
+ * What a click on an existing reaction pill does. A text reaction's anchor is
+ * not highlighted until its margin pills are focused, so the first click only
+ * reveals the anchor; a click while it is highlighted adds/removes the viewer's
+ * own reaction. Pills on ordinary comments toggle right away.
+ */
+export function reactionPillClickAction({
+  textReaction,
+  threadActive
+}: {
+  textReaction: boolean;
+  threadActive: boolean;
+}): "focus" | "toggle" {
+  return textReaction && !threadActive ? "focus" : "toggle";
+}
+
+/**
  * The root-comment body of a text-reaction thread: its distinct emoji in
  * palette order. Surfaces that only read comment text (agents, MCP, Slack) see
  * "🔥 🎉" instead of an empty comment.

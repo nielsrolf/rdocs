@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import type { MentionViewer } from "@/lib/mention-markdown";
-import { REACTION_EMOJIS, REACTION_THREAD_ORIGIN } from "@/lib/reactions";
+import { REACTION_EMOJIS, REACTION_THREAD_ORIGIN, reactionPillClickAction } from "@/lib/reactions";
 import { getSourceLabel } from "@/lib/sources";
 import { formatDateTime, truncate } from "@/lib/utils";
 
@@ -19,16 +19,25 @@ import { getThreadTags, isThreadUnread } from "./utils";
 
 // Existing reaction pills plus an "add reaction" picker. Reacting requires
 // comment access; the pills (with counts) are shown to everyone.
+// `textReaction` (margin pills of a reaction on document text): the first click
+// on a pill only reveals the anchor via `onRevealAnchor`; once the thread is
+// active (`threadActive`) a click toggles the viewer's own reaction.
 function CommentReactions({
   comment,
   canReact,
   onToggleReaction,
-  addLabel = "☺+"
+  addLabel = "☺+",
+  textReaction = false,
+  threadActive = false,
+  onRevealAnchor
 }: {
   comment: CommentView;
   canReact: boolean;
   onToggleReaction: (commentId: string, emoji: string) => void;
   addLabel?: string;
+  textReaction?: boolean;
+  threadActive?: boolean;
+  onRevealAnchor?: () => void;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const reactions = comment.reactions ?? [];
@@ -39,13 +48,23 @@ function CommentReactions({
       {reactions.map((reaction) => (
         <button
           className={`comment-reaction-pill${reaction.reactedByMe ? " comment-reaction-pill-mine" : ""}`}
-          disabled={!canReact}
+          // A text-reaction pill stays clickable for read-only viewers: its
+          // first click only shows which text the reaction is on.
+          disabled={!canReact && !(textReaction && !threadActive)}
           key={reaction.emoji}
           onClick={(event) => {
             event.stopPropagation();
-            onToggleReaction(comment.id, reaction.emoji);
+            if (reactionPillClickAction({ textReaction, threadActive }) === "focus") {
+              onRevealAnchor?.();
+              return;
+            }
+            if (canReact) onToggleReaction(comment.id, reaction.emoji);
           }}
-          title={reaction.users.join(", ")}
+          title={
+            textReaction && !threadActive
+              ? `${reaction.users.join(", ")} · click to show the text`
+              : reaction.users.join(", ")
+          }
           type="button"
         >
           <span className="comment-reaction-emoji">{reaction.emoji}</span>
@@ -59,6 +78,7 @@ function CommentReactions({
             className="comment-reaction-add"
             onClick={(event) => {
               event.stopPropagation();
+              if (textReaction && !threadActive) onRevealAnchor?.();
               setPickerOpen((open) => !open);
             }}
             type="button"
@@ -248,7 +268,8 @@ export function CommentRail({
           const isActive = activeThreadId === thread.id;
           if (thread.origin === REACTION_THREAD_ORIGIN) {
             // A text reaction: emoji pills only. Its reactions live on the
-            // root comment; clicking a pill toggles it, "+" adds another.
+            // root comment. The first click on a pill highlights the anchor;
+            // a click while highlighted toggles it, "+" adds another.
             const root = thread.comments[0];
             if (!root) return null;
             const reactors = (root.reactions ?? []).flatMap((reaction) => reaction.users);
@@ -268,6 +289,9 @@ export function CommentRail({
                   comment={root}
                   canReact={canWriteComments && currentUserId !== null}
                   onToggleReaction={onToggleReaction}
+                  onRevealAnchor={() => onFocusThread(thread)}
+                  textReaction
+                  threadActive={isActive}
                 />
               </article>
             );
