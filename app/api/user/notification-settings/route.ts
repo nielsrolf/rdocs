@@ -19,6 +19,7 @@ const patchSchema = z
     documentShareSlackNotifications: z.boolean().optional(),
     forumShareSlackNotifications: z.boolean().optional(),
     forumPostSlackNotifications: z.boolean().optional(),
+    accessRequestSlackNotifications: z.boolean().optional(),
     // Which linked Slack workspace receives DMs; null = oldest link. Must be one
     // of the caller's own SlackAccountLink teams.
     notificationSlackTeamId: z.string().min(1).nullable().optional(),
@@ -40,6 +41,7 @@ function selection() {
     documentShareSlackNotifications: true,
     forumShareSlackNotifications: true,
     forumPostSlackNotifications: true,
+    accessRequestSlackNotifications: true,
     notificationSlackTeamId: true
   } as const;
 }
@@ -56,6 +58,7 @@ export async function GET() {
     documentShareSlackNotifications: row?.documentShareSlackNotifications ?? false,
     forumShareSlackNotifications: row?.forumShareSlackNotifications ?? false,
     forumPostSlackNotifications: row?.forumPostSlackNotifications ?? true,
+    accessRequestSlackNotifications: row?.accessRequestSlackNotifications ?? true,
     notificationSlackTeamId: row?.notificationSlackTeamId ?? null
   });
 }
@@ -144,6 +147,9 @@ export async function PATCH(request: Request) {
       ...(parsed.data.forumPostSlackNotifications === undefined
         ? {}
         : { forumPostSlackNotifications: parsed.data.forumPostSlackNotifications }),
+      ...(parsed.data.accessRequestSlackNotifications === undefined
+        ? {}
+        : { accessRequestSlackNotifications: parsed.data.accessRequestSlackNotifications }),
       ...(teamId === undefined ? {} : { notificationSlackTeamId: teamId })
     },
     select: selection()

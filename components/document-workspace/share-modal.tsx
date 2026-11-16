@@ -3,6 +3,7 @@ import { permissionLabel } from "@/lib/utils";
 
 import { UserPickerInput } from "@/components/user-picker-input";
 
+import { AccessRequestsSection } from "./access-requests-section";
 import { ShareGroupsSection } from "./share-groups-section";
 import type { MemberView, ShareLinkView } from "./types";
 import { useDialogDismiss } from "./use-dialog-dismiss";
@@ -23,6 +24,8 @@ export function ShareModal({
   onInvite,
   onCreateShareLink,
   onRevokeShareLink,
+  onAccessGranted,
+  onPendingAccessRequestCount,
   onClose
 }: {
   documentId: string;
@@ -39,6 +42,8 @@ export function ShareModal({
   onInvite: () => void;
   onCreateShareLink: (permission: PermissionLevelValue) => void;
   onRevokeShareLink: (id: string) => void;
+  onAccessGranted: (membership: MemberView) => void;
+  onPendingAccessRequestCount: (count: number) => void;
   onClose: () => void;
 }) {
   const dialogRef = useDialogDismiss<HTMLDivElement>(onClose);
@@ -71,6 +76,12 @@ export function ShareModal({
             Close
           </button>
         </div>
+
+        <AccessRequestsSection
+          documentId={documentId}
+          onCountChange={onPendingAccessRequestCount}
+          onGranted={onAccessGranted}
+        />
 
         <div className="member-invite-form">
           <UserPickerInput

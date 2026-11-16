@@ -49,6 +49,9 @@ model User {
   // New forum posts and quick takes published to an audience this user is in.
   // On by default; the bell on the forum/quicktakes pages toggles it.
   forumPostSlackNotifications     Boolean                          @default(true)
+  // Someone asked for access to a document I own, or my own request was
+  // granted (lib/access-requests.ts). On by default: it is addressed to me.
+  accessRequestSlackNotifications Boolean                          @default(true)
   // Which linked Slack workspace receives this user's DMs when claudex is
   // installed in more than one of them. Null = the oldest SlackAccountLink.
   // Resolved through pickNotificationSlackLink (lib/notification-preferences.ts).
@@ -82,6 +85,7 @@ model User {
   commentVotes                    CommentVote[]
   slackCommentNotifications       SlackCommentNotification[]
   documentNotificationPreferences DocumentNotificationPreference[]
+  documentAccessRequests          DocumentAccessRequest[]
 }
 
 // A named set of users (a team/company) that documents can be shared with.
@@ -325,6 +329,7 @@ model Document {
   forumVotes              DocumentVote[]
   apiChannels             AgentApiChannel[]
   notificationPreferences DocumentNotificationPreference[]
+  accessRequests          DocumentAccessRequest[]
   mcpServers              DocumentMcpServer[]
   durableApp              DurableApp?
 
@@ -622,6 +627,26 @@ model DocumentMembership {
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([documentId, userId])
+}
+
+// A signed-in user without access asked the owner for it ("Ask for permission"
+// on the document page, lib/access-requests.ts). One row per (document, user):
+// status is "pending" | "granted" | "declined". A declined request stays
+// declined (the requester is not told and cannot re-notify the owner).
+model DocumentAccessRequest {
+  id         String    @id @default(cuid())
+  documentId String
+  userId     String
+  message    String?
+  status     String    @default("pending")
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  resolvedAt DateTime?
+  document   Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, userId])
+  @@index([documentId, status])
 }
 
 model CommentThread {
@@ -990,3 +1015,4 @@ model SlackInstallation {
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 }
+

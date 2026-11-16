@@ -73,6 +73,10 @@ export type DocumentWorkspaceProps = {
   initialDocumentUpdatedAt: string;
   initialPermission: PermissionLevelValue;
   initialMembers: MemberView[];
+  // Owner only: open "ask for permission" requests (badge on Share), and
+  // whether to open the Share dialog right away (?access=requests deep link).
+  initialPendingAccessRequestCount?: number;
+  initialShareModalOpen?: boolean;
   // Everyone who can be @mentioned (owner + collaborators), for autocomplete and
   // highlighting — passed to all viewers, unlike the owner-only initialMembers.
   mentionMembers: MentionCandidate[];

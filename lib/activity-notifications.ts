@@ -27,6 +27,7 @@ async function linkedRecipients(
     | "documentShareSlackNotifications"
     | "forumShareSlackNotifications"
     | "forumPostSlackNotifications"
+    | "accessRequestSlackNotifications"
     | "commentSlackNotifications"
 ) {
   if (userIds.length === 0) return [];
@@ -39,6 +40,7 @@ async function linkedRecipients(
       documentShareSlackNotifications: true,
       forumShareSlackNotifications: true,
       forumPostSlackNotifications: true,
+      accessRequestSlackNotifications: true,
       notificationSlackTeamId: true,
       slackLinks: { select: { slackTeamId: true, slackUserId: true }, orderBy: { createdAt: "asc" } }
     }
@@ -62,6 +64,7 @@ async function postActivity(input: {
     | "documentShareSlackNotifications"
     | "forumShareSlackNotifications"
     | "forumPostSlackNotifications"
+    | "accessRequestSlackNotifications"
     | "commentSlackNotifications";
   text: (appUrl: string) => string;
   deps?: ActivityNotificationDeps;
@@ -132,6 +135,53 @@ export async function notifyDocumentShared(input: {
     deps: input.deps,
     text: (appUrl) =>
       `📄 *${input.sharedByLabel}* shared <${appUrl}/documents/${input.documentId}|${document.title || "a document"}> with you.`
+  });
+}
+
+// Slack mrkdwn: user-supplied text must not open links or mentions.
+function plainSlackText(value: string) {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Someone without access asked the owner for it ("Ask for permission" on the
+// document page, lib/access-requests.ts). The link opens the Share dialog,
+// where the request is granted or declined.
+export async function notifyAccessRequested(input: {
+  documentId: string;
+  requester: { name: string; email: string };
+  message?: string | null;
+  deps?: ActivityNotificationDeps;
+}) {
+  const document = await db.document.findUnique({
+    where: { id: input.documentId },
+    select: { title: true, ownerId: true }
+  });
+  if (!document) return { notified: 0 };
+  const who = plainSlackText(input.requester.name || input.requester.email);
+  const note = input.message?.trim() ? `\n> ${plainSlackText(input.message.trim())}` : "";
+  return postActivity({
+    userIds: [document.ownerId],
+    setting: "accessRequestSlackNotifications",
+    deps: input.deps,
+    text: (appUrl) =>
+      `🔑 *${who}* (${plainSlackText(input.requester.email)}) is asking for access to <${appUrl}/documents/${input.documentId}?access=requests|${plainSlackText(document.title || "a document")}>.${note}`
+  });
+}
+
+export async function notifyAccessGranted(input: {
+  documentId: string;
+  requesterUserId: string;
+  grantedByLabel: string;
+  deps?: ActivityNotificationDeps;
+}) {
+  const document = await db.document.findUnique({ where: { id: input.documentId }, select: { title: true } });
+  if (!document) return { notified: 0 };
+  return postActivity({
+    userIds: [input.requesterUserId],
+    setting: "accessRequestSlackNotifications",
+    deps: input.deps,
+    text: (appUrl) =>
+      `🔓 *${plainSlackText(input.grantedByLabel)}* gave you access to <${appUrl}/documents/${input.documentId}|${plainSlackText(document.title || "a document")}>.`
   });
 }
 

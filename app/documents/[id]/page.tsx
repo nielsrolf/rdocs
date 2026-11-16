@@ -3,6 +3,8 @@ import { headers } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 
 import { DocumentWorkspace } from "@/components/document-workspace";
+import { RequestAccessView } from "@/components/request-access-view";
+import { countPendingAccessRequests, getAccessRequestState } from "@/lib/access-requests";
 import { getCurrentUser } from "@/lib/auth";
 import { listDocumentThreads } from "@/lib/document-data";
 import {
@@ -33,16 +35,19 @@ type PageProps = {
     share?: string;
     comment?: string;
     run?: string;
+    // "requests" opens the Share dialog on the pending access requests (owner).
+    access?: string;
   }>;
 };
 
-export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
+export async function generateMetadata({ params, searchParams }: PageProps): Promise<Metadata> {
   const { id } = await params;
-  const doc = await db.document.findUnique({
-    where: { id },
-    select: { title: true }
-  });
-  const title = doc?.title?.trim();
+  const shareToken = (searchParams ? await searchParams : undefined)?.share ?? null;
+  // Only someone who can open the document learns its title — the no-access
+  // ("ask for permission") page must not name it.
+  const user = await getCurrentUser();
+  const access = user || shareToken ? await resolveDocumentAccess(id, user?.id, shareToken) : null;
+  const title = access?.document.title?.trim();
   return { title: title ? `${title} — r-docs` : "r-docs" };
 }
 
@@ -60,6 +65,14 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
 
   const access = await resolveDocumentAccess(id, user?.id, shareToken);
   if (!access) {
+    // A signed-in user who may not read an existing document can ask its owner
+    // for access instead of hitting a 404.
+    const requestState = user ? await getAccessRequestState(id, user.id) : null;
+    if (user && requestState) {
+      return (
+        <RequestAccessView documentId={id} initiallyRequested={requestState.requested} userEmail={user.email} />
+      );
+    }
     notFound();
   }
 
@@ -137,6 +150,8 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
       : Promise.resolve([])
   ]);
 
+  const isOwner = user?.id === access.document.ownerId;
+  const pendingAccessRequestCount = isOwner ? await countPendingAccessRequests(id) : 0;
   const normalizedThreads = threads.map((thread) => ({
     ...thread,
     status: thread.status as ThreadStatusValue
@@ -234,6 +249,8 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         initialPermission={access.permission}
         initialShareLinks={normalizedShareLinks}
         initialMembers={normalizedMembers}
+        initialPendingAccessRequestCount={pendingAccessRequestCount}
+        initialShareModalOpen={isOwner && resolvedSearchParams?.access === "requests"}
         mentionMembers={mentionMembers}
         initialMentionedCommentIds={initialMentionedCommentIds}
         initialRepoBranch={access.document.repoBranch}

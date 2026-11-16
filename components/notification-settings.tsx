@@ -9,6 +9,7 @@ type Settings = {
   documentShareSlackNotifications: boolean;
   forumShareSlackNotifications: boolean;
   forumPostSlackNotifications: boolean;
+  accessRequestSlackNotifications: boolean;
   // Which linked Slack workspace receives the DMs; null = the oldest link.
   notificationSlackTeamId: string | null;
 };
@@ -107,6 +108,12 @@ export function NotificationSettings({
       key: "documentShareSlackNotifications",
       title: "Documents shared with me",
       description: "Notify me when someone gives me direct or group access to a document."
+    },
+    {
+      key: "accessRequestSlackNotifications",
+      title: "Access requests",
+      description:
+        "Notify me when someone asks for permission to open a document I own, and when a request of mine is granted."
     }
   ];
 

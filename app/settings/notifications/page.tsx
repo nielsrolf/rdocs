@@ -22,6 +22,7 @@ export default async function NotificationSettingsPage() {
       documentShareSlackNotifications: true,
       forumShareSlackNotifications: true,
       forumPostSlackNotifications: true,
+      accessRequestSlackNotifications: true,
       notificationSlackTeamId: true,
       slackLinks: { select: { slackTeamId: true }, orderBy: { createdAt: "asc" } }
     }
@@ -55,6 +56,7 @@ export default async function NotificationSettingsPage() {
               documentShareSlackNotifications: row?.documentShareSlackNotifications ?? false,
               forumShareSlackNotifications: row?.forumShareSlackNotifications ?? false,
               forumPostSlackNotifications: row?.forumPostSlackNotifications ?? true,
+              accessRequestSlackNotifications: row?.accessRequestSlackNotifications ?? true,
               notificationSlackTeamId: row?.notificationSlackTeamId ?? null
             }}
             linkedWorkspaces={linkedWorkspaces}

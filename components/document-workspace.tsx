@@ -267,6 +267,8 @@ export function DocumentWorkspace({
   credentialHasChatgptAuth,
   isAuthenticated,
   isOwner,
+  initialPendingAccessRequestCount = 0,
+  initialShareModalOpen = false,
   shareToken,
   viaShareLink,
   forumView = false,
@@ -384,7 +386,8 @@ export function DocumentWorkspace({
     []
   );
   const [activeThreadId, setActiveThreadId] = useState<string | null>(initialThreads[0]?.id ?? null);
-  const [shareModalOpen, setShareModalOpen] = useState(false);
+  const [shareModalOpen, setShareModalOpen] = useState(initialShareModalOpen && isOwner);
+  const [pendingAccessRequestCount, setPendingAccessRequestCount] = useState(initialPendingAccessRequestCount);
   const [creatingLink, setCreatingLink] = useState<PermissionLevelValue | null>(null);
   const [aiBusyThreadId, setAiBusyThreadId] = useState<string | null>(null);
   const [replyBusyThreadId, setReplyBusyThreadId] = useState<string | null>(null);
@@ -5219,8 +5222,20 @@ export function DocumentWorkspace({
               Agents{activeAiRuns.length > 0 ? ` (${activeAiRuns.length})` : ""}
             </button>
             {isOwner ? (
-              <button className="primary-button" onClick={() => setShareModalOpen(true)} type="button">
+              <button
+                className="primary-button"
+                onClick={() => setShareModalOpen(true)}
+                title={
+                  pendingAccessRequestCount > 0
+                    ? `${pendingAccessRequestCount} pending access request${pendingAccessRequestCount === 1 ? "" : "s"}`
+                    : undefined
+                }
+                type="button"
+              >
                 Share
+                {pendingAccessRequestCount > 0 ? (
+                  <span className="share-request-badge">{pendingAccessRequestCount}</span>
+                ) : null}
               </button>
             ) : null}
           </div>
@@ -5526,6 +5541,13 @@ export function DocumentWorkspace({
           onInvite={handleInviteCollaborator}
           onCreateShareLink={handleCreateShareLink}
           onRevokeShareLink={handleRevokeShareLink}
+          onAccessGranted={(membership) =>
+            setMembers((current) => [
+              ...current.filter((member) => member.user.id !== membership.user.id),
+              membership
+            ])
+          }
+          onPendingAccessRequestCount={setPendingAccessRequestCount}
           onClose={() => setShareModalOpen(false)}
         />
       ) : null}
