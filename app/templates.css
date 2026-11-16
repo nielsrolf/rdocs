@@ -107,3 +107,93 @@
   font-size: 0.82rem;
   color: var(--accent-strong);
 }
+
+/* Suggestion review: who suggested what (suggestion-review.tsx). */
+.suggestion-review-panel {
+  width: min(420px, calc(100vw - 2rem));
+}
+
+.suggestion-review-authors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.suggestion-author-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  padding: 2px 9px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.suggestion-author-chip.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.suggestion-review-item {
+  align-items: flex-start;
+}
+
+.suggestion-review-jump {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 6px;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.suggestion-review-jump:hover,
+.suggestion-review-jump:focus-visible {
+  background: rgba(60, 64, 67, 0.08);
+  outline: none;
+}
+
+.suggestion-review-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.suggestion-review-text ins {
+  text-decoration: none;
+  color: #128a3a;
+}
+
+.suggestion-review-text del {
+  color: var(--danger);
+}
+
+.suggestion-hover-label {
+  position: fixed;
+  z-index: 60;
+  transform: translateY(calc(-100% - 4px));
+  max-width: 320px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: #202124;
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}

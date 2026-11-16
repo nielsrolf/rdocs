@@ -124,7 +124,7 @@ export function LinkPopover({
         href={state.href}
         rel="noopener noreferrer"
         target="_blank"
-        title="Open in new tab"
+        title="Open in new tab (or Ctrl/⌘+click the link)"
       >
         Open
       </a>

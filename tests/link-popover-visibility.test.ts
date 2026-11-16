@@ -27,3 +27,13 @@ test("no link, no bubble", () => {
   assert.equal(linkPopoverVisible({ href: undefined, selectionPopoverMode: null }), false);
   assert.equal(linkPopoverVisible({ href: "", selectionPopoverMode: null }), false);
 });
+
+test("a link in editable text opens only with Ctrl/Cmd+click; read-only viewers click through", async () => {
+  const { linkClickOpens } = await import("../components/document-workspace/link-popover-visibility");
+  // Editors and suggest-only users: the plain click places the caret.
+  assert.equal(linkClickOpens({ editable: true, modifier: false }), false);
+  assert.equal(linkClickOpens({ editable: true, modifier: true }), true);
+  // Nothing to edit: the click follows the link.
+  assert.equal(linkClickOpens({ editable: false, modifier: false }), true);
+  assert.equal(linkClickOpens({ editable: false, modifier: true }), true);
+});

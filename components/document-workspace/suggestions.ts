@@ -47,9 +47,80 @@ export type SuggestionSummary = {
   to: number;
   author: SuggestionAuthor;
   createdAt: string | null;
+  // The suggested text itself (clipped), so a review list can say WHAT was
+  // inserted or deleted. Atoms contribute a label such as "[image]".
+  text: string;
 };
 
+export const SUGGESTION_TEXT_CLIP = 160;
+
+// One reviewable suggestion: a find/replace shares one id across its deletion
+// and insertion parts, so the per-kind ranges are folded back together here.
+export type SuggestionOverview = {
+  id: string;
+  label: "Insert" | "Delete" | "Replace";
+  author: SuggestionAuthor;
+  createdAt: string | null;
+  from: number;
+  to: number;
+  insertedText: string;
+  deletedText: string;
+};
+
+export function groupSuggestions(summaries: SuggestionSummary[]): SuggestionOverview[] {
+  const byId = new Map<string, SuggestionOverview>();
+  for (const summary of summaries) {
+    let entry = byId.get(summary.suggestionId);
+    if (!entry) {
+      entry = {
+        id: summary.suggestionId,
+        label: "Insert",
+        author: summary.author,
+        createdAt: summary.createdAt,
+        from: summary.from,
+        to: summary.to,
+        insertedText: "",
+        deletedText: ""
+      };
+      byId.set(summary.suggestionId, entry);
+    }
+    entry.from = Math.min(entry.from, summary.from);
+    entry.to = Math.max(entry.to, summary.to);
+    if (summary.kind === "insert") entry.insertedText = summary.text;
+    else entry.deletedText = summary.text;
+  }
+  for (const entry of byId.values()) {
+    entry.label = entry.insertedText && entry.deletedText ? "Replace" : entry.deletedText ? "Delete" : "Insert";
+  }
+  return Array.from(byId.values()).sort((a, b) => a.from - b.from);
+}
+
+// Who suggested how much, most suggestions first — the "by whom" header of the
+// review list. Suggestions without a recorded author count as "Unknown".
+export function suggestionAuthors(suggestions: SuggestionOverview[]) {
+  const counts = new Map<string, { key: string; label: string; count: number }>();
+  for (const suggestion of suggestions) {
+    const key = suggestionAuthorKey(suggestion.author);
+    const entry = counts.get(key) ?? { key, label: suggestion.author.authorLabel || "Unknown", count: 0 };
+    entry.count += 1;
+    counts.set(key, entry);
+  }
+  return Array.from(counts.values()).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+}
+
+export function suggestionAuthorKey(author: SuggestionAuthor) {
+  return author.authorId ?? `label:${author.authorLabel ?? ""}`;
+}
+
 const ATOM_NODE_TYPES = new Set(["repoImage", "embeddedWidget", "image", "attachmentChip", "tabBreak"]);
+
+const ATOM_LABELS: Record<string, string> = {
+  repoImage: "image",
+  image: "image",
+  embeddedWidget: "widget",
+  attachmentChip: "attachment",
+  tabBreak: "tab"
+};
 
 function isAtomNode(node: PMNode): boolean {
   return ATOM_NODE_TYPES.has(node.type.name);
@@ -187,7 +258,7 @@ function makeRecord(suggestionId: string, author: SuggestionAuthor, createdAt: s
 export function collectSuggestionRanges(doc: PMNode): SuggestionSummary[] {
   const byId = new Map<string, SuggestionSummary>();
 
-  const extend = (record: SuggestionRecord, kind: SuggestionKind, from: number, to: number) => {
+  const extend = (record: SuggestionRecord, kind: SuggestionKind, from: number, to: number, text: string) => {
     if (!record.suggestionId) return;
     // Key by id+kind: a find/replace suggestion shares one id across its deletion
     // and insertion parts, so they must surface as two ranges (the UI groups them
@@ -195,11 +266,17 @@ export function collectSuggestionRanges(doc: PMNode): SuggestionSummary[] {
     const key = `${record.suggestionId}:${kind}`;
     const existing = byId.get(key);
     if (existing) {
+      if (existing.text.length < SUGGESTION_TEXT_CLIP) {
+        // A gap between the pieces means another block (or untouched text) lies between.
+        const joined = existing.text + (from > existing.to ? " " : "") + text;
+        existing.text = joined.length > SUGGESTION_TEXT_CLIP ? `${joined.slice(0, SUGGESTION_TEXT_CLIP)}…` : joined;
+      }
       existing.from = Math.min(existing.from, from);
       existing.to = Math.max(existing.to, to);
       return;
     }
     byId.set(key, {
+      text: text.length > SUGGESTION_TEXT_CLIP ? `${text.slice(0, SUGGESTION_TEXT_CLIP)}…` : text,
       suggestionId: record.suggestionId,
       kind,
       from,
@@ -213,19 +290,20 @@ export function collectSuggestionRanges(doc: PMNode): SuggestionSummary[] {
     if (node.isText) {
       for (const mark of node.marks) {
         if (mark.type.name === SUGGESTED_INSERTION_MARK) {
-          extend(markRecord(mark), "insert", pos, pos + node.nodeSize);
+          extend(markRecord(mark), "insert", pos, pos + node.nodeSize, node.text ?? "");
         } else if (mark.type.name === SUGGESTED_DELETION_MARK) {
-          extend(markRecord(mark), "delete", pos, pos + node.nodeSize);
+          extend(markRecord(mark), "delete", pos, pos + node.nodeSize, node.text ?? "");
         }
       }
       return;
     }
     if (ATOM_NODE_TYPES.has(node.type.name)) {
+      const atomLabel = `[${ATOM_LABELS[node.type.name] ?? node.type.name}]`;
       for (const record of nodeRecords(node, SUGGESTION_INSERT_RECORDS_ATTR)) {
-        extend(record, "insert", pos, pos + node.nodeSize);
+        extend(record, "insert", pos, pos + node.nodeSize, atomLabel);
       }
       for (const record of nodeRecords(node, SUGGESTION_DELETE_RECORDS_ATTR)) {
-        extend(record, "delete", pos, pos + node.nodeSize);
+        extend(record, "delete", pos, pos + node.nodeSize, atomLabel);
       }
     }
   });

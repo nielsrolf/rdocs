@@ -72,6 +72,7 @@ import {
   acceptAllSuggestions,
   acceptSuggestion,
   collectSuggestionRanges,
+  groupSuggestions,
   createSuggestionId,
   rejectAllSuggestions,
   rejectSuggestion,
@@ -89,6 +90,8 @@ import { EnvironmentMenu } from "./document-workspace/environment-menu";
 import { SkillsMenu } from "./document-workspace/skills-menu";
 import { ExportMenu } from "./document-workspace/export-menu";
 import { FileMenu } from "./document-workspace/file-menu";
+import { linkClickOpens } from "./document-workspace/link-popover-visibility";
+import { SuggestionHoverLabel, SuggestionReviewList } from "./document-workspace/suggestion-review";
 import { SelectionPopover } from "./document-workspace/selection-popover";
 import { createSerialQueue } from "./document-workspace/serial-queue";
 import { deferToForeground } from "./document-workspace/remote-update-guard";
@@ -581,24 +584,7 @@ export function DocumentWorkspace({
   } | null>(null);
   // Distinct suggestions (a find/replace shares one id across its delete+insert
   // parts), ordered by document position, for the review panel.
-  const distinctSuggestions = useMemo(() => {
-    const byId = new Map<string, { id: string; authorLabel: string | null; from: number; kinds: Set<string> }>();
-    for (const summary of suggestionSummaries) {
-      const existing = byId.get(summary.suggestionId);
-      if (existing) {
-        existing.kinds.add(summary.kind);
-        existing.from = Math.min(existing.from, summary.from);
-      } else {
-        byId.set(summary.suggestionId, {
-          id: summary.suggestionId,
-          authorLabel: summary.author.authorLabel,
-          from: summary.from,
-          kinds: new Set([summary.kind])
-        });
-      }
-    }
-    return Array.from(byId.values()).sort((a, b) => a.from - b.from);
-  }, [suggestionSummaries]);
+  const distinctSuggestions = useMemo(() => groupSuggestions(suggestionSummaries), [suggestionSummaries]);
 
   const commentHighlightExtension = useMemo(
     () =>
@@ -1501,11 +1487,16 @@ export function DocumentWorkspace({
           return false;
         }
 
-        if (!canWriteDocument || event.metaKey || event.ctrlKey) {
+        // Like Word: where the text can be edited (directly or as
+        // suggestions), a plain click places the caret and only Ctrl/Cmd+click
+        // follows the link. Read-only viewers keep the plain click.
+        if (linkClickOpens({ editable: canPersistEdits, modifier: event.metaKey || event.ctrlKey })) {
           window.open(anchor.href, "_blank", "noopener,noreferrer");
           return true;
         }
-
+        // Never let the browser follow the anchor by itself; other click
+        // handlers (comment highlights) still get the click.
+        event.preventDefault();
         return false;
       }
     },
@@ -4735,38 +4726,21 @@ export function DocumentWorkspace({
                           </button>
                         </div>
                       )}
-                      <ul className="suggestion-review-list">
-                        {distinctSuggestions.map((suggestion) => (
-                          <li key={suggestion.id} className="suggestion-review-item">
-                            <span className="suggestion-review-meta">
-                              {suggestion.kinds.has("insert") && suggestion.kinds.has("delete")
-                                ? "Replace"
-                                : suggestion.kinds.has("insert")
-                                  ? "Insert"
-                                  : "Delete"}
-                              {suggestion.authorLabel ? ` · ${suggestion.authorLabel}` : ""}
-                            </span>
-                            {canWriteDocument && (
-                              <span className="suggestion-review-actions">
-                                <button
-                                  type="button"
-                                  className="ghost-button"
-                                  onClick={() => handleAcceptSuggestion(suggestion.id)}
-                                >
-                                  Accept
-                                </button>
-                                <button
-                                  type="button"
-                                  className="ghost-button"
-                                  onClick={() => handleRejectSuggestion(suggestion.id)}
-                                >
-                                  Reject
-                                </button>
-                              </span>
-                            )}
-                          </li>
-                        ))}
-                      </ul>
+                      <SuggestionReviewList
+                        canResolve={canWriteDocument}
+                        onAccept={handleAcceptSuggestion}
+                        onJump={(suggestion) => {
+                          if (!editor) return;
+                          // Select the suggested text so it is unmistakable which one was meant.
+                          editor
+                            .chain()
+                            .setTextSelection({ from: suggestion.from, to: suggestion.to })
+                            .scrollIntoView()
+                            .run();
+                        }}
+                        onReject={handleRejectSuggestion}
+                        suggestions={distinctSuggestions}
+                      />
                     </div>
                   )}
                 </div>
@@ -5360,6 +5334,7 @@ export function DocumentWorkspace({
             ) : null}
 
             <EditorContent editor={editor} />
+            <SuggestionHoverLabel containerRef={editorPageRef} />
             <LinkPopover
               editor={editor}
               containerRef={editorPageRef}

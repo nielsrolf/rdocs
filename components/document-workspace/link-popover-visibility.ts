@@ -14,3 +14,11 @@ export function linkPopoverVisible({
   // "menu" bubble sits above the selection and does not collide.
   return selectionPopoverMode === null || selectionPopoverMode === "menu";
 }
+
+// Whether a click on a link in the editor follows it. Where the text is
+// editable a plain click must only place the caret (so the link text can be
+// edited); Ctrl/Cmd+click opens it, as in Word. Read-only viewers have nothing
+// to edit, so their plain click opens the link.
+export function linkClickOpens(input: { editable: boolean; modifier: boolean }) {
+  return !input.editable || input.modifier;
+}
