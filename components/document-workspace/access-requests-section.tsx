@@ -8,12 +8,16 @@ import type { MemberView } from "./types";
 type AccessRequestView = {
   id: string;
   message: string | null;
+  // What they asked for, and what they have today (null = no access yet).
+  requestedPermission?: PermissionLevelValue | null;
+  currentPermission?: PermissionLevelValue | null;
   createdAt: string;
   user: { id: string; name: string; email: string };
 };
 
 /**
- * Share dialog (owner): people who asked for permission on the no-access page.
+ * Share dialog (owner): people who asked for permission on the no-access page,
+ * or who have access and asked for a higher level.
  * Renders nothing while there are none.
  */
 export function AccessRequestsSection({
@@ -55,7 +59,7 @@ export function AccessRequestsSection({
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(
-          action === "grant" ? { action, permission: permissions[request.id] ?? "COMMENT" } : { action }
+          action === "grant" ? { action, permission: grantLevel(request) } : { action }
         )
       });
       const data = (await response.json().catch(() => null)) as
@@ -79,6 +83,13 @@ export function AccessRequestsSection({
     }
   }
 
+  // Default grant: what they asked for; the old default for a plain "access" ask.
+  function grantLevel(request: AccessRequestView) {
+    return permissions[request.id] ?? request.requestedPermission ?? "COMMENT";
+  }
+  const levelWord = (permission: PermissionLevelValue) =>
+    permission === "EDIT" ? "edit" : permission === "COMMENT" ? "comment" : "view";
+
   if (requests.length === 0) return null;
 
   return (
@@ -91,6 +102,13 @@ export function AccessRequestsSection({
             <div>
               <strong>{request.user.name}</strong>
               <span>{request.user.email}</span>
+              {request.requestedPermission ? (
+                <span className="access-request-level">
+                  {request.currentPermission
+                    ? `Has ${levelWord(request.currentPermission)} access, asks for ${levelWord(request.requestedPermission)} access`
+                    : `Asks for ${levelWord(request.requestedPermission)} access`}
+                </span>
+              ) : null}
               {request.message ? <p className="access-request-message">{request.message}</p> : null}
             </div>
             <div className="access-request-actions">
@@ -103,7 +121,7 @@ export function AccessRequestsSection({
                     [request.id]: event.target.value as PermissionLevelValue
                   }))
                 }
-                value={permissions[request.id] ?? "COMMENT"}
+                value={grantLevel(request)}
               >
                 {permissionLevels.map((permission) => (
                   <option key={permission} value={permission}>

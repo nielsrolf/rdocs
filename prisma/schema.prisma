@@ -644,6 +644,9 @@ model DocumentAccessRequest {
   documentId String
   userId     String
   message    String?
+  // The level asked for (VIEW | COMMENT | EDIT). Null = just "access". Someone
+  // who already has access can ask for a higher level (lib/access-requests.ts).
+  requestedPermission String?
   status     String    @default("pending")
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt

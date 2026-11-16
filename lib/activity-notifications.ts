@@ -150,6 +150,9 @@ export async function notifyAccessRequested(input: {
   documentId: string;
   requester: { name: string; email: string };
   message?: string | null;
+  // The level asked for, and what the requester has today (an upgrade request).
+  permission?: string | null;
+  currentPermission?: string | null;
   deps?: ActivityNotificationDeps;
 }) {
   const document = await db.document.findUnique({
@@ -159,12 +162,17 @@ export async function notifyAccessRequested(input: {
   if (!document) return { notified: 0 };
   const who = plainSlackText(input.requester.name || input.requester.email);
   const note = input.message?.trim() ? `\n> ${plainSlackText(input.message.trim())}` : "";
+  const level = (value?: string | null) =>
+    value === "EDIT" ? "edit" : value === "COMMENT" ? "comment" : value === "VIEW" ? "view" : null;
+  const wanted = level(input.permission);
+  const has = level(input.currentPermission);
+  const ask = `${has ? `has ${has} access and ` : ""}is asking for ${wanted ? `${wanted} ` : ""}access to`;
   return postActivity({
     userIds: [document.ownerId],
     setting: "accessRequestSlackNotifications",
     deps: input.deps,
     text: (appUrl) =>
-      `🔑 *${who}* (${plainSlackText(input.requester.email)}) is asking for access to <${appUrl}/documents/${input.documentId}?access=requests|${plainSlackText(document.title || "a document")}>.${note}`
+      `🔑 *${who}* (${plainSlackText(input.requester.email)}) ${ask} <${appUrl}/documents/${input.documentId}?access=requests|${plainSlackText(document.title || "a document")}>.${note}`
   });
 }
 

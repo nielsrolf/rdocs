@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   countPendingAccessRequests,
   getAccessRequestState,
+  getUpgradeRequestState,
   listPendingAccessRequests,
   requestDocumentAccess,
   resolveAccessRequest
@@ -174,4 +175,107 @@ test("there is nothing to ask for on a missing document or a quick take", async 
   assert.deepEqual(await requestDocumentAccess({ documentId: quicktake.id, userId: requester.id }), {
     status: "not-found"
   });
+});
+
+test("someone with view access can ask for comment or edit access", async (t) => {
+  const { owner, requester, document } = await fixture(t);
+  await db.documentMembership.create({
+    data: { documentId: document.id, userId: requester.id, permission: "VIEW" }
+  });
+
+  // Asking for what you already have (or less) is not a request.
+  assert.deepEqual(await requestDocumentAccess({ documentId: document.id, userId: requester.id }), { status: "has-access" });
+  assert.deepEqual(
+    await requestDocumentAccess({ documentId: document.id, userId: requester.id, permission: "VIEW" }),
+    { status: "has-access" }
+  );
+  assert.deepEqual(await getUpgradeRequestState(document.id, requester.id, "VIEW"), { requestedPermission: null });
+
+  const asked = await requestDocumentAccess({
+    documentId: document.id,
+    userId: requester.id,
+    permission: "EDIT",
+    message: "need to fix typos"
+  });
+  assert.equal(asked.status, "requested");
+  assert.equal(asked.status === "requested" && asked.notifyOwner, true);
+  assert.equal(asked.status === "requested" && asked.currentPermission, "VIEW");
+  assert.deepEqual(await getUpgradeRequestState(document.id, requester.id, "VIEW"), { requestedPermission: "EDIT" });
+
+  // The owner sees it although the requester is already a member.
+  const pending = await listPendingAccessRequests(document.id);
+  assert.deepEqual(
+    pending.map((r) => [r.user.id, r.requestedPermission, r.currentPermission, r.message]),
+    [[requester.id, "EDIT", "VIEW", "need to fix typos"]]
+  );
+  assert.equal(await countPendingAccessRequests(document.id), 1);
+
+  // Asking again does not re-notify.
+  const again = await requestDocumentAccess({ documentId: document.id, userId: requester.id, permission: "EDIT" });
+  assert.equal(again.status === "requested" && again.notifyOwner, false);
+
+  const { slack, posted } = fakeSlack();
+  await notifyAccessRequested({
+    documentId: document.id,
+    requester: { name: requester.name, email: requester.email },
+    permission: "EDIT",
+    currentPermission: "VIEW",
+    deps: { slack, appUrl: "https://docs.example" }
+  });
+  assert.match(posted[0].text, /has view access.*asking for edit access/);
+
+  // Granting without choosing a level gives what was asked for.
+  const requestId = asked.status === "requested" ? asked.requestId : "";
+  const resolution = await resolveAccessRequest({ documentId: document.id, requestId, action: "grant" });
+  assert.equal(resolution.status === "granted" && resolution.membership.permission, "EDIT");
+  assert.equal((await resolveDocumentAccess(document.id, requester.id))?.permission, "EDIT");
+  assert.equal(await countPendingAccessRequests(document.id), 0);
+  assert.deepEqual(
+    await requestDocumentAccess({ documentId: document.id, userId: requester.id, permission: "EDIT" }),
+    { status: "has-access" }
+  );
+  void owner;
+});
+
+test("upgrade requests: a partial grant can be followed by a new ask; a decline is final and keeps the access", async (t) => {
+  const { requester, document } = await fixture(t);
+  await db.documentMembership.create({
+    data: { documentId: document.id, userId: requester.id, permission: "VIEW" }
+  });
+  const first = await requestDocumentAccess({ documentId: document.id, userId: requester.id, permission: "EDIT" });
+  const firstId = first.status === "requested" ? first.requestId : "";
+  // The owner gives less than asked.
+  await resolveAccessRequest({ documentId: document.id, requestId: firstId, action: "grant", permission: "COMMENT" });
+  assert.equal((await resolveDocumentAccess(document.id, requester.id))?.permission, "COMMENT");
+  assert.deepEqual(await getUpgradeRequestState(document.id, requester.id, "COMMENT"), { requestedPermission: null });
+
+  const second = await requestDocumentAccess({ documentId: document.id, userId: requester.id, permission: "EDIT" });
+  assert.equal(second.status === "requested" && second.notifyOwner, true);
+  const secondId = second.status === "requested" ? second.requestId : "";
+  assert.deepEqual(await resolveAccessRequest({ documentId: document.id, requestId: secondId, action: "decline" }), {
+    status: "declined"
+  });
+  // Declined: the comment access stays, the requester still sees "asked", the owner is not asked again.
+  assert.equal((await resolveDocumentAccess(document.id, requester.id))?.permission, "COMMENT");
+  assert.deepEqual(await getUpgradeRequestState(document.id, requester.id, "COMMENT"), { requestedPermission: "EDIT" });
+  const third = await requestDocumentAccess({ documentId: document.id, userId: requester.id, permission: "EDIT" });
+  assert.equal(third.status === "requested" && third.notifyOwner, false);
+  assert.equal(await countPendingAccessRequests(document.id), 0);
+});
+
+test("a request for access that was declined does not block a later upgrade request", async (t) => {
+  const { requester, document } = await fixture(t);
+  const first = await requestDocumentAccess({ documentId: document.id, userId: requester.id });
+  const firstId = first.status === "requested" ? first.requestId : "";
+  await resolveAccessRequest({ documentId: document.id, requestId: firstId, action: "decline" });
+  // Shared with them some other way later; now they want more.
+  await db.documentMembership.create({
+    data: { documentId: document.id, userId: requester.id, permission: "VIEW" }
+  });
+  const upgrade = await requestDocumentAccess({ documentId: document.id, userId: requester.id, permission: "COMMENT" });
+  assert.equal(upgrade.status === "requested" && upgrade.notifyOwner, true);
+  assert.deepEqual(
+    (await listPendingAccessRequests(document.id)).map((r) => [r.requestedPermission, r.currentPermission]),
+    [["COMMENT", "VIEW"]]
+  );
 });

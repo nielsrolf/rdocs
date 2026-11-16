@@ -21,6 +21,7 @@ export function RequestAccessView({
 }) {
   const [requested, setRequested] = useState(initiallyRequested);
   const [message, setMessage] = useState("");
+  const [permission, setPermission] = useState<"VIEW" | "COMMENT" | "EDIT">("VIEW");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,7 +32,7 @@ export function RequestAccessView({
       const response = await fetch(`/api/documents/${documentId}/access-requests`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: message.trim() || null })
+        body: JSON.stringify({ message: message.trim() || null, permission })
       });
       const data = (await response.json().catch(() => null)) as { status?: string; error?: string } | null;
       if (!response.ok) {
@@ -64,6 +65,17 @@ export function RequestAccessView({
         </div>
         {requested ? null : (
           <div className="stack-form">
+            <label>
+              <span>Access</span>
+              <select
+                onChange={(event) => setPermission(event.target.value as "VIEW" | "COMMENT" | "EDIT")}
+                value={permission}
+              >
+                <option value="VIEW">View</option>
+                <option value="COMMENT">Comment</option>
+                <option value="EDIT">Edit</option>
+              </select>
+            </label>
             <label>
               <span>Message (optional)</span>
               <textarea

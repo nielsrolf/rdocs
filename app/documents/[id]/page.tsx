@@ -5,7 +5,12 @@ import { notFound, redirect } from "next/navigation";
 import { DocumentWorkspace } from "@/components/document-workspace";
 import { TemplateOffers } from "@/components/template-offers";
 import { RequestAccessView } from "@/components/request-access-view";
-import { countPendingAccessRequests, getAccessRequestState } from "@/lib/access-requests";
+import { RequestUpgrade } from "@/components/request-upgrade";
+import {
+  countPendingAccessRequests,
+  getAccessRequestState,
+  getUpgradeRequestState
+} from "@/lib/access-requests";
 import { getCurrentUser } from "@/lib/auth";
 import { listDocumentThreads } from "@/lib/document-data";
 import {
@@ -154,6 +159,11 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
 
   const isOwner = user?.id === access.document.ownerId;
   const pendingAccessRequestCount = isOwner ? await countPendingAccessRequests(id) : 0;
+  // A signed-in reader below edit access can ask the owner for more.
+  const upgradePermission = user && access.permission !== "EDIT" ? access.permission : null;
+  const upgradeRequest = upgradePermission
+    ? await getUpgradeRequestState(id, user!.id, upgradePermission)
+    : null;
   const normalizedThreads = threads.map((thread) => ({
     ...thread,
     status: thread.status as ThreadStatusValue
@@ -307,11 +317,21 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         />
       ) : null}
       {access.permission !== "EDIT" &&
-        !((access.viaShareLink || access.viaForumPublic) && access.permission === "VIEW") && (
+        (upgradePermission ||
+          !((access.viaShareLink || access.viaForumPublic) && access.permission === "VIEW")) && (
         <div className="read-only-banner">
           {access.permission === "COMMENT"
             ? "You can comment, but not edit, in this document."
-            : "This share link is view-only."}
+            : user
+              ? "You can view, but not comment on or edit, this document."
+              : "This share link is view-only."}
+          {upgradePermission ? (
+            <RequestUpgrade
+              currentPermission={upgradePermission}
+              documentId={id}
+              initiallyRequested={upgradeRequest?.requestedPermission ?? null}
+            />
+          ) : null}
         </div>
       )}
     </main>

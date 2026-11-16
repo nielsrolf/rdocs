@@ -92,3 +92,18 @@
   color: var(--accent-strong);
   font-weight: 600;
 }
+
+/* "Ask for comment / edit access" in the read-only banner. */
+.request-upgrade {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: 0.75rem;
+}
+
+.access-request-level {
+  display: block;
+  font-size: 0.82rem;
+  color: var(--accent-strong);
+}
