@@ -1,0 +1,94 @@
+/* Templates: the "New document" menu, the share prompt, the settings rows.
+   Imported from app/layout.tsx. */
+
+.new-document {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.3rem;
+}
+
+.new-document-menu {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 260px;
+  max-width: min(380px, calc(100vw - 2rem));
+  max-height: min(70vh, 420px);
+  overflow-y: auto;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: white;
+  box-shadow: var(--shadow);
+}
+
+.template-offers {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.template-offers-dashboard {
+  margin-bottom: 1rem;
+}
+
+/* Inside a document: a card floating over the bottom-left corner, clear of the
+   editor text and the comment rail. */
+.template-offers-document {
+  position: fixed;
+  left: 1rem;
+  bottom: 1rem;
+  z-index: 40;
+  width: min(420px, calc(100vw - 2rem));
+}
+
+.template-offer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem 1rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: var(--surface-strong);
+  box-shadow: var(--shadow);
+}
+
+.template-offer-text {
+  flex: 1 1 280px;
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.template-offer-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.template-row {
+  align-items: center;
+}
+
+.template-row-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.file-menu-item[aria-checked="true"] .file-menu-item-hint {
+  color: var(--accent-strong);
+  font-weight: 600;
+}

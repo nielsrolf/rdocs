@@ -120,6 +120,7 @@ export type DocumentWorkspaceProps = {
   credentialHasChatgptAuth: boolean;
   isAuthenticated: boolean;
   isOwner: boolean;
+  initialIsTemplate?: boolean;
   shareToken: string | null;
   viaShareLink: boolean;
   // Forum mode: render like the public share-link view (no chrome, no outline)

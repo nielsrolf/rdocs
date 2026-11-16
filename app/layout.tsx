@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 
 import "@/app/globals.css";
+import "@/app/templates.css";
 import "katex/dist/katex.min.css";
 import { BrandMark } from "@/components/brand-mark";
 import { ChunkReloadRecovery } from "@/components/chunk-reload-recovery";

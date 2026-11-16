@@ -86,6 +86,7 @@ model User {
   slackCommentNotifications       SlackCommentNotification[]
   documentNotificationPreferences DocumentNotificationPreference[]
   documentAccessRequests          DocumentAccessRequest[]
+  templates                       UserTemplate[]
 }
 
 // A named set of users (a team/company) that documents can be shared with.
@@ -310,6 +311,10 @@ model Document {
   // comments, and group access all reuse the document machinery. Null for
   // every other kind.
   quicktakeBody           String?
+  // A template is an ordinary document that people can start new documents
+  // from (lib/templates.ts). Owner-only flag; who has it in their "New
+  // document" list is per user (UserTemplate).
+  isTemplate              Boolean                          @default(false)
   createdAt               DateTime                         @default(now())
   updatedAt               DateTime                         @updatedAt
   owner                   User                             @relation("DocumentOwner", fields: [ownerId], references: [id], onDelete: Cascade)
@@ -332,6 +337,7 @@ model Document {
   accessRequests          DocumentAccessRequest[]
   mcpServers              DocumentMcpServer[]
   durableApp              DurableApp?
+  templateUsers           UserTemplate[]
 
   @@unique([slackTeamId, slackChannelId])
   @@index([parentDocumentId])
@@ -1016,3 +1022,19 @@ model SlackInstallation {
   updatedAt         DateTime @updatedAt
 }
 
+// One user's decision about one template document (lib/templates.ts):
+// "added" = it is in their "New document" list, "dismissed" = they declined or
+// removed it. No row = not asked yet, which is what makes the app offer it.
+model UserTemplate {
+  id         String   @id @default(cuid())
+  userId     String
+  documentId String
+  status     String   @default("added")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, documentId])
+  @@index([documentId])
+}

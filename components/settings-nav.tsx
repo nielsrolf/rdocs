@@ -12,6 +12,7 @@ import { useEffect, useState } from "react";
 //   /settings/agent — AI credentials, default model, custom instructions,
 //                     MCP, skills, self-hosted worker
 //   /settings/groups — collaborator group management
+//   /settings/templates — which templates "New document" offers
 //   /settings/forum — forum preferences (default quicktake audience)
 //   /settings/notifications — Slack DM comment notifications
 const SECTIONS: ReadonlyArray<{
@@ -32,6 +33,7 @@ const SECTIONS: ReadonlyArray<{
     ]
   },
   { href: "/settings/groups", label: "Groups", anchors: [] },
+  { href: "/settings/templates", label: "Templates", anchors: [] },
   { href: "/settings/forum", label: "Forum", anchors: [] },
   { href: "/settings/notifications", label: "Notifications", anchors: [] }
 ];

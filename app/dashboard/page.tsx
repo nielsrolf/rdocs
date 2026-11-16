@@ -4,6 +4,7 @@ import type { InboxThreadView } from "@/components/comment-inbox";
 import { DashboardTabs } from "@/components/dashboard-tabs";
 import { NewDocumentButton } from "@/components/new-document-button";
 import { OnboardingTour, TourRestartButton } from "@/components/onboarding-tour";
+import { TemplateOffers } from "@/components/template-offers";
 import { getCurrentUser } from "@/lib/auth";
 import {
   getDocumentCommentStats,
@@ -11,6 +12,7 @@ import {
   listTaggedThreadsForUser
 } from "@/lib/document-data";
 import { getDocumentMentionStats } from "@/lib/mention-data";
+import { listTemplateOffers } from "@/lib/templates";
 
 type DashboardPageProps = {
   searchParams?: Promise<{ tab?: string }>;
@@ -41,10 +43,11 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
   const docIds = accessibleDocuments.map((d) => d.id);
 
   // Aggregated in SQL rather than loading every comment for every document.
-  const [{ unreadByDoc, lastCommentByDoc }, mentionByDoc, inbox] = await Promise.all([
+  const [{ unreadByDoc, lastCommentByDoc }, mentionByDoc, inbox, templateOffers] = await Promise.all([
     getDocumentCommentStats(user.id, docIds),
     getDocumentMentionStats(user.id, docIds),
-    listTaggedThreadsForUser(user.id)
+    listTaggedThreadsForUser(user.id),
+    listTemplateOffers(user.id)
   ]);
 
   const documents = accessibleDocuments.map((d) => ({
@@ -67,6 +70,10 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
 
   return (
     <main className="dashboard-shell">
+      <TemplateOffers
+        offers={templateOffers.map(({ id, title, ownerName }) => ({ id, title, ownerName }))}
+        variant="dashboard"
+      />
       <DashboardTabs
         documents={documents}
         inboxThreads={inboxThreads}

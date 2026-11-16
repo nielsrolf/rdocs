@@ -267,6 +267,7 @@ export function DocumentWorkspace({
   credentialHasChatgptAuth,
   isAuthenticated,
   isOwner,
+  initialIsTemplate = false,
   initialPendingAccessRequestCount = 0,
   initialShareModalOpen = false,
   shareToken,
@@ -4680,7 +4681,12 @@ export function DocumentWorkspace({
           >
           <ExportMenu documentId={documentId} shareToken={shareToken} />
 
-          <FileMenu currentDocumentId={documentId} onOpenVersionHistory={() => setHistoryOpen(true)} />
+          <FileMenu
+            canMakeTemplate={isOwner && documentKind === "document"}
+            currentDocumentId={documentId}
+            initialIsTemplate={initialIsTemplate}
+            onOpenVersionHistory={() => setHistoryOpen(true)}
+          />
 
           {canPersistEdits && (
             <div className="suggestion-mode-controls">

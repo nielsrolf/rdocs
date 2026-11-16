@@ -4,6 +4,7 @@ import { defaultDocumentContent, serializeDocumentContent } from "@/lib/content"
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { copyOwnerDefaultSkillsToDocument } from "@/lib/document-skills";
+import { createDocumentFromTemplate, TemplateError } from "@/lib/templates";
 
 export async function GET() {
   const user = await getCurrentUser();
@@ -44,10 +45,25 @@ export async function GET() {
   return NextResponse.json({ documents: merged });
 }
 
-export async function POST() {
+export async function POST(request: Request) {
   const user = await getCurrentUser();
   if (!user) {
     return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+  }
+
+  // Optional body { templateId }: start from a template the user can open.
+  // No body (the old callers) = a blank document.
+  const body = (await request.json().catch(() => null)) as { templateId?: unknown } | null;
+  if (typeof body?.templateId === "string" && body.templateId) {
+    try {
+      const created = await createDocumentFromTemplate(user.id, body.templateId);
+      return NextResponse.json({ id: created.id });
+    } catch (error) {
+      if (error instanceof TemplateError) {
+        return NextResponse.json({ error: error.message }, { status: error.status });
+      }
+      throw error;
+    }
   }
 
   const document = await db.document.create({

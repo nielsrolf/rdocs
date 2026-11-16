@@ -3,6 +3,7 @@ import { headers } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 
 import { DocumentWorkspace } from "@/components/document-workspace";
+import { TemplateOffers } from "@/components/template-offers";
 import { RequestAccessView } from "@/components/request-access-view";
 import { countPendingAccessRequests, getAccessRequestState } from "@/lib/access-requests";
 import { getCurrentUser } from "@/lib/auth";
@@ -26,6 +27,7 @@ import {
 } from "@/lib/user-credentials";
 import { getPublicOrigin } from "@/lib/request-origin";
 import { resolveConversationRootRunId } from "@/lib/ai-runs";
+import { getTemplateStateForViewer } from "@/lib/templates";
 
 type PageProps = {
   params: Promise<{
@@ -231,6 +233,12 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
   const initialHasLiteLlmKey = envHasLiteLlmKey || credentialHasLiteLlmKey;
   const initialHasOpenAiKey = envHasOpenAiKey || credentialHasOpenAiKey;
   const initialHasChatgptAuth = envHasChatgptAuth || credentialHasChatgptAuth;
+  // Template state for the File menu toggle and the "add to my templates?"
+  // prompt. A forum-public reader has no grant to keep it in a list.
+  const templateState = await getTemplateStateForViewer(id, user?.id ?? null);
+  const owner = templateState.offer && !access.viaForumPublic
+    ? await db.user.findUnique({ where: { id: access.document.ownerId }, select: { name: true } })
+    : null;
   const initialCollaborationVersion = await getCollaborationVersion(
     access.document.id,
     access.document.content,
@@ -275,6 +283,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
         documentKind={access.document.kind}
         isAuthenticated={Boolean(user)}
         isOwner={user?.id === access.document.ownerId}
+        initialIsTemplate={templateState.isTemplate}
         shareToken={access.shareToken}
         viaShareLink={access.viaShareLink || access.viaForumPublic}
         initialForumPostedAt={access.document.forumPostedAt?.toISOString() ?? null}
@@ -291,6 +300,12 @@ export default async function DocumentPage({ params, searchParams }: PageProps) 
             : false
         }
       />
+      {owner ? (
+        <TemplateOffers
+          offers={[{ id, title: access.document.title, ownerName: owner.name }]}
+          variant="document"
+        />
+      ) : null}
       {access.permission !== "EDIT" &&
         !((access.viaShareLink || access.viaForumPublic) && access.permission === "VIEW") && (
         <div className="read-only-banner">
