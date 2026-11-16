@@ -1,7 +1,7 @@
 import { getSchema } from "@tiptap/core";
 import ImageExtension from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
-import Table from "@tiptap/extension-table";
+import { DocumentTable } from "@/lib/document-table";
 import TableCell from "@tiptap/extension-table-cell";
 import TableHeader from "@tiptap/extension-table-header";
 import TableRow from "@tiptap/extension-table-row";
@@ -69,9 +69,7 @@ export function documentEditorExtensions() {
       autolink: true,
       defaultProtocol: "https"
     }),
-    Table.configure({
-      resizable: false
-    }),
+    DocumentTable,
     TableRow,
     TableHeader,
     TableCell,

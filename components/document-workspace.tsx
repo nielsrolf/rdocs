@@ -8,7 +8,7 @@ import {
 } from "@/agent-core/lifecycle-messages";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
-import Table from "@tiptap/extension-table";
+import { DocumentTable } from "@/lib/document-table";
 import TableCell from "@tiptap/extension-table-cell";
 import TableHeader from "@tiptap/extension-table-header";
 import TableRow from "@tiptap/extension-table-row";
@@ -1390,8 +1390,10 @@ export function DocumentWorkspace({
         showOnlyWhenEditable: true,
         showOnlyCurrent: false
       }),
-      Table.configure({
-        resizable: false
+      // Column widths are committed content: only direct editors get the
+      // drag handles (a suggest-only user's resize would be rejected by collab).
+      DocumentTable.configure({
+        resizable: canWriteDocument
       }),
       TableRow,
       TableHeader,

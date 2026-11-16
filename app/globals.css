@@ -4625,11 +4625,41 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
+/* Tables scroll sideways inside their wrapper instead of squeezing columns:
+   the table is at least (columns x TABLE_AUTO_COLUMN_MIN_WIDTH) wide, or the
+   sum of its dragged column widths (inline style from the table node view). */
+.ProseMirror .tableWrapper {
+  margin: 0.8rem 0;
+  /* Room for the collapsed outer border, which the scroll box would clip. */
+  padding: 1px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
 .ProseMirror table {
   width: 100%;
   border-collapse: collapse;
   margin: 0.8rem 0;
   table-layout: fixed;
+}
+
+.ProseMirror .tableWrapper table {
+  margin: 0;
+}
+
+.ProseMirror .column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  bottom: 0;
+  width: 4px;
+  background: #8ab4f8;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.ProseMirror.resize-cursor {
+  cursor: col-resize;
 }
 
 .ProseMirror img {
@@ -4658,6 +4688,9 @@ details.agent-tool:not(.agent-tool-empty) > .agent-tool-header:hover {
   border: 1px solid #c9cccf;
   padding: 8px 10px;
   vertical-align: top;
+  /* Anchor for the column resize handle. */
+  position: relative;
+  overflow-wrap: anywhere;
 }
 
 .ProseMirror th {
