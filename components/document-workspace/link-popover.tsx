@@ -3,6 +3,9 @@
 import type { Editor } from "@tiptap/react";
 import { useEffect, useState, type RefObject } from "react";
 
+import { linkPopoverVisible } from "./link-popover-visibility";
+import type { SelectionPopoverMode } from "./types";
+
 type PopoverState = {
   href: string;
   left: number;
@@ -12,11 +15,13 @@ type PopoverState = {
 export function LinkPopover({
   editor,
   containerRef,
-  canEdit
+  canEdit,
+  selectionPopoverMode
 }: {
   editor: Editor | null;
   containerRef: RefObject<HTMLDivElement | null>;
   canEdit: boolean;
+  selectionPopoverMode: SelectionPopoverMode | null;
 }) {
   const [state, setState] = useState<PopoverState | null>(null);
 
@@ -79,7 +84,7 @@ export function LinkPopover({
     };
   }, [editor, containerRef]);
 
-  if (!state || !editor) {
+  if (!state || !editor || !linkPopoverVisible({ href: state.href, selectionPopoverMode })) {
     return null;
   }
 

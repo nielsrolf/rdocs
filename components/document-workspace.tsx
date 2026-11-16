@@ -5306,7 +5306,12 @@ export function DocumentWorkspace({
             ) : null}
 
             <EditorContent editor={editor} />
-            <LinkPopover editor={editor} containerRef={editorPageRef} canEdit={canWriteDocument} />
+            <LinkPopover
+              editor={editor}
+              containerRef={editorPageRef}
+              canEdit={canWriteDocument}
+              selectionPopoverMode={selectionPopoverMode}
+            />
             <HeadingCopyOverlay editor={editor} containerRef={editorPageRef} />
             <TableInlineControls
               editor={editor}
