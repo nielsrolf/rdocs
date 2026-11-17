@@ -9,6 +9,7 @@ import {
   listAddedTemplates,
   listTemplateOffers,
   listTemplatesForUser,
+  setDocumentTemplateChoice,
   setUserTemplateStatus,
   TemplateError
 } from "../lib/templates";
@@ -43,8 +44,12 @@ test("using a shared document as a template, offers, dismissing and losing acces
     assert.deepEqual(await listTemplatesForUser(bo.id), []);
     assert.deepEqual(await getTemplateStateForViewer(doc.id, bo.id), { isTemplate: false, status: null, offer: false });
 
-    // Bo, who only has view access to Ann's document, uses it as a template.
-    await setUserTemplateStatus(bo.id, doc.id, "added");
+    // Bo, who only has view access to Ann's document, uses it as a template
+    // (the File menu toggle), turns it off and on again.
+    assert.deepEqual(await setDocumentTemplateChoice({ userId: bo.id, documentId: doc.id, isTemplate: true }), { isTemplate: true });
+    assert.deepEqual(await setDocumentTemplateChoice({ documentId: doc.id, userId: bo.id, isTemplate: false }), { isTemplate: false });
+    assert.deepEqual(await listAddedTemplates(bo.id), []);
+    await setDocumentTemplateChoice({ userId: bo.id, documentId: doc.id, isTemplate: true });
     assert.deepEqual((await listAddedTemplates(bo.id)).map((t) => [t.id, t.ownerName, t.isOwner]), [[doc.id, "ann", false]]);
     assert.equal((await getTemplateStateForViewer(doc.id, bo.id)).isTemplate, true);
     // That is Bo's own business: it is not a template for the owner, and nobody is asked.

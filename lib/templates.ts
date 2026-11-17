@@ -146,6 +146,22 @@ export async function setUserTemplateStatus(userId: string, documentId: string, 
   return { status };
 }
 
+// The File menu toggle ("Use this doc as a template"). Named arguments on
+// purpose: the route once passed (documentId, userId) in the wrong order and
+// every toggle answered "Document not found."
+export async function setDocumentTemplateChoice(input: {
+  userId: string;
+  documentId: string;
+  isTemplate: boolean;
+}) {
+  const { status } = await setUserTemplateStatus(
+    input.userId,
+    input.documentId,
+    input.isTemplate ? "added" : "dismissed"
+  );
+  return { isTemplate: status === "added" };
+}
+
 // Nodes that only work inside the template's own workspace: a widget is a row
 // + built files of that document, a repo image is a path in its checkout.
 const WORKSPACE_BOUND_NODE_TYPES = new Set(["embeddedWidget", "repoImage"]);

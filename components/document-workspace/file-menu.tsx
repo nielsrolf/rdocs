@@ -36,6 +36,8 @@ export function FileMenu({
   const [templates, setTemplates] = useState<TemplateOption[]>([]);
   const [isTemplate, setIsTemplate] = useState(initialIsTemplate);
   const [savingTemplate, setSavingTemplate] = useState(false);
+  // Separate from `error`, which replaces the Recent list.
+  const [templateError, setTemplateError] = useState<string | null>(null);
 
   // The user's "New document" templates. Best-effort: without them the menu
   // still offers a blank document.
@@ -57,7 +59,7 @@ export function FileMenu({
     if (savingTemplate) return;
     const next = !isTemplate;
     setSavingTemplate(true);
-    setError(null);
+    setTemplateError(null);
     try {
       const response = await fetch(`/api/documents/${currentDocumentId}/template`, {
         method: "PATCH",
@@ -66,13 +68,13 @@ export function FileMenu({
       });
       if (!response.ok) {
         const data = await response.json().catch(() => null);
-        setError(typeof data?.error === "string" ? data.error : "Failed to update the template setting.");
+        setTemplateError(typeof data?.error === "string" ? data.error : "Failed to update the template setting.");
         return;
       }
       setIsTemplate(next);
       void loadTemplates();
     } catch {
-      setError("Failed to update the template setting.");
+      setTemplateError("Failed to update the template setting.");
     } finally {
       setSavingTemplate(false);
     }
@@ -183,6 +185,11 @@ export function FileMenu({
             <span className="file-menu-item-label">Use this doc as a template</span>
             <span className="file-menu-item-hint">{isTemplate ? "✓ On" : "Off"}</span>
           </button>
+        ) : null}
+        {templateError ? (
+          <div className="file-menu-empty" role="alert">
+            {templateError}
+          </div>
         ) : null}
         <div className="file-menu-section-label">Recent</div>
         <div className="file-menu-list">

@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { notSignedIn, type RouteContext } from "@/lib/api-helpers";
 import { getCurrentUser } from "@/lib/auth";
-import { setUserTemplateStatus, TemplateError } from "@/lib/templates";
+import { setDocumentTemplateChoice, TemplateError } from "@/lib/templates";
 
 const patchSchema = z.object({ isTemplate: z.boolean() });
 
@@ -18,8 +18,9 @@ export async function PATCH(request: Request, { params }: RouteContext<{ id: str
     return NextResponse.json({ error: "Expected { isTemplate: boolean }." }, { status: 400 });
   }
   try {
-    const { status } = await setUserTemplateStatus(id, user.id, parsed.data.isTemplate ? "added" : "dismissed");
-    return NextResponse.json({ isTemplate: status === "added" });
+    return NextResponse.json(
+      await setDocumentTemplateChoice({ userId: user.id, documentId: id, isTemplate: parsed.data.isTemplate })
+    );
   } catch (error) {
     if (error instanceof TemplateError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
