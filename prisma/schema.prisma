@@ -314,6 +314,7 @@ model Document {
   // A template is an ordinary document that people can start new documents
   // from (lib/templates.ts). Owner-only flag; who has it in their "New
   // document" list is per user (UserTemplate).
+  // Unused since templates became per user (UserTemplate); kept so the old color keeps serving during a deploy.
   isTemplate              Boolean                          @default(false)
   createdAt               DateTime                         @default(now())
   updatedAt               DateTime                         @updatedAt

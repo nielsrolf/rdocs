@@ -9,14 +9,13 @@ import {
   listAddedTemplates,
   listTemplateOffers,
   listTemplatesForUser,
-  setDocumentTemplate,
   setUserTemplateStatus,
   TemplateError
 } from "../lib/templates";
 
-// Templates: a document flagged by its owner; each user decides whether it is
-// in their "New document" list (UserTemplate), and is offered it when it was
-// shared with them and they have not decided yet.
+// Templates are per user: anyone who can open a document may use it as a
+// template (UserTemplate "added"); when the OWNER does, the people it is shared
+// with are offered it once.
 
 async function makeUser(tag: string) {
   return db.user.create({
@@ -29,7 +28,7 @@ const paragraph = (text: string, marks?: unknown[]) => ({
   content: [{ type: "text", text, ...(marks ? { marks } : {}) }]
 });
 
-test("marking, offering, adding, dismissing and losing access", async () => {
+test("using a shared document as a template, offers, dismissing and losing access", async () => {
   const ann = await makeUser("ann");
   const bo = await makeUser("bo");
   const cy = await makeUser("cy");
@@ -37,18 +36,29 @@ test("marking, offering, adding, dismissing and losing access", async () => {
     data: { title: "Weekly report", content: JSON.stringify({ type: "doc", content: [paragraph("x")] }), ownerId: ann.id }
   });
   try {
-    // Only the owner can mark it.
-    await db.documentMembership.create({ data: { documentId: doc.id, userId: bo.id, permission: "EDIT" } });
-    await assert.rejects(setDocumentTemplate(doc.id, bo.id, true), (e) => e instanceof TemplateError && e.status === 403);
+    await db.documentMembership.create({ data: { documentId: doc.id, userId: bo.id, permission: "VIEW" } });
 
-    // Not a template yet: nothing listed, nothing offered, cannot be added or used.
+    // Nobody uses it as a template yet: nothing listed, nothing offered.
+    assert.deepEqual(await listTemplatesForUser(ann.id), []);
     assert.deepEqual(await listTemplatesForUser(bo.id), []);
-    await assert.rejects(setUserTemplateStatus(bo.id, doc.id, "added"), TemplateError);
-    await assert.rejects(createDocumentFromTemplate(bo.id, doc.id), TemplateError);
+    assert.deepEqual(await getTemplateStateForViewer(doc.id, bo.id), { isTemplate: false, status: null, offer: false });
 
-    await setDocumentTemplate(doc.id, ann.id, true);
+    // Bo, who only has view access to Ann's document, uses it as a template.
+    await setUserTemplateStatus(bo.id, doc.id, "added");
+    assert.deepEqual((await listAddedTemplates(bo.id)).map((t) => [t.id, t.ownerName, t.isOwner]), [[doc.id, "ann", false]]);
+    assert.equal((await getTemplateStateForViewer(doc.id, bo.id)).isTemplate, true);
+    // That is Bo's own business: it is not a template for the owner, and nobody is asked.
+    assert.deepEqual(await listTemplatesForUser(ann.id), []);
+    assert.deepEqual(await getTemplateStateForViewer(doc.id, ann.id), { isTemplate: false, status: null, offer: false });
+    await db.documentMembership.create({ data: { documentId: doc.id, userId: cy.id, permission: "VIEW" } });
+    assert.deepEqual(await listTemplatesForUser(cy.id), []);
+    assert.equal((await getTemplateStateForViewer(doc.id, cy.id)).offer, false);
+    await db.documentMembership.deleteMany({ where: { documentId: doc.id, userId: cy.id } });
+    await setUserTemplateStatus(bo.id, doc.id, "dismissed");
+    await db.userTemplate.deleteMany({ where: { documentId: doc.id } });
 
-    // The owner has it right away and is never "offered" their own template.
+    // The owner uses it: in their list right away, never "offered" to themselves.
+    await setUserTemplateStatus(ann.id, doc.id, "added");
     assert.deepEqual((await listAddedTemplates(ann.id)).map((t) => t.id), [doc.id]);
     assert.deepEqual(await listTemplateOffers(ann.id), []);
     assert.equal((await getTemplateStateForViewer(doc.id, ann.id)).offer, false);
@@ -86,10 +96,15 @@ test("marking, offering, adding, dismissing and losing access", async () => {
     assert.deepEqual(await listAddedTemplates(bo.id), []);
     await assert.rejects(createDocumentFromTemplate(bo.id, doc.id), TemplateError);
 
-    // Unmarking removes it for everyone; re-marking restores the owner's entry.
-    await setDocumentTemplate(doc.id, ann.id, false);
-    assert.deepEqual(await listTemplatesForUser(ann.id), []);
-    assert.deepEqual(await listTemplateOffers(cy.id), []);
+    // The owner stops using it: gone from their list, no more offers; whoever
+    // added it for themselves keeps it.
+    await setUserTemplateStatus(cy.id, doc.id, "added");
+    await setUserTemplateStatus(ann.id, doc.id, "dismissed");
+    assert.deepEqual(await listAddedTemplates(ann.id), []);
+    assert.deepEqual((await listAddedTemplates(cy.id)).map((t) => t.id), [doc.id]);
+    await db.documentMembership.create({ data: { documentId: doc.id, userId: bo.id, permission: "VIEW" } });
+    await db.userTemplate.deleteMany({ where: { documentId: doc.id, userId: bo.id } });
+    assert.deepEqual(await listTemplateOffers(bo.id), []);
     await db.group.delete({ where: { id: group.id } });
   } finally {
     await db.document.deleteMany({ where: { ownerId: { in: [ann.id, bo.id, cy.id] } } });
@@ -121,10 +136,9 @@ test("a document started from a template is an independent copy owned by the use
     }
   });
   try {
-    await setDocumentTemplate(template.id, ann.id, true);
     await db.documentMembership.create({ data: { documentId: template.id, userId: bo.id, permission: "VIEW" } });
 
-    // VIEW access is enough to use a template, and it need not be in the list.
+    // VIEW access is enough to start from a document, and it need not be in the list.
     const created = await createDocumentFromTemplate(bo.id, template.id);
     const copy = await db.document.findUniqueOrThrow({
       where: { id: created.id },
@@ -132,7 +146,7 @@ test("a document started from a template is an independent copy owned by the use
     });
     assert.equal(copy.ownerId, bo.id);
     assert.equal(copy.title, "Report template");
-    assert.equal(copy.isTemplate, false);
+    assert.equal((await getTemplateStateForViewer(copy.id, bo.id)).isTemplate, false);
     assert.equal(copy.agentModel, "claude-opus-latest");
     assert.equal(copy.agentEffort, "high");
     assert.equal(copy.repoUrl, null);

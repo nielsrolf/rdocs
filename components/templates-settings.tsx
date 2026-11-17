@@ -59,7 +59,7 @@ export function TemplatesSettings({ initialTemplates }: { initialTemplates: Temp
         <strong className="credentials-section-title">Your templates</strong>
         <p className="muted-copy">
           These are offered whenever you click “New document”. Removing one only takes it out of your
-          list; the template document itself is not touched.
+          list; the document itself is not touched.
         </p>
         <div className="env-var-list">
           {added.length > 0 ? added.map(row) : <div className="env-empty">No templates in your list.</div>}
@@ -68,7 +68,7 @@ export function TemplatesSettings({ initialTemplates }: { initialTemplates: Temp
       <section className="credentials-section">
         <strong className="credentials-section-title">Available templates</strong>
         <p className="muted-copy">
-          Templates you own or that were shared with you, and that are not in your list.
+          Templates you removed or declined, and templates of people who shared the document with you.
         </p>
         <div className="env-var-list">
           {available.length > 0 ? (

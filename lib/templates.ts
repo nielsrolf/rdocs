@@ -5,15 +5,20 @@ import { db } from "@/lib/db";
 import { copyOwnerDefaultSkillsToDocument } from "@/lib/document-skills";
 import { copySkillDir, getDocumentSkillDir } from "@/lib/skills";
 
-// Templates. A template is an ordinary document with `isTemplate` set (by its
-// owner, File menu). Whether it shows up under "New document" is PER USER: a
-// `UserTemplate` row says "added" or "dismissed", and no row means the user
-// was never asked — the app then offers it (dashboard + inside the document).
-// Whoever marks a document as a template gets it added right away.
+// Templates. "Template" is a property of the USER–DOCUMENT relation, not of
+// the document: a `UserTemplate` row with status "added" puts a document the
+// user can open under their "New document" options (File menu → "Use this doc
+// as a template", or Settings → Templates). Any document they can open
+// qualifies, their own or one shared with them.
+//
+// When a document's OWNER uses it as a template, everyone else it is shared
+// with and who has no row yet is asked whether they want it too (dashboard +
+// inside the document); "dismissed" records a no, so each one asks once.
 //
 // A template is only ever usable or listed while the user can still open the
-// document: every query goes through `accessibleTemplateWhere`, so revoking
-// access (or unmarking the document) silently takes it out of every list.
+// document: every query goes through `accessibleDocumentWhere`, so revoking
+// access silently takes it out of every list. `Document.isTemplate` is an
+// unused leftover column of the first version.
 
 export type TemplateStatus = "added" | "dismissed";
 
@@ -22,7 +27,8 @@ export type TemplateListing = {
   title: string;
   ownerName: string;
   isOwner: boolean;
-  // null = shared with the user but not decided yet (an open offer).
+  // null = the owner uses it as a template and this user was not asked yet
+  // (an open offer).
   status: TemplateStatus | null;
 };
 
@@ -35,9 +41,8 @@ export class TemplateError extends Error {
   }
 }
 
-function accessibleTemplateWhere(userId: string): Prisma.DocumentWhereInput {
+function accessibleDocumentWhere(userId: string): Prisma.DocumentWhereInput {
   return {
-    isTemplate: true,
     kind: "document",
     OR: [
       { ownerId: userId },
@@ -51,29 +56,49 @@ function normalizeStatus(value: string | null | undefined): TemplateStatus | nul
   return value === "added" || value === "dismissed" ? value : null;
 }
 
-// Every template the user can open, with their decision about it. Added ones
+type TemplateUserRow = { userId: string; status: string };
+
+// The viewer's own decision, and whether the owner's use of the document as a
+// template makes it an open offer for them.
+function templateStateFromRows(rows: TemplateUserRow[], ownerId: string, userId: string) {
+  const status = normalizeStatus(rows.find((row) => row.userId === userId)?.status);
+  const ownerUsesIt = rows.some((row) => row.userId === ownerId && row.status === "added");
+  return { status, offer: status === null && ownerId !== userId && ownerUsesIt };
+}
+
+// Every document the user decided about, plus the open offers. Added ones
 // first, then open offers, then dismissed; alphabetical within each.
 export async function listTemplatesForUser(userId: string): Promise<TemplateListing[]> {
   const rows = await db.document.findMany({
-    where: accessibleTemplateWhere(userId),
+    where: {
+      ...accessibleDocumentWhere(userId),
+      templateUsers: { some: { OR: [{ userId }, { status: "added" }] } }
+    },
     select: {
       id: true,
       title: true,
       ownerId: true,
       owner: { select: { name: true } },
-      templateUsers: { where: { userId }, select: { status: true } }
+      templateUsers: {
+        where: { OR: [{ userId }, { status: "added" }] },
+        select: { userId: true, status: true }
+      }
     }
   });
   const rank = (status: TemplateStatus | null) => (status === "added" ? 0 : status === null ? 1 : 2);
-  return rows
-    .map((row) => ({
+  const listings: TemplateListing[] = [];
+  for (const row of rows) {
+    const state = templateStateFromRows(row.templateUsers, row.ownerId, userId);
+    if (state.status === null && !state.offer) continue;
+    listings.push({
       id: row.id,
       title: row.title,
       ownerName: row.owner.name,
       isOwner: row.ownerId === userId,
-      status: normalizeStatus(row.templateUsers[0]?.status)
-    }))
-    .sort((a, b) => rank(a.status) - rank(b.status) || a.title.localeCompare(b.title));
+      status: state.status
+    });
+  }
+  return listings.sort((a, b) => rank(a.status) - rank(b.status) || a.title.localeCompare(b.title));
 }
 
 // The "New document" options.
@@ -81,66 +106,38 @@ export async function listAddedTemplates(userId: string): Promise<TemplateListin
   return (await listTemplatesForUser(userId)).filter((template) => template.status === "added");
 }
 
-// Templates someone shared with the user that they have not decided about.
+// Templates of an owner who shared the document with the user, not decided yet.
 export async function listTemplateOffers(userId: string): Promise<TemplateListing[]> {
-  return (await listTemplatesForUser(userId)).filter(
-    (template) => template.status === null && !template.isOwner
-  );
+  return (await listTemplatesForUser(userId)).filter((template) => template.status === null);
 }
 
-// What the document page needs: is this a template, and what did this viewer
-// decide. `offer` is true when the viewer should be asked.
+// What the document page needs: does this viewer use the document as a
+// template, and should they be asked (`offer`).
 export async function getTemplateStateForViewer(documentId: string, userId: string | null) {
+  if (!userId) return { isTemplate: false, status: null, offer: false };
   const row = await db.document.findUnique({
     where: { id: documentId },
     select: {
-      isTemplate: true,
       ownerId: true,
-      templateUsers: userId ? { where: { userId }, select: { status: true } } : false
+      templateUsers: {
+        where: { OR: [{ userId }, { status: "added" }] },
+        select: { userId: true, status: true }
+      }
     }
   });
-  const isTemplate = Boolean(row?.isTemplate);
-  const status = normalizeStatus(row?.templateUsers?.[0]?.status);
-  return {
-    isTemplate,
-    status,
-    offer: Boolean(isTemplate && userId && row?.ownerId !== userId && status === null)
-  };
+  if (!row) return { isTemplate: false, status: null, offer: false };
+  const state = templateStateFromRows(row.templateUsers, row.ownerId, userId);
+  return { isTemplate: state.status === "added", ...state };
 }
 
-// Owner-only (the caller checks ownership). Marking adds the template to the
-// owner's own list; unmarking keeps everyone's rows, so re-marking restores
-// the lists as they were.
-export async function setDocumentTemplate(documentId: string, userId: string, isTemplate: boolean) {
-  const document = await db.document.findUnique({
-    where: { id: documentId },
-    select: { ownerId: true, kind: true }
-  });
-  if (!document) throw new TemplateError("Document not found.", 404);
-  if (document.ownerId !== userId) {
-    throw new TemplateError("Only the owner can make a document a template.", 403);
-  }
-  if (document.kind !== "document") {
-    throw new TemplateError("Only regular documents can be templates.", 400);
-  }
-  await db.document.update({ where: { id: documentId }, data: { isTemplate } });
-  if (isTemplate) {
-    await db.userTemplate.upsert({
-      where: { userId_documentId: { userId, documentId } },
-      create: { userId, documentId, status: "added" },
-      update: { status: "added" }
-    });
-  }
-  return { isTemplate };
-}
-
-// Add a template to the user's list, or take it out / decline it.
+// Use a document as a template ("added"), or stop / decline ("dismissed").
+// Works for any regular document the user can open.
 export async function setUserTemplateStatus(userId: string, documentId: string, status: TemplateStatus) {
-  const template = await db.document.findFirst({
-    where: { id: documentId, ...accessibleTemplateWhere(userId) },
+  const document = await db.document.findFirst({
+    where: { id: documentId, ...accessibleDocumentWhere(userId) },
     select: { id: true }
   });
-  if (!template) throw new TemplateError("Template not found.", 404);
+  if (!document) throw new TemplateError("Document not found.", 404);
   await db.userTemplate.upsert({
     where: { userId_documentId: { userId, documentId } },
     create: { userId, documentId, status },
@@ -181,12 +178,12 @@ export function templateContentForNewDocument(rawContent: string): string {
   return serializeDocumentContent(content);
 }
 
-// A new document owned by `userId`, started from a template they can open.
+// A new document owned by `userId`, started from a document they can open.
 // Copies title, content, agent model/effort and the template's skills. Never
 // copied: comments, sharing, env vars, the linked repo, schedules.
 export async function createDocumentFromTemplate(userId: string, templateId: string) {
   const template = await db.document.findFirst({
-    where: { id: templateId, ...accessibleTemplateWhere(userId) },
+    where: { id: templateId, ...accessibleDocumentWhere(userId) },
     select: {
       id: true,
       title: true,

@@ -22,8 +22,8 @@ export default async function TemplatesSettingsPage() {
           <section className="credentials-section slack-connect-success">
             <strong className="credentials-section-title">Templates</strong>
             <p>
-              A template is a document you can start new documents from. To make one, open a document
-              you own and choose File → This doc is a template.
+              A template is a document you can start new documents from. To use a document as one — your own
+              or one shared with you — open it and choose File → Use this doc as a template.
             </p>
           </section>
           <TemplatesSettings initialTemplates={templates} />

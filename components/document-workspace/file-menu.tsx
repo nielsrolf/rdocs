@@ -45,6 +45,9 @@ export function FileMenu({
       if (!response.ok) return;
       const data = (await response.json()) as { templates: TemplateOption[] };
       setTemplates(data.templates.filter((template) => template.status === "added"));
+      // The choice may have changed outside this menu (the "add to my
+      // templates?" prompt, Settings).
+      setIsTemplate(data.templates.some((template) => template.id === currentDocumentId && template.status === "added"));
     } catch {
       // keep whatever we had
     }
@@ -174,10 +177,10 @@ export function FileMenu({
             disabled={savingTemplate}
             onClick={() => void handleToggleTemplate()}
             role="menuitemcheckbox"
-            title="Templates show up as options under “New document”. People you share this document with are asked whether they want it in their list."
+            title="Adds this document to your options under “New document”. Only for you; if you own the document, people you share it with are asked whether they want it too."
             type="button"
           >
-            <span className="file-menu-item-label">This doc is a template</span>
+            <span className="file-menu-item-label">Use this doc as a template</span>
             <span className="file-menu-item-hint">{isTemplate ? "✓ On" : "Off"}</span>
           </button>
         ) : null}

@@ -4673,7 +4673,7 @@ export function DocumentWorkspace({
           <ExportMenu documentId={documentId} shareToken={shareToken} />
 
           <FileMenu
-            canMakeTemplate={isOwner && documentKind === "document"}
+            canMakeTemplate={isAuthenticated && !viaShareLink && documentKind === "document"}
             currentDocumentId={documentId}
             initialIsTemplate={initialIsTemplate}
             onOpenVersionHistory={() => setHistoryOpen(true)}

@@ -3,12 +3,12 @@ import { z } from "zod";
 
 import { notSignedIn, type RouteContext } from "@/lib/api-helpers";
 import { getCurrentUser } from "@/lib/auth";
-import { setDocumentTemplate, TemplateError } from "@/lib/templates";
+import { setUserTemplateStatus, TemplateError } from "@/lib/templates";
 
 const patchSchema = z.object({ isTemplate: z.boolean() });
 
-// "This doc is a template" (File menu). Owner-only, enforced in
-// setDocumentTemplate.
+// "Use this doc as a template" (File menu): the signed-in user's own choice
+// for this document, for anyone who can open it.
 export async function PATCH(request: Request, { params }: RouteContext<{ id: string }>) {
   const { id } = await params;
   const user = await getCurrentUser();
@@ -18,7 +18,8 @@ export async function PATCH(request: Request, { params }: RouteContext<{ id: str
     return NextResponse.json({ error: "Expected { isTemplate: boolean }." }, { status: 400 });
   }
   try {
-    return NextResponse.json(await setDocumentTemplate(id, user.id, parsed.data.isTemplate));
+    const { status } = await setUserTemplateStatus(id, user.id, parsed.data.isTemplate ? "added" : "dismissed");
+    return NextResponse.json({ isTemplate: status === "added" });
   } catch (error) {
     if (error instanceof TemplateError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
