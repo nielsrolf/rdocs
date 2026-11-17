@@ -105,7 +105,12 @@ export async function ensureCostsProject(
   input: { name: string; parent: string | null; budgetUsd: number; externalRef: string; description: string },
   fetchImpl: FetchLike = fetch
 ): Promise<void> {
-  const created = await costsRequest<{ budget_usd: number | null; parent: string | null; external_ref: string }>(
+  const created = await costsRequest<{
+    budget_usd: number | null;
+    parent: string | null;
+    external_ref: string;
+    closed_at: string | null;
+  }>(
     config,
     "POST",
     "/api/projects",
@@ -118,8 +123,8 @@ export async function ensureCostsProject(
     },
     fetchImpl
   );
-  // POST returns an existing project unchanged.
-  if (created.budget_usd !== input.budgetUsd || created.external_ref !== input.externalRef) {
+  // POST returns an existing project unchanged (also one that was closed earlier).
+  if (created.budget_usd !== input.budgetUsd || created.external_ref !== input.externalRef || created.closed_at) {
     if (created.external_ref && created.external_ref !== input.externalRef) {
       throw new CostsError(`The cost project "${input.name}" already belongs to something else (${created.external_ref}).`);
     }

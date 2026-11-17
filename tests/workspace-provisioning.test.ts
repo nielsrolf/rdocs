@@ -170,6 +170,7 @@ test("the workspaces toolset exposes only provisioning tools", async () => {
   assert.ok(list && "result" in list);
   const names = (list.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name).sort();
   assert.deepEqual(names, [
+    "close_workspace_budget",
     "create_workspace",
     "get_workspace_budget",
     "list_child_workspaces",

@@ -42,6 +42,7 @@ import {
 } from "@/lib/costs-client";
 import { db } from "@/lib/db";
 import { enforceWorkspaceBudgets } from "@/lib/workspace-budget-enforcement";
+import { forgetRunBudgetStates } from "@/lib/workspace-budget-state";
 import { copyDocumentEnvKeys, deleteDocumentEnv, loadProvisionerEnv, upsertDocumentEnv } from "@/lib/document-env";
 import {
   LITELLM_ADMIN_KEY_ENV,
@@ -333,6 +334,56 @@ export async function updateWorkspaceBudget(
     JSON.stringify({ documentId: input.documentId, costsProject: budget.costsProject, budgetUsd: input.budgetUsd, warnings })
   );
   return { costsProject: budget.costsProject, budgetUsd: input.budgetUsd, warnings };
+}
+
+/**
+ * End a workspace's budget: the keys minted for it are revoked (and leave its
+ * env), the cost project is marked closed (its numbers stay), and the budget
+ * no longer applies. Shared keys and the document itself are left alone.
+ * Returns what could not be revoked.
+ */
+export async function closeWorkspaceBudget(
+  documentId: string,
+  fetchImpl: FetchLike = fetch
+): Promise<{ costsProject: string; warnings: string[] }> {
+  const budget = await requireBudget(documentId);
+  const env = await loadProvisionerEnv(budget.provisionerDocumentId);
+  const providers = parseProviders(budget.providers);
+  const warnings: string[] = [];
+  const attempt = async (what: string, step: () => Promise<unknown>) => {
+    try {
+      await step();
+    } catch (error) {
+      if (!isBudgetError(error)) throw error;
+      warnings.push(`${what}: ${error.message}`);
+    }
+  };
+  if (providers.litellm === "minted") {
+    await attempt("LiteLLM key not revoked", () =>
+      revokeLiteLlmKey({ provisionerDocumentId: budget.provisionerDocumentId, targetDocumentId: documentId }, fetchImpl)
+    );
+  }
+  if (providers.openweights === "minted") {
+    await attempt("OpenWeights token not revoked", async () => {
+      const record = await db.provisionedCredential.findFirst({
+        where: { provider: OPENWEIGHTS_PROVIDER, targetDocumentId: documentId, revokedAt: null },
+        orderBy: { createdAt: "desc" }
+      });
+      const config = resolveOpenWeightsConfig(env);
+      if (!record?.externalId) return;
+      if (!config) throw new WorkspaceBudgetError("the provisioner no longer has an OpenWeights key.");
+      await revokeOpenWeightsToken(config, record.externalId, fetchImpl);
+      await deleteDocumentEnv(documentId, OPENWEIGHTS_KEY_ENV);
+      await db.provisionedCredential.update({ where: { id: record.id }, data: { revokedAt: new Date() } });
+    });
+  }
+  await attempt("cost project not closed", () =>
+    updateCostsProject(requireCosts(env), budget.costsProject, { closed: true }, fetchImpl)
+  );
+  await db.workspaceBudget.update({ where: { id: budget.id }, data: { closedAt: new Date(), exhaustedAt: null } });
+  forgetRunBudgetStates();
+  console.log("[workspace-budget] closed", JSON.stringify({ documentId, costsProject: budget.costsProject, warnings }));
+  return { costsProject: budget.costsProject, warnings };
 }
 
 export type WorkspaceBudgetStatus = {

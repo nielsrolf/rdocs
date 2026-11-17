@@ -267,7 +267,9 @@ straight into the target env (secret) and a `ProvisionedCredential` row (audit +
 `LITELLM_PROVISION_MAX_BUDGET_USD` (cap), `LITELLM_PROVISION_TEAM_ID`. Logs: `[workspace-provisioning]`,
 `[litellm-provisioning]`. Test: `tests/workspace-provisioning.test.ts` (fake LiteLLM proxy).
 **Workspace budgets** (2026-11-17, `lib/workspace-budget.ts`, `lib/costs-client.ts`, `lib/openweights-provisioning.ts`,
-table `WorkspaceBudget`): `create_workspace { budget_usd, provisioner? }`, `set_workspace_budget`, `get_workspace_budget`.
+table `WorkspaceBudget`): `create_workspace { budget_usd, provisioner? }`, `set_workspace_budget`, `get_workspace_budget`,
+`close_workspace_budget` (revokes the minted keys, closes the cost project; do this when a workspace is done, open budgets
+are polled forever).
 A budgeted workspace is a PROJECT with a lifetime budget in the cost dashboard (`../costs`, nested under the
 provisioner's `COSTS_PARENT_PROJECT`); the dashboard is the ledger, r-docs hands out the keys. The provisioner
 (default: the parent) must hold `COSTS_ADMIN_TOKEN` (a dashboard API token; server env is the fallback) and whichever of
@@ -281,7 +283,9 @@ needs it, Tinker is tagged by the broker — Tinker project ids are server-assig
 itself, and `create_workspace` then deletes the new document. Changing a budget needs edit on the provisioner that gave it,
 so a workspace's own run (confined to its document) cannot raise it; providers that refuse the new limit come back as
 `warnings`. `WORKSPACE_MAX_BUDGET_USD` on the provisioner caps a single workspace. The OpenWeights token is named after the
-cost project, which is how the dashboard attributes its share of the org's spend. Logs: `[workspace-budget]`.
+cost project, which is how the dashboard attributes its share of the org's spend. OpenWeights lets an API key create and
+revoke tokens but NOT change a limit (`set_spending_limit` → 403 "Only a signed-in organization admin"), so a changed
+budget leaves the OpenWeights token at its old limit (reported in `warnings`) until OpenWeights allows it. Logs: `[workspace-budget]`.
 **Enforcement** (`lib/workspace-budget-enforcement.ts`, started/stopped with the scheduler loop, every
 `WORKSPACE_BUDGET_CHECK_SECONDS`, default 300; also right after `set_workspace_budget`): asks the dashboard about every open
 budget. Used up (`remaining_usd <= 0`, own budget or one above) → `WorkspaceBudget.exhaustedAt`: the credential broker answers

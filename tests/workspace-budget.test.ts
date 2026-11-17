@@ -86,6 +86,7 @@ async function startFakeProviders() {
         if (!project) return send(404, { detail: `no project '${name}'` });
         if (req.method === "PATCH") {
           Object.assign(project, body);
+          if (body && "closed" in body) project.closed_at = body.closed ? "2026-11-17T12:00:00+00:00" : null;
           return send(200, project);
         }
         if (req.method === "DELETE") {
@@ -441,6 +442,24 @@ test("a used-up budget stops the workspace; raising it brings it back, and the L
     assert.deepEqual(fake.calls("/key/update").at(-1)?.body, { key: "sk-minted-1", max_budget: 957 });
     await assertWorkspaceBudgetAvailable(created.id);
     assert.equal((await runBudgetState(run.id)).exhausted, false);
+
+    // closing: minted keys are revoked and leave the env, the project is closed, the budget no longer applies
+    const closed = await callTool(ctx, "close_workspace_budget", { document: created.id });
+    assert.equal(closed.isError, false, closed.text);
+    assert.deepEqual(closed.json().warnings, []);
+    assert.deepEqual(fake.calls("/key/delete").at(-1)?.body, { keys: ["sk-minted-1"] });
+    assert.deepEqual(fake.calls("/revoke_api_token").at(-1)?.body, { token_id: "tok-2" });
+    assert.equal(fake.projects.get(created.budget.cost_project)?.closed, true);
+    assert.deepEqual(Object.keys(await loadDocumentEnv(created.id)).sort(), [
+      "COSTS_PROJECT", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "RDOCS_BROKER_TINKER", "TINKER_API_KEY"
+    ]);
+    assert.deepEqual(await runBudgetState(run.id), { costsProject: null, exhausted: false });
+    assert.equal((await callTool(ctx, "close_workspace_budget", { document: created.id })).isError, true);
+    // a closed workspace can be given a budget again: same project, new keys
+    const reopened = await callTool(ctx, "set_workspace_budget", { document: created.id, budget_usd: 1000 });
+    assert.equal(reopened.isError, false, reopened.text);
+    assert.equal(reopened.json().budget.cost_project, created.budget.cost_project);
+    assert.equal(fake.projects.get(created.budget.cost_project)?.closed, false);
 
     // an unreachable dashboard is reported, and nobody is stopped because of it
     fake.fail.add("/spend");

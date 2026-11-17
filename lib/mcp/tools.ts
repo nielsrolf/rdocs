@@ -33,6 +33,7 @@ import {
 } from "@/lib/schedules";
 import { listDocumentEnvMasked } from "@/lib/document-env";
 import {
+  closeWorkspaceBudget,
   getWorkspaceBudget,
   isWorkspaceBudgetError,
   provisionWorkspaceBudget,
@@ -1314,6 +1315,23 @@ const setWorkspaceBudgetTool = defineTool({
   }
 });
 
+const closeWorkspaceBudgetTool = defineTool({
+  name: "close_workspace_budget",
+  description:
+    "End a workspace's compute budget when its work is done: the LiteLLM key and OpenWeights token minted for it are revoked and removed from its environment, " +
+    "and its cost project is marked closed (the numbers stay). The document, its other env vars and shared keys are left alone. " +
+    "Needs edit access to the workspace and to the provisioner that gave the budget.",
+  schema: z.object({ document: documentRef }).strict(),
+  handler: async (args, ctx) => {
+    const { documentId } = await requireAccess(args.document, ctx, "edit");
+    const current = await getWorkspaceBudget(documentId).catch(() => null);
+    if (!current || current.closedAt) throw new McpToolError("That workspace has no open budget.");
+    await requireAccess(current.provisionerDocumentId, ctx, "edit");
+    const closed = await workspaceCall(() => closeWorkspaceBudget(documentId));
+    return { document: documentId, cost_project: closed.costsProject, closed: true, warnings: closed.warnings };
+  }
+});
+
 const getWorkspaceBudgetTool = defineTool({
   name: "get_workspace_budget",
   description:
@@ -1375,7 +1393,8 @@ export const MCP_TOOLS: McpTool[] = [
   revokeLiteLlmKeyTool,
   listLiteLlmKeysTool,
   setWorkspaceBudgetTool,
-  getWorkspaceBudgetTool
+  getWorkspaceBudgetTool,
+  closeWorkspaceBudgetTool
 ];
 
 /** The `workspaces` toolset (McpToolContext.toolset). */
@@ -1389,7 +1408,8 @@ export const WORKSPACE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "revoke_litellm_key",
   "list_litellm_keys",
   "set_workspace_budget",
-  "get_workspace_budget"
+  "get_workspace_budget",
+  "close_workspace_budget"
 ]);
 
 // Tools that roam across the user's documents; a document-scoped caller
