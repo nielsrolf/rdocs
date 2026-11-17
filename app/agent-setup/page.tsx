@@ -4,6 +4,7 @@ import { AgentSetupClient } from "./agent-setup-client";
 import { getCurrentUser } from "@/lib/auth";
 import { runCredentialChoices } from "@/lib/run-credential-policy";
 import { getUserCredentialsMasked } from "@/lib/user-credentials";
+import { listBudgetProvisioners } from "@/lib/workspace-budget";
 
 export default async function AgentSetupPage({
   searchParams
@@ -29,5 +30,6 @@ export default async function AgentSetupPage({
   return <AgentSetupClient
     manifestUrl={get("manifest_url") || sourceUrl}
     credentialChoices={credentialChoices}
+    budgetProvisioners={await listBudgetProvisioners(user!.id)}
   />;
 }

@@ -311,6 +311,29 @@ export async function provisionWorkspaceBudget(
   return { costsProject, costsParent, budgetUsd: input.budgetUsd, providers, warnings };
 }
 
+const provisionerWhere = (userId: string) => ({
+  envVars: { some: { key: COSTS_ADMIN_TOKEN_ENV } },
+  OR: [{ ownerId: userId }, { memberships: { some: { userId, permission: "EDIT" } } }]
+});
+
+/**
+ * The documents a user may hand out budgets from: they can edit it, and its env
+ * holds the cost dashboard token. (Group grants are not considered: a budget
+ * spends the provisioner's money, so it takes direct edit access.)
+ */
+export async function listBudgetProvisioners(userId: string): Promise<Array<{ id: string; title: string }>> {
+  return db.document.findMany({
+    where: provisionerWhere(userId),
+    orderBy: { updatedAt: "desc" },
+    take: 50,
+    select: { id: true, title: true }
+  });
+}
+
+export async function canProvisionBudgetFrom(userId: string, provisionerDocumentId: string): Promise<boolean> {
+  return (await db.document.count({ where: { id: provisionerDocumentId, ...provisionerWhere(userId) } })) > 0;
+}
+
 async function requireBudget(documentId: string) {
   const budget = await db.workspaceBudget.findUnique({ where: { documentId } });
   if (!budget) throw new WorkspaceBudgetError("That workspace has no budget.");

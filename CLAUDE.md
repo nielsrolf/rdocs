@@ -295,6 +295,15 @@ revoke tokens but NOT change a limit (`set_spending_limit` → 403 "Only a signe
 budget leaves the OpenWeights token at its old limit (reported in `warnings`) until OpenWeights allows it: migration
 `20261117000000_api_key_set_spending_limit.sql` (longtermrisk/openweights#95) lets an unbudgeted API key change other keys'
 limits; once it is applied to the prod database, `set_workspace_budget` updates the token with no change here. Logs: `[workspace-budget]`.
+**Budgets for integrations** (2026-11-17): the `/agent-setup` consent page shows a "Compute budget" picker when the user can
+hand out budgets (`listBudgetProvisioners`: direct edit access to a document whose env holds `COSTS_ADMIN_TOKEN`). The choice
+goes to `POST /api/agent-setups` as `budget: {provisionerDocumentId, budgetUsd}`; `provisionAgentSetup` checks the access
+again, provisions the budget for the new workspace and ADDS the budget's env keys to the channel's credential ceiling (a
+ceiling would otherwise withhold them). With the user's own model key unticked, the run falls back to the budget's LiteLLM key
+(`litellm/anthropic/<model>`), so the agent's own tokens count against the budget. A failed setup closes the budget (keys
+revoked, Modal environment deleted) before the document is deleted. The callback body gets `budget_usd`. The integration reads
+the spend with its channel token: `GET /api/agent-channels/:triggerId/budget` → `{budget: null | {budget_usd, cost_project,
+providers, closed_at, exhausted, spent_usd, remaining_usd, by_provider, synced_at}}`. First user: research-backlog.
 **Enforcement** (`lib/workspace-budget-enforcement.ts`, started/stopped with the scheduler loop, every
 `WORKSPACE_BUDGET_CHECK_SECONDS`, default 300; also right after `set_workspace_budget`): asks the dashboard about every open
 budget. Used up (`remaining_usd <= 0`, own budget or one above) → `WorkspaceBudget.exhaustedAt`: the credential broker answers

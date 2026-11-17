@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { getCurrentUser } from "@/lib/auth";
 import { agentSetupSchema, provisionAgentSetup } from "@/lib/agent-setup";
+import { isWorkspaceBudgetError } from "@/lib/workspace-budget";
 
 export const runtime = "nodejs";
 
@@ -21,6 +22,8 @@ export async function POST(request: Request) {
       userId: user.id,
       error: error instanceof Error ? error.message : error
     });
+    // A refused budget (no access, over the cap, a provider that is down) is the user's to read.
+    if (isWorkspaceBudgetError(error)) return NextResponse.json({ error: error.message }, { status: 400 });
     return NextResponse.json({ error: "Could not provision the agent document." }, { status: 500 });
   }
 }

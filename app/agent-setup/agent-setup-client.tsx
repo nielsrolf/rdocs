@@ -4,7 +4,14 @@ import { useEffect, useState } from "react";
 
 type CredentialChoice = { id: string; label: string; envNames: string[]; model: boolean };
 
-type Props = { manifestUrl: string; credentialChoices?: CredentialChoice[] | null };
+type BudgetProvisioner = { id: string; title: string };
+
+type Props = {
+  manifestUrl: string;
+  credentialChoices?: CredentialChoice[] | null;
+  /** Documents the user may give out compute budgets from (empty: no budget section). */
+  budgetProvisioners?: BudgetProvisioner[];
+};
 
 type ExtraKey = { name: string; value: string };
 
@@ -33,6 +40,10 @@ export function AgentSetupClient(props: Props) {
     () => Object.fromEntries((choices ?? []).map((choice) => [choice.id, choice.model]))
   );
   const [extraKeys, setExtraKeys] = useState<ExtraKey[]>([]);
+  const provisioners = props.budgetProvisioners ?? [];
+  const [provisionerId, setProvisionerId] = useState("");
+  const [budgetUsd, setBudgetUsd] = useState("");
+  const [warnings, setWarnings] = useState<string[]>([]);
 
   useEffect(() => {
     if (state !== "ready") return;
@@ -49,6 +60,11 @@ export function AgentSetupClient(props: Props) {
     const extras = extraKeys.filter((key) => key.name.trim() || key.value);
     if (extras.some((key) => !ENV_NAME.test(key.name.trim()) || !key.value)) {
       setError("Each extra key needs a name like RUNPOD_API_KEY and a value.");
+      return;
+    }
+    const budgetAmount = Number(budgetUsd);
+    if (provisionerId && !(Number.isFinite(budgetAmount) && budgetAmount > 0)) {
+      setError("Enter the budget in USD, e.g. 50.");
       return;
     }
     setState("working");
@@ -76,6 +92,7 @@ export function AgentSetupClient(props: Props) {
           callbackCredential: credential,
           callbackBody: manifest.callback_body,
           mcpServers: manifest.mcp_servers,
+          budget: provisionerId ? { provisionerDocumentId: provisionerId, budgetUsd: budgetAmount } : undefined,
           // With a picker, the choice becomes the channel's credential ceiling:
           // the ticked keys, the keys typed in here, and the integration's own
           // settings from the manifest. Nothing else of the user's reaches a run.
@@ -96,6 +113,7 @@ export function AgentSetupClient(props: Props) {
 
       window.history.replaceState(null, "", window.location.pathname);
       setDocumentUrl(data.documentUrl);
+      setWarnings(Array.isArray(data.budget?.warnings) ? data.budget.warnings : []);
       setState("done");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Setup failed.");
@@ -132,7 +150,7 @@ export function AgentSetupClient(props: Props) {
                 ))}
               </div>
             ) : <p>You have no keys connected in r-docs. Connect a model credential under Settings → AI first, or the run cannot start.</p>}
-            {choices.length && !choices.some((choice) => choice.model && picked[choice.id]) ? (
+            {choices.length && !provisionerId && !choices.some((choice) => choice.model && picked[choice.id]) ? (
               <p className="auth-error">No model credential is ticked, so the run cannot start its model.</p>
             ) : null}
             {extraKeys.map((key, index) => (
@@ -154,7 +172,32 @@ export function AgentSetupClient(props: Props) {
             <p className="agent-setup-hint">Added keys are stored encrypted with the new workspace and are not sent to the other service.</p>
           </div>
         ) : null}
+        {provisioners.length && state !== "done" ? (
+          <div className="agent-setup-keys">
+            <h2>Compute budget</h2>
+            <p className="agent-setup-hint">
+              Optional. The workspace gets its own keys for LLM calls, OpenWeights, Tinker and Modal, paid by the document you pick
+              and limited to this total. Its spend shows up per provider in the cost dashboard, and the run is stopped when the budget is used up.
+              {choices ? " Untick your own model key above if the agent's own LLM usage should come out of the budget too." : ""}
+            </p>
+            <div className="agent-setup-extra-key">
+              <select aria-label="Budget from" value={provisionerId} onChange={(event) => setProvisionerId(event.target.value)}>
+                <option value="">No budget</option>
+                {provisioners.map((provisioner) => (
+                  <option key={provisioner.id} value={provisioner.id}>From: {provisioner.title}</option>
+                ))}
+              </select>
+              {provisionerId ? (
+                <input
+                  aria-label="Budget in USD" placeholder="Budget in USD, e.g. 50" inputMode="decimal" value={budgetUsd} autoComplete="off"
+                  onChange={(event) => setBudgetUsd(event.target.value)}
+                />
+              ) : null}
+            </div>
+          </div>
+        ) : null}
         {error ? <p className="auth-error">{error}</p> : null}
+        {warnings.map((warning) => <p className="agent-setup-hint" key={warning}>{warning}</p>)}
         {state === "done" ? (
           <p><a className="primary-button" href={documentUrl}>Open the new agent workspace →</a></p>
         ) : (

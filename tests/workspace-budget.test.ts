@@ -7,6 +7,8 @@ import test from "node:test";
 import { costsProjectName } from "../lib/costs-client";
 import { db } from "../lib/db";
 import { loadDocumentEnv, loadProvisionerEnv, upsertDocumentEnv } from "../lib/document-env";
+import { GET as getChannelBudget } from "../app/api/agent-channels/[triggerId]/budget/route";
+import { provisionAgentSetup } from "../lib/agent-setup";
 import { handleMcpMessage } from "../lib/mcp/server";
 import { enforceWorkspaceBudgets, liteLlmAllowance } from "../lib/workspace-budget-enforcement";
 import { assertWorkspaceBudgetAvailable, runBudgetState } from "../lib/workspace-budget-state";
@@ -132,6 +134,9 @@ async function startFakeProviders() {
           });
         }
       }
+
+      // --- an integration's agent-setup callback
+      if (path === "/cb") return send(200, { ok: true });
 
       // --- LiteLLM proxy
       if (path.startsWith("/key/")) {
@@ -531,6 +536,98 @@ test("a used-up budget stops the workspace; raising it brings it back, and the L
     assert.ok(down.errors.some((error) => error.startsWith(created.budget.cost_project)));
     assert.equal((await db.workspaceBudget.findUniqueOrThrow({ where: { documentId: created.id } })).exhaustedAt, null);
   } finally {
+    await fake.close();
+  }
+});
+
+test("an agent setup with a budget: budgeted keys reach the channel's runs, the integration can read the spend", async () => {
+  const fake = await startFakeProviders();
+  const saved = { origins: process.env.AGENT_SETUP_ALLOWED_ORIGINS, appUrl: process.env.APP_URL };
+  process.env.AGENT_SETUP_ALLOWED_ORIGINS = fake.url;
+  process.env.APP_URL = ORIGIN;
+  try {
+    const owner = await makeUser("budget-setup");
+    const provisioner = await makeProvisioner(fake, owner.id);
+    const setup = (userId: string, extra: Record<string, unknown> = {}) =>
+      provisionAgentSetup(userId, {
+        title: "Backlog run: probes",
+        markdown: "# Task",
+        environment: { BACKLOG_URL: "https://backlog.example.com" },
+        skillMarkdown: "---\nname: backlog\ndescription: run a proposal\n---\n\nDo it.",
+        skillName: "backlog",
+        channelLabel: "research-backlog",
+        callbackUrl: `${fake.url}/cb`,
+        callbackCredential: "one-time",
+        // the user ticked only their GitHub token on the consent page
+        credentials: { allowEnv: ["GITHUB_TOKEN", "BACKLOG_URL"], allowMcpServers: [] },
+        budget: { provisionerDocumentId: provisioner.id, budgetUsd: 40 },
+        ...extra
+      });
+
+    const result = await setup(owner.id);
+    assert.equal(result.budget?.budgetUsd, 40);
+    assert.deepEqual(result.budget?.providers, { litellm: "minted", openweights: "minted", tinker: "shared", modal: "environment" });
+    const project = result.budget!.costsProject;
+    assert.equal(fake.projects.get(project)?.budget_usd, 40);
+
+    // the channel's credential ceiling lets the budget's keys through, next to what the user chose
+    const channel = await db.agentApiChannel.findUniqueOrThrow({ where: { id: result.triggerId } });
+    const ceiling = JSON.parse(channel.credentialPolicy ?? "{}") as { allowEnv: string[] };
+    assert.deepEqual([...ceiling.allowEnv].sort(), [
+      "BACKLOG_URL", "COSTS_PROJECT", "GITHUB_TOKEN", "LITELLM_API_KEY", "MODAL_ENVIRONMENT", "MODAL_TOKEN_ID",
+      "MODAL_TOKEN_SECRET", "OPENWEIGHTS_API_KEY", "RDOCS_BROKER_TINKER", "TINKER_API_KEY"
+    ]);
+    // the integration is told the budget, never a key
+    const callback = fake.calls("/cb")[0];
+    assert.equal(callback.body?.budget_usd, 40);
+    assertNoSecrets(JSON.stringify(callback.body).replace(String(callback.body?.trigger_token), ""));
+
+    // what the integration reads back with its channel token
+    const read = async (token: string) => {
+      const response = await getChannelBudget(
+        new Request(`${ORIGIN}/api/agent-channels/${result.triggerId}/budget`, { headers: { authorization: `Bearer ${token}` } }),
+        { params: Promise.resolve({ triggerId: result.triggerId }) }
+      );
+      return { status: response.status, body: (await response.json()) as { budget: Record<string, unknown> | null } };
+    };
+    assert.equal((await read("gdach_wrong")).status, 401);
+    const seen = await read(result.triggerToken);
+    assert.equal(seen.status, 200);
+    assertNoSecrets(JSON.stringify(seen.body));
+    assert.deepEqual(
+      { budget: seen.body.budget?.budget_usd, spent: seen.body.budget?.spent_usd, left: seen.body.budget?.remaining_usd, exhausted: seen.body.budget?.exhausted },
+      { budget: 40, spent: 61, left: -21, exhausted: false }
+    );
+    assert.deepEqual(seen.body.budget?.by_provider, [
+      { provider: "tinker", usd: 43, estimated_usd: 43 },
+      { provider: "litellm", usd: 18, estimated_usd: 0 }
+    ]);
+
+    // a workspace without a budget answers null
+    const plain = await setup(owner.id, { budget: undefined });
+    const none = await getChannelBudget(
+      new Request(`${ORIGIN}/x`, { headers: { authorization: `Bearer ${plain.triggerToken}` } }),
+      { params: Promise.resolve({ triggerId: plain.triggerId }) }
+    );
+    assert.deepEqual(await none.json(), { budget: null });
+
+    // someone who cannot edit the provisioner gets no budget from it, and no workspace
+    const stranger = await makeUser("budget-setup-stranger");
+    await db.documentMembership.create({ data: { documentId: provisioner.id, userId: stranger.id, permission: "VIEW" } });
+    await assert.rejects(setup(stranger.id), /cannot give out budgets from that document/);
+    assert.equal(await db.document.count({ where: { ownerId: stranger.id } }), 0);
+
+    // a setup whose callback fails leaves no workspace, no live key and no Modal environment
+    fake.fail.add("/cb");
+    const keysBefore = fake.calls("/key/delete").length;
+    const environmentsBefore = fake.modalEnvironments.size;
+    await assert.rejects(setup(owner.id), /callback failed/);
+    assert.equal(fake.calls("/key/delete").length, keysBefore + 1);
+    assert.equal(fake.modalEnvironments.size, environmentsBefore);
+    assert.equal(await db.workspaceBudget.count({ where: { provisionerDocumentId: provisioner.id, closedAt: null } }), 1, "only the first setup's budget is open");
+  } finally {
+    process.env.AGENT_SETUP_ALLOWED_ORIGINS = saved.origins;
+    process.env.APP_URL = saved.appUrl;
     await fake.close();
   }
 });
