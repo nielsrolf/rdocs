@@ -134,7 +134,7 @@ test("update: only creator or editors; pause stops firing, resume recomputes; ti
   assert.equal(paused.nextRunAt, null);
   // Even when overdue, the poll loop leaves a paused task alone.
   await db.scheduledTask.update({ where: { id: created.id }, data: { nextRunAt: new Date(Date.now() - 60_000) } });
-  await schedulerTick(new Date());
+  await schedulerTick(new Date(), undefined, { documentIds: [document.id] });
   const untouched = await db.scheduledTask.findUniqueOrThrow({ where: { id: created.id } });
   assert.equal(untouched.lastFiredAt, null);
 

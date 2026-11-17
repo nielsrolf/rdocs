@@ -236,9 +236,20 @@ async function buildSlackDeps(teamId: string): Promise<SlackEventDeps | null> {
   return { slack: context.slack, appUrl: context.appUrl, botUserId: context.botUserId };
 }
 
-export async function schedulerTick(now = new Date(), deps?: SlackEventDeps) {
+/**
+ * Fire every due task. `scope` confines the tick to some documents: the
+ * production loop passes none, tests pass their own documents. The test files
+ * share one database and run in parallel, so an unscoped tick in a test fires
+ * (and takes away) the due tasks of whatever other file is running.
+ */
+export async function schedulerTick(now = new Date(), deps?: SlackEventDeps, scope?: { documentIds: string[] }) {
   const due = await db.scheduledTask.findMany({
-    where: { disabledAt: null, pausedAt: null, nextRunAt: { lte: now } },
+    where: {
+      disabledAt: null,
+      pausedAt: null,
+      nextRunAt: { lte: now },
+      ...(scope ? { documentId: { in: scope.documentIds } } : {})
+    },
     orderBy: { nextRunAt: "asc" },
     take: 10
   });

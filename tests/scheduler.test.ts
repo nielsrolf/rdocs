@@ -164,11 +164,37 @@ test("schedulerTick claims due tasks atomically and fires runs as the creator", 
     }
   });
 
+  // Every test file shares one database and runs in parallel, so at any moment
+  // other files have due tasks of their own in it (this one stands for them).
+  // A tick in a test must fire only the test's own tasks: it used to fire
+  // whatever was due, which made this count 2 in a full run and took the other
+  // file's task away from under it.
+  const foreignDoc = await db.document.create({
+    data: { ownerId: alice.id, title: "#elsewhere", kind: "slack_channel", content: "{}", slackTeamId: teamId, slackChannelId: `${channel}-2` }
+  });
+  const foreign = await db.scheduledTask.create({
+    data: {
+      documentId: foreignDoc.id,
+      createdById: alice.id,
+      instruction: "another test file's task",
+      contextType: "slack_thread",
+      slackTeamId: teamId,
+      slackChannelId: `${channel}-2`,
+      slackThreadTs: "2000.000",
+      cron: "0 9 * * *",
+      timezone: "UTC",
+      nextRunAt: past
+    }
+  });
+
   const runs: ConversationRunInput[] = [];
   const { deps, posted } = makeDeps(runs);
-  const fired = await schedulerTick(new Date(), deps);
+  const fired = await schedulerTick(new Date(), deps, { documentIds: [doc.id] });
   assert.equal(fired, 1);
   assert.equal(runs.length, 1);
+  const untouched = await db.scheduledTask.findUniqueOrThrow({ where: { id: foreign.id } });
+  assert.equal(untouched.lastFiredAt, null, "a task outside the tick's scope is left alone");
+  await db.scheduledTask.update({ where: { id: foreign.id }, data: { disabledAt: new Date() } });
   assert.equal(runs[0].createdById, alice.id, "fires with the creator's identity");
   assert.match(runs[0].message, /Scheduled task firing/);
   assert.match(runs[0].message, /check the eval dashboard/);
@@ -182,7 +208,7 @@ test("schedulerTick claims due tasks atomically and fires runs as the creator", 
   assert.ok(bumped!.lastRunId, "run id recorded");
 
   // Second tick: nothing due anymore.
-  const again = await schedulerTick(new Date(), deps);
+  const again = await schedulerTick(new Date(), deps, { documentIds: [doc.id] });
   assert.equal(again, 0);
 
   // Tests share the REAL database with the running service. A recurring task
@@ -365,7 +391,7 @@ test("a beat that cannot be delivered is deferred, not lost", async () => {
   const runs: ConversationRunInput[] = [];
   const { deps } = makeDeps(runs);
   // schedulerTick claims (and, for a one-shot, disables) the task before firing.
-  const fired = await schedulerTick(new Date(), { ...deps, injectRunMessage: () => false });
+  const fired = await schedulerTick(new Date(), { ...deps, injectRunMessage: () => false }, { documentIds: [doc.id] });
   assert.equal(fired, 1);
   assert.equal(runs.length, 0, "still no stacked run in a thread with an active session");
 
@@ -383,7 +409,7 @@ test("a beat that cannot be delivered is deferred, not lost", async () => {
     where: { id: wakeUp.id },
     data: { nextRunAt: new Date(Date.now() - (MAX_BEAT_DEFER_MS + 60_000)), disabledAt: null }
   });
-  const staleFired = await schedulerTick(new Date(), { ...deps, injectRunMessage: () => false });
+  const staleFired = await schedulerTick(new Date(), { ...deps, injectRunMessage: () => false }, { documentIds: [doc.id] });
   assert.equal(staleFired, 1);
   const abandoned = await db.scheduledTask.findUnique({ where: { id: wakeUp.id } });
   assert.ok(abandoned!.disabledAt, "a hopelessly overdue beat gives up rather than retrying forever");
@@ -415,7 +441,7 @@ test("one-shot tasks disable after firing; unlinked creators disable the task", 
   });
   const runs: ConversationRunInput[] = [];
   const { deps, posted } = makeDeps(runs);
-  const fired = await schedulerTick(new Date(), deps);
+  const fired = await schedulerTick(new Date(), deps, { documentIds: [doc.id] });
   assert.equal(fired, 1);
   const after = await db.scheduledTask.findUnique({ where: { id: oneShot.id } });
   assert.ok(after!.disabledAt, "one-shot task disables after firing");
