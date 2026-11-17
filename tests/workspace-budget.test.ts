@@ -599,6 +599,12 @@ test("an agent setup with a budget: budgeted keys reach the channel's runs, the 
 
     const result = await setup(owner.id);
     assert.equal(result.budget?.budgetUsd, 40);
+    assert.equal(fake.projects.get(result.budget!.costsProject)?.parent, "backlog", "the provisioner's default parent");
+    // the consent page may name the dashboard project to file this run under
+    fake.projects.set("srf", { name: "srf" });
+    const filed = await setup(owner.id, { budget: { provisionerDocumentId: provisioner.id, budgetUsd: 5, costProjectParent: "srf" } });
+    assert.equal(fake.projects.get(filed.budget!.costsProject)?.parent, "srf");
+    await db.workspaceBudget.updateMany({ where: { documentId: filed.documentId }, data: { closedAt: new Date() } });
     assert.deepEqual(result.budget?.providers, { litellm: "minted", openweights: "minted", tinker: "shared", modal: "environment" });
     const project = result.budget!.costsProject;
     assert.equal(fake.projects.get(project)?.budget_usd, 40);

@@ -14,7 +14,9 @@ import { upsertDocumentEnv } from "@/lib/document-env";
 import { MAX_MCP_SERVERS_PER_DOCUMENT, upsertDocumentMcpServer } from "@/lib/document-mcp-servers";
 import { applyMarkdownEdit } from "@/lib/mcp/apply-edit";
 import { channelCredentialCeilingSchema } from "@/lib/run-credential-policy";
-import { getDocumentSkillDir, prepareSkillUpload, writeSkillToStore } from "@/lib/skills";
+import { copySkillDir, getDocumentSkillDir, getUserSkillDir, prepareSkillUpload, writeSkillToStore } from "@/lib/skills";
+import { AGENT_EFFORTS, isStorableAgentModel, normalizeAgentModel } from "@/agent-core/agent-config";
+import { agentPresetNameSchema } from "@/lib/agent-presets";
 import {
   canProvisionBudgetFrom,
   closeWorkspaceBudget,
@@ -22,6 +24,11 @@ import {
   WorkspaceBudgetError
 } from "@/lib/workspace-budget";
 import { listDocumentEnvMasked } from "@/lib/document-env";
+
+/** A setup the user asked for that cannot be done as asked; the message is theirs to read. */
+export class AgentSetupError extends Error {}
+
+const EFFORT_VALUES = AGENT_EFFORTS.map((effort) => effort.value) as [string, ...string[]];
 
 export const agentSetupSchema = z.object({
   title: z.string().min(1).max(300),
@@ -46,9 +53,23 @@ export const agentSetupSchema = z.object({
   // the user can edit (lib/workspace-budget.ts). The workspace then runs on its
   // own budgeted keys, which are added to the channel's credential ceiling.
   budget: z
-    .object({ provisionerDocumentId: z.string().min(1).max(64), budgetUsd: z.number().positive().max(1_000_000) })
+    .object({
+      provisionerDocumentId: z.string().min(1).max(64),
+      budgetUsd: z.number().positive().max(1_000_000),
+      // The cost dashboard project to file the workspace under (default: the provisioner's).
+      costProjectParent: z.string().trim().max(100).optional().nullable()
+    })
     .optional()
-    .nullable()
+    .nullable(),
+  // What the user configured on the consent page. Omitted = their defaults.
+  // agentModel is a Document.agentModel value, which also decides the harness
+  // (Claude Code or Codex); skills are names in the user's own library and are
+  // copied into the workspace next to the integration's skill.
+  agentModel: z.string().max(200).optional().nullable(),
+  agentEffort: z.enum(EFFORT_VALUES).optional().nullable(),
+  skills: z.array(z.string().min(1).max(64)).max(20).optional(),
+  // The preset the configuration came from, told to the integration as the agent's name.
+  presetName: agentPresetNameSchema.optional().nullable()
 });
 
 export type AgentSetupInput = z.infer<typeof agentSetupSchema>;
@@ -62,17 +83,39 @@ export type AgentSetupResult = {
   budget?: { budgetUsd: number; costsProject: string; providers: Record<string, string>; warnings: string[] };
 };
 
+/**
+ * What the integration is told about the agent it is about to start: names
+ * only, nothing it could use. `model` and `effort` are null when the workspace
+ * follows the user's defaults (the run itself reports the model it ran on).
+ */
+export type AgentSetupAgentInfo = { preset: string | null; model: string | null; effort: string | null; skills: string[] };
+
 /** Provision the document for `userId`; deletes it again and throws on any failure. */
 export async function provisionAgentSetup(userId: string, input: AgentSetupInput): Promise<AgentSetupResult> {
   if (input.budget && !(await canProvisionBudgetFrom(userId, input.budget.provisionerDocumentId))) {
     throw new WorkspaceBudgetError("You cannot give out budgets from that document.");
+  }
+  const agentModel = input.agentModel ? normalizeAgentModel(input.agentModel) : null;
+  if (agentModel && !isStorableAgentModel(agentModel)) {
+    throw new AgentSetupError(`"${input.agentModel}" is not a model r-docs can run.`);
+  }
+  // Checked before anything exists, so a skill that was renamed or removed leaves no workspace behind.
+  const wanted = [...new Set(input.skills ?? [])];
+  const librarySkills = wanted.length
+    ? await db.userSkill.findMany({ where: { userId, name: { in: wanted } } })
+    : [];
+  const missing = wanted.filter((name) => !librarySkills.some((skill) => skill.name === name));
+  if (missing.length) {
+    throw new AgentSetupError(`Not in your skill library: ${missing.join(", ")}. Add them under Settings → AI, or untick them.`);
   }
   let budgeted = false;
   const document = await db.document.create({
     data: {
       ownerId: userId,
       title: input.title.trim(),
-      content: serializeDocumentContent(defaultDocumentContent)
+      content: serializeDocumentContent(defaultDocumentContent),
+      ...(agentModel ? { agentModel } : {}),
+      ...(input.agentEffort ? { agentEffort: input.agentEffort } : {})
     },
     select: { id: true }
   });
@@ -108,6 +151,28 @@ export async function provisionAgentSetup(userId: string, input: AgentSetupInput
         createdById: userId
       }
     });
+    // The user's own skills, next to the integration's. The integration's skill wins a name clash:
+    // it is what tells the agent how to do the integration's job.
+    for (const skill of librarySkills) {
+      if (skill.name === prepared.name) continue;
+      await copySkillDir(getUserSkillDir(userId, skill.name), getDocumentSkillDir(document.id, skill.name));
+      await db.documentSkill.create({
+        data: {
+          documentId: document.id,
+          name: skill.name,
+          description: skill.description,
+          createdById: userId,
+          catalogName: skill.catalogName,
+          catalogVersion: skill.catalogVersion
+        }
+      });
+    }
+    const agent: AgentSetupAgentInfo = {
+      preset: input.presetName?.trim() || null,
+      model: agentModel,
+      effort: input.agentEffort ?? null,
+      skills: librarySkills.map((skill) => skill.name).filter((name) => name !== prepared.name).sort()
+    };
     let budget: AgentSetupResult["budget"];
     let credentials = input.credentials;
     if (input.budget) {
@@ -118,7 +183,8 @@ export async function provisionAgentSetup(userId: string, input: AgentSetupInput
         userId,
         budgetUsd: input.budget.budgetUsd,
         title: input.title.trim(),
-        documentUrl: new URL(`/documents/${document.id}`, process.env.APP_URL).toString()
+        documentUrl: new URL(`/documents/${document.id}`, process.env.APP_URL).toString(),
+        costsParent: input.budget.costProjectParent
       });
       budgeted = true;
       budget = {
@@ -154,6 +220,7 @@ export async function provisionAgentSetup(userId: string, input: AgentSetupInput
         document_url: new URL(`/documents/${document.id}`, process.env.APP_URL).toString(),
         trigger_url: new URL(`/api/agent-channels/${api.channel.id}/runs`, process.env.APP_URL).toString(),
         trigger_token: api.token,
+        agent,
         ...(budget ? { budget_usd: budget.budgetUsd } : {})
       }),
       signal: AbortSignal.timeout(10_000)

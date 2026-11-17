@@ -303,6 +303,18 @@ ceiling would otherwise withhold them). With the user's own model key unticked, 
 revoked, Modal environment deleted) before the document is deleted. The callback body gets `budget_usd`. The integration reads
 the spend with its channel token: `GET /api/agent-channels/:triggerId/budget` → `{budget: null | {budget_usd, cost_project,
 providers, closed_at, exhausted, spent_usd, remaining_usd, by_provider, synced_at}}`. First user: research-backlog.
+**Configurable agent setup + presets** (2026-11-18, `lib/agent-presets.ts`, table `AgentPreset`, `app/agent-setup/`): the
+consent page lets the user configure the agent an integration is about to start: scaffold and model (one `agentModel` value;
+`agentHarnessForModel` decides Claude Code vs Codex), thinking effort, skills from their own library, keys, budget and the
+budget's cost project parent. `POST /api/agent-setups` takes these as `agentModel`, `agentEffort`, `skills` (library skill
+NAMES, copied next to the integration's skill, which wins a name clash), `budget.costProjectParent` and `presetName`; an
+unknown skill or model is an `AgentSetupError` (400 with the message) before a workspace exists. Everything optional: omitted
+= the user's defaults, as before. A **preset** is the whole form under a name (`GET/POST /api/user/agent-presets`, POST
+replaces by name; `DELETE …/:id`; at most 30 per user; typed-in extra keys are never part of one). Picking a preset fills the
+form; a part that no longer applies (skill gone, provisioner no longer editable) is dropped with a notice. The integration's
+callback gets `agent: {preset, model, effort, skills}`: names only, `preset` only when the run uses that preset unchanged or
+saves it. research-backlog shows it and uses the preset name in the agent label. The client logic (apply/save/delete) is NOT
+covered by tests; `tests/agent-setup-page.test.ts` only renders the page, `tests/agent-presets.test.ts` covers the server side.
 `create_workspace` / `set_workspace_budget` take `cost_project_parent` (2026-11-18): the EXISTING dashboard project to file
 the workspace's project under, overriding the provisioner's `COSTS_PARENT_PROJECT` default; an unknown name is refused before
 anything is created, and it cannot be changed through r-docs once the budget exists (move it in the dashboard). The tool

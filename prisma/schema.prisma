@@ -87,6 +87,7 @@ model User {
   documentNotificationPreferences DocumentNotificationPreference[]
   documentAccessRequests          DocumentAccessRequest[]
   templates                       UserTemplate[]
+  agentPresets                    AgentPreset[]
 }
 
 // A named set of users (a team/company) that documents can be shared with.
@@ -173,6 +174,22 @@ model CommentVote {
 // under the per-user skill store (see lib/skills.ts); this row holds metadata.
 // `name` is the sanitized skill directory name. Skills marked `isDefault` are
 // copied into every document the user creates.
+// A pre-configured agent a user can start from on the agent-setup consent page
+// ("Run with r-docs agent" in an integration): model + harness, thinking effort,
+// library skills, which of their keys it may use, and a compute budget.
+// `config` is JSON, validated by agentPresetConfigSchema (lib/agent-presets.ts).
+model AgentPreset {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  config    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, name])
+}
+
 model UserSkill {
   id          String   @id @default(cuid())
   userId      String
