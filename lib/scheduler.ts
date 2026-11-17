@@ -293,6 +293,10 @@ export function startSchedulerLoop(intervalMs = 30_000) {
   }, intervalMs);
   loop.unref?.();
   console.log("[scheduler] poll loop started", { intervalMs });
+  // Workspace budgets are enforced by the same (single, non-draining) process.
+  void import("@/lib/workspace-budget-enforcement")
+    .then(({ startBudgetEnforcementLoop }) => startBudgetEnforcementLoop())
+    .catch((error) => console.error("[scheduler] budget enforcement failed to start", { error: String(error) }));
 }
 
 // Graceful drain (blue/green deploy): the outgoing process must stop claiming
@@ -303,5 +307,6 @@ export function stopSchedulerLoop() {
   if (!loop) return;
   clearInterval(loop);
   loop = null;
+  void import("@/lib/workspace-budget-enforcement").then(({ stopBudgetEnforcementLoop }) => stopBudgetEnforcementLoop());
   console.log("[scheduler] poll loop stopped (drain)");
 }

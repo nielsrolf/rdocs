@@ -1,6 +1,25 @@
 import { resolveBrokerRequest } from "./index";
 import { randomUUID } from "node:crypto";
+import {
+  isTinkerClientConfig,
+  isTinkerCreateSession,
+  tagTinkerSession,
+  TINKER_PROVIDER,
+  withoutTinkerJwtAuth
+} from "./tinker";
 import { createUsageCapture, type BrokerUsage } from "./usage";
+
+// Providers whose responses carry model usage worth recording per call. Compute
+// providers (Tinker) make thousands of requests per run that are not model calls.
+const USAGE_PROVIDERS = new Set(["anthropic", "openai", "openrouter", "litellm"]);
+
+/** What the workspace budget says about a run (lib/workspace-budget.ts). */
+export type RunBudgetState = { costsProject: string | null; exhausted: boolean };
+
+async function defaultRunBudget(aiRunId: string): Promise<RunBudgetState> {
+  const { runBudgetState } = await import("@/lib/workspace-budget-state");
+  return runBudgetState(aiRunId);
+}
 
 // The HTTP half of the credential broker: validates the virtual token carried
 // in the incoming request's auth header, swaps in the real credential, and
@@ -66,7 +85,8 @@ export async function handleBrokerProxyRequest(
   keyId: string,
   pathSegments: string[],
   opts: { env?: Record<string, string | undefined>; fetchImpl?: typeof fetch;
-    onUsage?: (aiRunId: string, usage: BrokerUsage) => Promise<void> } = {}
+    onUsage?: (aiRunId: string, usage: BrokerUsage) => Promise<void>;
+    runBudget?: (aiRunId: string) => Promise<RunBudgetState> } = {}
 ): Promise<Response> {
   const env = opts.env ?? process.env;
   const fetchImpl = opts.fetchImpl ?? fetch;
@@ -85,6 +105,30 @@ export async function handleBrokerProxyRequest(
     return Response.json(
       { error: `Credential broker: ${resolution.error}` },
       { status: resolution.status }
+    );
+  }
+
+  // A run of a workspace with a budget: nothing more is spent once it is used up.
+  let budget: RunBudgetState = { costsProject: null, exhausted: false };
+  if (resolution.aiRunId) {
+    try {
+      budget = await (opts.runBudget ?? defaultRunBudget)(resolution.aiRunId);
+    } catch (error) {
+      console.warn("[broker] budget lookup failed", { aiRunId: resolution.aiRunId, error: String(error) });
+    }
+  }
+  if (budget.exhausted) {
+    console.warn(`[broker] refused ${resolution.provider} for run ${resolution.aiRunId}: budget of ${budget.costsProject} is used up`);
+    return Response.json(
+      {
+        error: {
+          type: "budget_exhausted",
+          message:
+            "This workspace's compute budget is used up, so r-docs no longer forwards requests to " +
+            `${resolution.provider}. Stop and report what you have; the budget can only be raised by the workspace that gave it.`
+        }
+      },
+      { status: 402 }
     );
   }
 
@@ -112,7 +156,10 @@ export async function handleBrokerProxyRequest(
     // Buffer once at the trust boundary. Forwarding Next's incoming stream
     // makes undici use chunked transfer encoding; some OpenAI-compatible
     // Responses endpoints reject that even though their JSON payload is valid.
-    const body = hasBody ? new Uint8Array(await request.arrayBuffer()) : undefined;
+    let body = hasBody ? new Uint8Array(await request.arrayBuffer()) : undefined;
+    if (body && budget.costsProject && resolution.provider === TINKER_PROVIDER && isTinkerCreateSession(request.method, pathSegments)) {
+      body = tagTinkerSession(body, budget.costsProject);
+    }
     if (body) headers.set("content-length", String(body.byteLength));
     upstream = await fetchImpl(upstreamUrl, {
       method: request.method,
@@ -144,8 +191,16 @@ export async function handleBrokerProxyRequest(
     }ms) run=${resolution.aiRunId ?? "-"} key=${keyId}`
   );
 
+  if (resolution.provider === TINKER_PROVIDER && upstream.ok && isTinkerClientConfig(pathSegments)) {
+    return new Response(withoutTinkerJwtAuth(await upstream.text()), {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: responseHeaders
+    });
+  }
+
   let responseBody = upstream.body;
-  if (responseBody && resolution.aiRunId) {
+  if (responseBody && resolution.aiRunId && USAGE_PROVIDERS.has(resolution.provider)) {
     const rawCost = upstream.headers.get("x-litellm-response-cost");
     const cost = rawCost === null ? NaN : Number(rawCost);
     const capture = createUsageCapture({ requestId: randomUUID(), provider: resolution.provider,

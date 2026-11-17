@@ -17,6 +17,10 @@ import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
 //   - OPENROUTER_API_KEY / LITELLM_API_KEY (when the selected model routes
 //     through that provider — applyProviderEnv then points the SDK at the
 //     broker via OPENROUTER_BASE_URL / LITELLM_BASE_URL).
+//   - TINKER_API_KEY (opt-in, see tinkerBrokerEnabled): the Tinker SDK honors
+//     TINKER_BASE_URL and sends the key as X-API-Key. Besides hiding the key,
+//     the proxy tags every Tinker session with the workspace's cost project
+//     (lib/credential-broker/tinker.ts).
 // GITHUB_TOKEN is NOT brokered yet: the real token is already pinned into the
 // worktree's git config (http.extraheader) for git itself, so an env-only swap
 // would add confusion without confidentiality. Follow-up.
@@ -27,6 +31,28 @@ import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
 
 export const BROKER_FLAG = "AGENT_CREDENTIAL_BROKER";
 const VIRTUAL_PREFIX = "rdocs-vk-";
+// The Tinker SDK refuses an api key that does not start with "tml-".
+const TINKER_KEY_PREFIX = "tml-";
+export const TINKER_DEFAULT_BASE_URL = "https://tinker.thinkingmachines.dev/services/tinker-prod";
+
+function isFlagOn(value: string | undefined): boolean {
+  return Boolean(value) && ["1", "true", "yes", "on"].includes(value!.trim().toLowerCase());
+}
+
+/**
+ * Tinker goes through the broker when the deployment says so
+ * (AGENT_BROKER_TINKER=1) or the workspace does (RDOCS_BROKER_TINKER=1 in its
+ * env — set for budgeted workspaces, lib/workspace-budget.ts). Opt-in because
+ * training traffic is heavy and the proxy sits in the app process.
+ */
+export function tinkerBrokerEnabled(agentEnv: DocumentEnv, hostEnv: Record<string, string | undefined>): boolean {
+  return isFlagOn(hostEnv.AGENT_BROKER_TINKER) || isFlagOn(agentEnv.RDOCS_BROKER_TINKER);
+}
+
+/** A virtual broker token, possibly behind a provider's mandatory key prefix. */
+export function isVirtualBrokerToken(token: string): boolean {
+  return token.startsWith(VIRTUAL_PREFIX) || token.startsWith(`${TINKER_KEY_PREFIX}${VIRTUAL_PREFIX}`);
+}
 const DEFAULT_TTL_MS = 12 * 60 * 60 * 1000;
 
 export type BrokerAuthMode = "authorization-bearer" | "x-api-key";
@@ -81,6 +107,8 @@ export type BrokerRewritePlan = {
   /** Exactly one of secretValue / secretRef. */
   secretValue?: string;
   secretRef?: string;
+  /** Prefix the provider's client insists on for a key (the virtual token gets it too). */
+  tokenPrefix?: string;
   /** Additional env vars pointing the client at the broker, given the per-key URL. */
   extraEnv: (brokerKeyUrl: string) => Record<string, string>;
 };
@@ -163,6 +191,21 @@ export function planBrokerRewrites(
     }
   }
 
+  // A static Tinker key ("tml-…"). A JWT credential ("eyJ…") or a credential
+  // command is the user's own dynamic auth and is left alone.
+  const tinkerKey = agentEnv.TINKER_API_KEY?.trim();
+  if (tinkerKey?.startsWith(TINKER_KEY_PREFIX) && tinkerBrokerEnabled(agentEnv, hostEnv)) {
+    plans.push({
+      envKey: "TINKER_API_KEY",
+      provider: "tinker",
+      upstreamBaseUrl: agentEnv.TINKER_BASE_URL?.trim() || TINKER_DEFAULT_BASE_URL,
+      authMode: "x-api-key",
+      secretValue: tinkerKey,
+      tokenPrefix: TINKER_KEY_PREFIX,
+      extraEnv: (url) => ({ TINKER_BASE_URL: url })
+    });
+  }
+
   return plans;
 }
 
@@ -199,7 +242,7 @@ export async function brokerizeAgentEnvForRun(
   const next: DocumentEnv = { ...agentEnv };
   const minted: string[] = [];
   for (const plan of plans) {
-    const token = `${VIRTUAL_PREFIX}${crypto.randomBytes(24).toString("hex")}`;
+    const token = `${plan.tokenPrefix ?? ""}${VIRTUAL_PREFIX}${crypto.randomBytes(24).toString("hex")}`;
     const row = await db.agentBrokerKey.create({
       data: {
         tokenHash: hashBrokerToken(token),
@@ -259,7 +302,7 @@ export async function resolveBrokerRequest(
   opts: { now?: number; homeDir?: string } = {}
 ): Promise<BrokerResolution> {
   const now = opts.now ?? Date.now();
-  if (!presentedToken || !presentedToken.startsWith(VIRTUAL_PREFIX)) {
+  if (!presentedToken || !isVirtualBrokerToken(presentedToken)) {
     return { ok: false, status: 401, error: "Missing or malformed broker token." };
   }
   const key = await db.agentBrokerKey.findUnique({ where: { id: keyId } });

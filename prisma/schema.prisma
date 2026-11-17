@@ -392,6 +392,9 @@ model WorkspaceBudget {
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
   closedAt              DateTime?
+  // Set while the cost dashboard reports the budget as used up: the credential
+  // broker then refuses the workspace's requests and no new run starts.
+  exhaustedAt           DateTime?
 
   @@index([provisionerDocumentId])
 }

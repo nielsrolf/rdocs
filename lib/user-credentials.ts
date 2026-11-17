@@ -24,6 +24,7 @@ import {
   credentialBrokerEnabled
 } from "@/lib/credential-broker";
 import { db } from "@/lib/db";
+import { assertWorkspaceBudgetAvailable } from "@/lib/workspace-budget-state";
 import { loadDocumentEnv } from "@/lib/document-env";
 import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
 
@@ -843,6 +844,7 @@ export async function loadAgentEnvWithFreeFallback(
   opts: { aiRunId?: string; runnerMode?: string; credentialPolicy?: RunCredentialPolicy | null } = {}
 ): Promise<AgentRunEnvResolution> {
   const policy = opts.credentialPolicy ?? null;
+  await assertWorkspaceBudgetAvailable(documentId);
   const resolved = await (async (): Promise<AgentRunEnvResolution> => {
     try {
       const agentEnv = await loadAgentEnvForDocument(documentId, agentConfig.model, runnerUserId, policy);

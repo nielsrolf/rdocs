@@ -275,15 +275,30 @@ these it can pay for: `LITELLM_ADMIN_KEY` → a key with `max_budget` = the budg
 the provisioner's `OPENWEIGHTS_API_KEY`, or `OPENWEIGHTS_ADMIN_KEY` (the same kind of key under a name its own runs never
 see; + `OPENWEIGHTS_SUPABASE_URL` / `OPENWEIGHTS_SUPABASE_ANON_KEY`, provisioner or server env) → an OpenWeights API token with that lifetime spending limit (`ProvisionedCredential.externalId` = the token id);
 `TINKER_API_KEY`, `MODAL_TOKEN_ID`+`MODAL_TOKEN_SECRET` → handed on as they are ("shared": no limit of their own). The
-workspace also gets `COSTS_PROJECT`, the name agents tag shared-key spend with (the `compute-costs` skill says how; Tinker
-project ids are server-assigned UUIDs, so `TINKER_PROJECT_ID` cannot carry it). `COSTS_ADMIN_TOKEN` and
+workspace also gets `COSTS_PROJECT`, the name agents tag shared-key spend with (the `compute-costs` skill says how; Modal
+needs it, Tinker is tagged by the broker — Tinker project ids are server-assigned UUIDs, so `TINKER_PROJECT_ID` cannot carry it). `COSTS_ADMIN_TOKEN` and
 `OPENWEIGHTS_ADMIN_KEY` are provisioner secrets like `LITELLM_ADMIN_KEY` (never in a run env). A failed provisioning undoes
 itself, and `create_workspace` then deletes the new document. Changing a budget needs edit on the provisioner that gave it,
 so a workspace's own run (confined to its document) cannot raise it; providers that refuse the new limit come back as
-`warnings`. **Not enforced yet:** each minted key is limited to the full budget by its provider, the combined total and the
-shared keys are only reported (`get_workspace_budget` → spend per provider and `synced_at`, straight from the dashboard).
-`WORKSPACE_MAX_BUDGET_USD` on the provisioner caps a single workspace. Minting against the real OpenWeights API has not
-been run (the fake in `tests/workspace-budget.test.ts` mirrors the `ow token` CLI's calls). Logs: `[workspace-budget]`.
+`warnings`. `WORKSPACE_MAX_BUDGET_USD` on the provisioner caps a single workspace. The OpenWeights token is named after the
+cost project, which is how the dashboard attributes its share of the org's spend. Logs: `[workspace-budget]`.
+**Enforcement** (`lib/workspace-budget-enforcement.ts`, started/stopped with the scheduler loop, every
+`WORKSPACE_BUDGET_CHECK_SECONDS`, default 300; also right after `set_workspace_budget`): asks the dashboard about every open
+budget. Used up (`remaining_usd <= 0`, own budget or one above) → `WorkspaceBudget.exhaustedAt`: the credential broker answers
+**402 `budget_exhausted`** to every request of that workspace's runs (`lib/workspace-budget-state.ts`, 20 s cache, cleared on
+change), `loadAgentEnvWithFreeFallback` refuses new runs (`assertWorkspaceBudgetAvailable`), the minted LiteLLM key is blocked,
+and RUNNING runs get an error event and are cancelled if this process owns them. Raised → cleared and unblocked. In between,
+the LiteLLM key's `max_budget` is kept at budget minus non-LiteLLM spend (`liteLlmAllowance`), so LLM spend cannot pass the
+total between two checks. Not stoppable from here: a shared Modal token, Tinker without the broker, jobs already at
+OpenWeights (its token limit covers those); and the dashboard lags (Tinker ~1 h), so a budget is overshot by what is spent
+in that time. An unreachable dashboard stops nobody (reported in `errors`).
+**Tinker through the broker** (`lib/credential-broker/tinker.ts`): opt-in per deployment (`AGENT_BROKER_TINKER=1`) or per
+workspace (`RDOCS_BROKER_TINKER=1` in its env, set automatically for budgeted workspaces). The run gets a virtual key
+`tml-rdocs-vk-…` (the SDK insists on the `tml-` prefix) and `TINKER_BASE_URL` → broker; the proxy sends the real key as
+`X-API-Key`, answers `client/config` with `pjwt_auth_enabled: false` (otherwise the SDK swaps the key for a JWT the broker
+never issued), and writes the workspace's cost project into `user_metadata.project` of every `create_session`, which is what
+the dashboard attributes Tinker spend by. Tinker requests write no `[usage]` events (only LLM providers do). Verified with
+the real SDK (0.33.1): capabilities, sampling, session listing.
 `GET /authorize?redirect_uri&state` + `POST /api/authorize` (`lib/integration-signin.ts`) is
 the generic **"Sign in with r-docs"** seam: a signed-in user consents, and r-docs redirects
 back with a 2-minute HS256 id token (`sub`, `email`, `name`, `aud` = redirect origin) signed

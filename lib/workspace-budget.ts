@@ -41,6 +41,7 @@ import {
   type CostsSpend
 } from "@/lib/costs-client";
 import { db } from "@/lib/db";
+import { enforceWorkspaceBudgets } from "@/lib/workspace-budget-enforcement";
 import { copyDocumentEnvKeys, deleteDocumentEnv, loadProvisionerEnv, upsertDocumentEnv } from "@/lib/document-env";
 import {
   LITELLM_ADMIN_KEY_ENV,
@@ -225,6 +226,10 @@ export async function provisionWorkspaceBudget(
       providers[provider] = "shared";
     }
 
+    // Tinker goes through the credential broker here: the workspace's runs get a
+    // per-run virtual key, their sessions are tagged with the cost project, and
+    // the broker stops forwarding once the budget is used up.
+    if (providers.tinker) await upsertDocumentEnv(input.documentId, "RDOCS_BROKER_TINKER", "1", false);
     await upsertDocumentEnv(input.documentId, COSTS_PROJECT_ENV, costsProject, false);
     const data = {
       provisionerDocumentId: input.provisionerDocumentId,
@@ -320,6 +325,9 @@ export async function updateWorkspaceBudget(
       warnings.push(`OpenWeights token limit not changed: ${error.message}`);
     }
   }
+  // Whether the new budget is enough is decided against the dashboard right away,
+  // not at the next periodic check (this also unblocks a key that was blocked).
+  await enforceWorkspaceBudgets(fetchImpl);
   console.log(
     "[workspace-budget] updated",
     JSON.stringify({ documentId: input.documentId, costsProject: budget.costsProject, budgetUsd: input.budgetUsd, warnings })

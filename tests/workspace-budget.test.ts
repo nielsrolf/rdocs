@@ -8,6 +8,8 @@ import { costsProjectName } from "../lib/costs-client";
 import { db } from "../lib/db";
 import { loadDocumentEnv, loadProvisionerEnv, upsertDocumentEnv } from "../lib/document-env";
 import { handleMcpMessage } from "../lib/mcp/server";
+import { enforceWorkspaceBudgets, liteLlmAllowance } from "../lib/workspace-budget-enforcement";
+import { assertWorkspaceBudgetAvailable, runBudgetState } from "../lib/workspace-budget-state";
 import type { McpToolContext } from "../lib/mcp/tools";
 
 process.env.SESSION_SECRET ||= "workspace-budget-test-secret";
@@ -205,6 +207,7 @@ test("create_workspace with budget_usd: a cost project, minted keys with that li
       "MODAL_TOKEN_ID",
       "MODAL_TOKEN_SECRET",
       "OPENWEIGHTS_API_KEY",
+      "RDOCS_BROKER_TINKER",
       "TINKER_API_KEY"
     ]);
 
@@ -232,6 +235,7 @@ test("create_workspace with budget_usd: a cost project, minted keys with that li
       MODAL_TOKEN_ID: "ak-shared",
       MODAL_TOKEN_SECRET: "as-shared",
       OPENWEIGHTS_API_KEY: "ow_minted_2",
+      RDOCS_BROKER_TINKER: "1",
       TINKER_API_KEY: "tml-shared-tinker"
     });
     const provisionerRunEnv = await loadDocumentEnv(provisioner.id);
@@ -394,6 +398,55 @@ test("a workspace cannot give itself a budget or raise it; an existing workspace
     await db.documentMembership.create({ data: { documentId: child.id, userId: collaborator.id, permission: "EDIT" } });
     const outsider = await callTool(ctxFor(collaborator), "set_workspace_budget", { document: child.id, budget_usd: 999 });
     assert.equal(outsider.isError, true, "edit on the workspace alone does not raise its budget");
+  } finally {
+    await fake.close();
+  }
+});
+
+test("a used-up budget stops the workspace; raising it brings it back, and the LiteLLM key gets what the others left", async () => {
+  const fake = await startFakeProviders(); // its dashboard always reports $61 spent: $43 Tinker, $18 LiteLLM
+  try {
+    assert.equal(liteLlmAllowance(100, { spent_usd: 61, by_provider: [{ provider: "tinker", usd: 43, estimated_usd: 0 }, { provider: "litellm", usd: 18, estimated_usd: 0 }] }), 57);
+    assert.equal(liteLlmAllowance(30, { spent_usd: 61, by_provider: [{ provider: "tinker", usd: 43, estimated_usd: 0 }] }), 0);
+
+    const owner = await makeUser("budget-enforce");
+    const provisioner = await makeProvisioner(fake, owner.id);
+    const ctx = ctxFor(owner);
+    const created = (await callTool(ctx, "create_workspace", { parent: provisioner.id, title: "Small", budget_usd: 50 })).json();
+    assert.equal((await loadDocumentEnv(created.id)).RDOCS_BROKER_TINKER, "1", "Tinker goes through the broker in a budgeted workspace");
+    const run = await db.aiRun.create({
+      data: { documentId: created.id, triggerType: "CONVERSATION", instruction: "t", status: "RUNNING" }
+    });
+    await assertWorkspaceBudgetAvailable(created.id);
+
+    // $61 spent of $50
+    const first = await enforceWorkspaceBudgets();
+    assert.ok(first.exhausted.includes(created.budget.cost_project), JSON.stringify(first));
+    assert.ok((await db.workspaceBudget.findUniqueOrThrow({ where: { documentId: created.id } })).exhaustedAt);
+    assert.deepEqual(fake.calls("/key/block").at(-1)?.body, { key: "sk-minted-1" });
+    assert.deepEqual(await runBudgetState(run.id), { costsProject: created.budget.cost_project, exhausted: true });
+    await assert.rejects(assertWorkspaceBudgetAvailable(created.id), /budget \(\$50\) is used up/);
+    const events = await db.aiRunEvent.findMany({ where: { aiRunId: run.id, role: "error" } });
+    assert.match(events[0].message, /budget is used up \(\$61 spent, budget \$50\)/);
+    // a second look changes nothing
+    const blocks = fake.calls("/key/block").length;
+    assert.deepEqual((await enforceWorkspaceBudgets()).exhausted, []);
+    assert.equal(fake.calls("/key/block").length, blocks);
+
+    // the provisioner raises it: the workspace runs again, the key may spend 1000 - 43
+    const raised = await callTool(ctx, "set_workspace_budget", { document: created.id, budget_usd: 1000 });
+    assert.equal(raised.isError, false, raised.text);
+    assert.equal((await db.workspaceBudget.findUniqueOrThrow({ where: { documentId: created.id } })).exhaustedAt, null);
+    assert.deepEqual(fake.calls("/key/unblock").at(-1)?.body, { key: "sk-minted-1" });
+    assert.deepEqual(fake.calls("/key/update").at(-1)?.body, { key: "sk-minted-1", max_budget: 957 });
+    await assertWorkspaceBudgetAvailable(created.id);
+    assert.equal((await runBudgetState(run.id)).exhausted, false);
+
+    // an unreachable dashboard is reported, and nobody is stopped because of it
+    fake.fail.add("/spend");
+    const down = await enforceWorkspaceBudgets();
+    assert.ok(down.errors.some((error) => error.startsWith(created.budget.cost_project)));
+    assert.equal((await db.workspaceBudget.findUniqueOrThrow({ where: { documentId: created.id } })).exhaustedAt, null);
   } finally {
     await fake.close();
   }
