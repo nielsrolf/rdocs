@@ -292,7 +292,9 @@ so a workspace's own run (confined to its document) cannot raise it; providers t
 `warnings`. `WORKSPACE_MAX_BUDGET_USD` on the provisioner caps a single workspace. The OpenWeights token is named after the
 cost project, which is how the dashboard attributes its share of the org's spend. OpenWeights lets an API key create and
 revoke tokens but NOT change a limit (`set_spending_limit` → 403 "Only a signed-in organization admin"), so a changed
-budget leaves the OpenWeights token at its old limit (reported in `warnings`) until OpenWeights allows it. Logs: `[workspace-budget]`.
+budget leaves the OpenWeights token at its old limit (reported in `warnings`) until OpenWeights allows it: migration
+`20261117000000_api_key_set_spending_limit.sql` (longtermrisk/openweights#95) lets an unbudgeted API key change other keys'
+limits; once it is applied to the prod database, `set_workspace_budget` updates the token with no change here. Logs: `[workspace-budget]`.
 **Enforcement** (`lib/workspace-budget-enforcement.ts`, started/stopped with the scheduler loop, every
 `WORKSPACE_BUDGET_CHECK_SECONDS`, default 300; also right after `set_workspace_budget`): asks the dashboard about every open
 budget. Used up (`remaining_usd <= 0`, own budget or one above) → `WorkspaceBudget.exhaustedAt`: the credential broker answers
