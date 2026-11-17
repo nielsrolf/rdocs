@@ -975,7 +975,13 @@ const BUDGET_DESCRIPTION =
   "a LiteLLM key and an OpenWeights token limited to the budget (where the provisioner can mint them), the provisioner's Tinker key (used through r-docs, which counts it), " +
   "and the provisioner's Modal token together with a Modal environment of the workspace's own (MODAL_ENVIRONMENT). " +
   "When the total is used up, the workspace's runs, LLM and Tinker calls are refused and every app in its Modal environment is stopped. " +
+  "In the dashboard the workspace's project sits under the project named by cost_project_parent, else under the provisioner's default (its COSTS_PARENT_PROJECT env var), else at the top level; " +
+  "its spend then also counts toward that project and any budget it has. " +
   "Read the spend with get_workspace_budget.";
+
+const COST_PROJECT_PARENT_DESCRIPTION =
+  "Name of an EXISTING project in the cost dashboard to file this workspace's cost project under (e.g. the research project it belongs to), so its spend rolls up there. " +
+  "Default: the provisioner's COSTS_PARENT_PROJECT env var if its owner set one, otherwise top level.";
 
 function budgetResult(budget: {
   costsProject: string;
@@ -1026,7 +1032,8 @@ const createWorkspace = defineTool({
         .describe("Total compute budget in USD for the new workspace, over its whole lifetime."),
       provisioner: documentRef
         .optional()
-        .describe(`Only with budget_usd — ${BUDGET_PROVISIONER_DESCRIPTION} Default: the parent.`)
+        .describe(`Only with budget_usd — ${BUDGET_PROVISIONER_DESCRIPTION} Default: the parent.`),
+      cost_project_parent: z.string().min(1).max(100).optional().describe(`Only with budget_usd. ${COST_PROJECT_PARENT_DESCRIPTION}`)
     })
     .strict(),
   handler: async (args, ctx) => {
@@ -1034,8 +1041,8 @@ const createWorkspace = defineTool({
       throw new McpToolError(`A run confined to ${ctx.scopeDocumentId} can only create workspaces under it.`);
     }
     const { documentId: parentId } = await requireEditableDocument(args.parent, ctx);
-    if (args.provisioner && args.budget_usd === undefined) {
-      throw new McpToolError("provisioner only makes sense together with budget_usd.");
+    if ((args.provisioner || args.cost_project_parent) && args.budget_usd === undefined) {
+      throw new McpToolError("provisioner and cost_project_parent only make sense together with budget_usd.");
     }
     // Checked before the workspace exists, so a refused provisioner leaves nothing behind.
     const provisionerId =
@@ -1070,7 +1077,8 @@ const createWorkspace = defineTool({
           userId: ctx.user.id,
           budgetUsd,
           title: args.title,
-          documentUrl: url
+          documentUrl: url,
+          costsParent: args.cost_project_parent
         });
       } catch (error) {
         // A workspace that was asked for with a budget must not exist without one.
@@ -1285,7 +1293,13 @@ const setWorkspaceBudgetTool = defineTool({
       budget_usd: z.number().positive().max(1_000_000).describe("Total budget in USD over the workspace's lifetime (not what is left)."),
       provisioner: documentRef
         .optional()
-        .describe(`Only when the workspace has no budget yet — ${BUDGET_PROVISIONER_DESCRIPTION} Default: the workspace's parent.`)
+        .describe(`Only when the workspace has no budget yet — ${BUDGET_PROVISIONER_DESCRIPTION} Default: the workspace's parent.`),
+      cost_project_parent: z
+        .string()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe(`Only when the workspace has no budget yet. ${COST_PROJECT_PARENT_DESCRIPTION}`)
     })
     .strict(),
   handler: async (args, ctx) => {
@@ -1294,6 +1308,11 @@ const setWorkspaceBudgetTool = defineTool({
     if (current && !current.closedAt) {
       if (args.provisioner && parseDocumentRef(args.provisioner) !== current.provisionerDocumentId) {
         throw new McpToolError("That workspace already has a budget from another provisioner.");
+      }
+      if (args.cost_project_parent) {
+        throw new McpToolError(
+          `That workspace already has a budget (cost project "${current.costsProject}"). To file it under another project, change its parent in the cost dashboard.`
+        );
       }
       // Raising a budget is the provisioner's decision, not the workspace's.
       await requireAccess(current.provisionerDocumentId, ctx, "edit");
@@ -1317,7 +1336,8 @@ const setWorkspaceBudgetTool = defineTool({
         userId: ctx.user.id,
         budgetUsd: args.budget_usd,
         title: access.document.title,
-        documentUrl: `${ctx.origin}/documents/${documentId}`
+        documentUrl: `${ctx.origin}/documents/${documentId}`,
+        costsParent: args.cost_project_parent
       })
     );
     return { document: documentId, budget: budgetResult({ ...budget, warnings: undefined }), warnings: budget.warnings };

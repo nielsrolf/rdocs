@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { removeRunContainers, type ContainerCleanupOptions } from "@/lib/agent-runner/container-cleanup";
 import { revokeBrokerKeysForRun } from "@/lib/credential-broker";
 import { db } from "@/lib/db";
+import { estimateListPriceUsd } from "@/lib/model-pricing";
 
 // A RUNNING run is considered abandoned (server restart/crash) only after this
 // much *silence*: no AiRunEvent, no runner heartbeat, and startedAt at least
@@ -328,11 +329,31 @@ export const TIMELINE_EVENT_WHERE = { NOT: { message: { startsWith: USAGE_EVENT_
 
 export type RunUsageSummary = {
   calls: number;
-  /** null when no call reported a cost (e.g. direct Anthropic/OAuth). */
+  /** Cost the providers reported (LiteLLM). null when no call reported one (direct Anthropic/OpenAI). */
   costUsd: number | null;
+  /**
+   * List-price estimate (lib/model-pricing.ts) for the calls that reported NO
+   * cost, i.e. those made directly on an Anthropic credential. Not part of
+   * `costUsd`. null when there were no such calls or none had a known price.
+   */
+  estimatedCostUsd: number | null;
+  /**
+   * What the estimated calls ran on: "subscription" = a Claude subscription
+   * login, so the estimate is hypothetical (nothing was billed per token);
+   * "api-key" = billed to that key at about this amount; "mixed"; "unknown"
+   * for runs from before the broker recorded it. null without an estimate.
+   */
+  estimatedBilling: "subscription" | "api-key" | "mixed" | "unknown" | null;
   inputTokens: number;
   outputTokens: number;
-  models: Array<{ model: string; calls: number; costUsd: number | null; inputTokens: number; outputTokens: number }>;
+  models: Array<{
+    model: string;
+    calls: number;
+    costUsd: number | null;
+    estimatedCostUsd: number | null;
+    inputTokens: number;
+    outputTokens: number;
+  }>;
 };
 
 // Totals of finished runs never change again; cache them so the 2s poll only
@@ -371,22 +392,38 @@ export async function summarizeRunUsage(
   }
   if (pending.length === 0) return result;
 
-  type Row = { aiRunId: string; model: string | null; calls: bigint | number; cost: number | null; inputTokens: number | null; outputTokens: number | null };
+  type Row = {
+    aiRunId: string;
+    model: string | null;
+    billing: string | null;
+    calls: bigint | number;
+    cost: number | null;
+    inputTokens: number | null;
+    outputTokens: number | null;
+    cachedInputTokens: number | null;
+    cacheWriteTokens: number | null;
+  };
   let rows: Row[] = [];
   try {
     const offset = USAGE_EVENT_PREFIX.length + 1;
     rows = await db.$queryRaw<Row[]>(Prisma.sql`
       SELECT "aiRunId",
              json_extract(substr("message", ${offset}), '$.model') AS model,
+             -- calls that reported a cost are one group ('reported'); the others are
+             -- grouped by what they ran on, since only those are estimated
+             CASE WHEN json_extract(substr("message", ${offset}), '$.costUsd') IS NOT NULL THEN 'reported'
+                  ELSE coalesce(json_extract(substr("message", ${offset}), '$.billing'), 'unknown') END AS billing,
              count(*) AS calls,
              sum(json_extract(substr("message", ${offset}), '$.costUsd')) AS cost,
              sum(json_extract(substr("message", ${offset}), '$.inputTokens')) AS inputTokens,
-             sum(json_extract(substr("message", ${offset}), '$.outputTokens')) AS outputTokens
+             sum(json_extract(substr("message", ${offset}), '$.outputTokens')) AS outputTokens,
+             sum(json_extract(substr("message", ${offset}), '$.cachedInputTokens')) AS cachedInputTokens,
+             sum(json_extract(substr("message", ${offset}), '$.cacheWriteTokens')) AS cacheWriteTokens
       FROM "AiRunEvent"
       WHERE "aiRunId" IN (${Prisma.join(pending)})
         AND "message" LIKE ${`${USAGE_EVENT_PREFIX}%`}
         AND json_valid(substr("message", ${offset}))
-      GROUP BY 1, 2
+      GROUP BY 1, 2, 3
       ORDER BY calls DESC`);
   } catch (error) {
     console.warn("[ai-runs] usage summary failed", { error: String(error) });
@@ -394,22 +431,51 @@ export async function summarizeRunUsage(
   }
 
   for (const row of rows) {
-    const summary = result.get(row.aiRunId) ?? { calls: 0, costUsd: null, inputTokens: 0, outputTokens: 0, models: [] };
+    const summary: RunUsageSummary = result.get(row.aiRunId) ?? {
+      calls: 0,
+      costUsd: null,
+      estimatedCostUsd: null,
+      estimatedBilling: null,
+      inputTokens: 0,
+      outputTokens: 0,
+      models: []
+    };
     const calls = Number(row.calls);
     const cost = typeof row.cost === "number" ? row.cost : null;
+    const inputTokens = Number(row.inputTokens ?? 0);
+    const outputTokens = Number(row.outputTokens ?? 0);
+    // Only calls without a reported cost are estimated, so nothing is counted twice.
+    const estimate =
+      row.billing === "reported"
+        ? null
+        : estimateListPriceUsd(row.model, {
+            inputTokens,
+            outputTokens,
+            cachedInputTokens: Number(row.cachedInputTokens ?? 0),
+            cacheWriteTokens: Number(row.cacheWriteTokens ?? 0)
+          });
     summary.calls += calls;
     if (cost !== null) summary.costUsd = (summary.costUsd ?? 0) + cost;
-    summary.inputTokens += Number(row.inputTokens ?? 0);
-    summary.outputTokens += Number(row.outputTokens ?? 0);
-    summary.models.push({
-      model: row.model ?? "unknown",
-      calls,
-      costUsd: cost,
-      inputTokens: Number(row.inputTokens ?? 0),
-      outputTokens: Number(row.outputTokens ?? 0)
-    });
+    if (estimate !== null) {
+      summary.estimatedCostUsd = (summary.estimatedCostUsd ?? 0) + estimate;
+      const billing = row.billing === "subscription" || row.billing === "api-key" ? row.billing : "unknown";
+      summary.estimatedBilling =
+        summary.estimatedBilling === null || summary.estimatedBilling === billing ? billing : "mixed";
+    }
+    summary.inputTokens += inputTokens;
+    summary.outputTokens += outputTokens;
+    // one entry per model, whatever its calls ran on
+    const name = row.model ?? "unknown";
+    let entry = summary.models.find((model) => model.model === name);
+    if (!entry) summary.models.push((entry = { model: name, calls: 0, costUsd: null, estimatedCostUsd: null, inputTokens: 0, outputTokens: 0 }));
+    entry.calls += calls;
+    if (cost !== null) entry.costUsd = (entry.costUsd ?? 0) + cost;
+    if (estimate !== null) entry.estimatedCostUsd = (entry.estimatedCostUsd ?? 0) + estimate;
+    entry.inputTokens += inputTokens;
+    entry.outputTokens += outputTokens;
     result.set(row.aiRunId, summary);
   }
+  for (const summary of result.values()) summary.models.sort((a, b) => b.calls - a.calls);
   for (const id of pending) {
     cache.delete(id);
     if (cache.size >= USAGE_CACHE_LIMIT) cache.delete(cache.keys().next().value as string);

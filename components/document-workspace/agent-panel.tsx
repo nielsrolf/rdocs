@@ -307,10 +307,17 @@ function RunUsageChip({ runs }: { runs: ActiveAiRunView[] }) {
   const byModel = new Map<string, { calls: number; costUsd: number | null; inputTokens: number; outputTokens: number }>();
   let calls = 0;
   let cost: number | null = null;
+  // List-price estimate for calls that reported no cost (direct Anthropic credential).
+  let estimate: number | null = null;
+  let subscription = false;
   for (const run of runs) {
     if (!run.usage) continue;
     calls += run.usage.calls;
     if (run.usage.costUsd !== null) cost = (cost ?? 0) + run.usage.costUsd;
+    if (typeof run.usage.estimatedCostUsd === "number") {
+      estimate = (estimate ?? 0) + run.usage.estimatedCostUsd;
+      if (run.usage.estimatedBilling === "subscription") subscription = true;
+    }
     for (const entry of run.usage.models) {
       const current = byModel.get(entry.model) ?? { calls: 0, costUsd: null, inputTokens: 0, outputTokens: 0 };
       current.calls += entry.calls;
@@ -326,6 +333,13 @@ function RunUsageChip({ runs }: { runs: ActiveAiRunView[] }) {
       <summary title="Model calls made through the credential broker">
         {calls.toLocaleString()} model {calls === 1 ? "call" : "calls"}
         {cost !== null ? ` · ${formatUsd(cost)}` : ""}
+        {estimate !== null ? (
+          <span title={subscription
+            ? "List-price value of the calls made on a Claude subscription. Nothing was billed per token."
+            : "List-price estimate of the calls made directly on an Anthropic credential."}>
+            {` · ≈${formatUsd(estimate)} ${subscription ? "hypothetical" : "estimated"}`}
+          </span>
+        ) : null}
       </summary>
       <table className="agent-usage-table">
         <thead>

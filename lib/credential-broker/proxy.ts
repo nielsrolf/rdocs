@@ -204,7 +204,11 @@ export async function handleBrokerProxyRequest(
     const rawCost = upstream.headers.get("x-litellm-response-cost");
     const cost = rawCost === null ? NaN : Number(rawCost);
     const capture = createUsageCapture({ requestId: randomUUID(), provider: resolution.provider,
-      costUsd: Number.isFinite(cost) && cost >= 0 ? cost : null });
+      costUsd: Number.isFinite(cost) && cost >= 0 ? cost : null,
+      // Anthropic directly: a bearer token is a Claude subscription login, x-api-key an API key.
+      ...(resolution.provider === "anthropic"
+        ? { billing: resolution.authMode === "authorization-bearer" ? "subscription" as const : "api-key" as const }
+        : {}) });
     const decoder = new TextDecoder();
     const reader = responseBody.getReader();
     const aiRunId = resolution.aiRunId;

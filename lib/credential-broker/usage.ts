@@ -8,10 +8,16 @@ export type BrokerUsage = {
   cachedInputTokens: number;
   cacheWriteTokens: number;
   costUsd: number | null;
+  /**
+   * What the call ran on, where the broker can tell: a Claude subscription
+   * login (nothing is billed per token) or an API key. Absent on events
+   * written before 2026-11-18 and for providers that report their own cost.
+   */
+  billing?: "subscription" | "api-key";
   complete: boolean;
 };
 
-export function createUsageCapture(meta: Pick<BrokerUsage, "requestId" | "provider" | "costUsd">) {
+export function createUsageCapture(meta: Pick<BrokerUsage, "requestId" | "provider" | "costUsd" | "billing">) {
   let pending = "";
   let sawUsage = false;
   let jsonBody: boolean | undefined;

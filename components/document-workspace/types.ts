@@ -176,6 +176,9 @@ export type AiRunEventView = {
 export type RunUsageView = {
   calls: number;
   costUsd: number | null;
+  /** List-price estimate for calls that reported no cost; see RunUsageSummary in lib/ai-runs.ts. */
+  estimatedCostUsd?: number | null;
+  estimatedBilling?: "subscription" | "api-key" | "mixed" | "unknown" | null;
   inputTokens: number;
   outputTokens: number;
   models: Array<{ model: string; calls: number; costUsd: number | null; inputTokens: number; outputTokens: number }>;

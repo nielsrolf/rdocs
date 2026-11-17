@@ -145,6 +145,11 @@ export type ProvisionWorkspaceBudgetInput = {
   /** Used for the cost project's name and description. */
   title: string;
   documentUrl?: string;
+  /**
+   * The cost dashboard project to put the workspace's project under. Default:
+   * the provisioner's COSTS_PARENT_PROJECT, else top level. Must exist there.
+   */
+  costsParent?: string | null;
 };
 
 export type ProvisionedWorkspaceBudget = {
@@ -176,7 +181,7 @@ export async function provisionWorkspaceBudget(
   const costs = requireCosts(env);
   const openweights = resolveOpenWeightsConfig(env); // throws on a half-configured provisioner, before anything is created
   const costsProject = existing?.costsProject ?? costsProjectName(input.title, input.documentId);
-  const costsParent = env.COSTS_PARENT_PROJECT?.trim() || null;
+  const costsParent = input.costsParent?.trim() || env.COSTS_PARENT_PROJECT?.trim() || null;
 
   const providers: BudgetProviders = {};
   const warnings: string[] = [];
@@ -192,7 +197,15 @@ export async function provisionWorkspaceBudget(
         description: `r-docs workspace: ${input.title}`.slice(0, 200) + (input.documentUrl ? ` (${input.documentUrl})` : "")
       },
       fetchImpl
-    );
+    ).catch((error) => {
+      // The dashboard answers 404 "no project '<parent>'" for a parent it does not know.
+      if (costsParent && error instanceof CostsError && error.message.includes(`no project '${costsParent}'`)) {
+        throw new WorkspaceBudgetError(
+          `The cost dashboard has no project "${costsParent}" to put this workspace under. Use the name of an existing project (list them in the dashboard), or leave the parent out.`
+        );
+      }
+      throw error;
+    });
     if (!existing) undo.push(() => deleteCostsProject(costs, costsProject, fetchImpl));
 
     if (env[LITELLM_ADMIN_KEY_ENV]?.trim()) {

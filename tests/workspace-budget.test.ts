@@ -82,6 +82,10 @@ async function startFakeProviders() {
         if (req.headers.authorization !== "Bearer ct_costs_token") return send(401, { detail: "bad token" });
         const name = decodeURIComponent(path.split("/")[3] ?? "");
         if (req.method === "POST" && path === "/api/projects") {
+          // like the dashboard: a parent has to exist ("backlog" stands for one that does)
+          if (body?.parent && body.parent !== "backlog" && !projects.has(String(body.parent))) {
+            return send(404, { detail: `no project '${body.parent}'` });
+          }
           const key = String(body?.name);
           if (!projects.has(key)) projects.set(key, { ...body, closed_at: null });
           return send(201, projects.get(key));
@@ -330,6 +334,35 @@ test("create_workspace with budget_usd: a cost project, minted keys with that li
     // one budget per workspace
     const again = await callTool(ctx, "set_workspace_budget", { document: created.id, budget_usd: 5, provisioner: created.id });
     assert.equal(again.isError, true);
+
+    // the caller may name the dashboard project to file the workspace under, instead of the provisioner's default
+    fake.projects.set("srf", { name: "srf" });
+    const filed = await callTool(ctx, "create_workspace", {
+      parent: provisioner.id,
+      title: "SRF probes",
+      budget_usd: 10,
+      cost_project_parent: "srf"
+    });
+    assert.equal(filed.isError, false, filed.text);
+    assert.equal(filed.json().budget.cost_project_parent, "srf");
+    assert.equal(fake.projects.get(filed.json().budget.cost_project)?.parent, "srf");
+    // a parent the dashboard does not know: a clear refusal, and no workspace
+    const before = await db.document.count({ where: { parentDocumentId: provisioner.id } });
+    const lost = await callTool(ctx, "create_workspace", {
+      parent: provisioner.id,
+      title: "Typo",
+      budget_usd: 10,
+      cost_project_parent: "srff"
+    });
+    assert.equal(lost.isError, true);
+    assert.match(lost.text, /no project "srff" to put this workspace under/);
+    assert.equal(await db.document.count({ where: { parentDocumentId: provisioner.id } }), before);
+    // it is chosen when the budget is given, not afterwards, and only together with a budget
+    const moved = await callTool(ctx, "set_workspace_budget", { document: created.id, budget_usd: 2000, cost_project_parent: "srf" });
+    assert.equal(moved.isError, true);
+    assert.match(moved.text, /change its parent in the cost dashboard/);
+    const pointless = await callTool(ctx, "create_workspace", { parent: provisioner.id, title: "No budget", cost_project_parent: "srf" });
+    assert.equal(pointless.isError, true);
   } finally {
     await fake.close();
   }

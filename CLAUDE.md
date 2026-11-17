@@ -303,6 +303,19 @@ ceiling would otherwise withhold them). With the user's own model key unticked, 
 revoked, Modal environment deleted) before the document is deleted. The callback body gets `budget_usd`. The integration reads
 the spend with its channel token: `GET /api/agent-channels/:triggerId/budget` → `{budget: null | {budget_usd, cost_project,
 providers, closed_at, exhausted, spent_usd, remaining_usd, by_provider, synced_at}}`. First user: research-backlog.
+`create_workspace` / `set_workspace_budget` take `cost_project_parent` (2026-11-18): the EXISTING dashboard project to file
+the workspace's project under, overriding the provisioner's `COSTS_PARENT_PROJECT` default; an unknown name is refused before
+anything is created, and it cannot be changed through r-docs once the budget exists (move it in the dashboard). The tool
+descriptions are where claudex learns about both.
+**Agent session cost** (2026-11-18, `lib/model-pricing.ts`, `summarizeRunUsage`): the broker's `[usage]` events already hold
+the tokens of every brokered model call, the agent's own session included, but only LiteLLM calls come with a cost. Calls made
+directly on an Anthropic credential are now priced at list prices at READ time (so old runs get it too, and a corrected price
+table applies retroactively): `RunUsageSummary.estimatedCostUsd`, kept apart from the reported `costUsd`, with
+`estimatedBilling` = `subscription` (hypothetical: a Claude subscription bills nothing per token) | `api-key` | `mixed` |
+`unknown` (events from before the broker wrote `billing`). Shown in the agent panel's usage chip ("≈$x hypothetical") and
+returned as `usage` by `GET /api/agent-channels/:id/runs/:runId`, which is what research-backlog shows. Update the price table
+when a model ships; a model missing from it gets no estimate. Not covered: Codex on a ChatGPT subscription (not brokered) and
+OpenAI calls (no price table). No agent-core change, so no image rebuild. Test: `tests/run-usage-estimate.test.ts`.
 **Enforcement** (`lib/workspace-budget-enforcement.ts`, started/stopped with the scheduler loop, every
 `WORKSPACE_BUDGET_CHECK_SECONDS`, default 300; also right after `set_workspace_budget`): asks the dashboard about every open
 budget. Used up (`remaining_usd <= 0`, own budget or one above) → `WorkspaceBudget.exhaustedAt`: the credential broker answers
