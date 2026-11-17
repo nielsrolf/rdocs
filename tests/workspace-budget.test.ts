@@ -159,7 +159,8 @@ async function makeProvisioner(fake: Fake, ownerId: string) {
     COSTS_PARENT_PROJECT: "backlog",
     LITELLM_ADMIN_KEY: "sk-admin-secret",
     LITELLM_ADMIN_BASE_URL: fake.url,
-    OPENWEIGHTS_ADMIN_KEY: "ow_admin_secret",
+    // an ordinary organization key: OpenWeights has no separate admin keys
+    OPENWEIGHTS_API_KEY: "ow_admin_secret",
     OPENWEIGHTS_SUPABASE_URL: fake.url,
     OPENWEIGHTS_SUPABASE_ANON_KEY: "anon-key",
     TINKER_API_KEY: "tml-shared-tinker",
@@ -344,6 +345,7 @@ test("only what the provisioner has is set up; caps and missing configuration ar
     assert.equal(fake.calls("/key/generate").length, 0);
 
     // half-configured OpenWeights is refused before anything is created
+    delete process.env.OPENWEIGHTS_SUPABASE_URL;
     await upsertDocumentEnv(provisioner.id, "OPENWEIGHTS_ADMIN_KEY", "ow_admin_secret");
     const before = fake.requests.length;
     const half = await callTool(ctx, "create_workspace", { parent: provisioner.id, title: "Half", budget_usd: 5 });

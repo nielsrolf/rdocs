@@ -7,8 +7,13 @@
 // own hard-ish cap inside a shared organization (a limit, not a reservation:
 // it is checked against accrued spend).
 //
-// The provisioner holds an organization's API key as OPENWEIGHTS_ADMIN_KEY (a
-// provisioner admin secret, never given to an agent run). This module speaks
+// The minting key is an ORDINARY OpenWeights API key of the organization that
+// pays; OpenWeights has no separate admin keys. The provisioner holds it either
+// as OPENWEIGHTS_API_KEY (its own agent runs can then use OpenWeights too,
+// without a limit) or as OPENWEIGHTS_ADMIN_KEY, which only changes who sees
+// it: that name is a provisioner admin secret and never reaches an agent run,
+// so a provisioner whose agents should not have an unlimited key uses it.
+// OPENWEIGHTS_ADMIN_KEY wins when both are set. This module speaks
 // to OpenWeights' Supabase REST API the way the `ow token` CLI does:
 //   rpc/exchange_api_token_for_jwt   API key -> JWT
 //   rpc/get_organization_from_token  -> organization id
@@ -32,13 +37,13 @@ export function resolveOpenWeightsConfig(
   provisionerEnv: Record<string, string>,
   hostEnv: Record<string, string | undefined> = process.env
 ): OpenWeightsConfig | null {
-  const adminKey = provisionerEnv[OPENWEIGHTS_ADMIN_KEY_ENV]?.trim();
+  const adminKey = provisionerEnv[OPENWEIGHTS_ADMIN_KEY_ENV]?.trim() || provisionerEnv.OPENWEIGHTS_API_KEY?.trim();
   if (!adminKey) return null;
   const supabaseUrl = provisionerEnv.OPENWEIGHTS_SUPABASE_URL?.trim() || hostEnv.OPENWEIGHTS_SUPABASE_URL?.trim();
   const anonKey = provisionerEnv.OPENWEIGHTS_SUPABASE_ANON_KEY?.trim() || hostEnv.OPENWEIGHTS_SUPABASE_ANON_KEY?.trim();
   if (!supabaseUrl || !anonKey) {
     throw new OpenWeightsProvisioningError(
-      "OPENWEIGHTS_ADMIN_KEY is set, but OPENWEIGHTS_SUPABASE_URL / OPENWEIGHTS_SUPABASE_ANON_KEY are not (provisioner env or server env)."
+      "An OpenWeights key is set, but OPENWEIGHTS_SUPABASE_URL / OPENWEIGHTS_SUPABASE_ANON_KEY are not (provisioner env or server env)."
     );
   }
   return { adminKey, supabaseUrl: supabaseUrl.replace(/\/+$/, ""), anonKey };
@@ -83,11 +88,11 @@ async function rpc<T>(
 async function session(config: OpenWeightsConfig, fetchImpl: FetchLike) {
   const jwt = await rpc<string>(config, config.anonKey, "exchange_api_token_for_jwt", { api_token: config.adminKey }, fetchImpl);
   if (typeof jwt !== "string" || !jwt) {
-    throw new OpenWeightsProvisioningError("OpenWeights did not accept OPENWEIGHTS_ADMIN_KEY.");
+    throw new OpenWeightsProvisioningError("OpenWeights did not accept the provisioner's API key.");
   }
   const orgId = await rpc<string>(config, jwt, "get_organization_from_token", {}, fetchImpl);
   if (typeof orgId !== "string" || !orgId) {
-    throw new OpenWeightsProvisioningError("OpenWeights returned no organization for OPENWEIGHTS_ADMIN_KEY.");
+    throw new OpenWeightsProvisioningError("OpenWeights returned no organization for the provisioner's API key.");
   }
   return { jwt, orgId };
 }

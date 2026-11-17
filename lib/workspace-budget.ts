@@ -9,7 +9,8 @@
 //        litellm      a virtual key with max_budget = the budget, tagged with
 //                     the project (LITELLM_ADMIN_KEY on the provisioner)
 //        openweights  an API token with a lifetime spending limit = the budget
-//                     (OPENWEIGHTS_ADMIN_KEY on the provisioner)
+//                     (the provisioner's OPENWEIGHTS_API_KEY, or
+//                     OPENWEIGHTS_ADMIN_KEY to keep it from its own runs)
 //        tinker       the provisioner's TINKER_API_KEY, handed on by name
 //        modal        the provisioner's MODAL_TOKEN_ID / MODAL_TOKEN_SECRET
 //   3. sets COSTS_PROJECT in the workspace env, the name agents tag shared-key
@@ -309,7 +310,7 @@ export async function updateWorkspaceBudget(
     });
     try {
       const config = resolveOpenWeightsConfig(env);
-      if (!config || !record?.externalId) throw new WorkspaceBudgetError("the provisioner no longer has the OpenWeights admin key.");
+      if (!config || !record?.externalId) throw new WorkspaceBudgetError("the provisioner no longer has an OpenWeights key.");
       await setOpenWeightsTokenLimit(config, { tokenId: record.externalId, spendingLimitUsd: input.budgetUsd }, fetchImpl);
       await db.provisionedCredential.update({ where: { id: record.id }, data: { maxBudgetUsd: input.budgetUsd } });
     } catch (error) {

@@ -272,8 +272,8 @@ A budgeted workspace is a PROJECT with a lifetime budget in the cost dashboard (
 provisioner's `COSTS_PARENT_PROJECT`); the dashboard is the ledger, r-docs hands out the keys. The provisioner
 (default: the parent) must hold `COSTS_ADMIN_TOKEN` (a dashboard API token; server env is the fallback) and whichever of
 these it can pay for: `LITELLM_ADMIN_KEY` → a key with `max_budget` = the budget and metadata `costs_project`;
-`OPENWEIGHTS_ADMIN_KEY` (+ `OPENWEIGHTS_SUPABASE_URL` / `OPENWEIGHTS_SUPABASE_ANON_KEY`, provisioner or server env) → an
-OpenWeights API token with that lifetime spending limit (`ProvisionedCredential.externalId` = the token id);
+the provisioner's `OPENWEIGHTS_API_KEY`, or `OPENWEIGHTS_ADMIN_KEY` (the same kind of key under a name its own runs never
+see; + `OPENWEIGHTS_SUPABASE_URL` / `OPENWEIGHTS_SUPABASE_ANON_KEY`, provisioner or server env) → an OpenWeights API token with that lifetime spending limit (`ProvisionedCredential.externalId` = the token id);
 `TINKER_API_KEY`, `MODAL_TOKEN_ID`+`MODAL_TOKEN_SECRET` → handed on as they are ("shared": no limit of their own). The
 workspace also gets `COSTS_PROJECT`, the name agents tag shared-key spend with (the `compute-costs` skill says how; Tinker
 project ids are server-assigned UUIDs, so `TINKER_PROJECT_ID` cannot carry it). `COSTS_ADMIN_TOKEN` and
