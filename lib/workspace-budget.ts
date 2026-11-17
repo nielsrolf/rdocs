@@ -196,7 +196,9 @@ export async function provisionWorkspaceBudget(
     }
 
     if (openweights) {
-      const name = `rdocs-${input.documentId}`;
+      // Named after the cost project: the dashboard gives a token's share of the
+      // organization's spend to the project of that name.
+      const name = costsProject;
       const minted = await createOpenWeightsToken(openweights, { name, spendingLimitUsd: input.budgetUsd }, fetchImpl);
       undo.push(() => revokeOpenWeightsToken(openweights, minted.tokenId, fetchImpl));
       await upsertDocumentEnv(input.documentId, OPENWEIGHTS_KEY_ENV, minted.token, true);

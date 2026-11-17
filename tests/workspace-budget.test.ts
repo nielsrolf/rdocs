@@ -220,7 +220,7 @@ test("create_workspace with budget_usd: a cost project, minted keys with that li
     const [token] = fake.calls("/create_api_token_with_limit");
     assert.deepEqual(token.body, {
       org_id: "org-1",
-      token_name: `rdocs-${created.id}`,
+      token_name: project,
       expires_at: null,
       spending_limit_usd: "1000"
     });
