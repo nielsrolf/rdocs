@@ -290,11 +290,10 @@ may hold results); `delete_modal_environment: true` deletes it at Modal, irrever
 itself, and `create_workspace` then deletes the new document. Changing a budget needs edit on the provisioner that gave it,
 so a workspace's own run (confined to its document) cannot raise it; providers that refuse the new limit come back as
 `warnings`. `WORKSPACE_MAX_BUDGET_USD` on the provisioner caps a single workspace. The OpenWeights token is named after the
-cost project, which is how the dashboard attributes its share of the org's spend. OpenWeights lets an API key create and
-revoke tokens but NOT change a limit (`set_spending_limit` → 403 "Only a signed-in organization admin"), so a changed
-budget leaves the OpenWeights token at its old limit (reported in `warnings`) until OpenWeights allows it: migration
-`20261117000000_api_key_set_spending_limit.sql` (longtermrisk/openweights#95) lets an unbudgeted API key change other keys'
-limits; once it is applied to the prod database, `set_workspace_budget` updates the token with no change here. Logs: `[workspace-budget]`.
+cost project, which is how the dashboard attributes its share of the org's spend. OpenWeights lets an unbudgeted API key change other
+keys' limits since migration `20261117000000_api_key_set_spending_limit.sql` (longtermrisk/openweights#95, applied to prod
+2026-11-17), so a changed budget also changes the OpenWeights token's limit; verified live ($5 → $7 → $3 read back from
+`spending_limits`). A budgeted key or a key changing its own limit is still refused and would show up in `warnings`. Logs: `[workspace-budget]`.
 **Budgets for integrations** (2026-11-17): the `/agent-setup` consent page shows a "Compute budget" picker when the user can
 hand out budgets (`listBudgetProvisioners`: direct edit access to a document whose env holds `COSTS_ADMIN_TOKEN`). The choice
 goes to `POST /api/agent-setups` as `budget: {provisionerDocumentId, budgetUsd}`; `provisionAgentSetup` checks the access
