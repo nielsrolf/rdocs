@@ -334,8 +334,9 @@ in that time. An unreachable dashboard stops nobody (reported in `errors`).
 workspace (`RDOCS_BROKER_TINKER=1` in its env, set automatically for budgeted workspaces). The run gets a virtual key
 `tml-rdocs-vk-…` (the SDK insists on the `tml-` prefix) and `TINKER_BASE_URL` → broker; the proxy sends the real key as
 `X-API-Key`, answers `client/config` with `pjwt_auth_enabled: false` (otherwise the SDK swaps the key for a JWT the broker
-never issued), and writes the workspace's cost project into `user_metadata.project` of every `create_session`, which is what
-the dashboard attributes Tinker spend by. Tinker requests write no `[usage]` events (only LLM providers do). Verified with
+never issued), and writes the workspace's cost project into `user_metadata.costs_project` (and `.project`) of every `create_session`.
+The dashboard treats `costs_project` like a minted key (ahead of every rule); `project` alone is a hint that an explicit
+rule for the key's owner would override (found 2026-11-18 while verifying attribution). Tinker requests write no `[usage]` events (only LLM providers do). Verified with
 the real SDK (0.33.1): capabilities, sampling, session listing.
 `GET /authorize?redirect_uri&state` + `POST /api/authorize` (`lib/integration-signin.ts`) is
 the generic **"Sign in with r-docs"** seam: a signed-in user consents, and r-docs redirects

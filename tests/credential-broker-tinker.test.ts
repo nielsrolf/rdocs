@@ -110,10 +110,14 @@ test("a budgeted workspace's Tinker sessions are tagged with its cost project; J
   const { upstream, call } = await brokeredTinker({ costsProject: "run-42", exhausted: false });
   const session = { tags: [], user_metadata: { note: "mine", project: "someone-else" }, sdk_version: "0.33", type: "create_session" };
   await call("POST", "api/v1/create_session", session);
-  assert.deepEqual(JSON.parse(upstream[0].body), { ...session, user_metadata: { note: "mine", project: "run-42" } });
+  assert.deepEqual(JSON.parse(upstream[0].body), {
+    ...session,
+    // costs_project is what the dashboard trusts ahead of its rules; project is the readable hint
+    user_metadata: { note: "mine", project: "run-42", costs_project: "run-42" }
+  });
 
   await call("POST", "api/v1/create_session", { tags: [], user_metadata: null, sdk_version: "0.33" });
-  assert.deepEqual(JSON.parse(upstream[1].body).user_metadata, { project: "run-42" });
+  assert.deepEqual(JSON.parse(upstream[1].body).user_metadata, { project: "run-42", costs_project: "run-42" });
 
   // other requests pass through byte for byte
   await call("POST", "api/v1/asample", { user_metadata: { project: "kept" } });

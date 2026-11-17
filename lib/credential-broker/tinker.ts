@@ -6,11 +6,14 @@
 //    one it could not match to a run. We answer with the flag off, so the SDK
 //    keeps presenting the (virtual) API key on every request.
 // 2. Tinker bills by session, and its billing report carries each session's
-//    `user_metadata`. The cost dashboard reads `user_metadata.project` as the
-//    project that pays. A workspace with a budget has a cost project, so the
-//    proxy writes it into every `create_session` — the agent does not have to
-//    remember to tag anything, and cannot bill another project by accident.
-//    A project the caller set itself is kept only when there is no budget.
+//    `user_metadata`. The cost dashboard reads `user_metadata.costs_project`
+//    as the project that pays, ahead of every attribution rule (like the
+//    metadata of a minted LiteLLM key), and `user_metadata.project` as a mere
+//    hint that an explicit rule for the key's owner would override. A
+//    workspace with a budget has a cost project, so the proxy writes both
+//    into every `create_session` — the agent does not have to remember to tag
+//    anything, and cannot bill another project by accident. What the caller
+//    set itself is kept only when there is no budget.
 
 export const TINKER_PROVIDER = "tinker";
 
@@ -25,7 +28,7 @@ export function isTinkerClientConfig(pathSegments: string[]): boolean {
   return endsWith(pathSegments, "api", "v1", "client", "config");
 }
 
-/** The create_session body with the cost project as `user_metadata.project`. */
+/** The create_session body with the cost project as `user_metadata.costs_project` (and `.project`). */
 export function tagTinkerSession(body: Uint8Array<ArrayBuffer>, costsProject: string): Uint8Array<ArrayBuffer> {
   let parsed: unknown;
   try {
@@ -39,7 +42,7 @@ export function tagTinkerSession(body: Uint8Array<ArrayBuffer>, costsProject: st
     request.user_metadata && typeof request.user_metadata === "object" && !Array.isArray(request.user_metadata)
       ? (request.user_metadata as Record<string, unknown>)
       : {};
-  request.user_metadata = { ...metadata, project: costsProject };
+  request.user_metadata = { ...metadata, project: costsProject, costs_project: costsProject };
   return new TextEncoder().encode(JSON.stringify(request));
 }
 
