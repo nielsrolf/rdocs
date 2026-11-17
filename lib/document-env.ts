@@ -37,11 +37,17 @@ async function migrateRows(rows: Array<{ id: string; value: string }>) {
 }
 
 // Admin secrets a PROVISIONER document holds to mint credentials for other
-// workspaces (lib/litellm-provisioning.ts). They are used server-side only and
-// are NEVER given to an agent run: an agent that could read the admin key
-// could mint unbudgeted keys or copy it anywhere. loadDocumentEnv (the source
-// of every run env) drops them; loadProvisionerEnv is the only reader.
-export const PROVISIONER_SECRET_ENV_KEYS: ReadonlySet<string> = new Set(["LITELLM_ADMIN_KEY"]);
+// workspaces (lib/litellm-provisioning.ts, lib/openweights-provisioning.ts) and
+// to register their budgets (lib/costs-client.ts). They are used server-side
+// only and are NEVER given to an agent run: an agent that could read an admin
+// key could mint unbudgeted keys, raise its own budget or copy the key
+// anywhere. loadDocumentEnv (the source of every run env) drops them;
+// loadProvisionerEnv is the only reader.
+export const PROVISIONER_SECRET_ENV_KEYS: ReadonlySet<string> = new Set([
+  "LITELLM_ADMIN_KEY",
+  "OPENWEIGHTS_ADMIN_KEY",
+  "COSTS_ADMIN_TOKEN"
+]);
 
 export function isProvisionerSecretEnvKey(key: string): boolean {
   return PROVISIONER_SECRET_ENV_KEYS.has(key);

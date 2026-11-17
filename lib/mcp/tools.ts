@@ -33,6 +33,12 @@ import {
 } from "@/lib/schedules";
 import { listDocumentEnvMasked } from "@/lib/document-env";
 import {
+  getWorkspaceBudget,
+  isWorkspaceBudgetError,
+  provisionWorkspaceBudget,
+  updateWorkspaceBudget
+} from "@/lib/workspace-budget";
+import {
   listLiteLlmKeys,
   LiteLlmProvisioningError,
   provisionLiteLlmKey,
@@ -949,11 +955,34 @@ async function workspaceCall<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (error) {
-    if (error instanceof WorkspaceProvisioningError || error instanceof LiteLlmProvisioningError) {
+    if (
+      error instanceof WorkspaceProvisioningError ||
+      error instanceof LiteLlmProvisioningError ||
+      isWorkspaceBudgetError(error)
+    ) {
       throw new McpToolError(error.message);
     }
     throw error;
   }
+}
+
+const BUDGET_PROVISIONER_DESCRIPTION =
+  "the document that pays: one whose owner stored the cost dashboard token (COSTS_ADMIN_TOKEN) and the organization's provider credentials in its environment. You never see them.";
+
+const BUDGET_DESCRIPTION =
+  "it becomes a project with that budget in the cost dashboard, and the workspace gets its own credentials so its spend is counted there: " +
+  "a LiteLLM key and an OpenWeights token limited to the budget (where the provisioner can mint them), and the provisioner's Tinker and Modal keys. " +
+  "Each minted key is limited to the full budget on its own; Tinker and Modal have no limit of their own and only count when the agent tags its usage with the COSTS_PROJECT env var. " +
+  "Read the spend with get_workspace_budget.";
+
+function budgetResult(budget: { costsProject: string; costsParent?: string | null; budgetUsd: number; providers: Record<string, string> }) {
+  return {
+    budget_usd: budget.budgetUsd,
+    cost_project: budget.costsProject,
+    ...(budget.costsParent !== undefined ? { cost_project_parent: budget.costsParent } : {}),
+    // "minted": the workspace's own key, limited to the budget. "shared": the provisioner's key, no limit of its own.
+    providers: budget.providers
+  };
 }
 
 const createWorkspace = defineTool({
@@ -963,6 +992,7 @@ const createWorkspace = defineTool({
     "The child is owned by the parent's owner; you get edit access. It copies the parent's model settings. " +
     "Hand on secrets by NAME with inherit_env (values are copied server-side; you never see them); set plain config with environment. " +
     "Needs edit access to the parent. A run confined to its document may only use its own document as parent. " +
+    "budget_usd gives the workspace a total compute budget: " + BUDGET_DESCRIPTION + " " +
     MARKDOWN_CONTRACT,
   schema: z
     .object({
@@ -977,7 +1007,16 @@ const createWorkspace = defineTool({
         .describe("Env var names to copy from the parent, e.g. [\"OPENWEIGHTS_API_KEY\"]."),
       inherit_skills: z.array(z.string().min(1).max(128)).max(30).optional().describe("Parent skill names to copy."),
       repo_url: z.string().min(1).max(500).optional().describe("GitHub/HuggingFace HTTPS repo to link."),
-      repo_branch: z.string().min(1).max(200).optional()
+      repo_branch: z.string().min(1).max(200).optional(),
+      budget_usd: z
+        .number()
+        .positive()
+        .max(1_000_000)
+        .optional()
+        .describe("Total compute budget in USD for the new workspace, over its whole lifetime."),
+      provisioner: documentRef
+        .optional()
+        .describe(`Only with budget_usd — ${BUDGET_PROVISIONER_DESCRIPTION} Default: the parent.`)
     })
     .strict(),
   handler: async (args, ctx) => {
@@ -985,6 +1024,16 @@ const createWorkspace = defineTool({
       throw new McpToolError(`A run confined to ${ctx.scopeDocumentId} can only create workspaces under it.`);
     }
     const { documentId: parentId } = await requireEditableDocument(args.parent, ctx);
+    if (args.provisioner && args.budget_usd === undefined) {
+      throw new McpToolError("provisioner only makes sense together with budget_usd.");
+    }
+    // Checked before the workspace exists, so a refused provisioner leaves nothing behind.
+    const provisionerId =
+      args.budget_usd === undefined
+        ? null
+        : args.provisioner
+          ? (await requireAccess(args.provisioner, ctx, "edit")).documentId
+          : parentId;
     const created = await workspaceCall(() =>
       createChildWorkspace({
         parentDocumentId: parentId,
@@ -998,12 +1047,35 @@ const createWorkspace = defineTool({
         repoBranch: args.repo_branch ?? null
       })
     );
+    const url = `${ctx.origin}/documents/${created.id}`;
+    if (provisionerId === null || args.budget_usd === undefined) {
+      return { id: created.id, url, parent: parentId, env_keys: created.envKeys, skills: created.skills };
+    }
+    const budgetUsd = args.budget_usd;
+    const budget = await workspaceCall(async () => {
+      try {
+        return await provisionWorkspaceBudget({
+          provisionerDocumentId: provisionerId,
+          documentId: created.id,
+          userId: ctx.user.id,
+          budgetUsd,
+          title: args.title,
+          documentUrl: url
+        });
+      } catch (error) {
+        // A workspace that was asked for with a budget must not exist without one.
+        await db.document.delete({ where: { id: created.id } }).catch(() => null);
+        throw error;
+      }
+    });
+    const env = await listDocumentEnvMasked(created.id);
     return {
       id: created.id,
-      url: `${ctx.origin}/documents/${created.id}`,
+      url,
       parent: parentId,
-      env_keys: created.envKeys,
-      skills: created.skills
+      env_keys: env.map((entry) => entry.key),
+      skills: created.skills,
+      budget: budgetResult(budget)
     };
   }
 });
@@ -1191,6 +1263,90 @@ const listLiteLlmKeysTool = defineTool({
   }
 });
 
+const setWorkspaceBudgetTool = defineTool({
+  name: "set_workspace_budget",
+  description:
+    "Give an existing workspace a total compute budget, or change the budget it has. First time: " + BUDGET_DESCRIPTION + " " +
+    "Changing it updates the dashboard and the limits of the keys minted for the workspace; anything that could not be changed comes back in warnings. " +
+    "Needs edit access to the workspace and to the provisioner (for a change: the one that gave the budget).",
+  schema: z
+    .object({
+      document: documentRef.describe("The workspace."),
+      budget_usd: z.number().positive().max(1_000_000).describe("Total budget in USD over the workspace's lifetime (not what is left)."),
+      provisioner: documentRef
+        .optional()
+        .describe(`Only when the workspace has no budget yet — ${BUDGET_PROVISIONER_DESCRIPTION} Default: the workspace's parent.`)
+    })
+    .strict(),
+  handler: async (args, ctx) => {
+    const { documentId, access } = await requireAccess(args.document, ctx, "edit");
+    const current = await getWorkspaceBudget(documentId).catch(() => null);
+    if (current && !current.closedAt) {
+      if (args.provisioner && parseDocumentRef(args.provisioner) !== current.provisionerDocumentId) {
+        throw new McpToolError("That workspace already has a budget from another provisioner.");
+      }
+      // Raising a budget is the provisioner's decision, not the workspace's.
+      await requireAccess(current.provisionerDocumentId, ctx, "edit");
+      const updated = await workspaceCall(() => updateWorkspaceBudget({ documentId, budgetUsd: args.budget_usd }));
+      return {
+        document: documentId,
+        budget: { budget_usd: updated.budgetUsd, cost_project: updated.costsProject, providers: current.providers },
+        warnings: updated.warnings
+      };
+    }
+    const parent = await db.document.findUnique({ where: { id: documentId }, select: { parentDocumentId: true } });
+    const provisionerRef = args.provisioner ?? parent?.parentDocumentId;
+    if (!provisionerRef) {
+      throw new McpToolError("Name the provisioner: this workspace has no parent to take the budget from.");
+    }
+    const { documentId: provisionerDocumentId } = await requireAccess(provisionerRef, ctx, "edit");
+    const budget = await workspaceCall(() =>
+      provisionWorkspaceBudget({
+        provisionerDocumentId,
+        documentId,
+        userId: ctx.user.id,
+        budgetUsd: args.budget_usd,
+        title: access.document.title,
+        documentUrl: `${ctx.origin}/documents/${documentId}`
+      })
+    );
+    return { document: documentId, budget: budgetResult(budget), warnings: [] };
+  }
+});
+
+const getWorkspaceBudgetTool = defineTool({
+  name: "get_workspace_budget",
+  description:
+    "A workspace's compute budget and what it has spent so far, in total and per provider (litellm, tinker, openweights, modal, …), from the cost dashboard. " +
+    "Spend arrives with a delay (synced_at per provider; Tinker's own numbers lag about an hour, OpenWeights up to six), so the latest spending is not in yet. Needs view access.",
+  schema: z.object({ document: documentRef }).strict(),
+  handler: async (args, ctx) => {
+    const { documentId } = await requireAccess(args.document, ctx, "view");
+    const budget = await workspaceCall(() => getWorkspaceBudget(documentId));
+    if (!budget) return { document: documentId, budget: null };
+    const spend = budget.spend;
+    return {
+      document: documentId,
+      budget: {
+        ...budgetResult(budget),
+        closed_at: budget.closedAt,
+        ...(spend
+          ? {
+              spent_usd: spend.spent_usd,
+              estimated_usd: spend.estimated_usd,
+              remaining_usd: spend.remaining_usd,
+              over_budget: spend.over_budget,
+              by_provider: spend.by_provider,
+              // budgets that apply: this workspace's own and those of the projects above it
+              limits: spend.limits,
+              synced_at: spend.synced_at
+            }
+          : { spend_error: budget.spendError })
+      }
+    };
+  }
+});
+
 export const MCP_TOOLS: McpTool[] = [
   listDocuments,
   listQuicktakes,
@@ -1217,7 +1373,9 @@ export const MCP_TOOLS: McpTool[] = [
   provisionLiteLlmKeyTool,
   updateLiteLlmKeyTool,
   revokeLiteLlmKeyTool,
-  listLiteLlmKeysTool
+  listLiteLlmKeysTool,
+  setWorkspaceBudgetTool,
+  getWorkspaceBudgetTool
 ];
 
 /** The `workspaces` toolset (McpToolContext.toolset). */
@@ -1229,7 +1387,9 @@ export const WORKSPACE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "provision_litellm_key",
   "update_litellm_key",
   "revoke_litellm_key",
-  "list_litellm_keys"
+  "list_litellm_keys",
+  "set_workspace_budget",
+  "get_workspace_budget"
 ]);
 
 // Tools that roam across the user's documents; a document-scoped caller

@@ -266,6 +266,24 @@ straight into the target env (secret) and a `ProvisionedCredential` row (audit +
 `LITELLM_ADMIN_BASE_URL` (default: server `LITELLM_BASE_URL` with host.docker.internal→127.0.0.1),
 `LITELLM_PROVISION_MAX_BUDGET_USD` (cap), `LITELLM_PROVISION_TEAM_ID`. Logs: `[workspace-provisioning]`,
 `[litellm-provisioning]`. Test: `tests/workspace-provisioning.test.ts` (fake LiteLLM proxy).
+**Workspace budgets** (2026-11-17, `lib/workspace-budget.ts`, `lib/costs-client.ts`, `lib/openweights-provisioning.ts`,
+table `WorkspaceBudget`): `create_workspace { budget_usd, provisioner? }`, `set_workspace_budget`, `get_workspace_budget`.
+A budgeted workspace is a PROJECT with a lifetime budget in the cost dashboard (`../costs`, nested under the
+provisioner's `COSTS_PARENT_PROJECT`); the dashboard is the ledger, r-docs hands out the keys. The provisioner
+(default: the parent) must hold `COSTS_ADMIN_TOKEN` (a dashboard API token; server env is the fallback) and whichever of
+these it can pay for: `LITELLM_ADMIN_KEY` → a key with `max_budget` = the budget and metadata `costs_project`;
+`OPENWEIGHTS_ADMIN_KEY` (+ `OPENWEIGHTS_SUPABASE_URL` / `OPENWEIGHTS_SUPABASE_ANON_KEY`, provisioner or server env) → an
+OpenWeights API token with that lifetime spending limit (`ProvisionedCredential.externalId` = the token id);
+`TINKER_API_KEY`, `MODAL_TOKEN_ID`+`MODAL_TOKEN_SECRET` → handed on as they are ("shared": no limit of their own). The
+workspace also gets `COSTS_PROJECT`, the name agents tag shared-key spend with (the `compute-costs` skill says how; Tinker
+project ids are server-assigned UUIDs, so `TINKER_PROJECT_ID` cannot carry it). `COSTS_ADMIN_TOKEN` and
+`OPENWEIGHTS_ADMIN_KEY` are provisioner secrets like `LITELLM_ADMIN_KEY` (never in a run env). A failed provisioning undoes
+itself, and `create_workspace` then deletes the new document. Changing a budget needs edit on the provisioner that gave it,
+so a workspace's own run (confined to its document) cannot raise it; providers that refuse the new limit come back as
+`warnings`. **Not enforced yet:** each minted key is limited to the full budget by its provider, the combined total and the
+shared keys are only reported (`get_workspace_budget` → spend per provider and `synced_at`, straight from the dashboard).
+`WORKSPACE_MAX_BUDGET_USD` on the provisioner caps a single workspace. Minting against the real OpenWeights API has not
+been run (the fake in `tests/workspace-budget.test.ts` mirrors the `ow token` CLI's calls). Logs: `[workspace-budget]`.
 `GET /authorize?redirect_uri&state` + `POST /api/authorize` (`lib/integration-signin.ts`) is
 the generic **"Sign in with r-docs"** seam: a signed-in user consents, and r-docs redirects
 back with a 2-minute HS256 id token (`sub`, `email`, `name`, `aud` = redirect origin) signed

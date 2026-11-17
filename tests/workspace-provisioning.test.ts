@@ -171,11 +171,13 @@ test("the workspaces toolset exposes only provisioning tools", async () => {
   const names = (list.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name).sort();
   assert.deepEqual(names, [
     "create_workspace",
+    "get_workspace_budget",
     "list_child_workspaces",
     "list_litellm_keys",
     "list_workspace_env",
     "provision_litellm_key",
     "revoke_litellm_key",
+    "set_workspace_budget",
     "set_workspace_env",
     "update_litellm_key"
   ]);

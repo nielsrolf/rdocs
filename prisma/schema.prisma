@@ -365,9 +365,35 @@ model ProvisionedCredential {
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
   revokedAt             DateTime?
+  // The provider's own id for the credential where it needs one to update or
+  // revoke it (OpenWeights: the API token id). Null for LiteLLM keys.
+  externalId            String?
 
   @@index([provisionerDocumentId])
   @@index([targetDocumentId, envKey])
+}
+
+// A workspace (document) with a total compute budget (lib/workspace-budget.ts).
+// `costsProject` is its project in the cost dashboard (services/costs), which
+// adds up what every provider billed for it; the credentials in the
+// workspace's env were minted or handed on by `provisionerDocumentId` so that
+// their spend lands in that project. Plain-string document ids, like
+// ProvisionedCredential: the record outlives a deleted document.
+model WorkspaceBudget {
+  id                    String    @id @default(cuid())
+  documentId            String    @unique
+  provisionerDocumentId String
+  costsProject          String
+  budgetUsd             Float
+  // JSON object, provider -> how the workspace got its credential:
+  // "minted" (own key with its own limit) or "shared" (the provisioner's key).
+  providers             String    @default("{}")
+  createdById           String
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  closedAt              DateTime?
+
+  @@index([provisionerDocumentId])
 }
 
 // An HTTP MCP server mounted into every agent run of this document, next to

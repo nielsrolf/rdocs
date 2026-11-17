@@ -145,6 +145,11 @@ export type ProvisionLiteLlmKeyInput = {
   models?: string[] | null;
   envKey?: string;
   replace?: boolean;
+  /**
+   * Project in the cost dashboard this key's spend belongs to. Stored as key
+   * metadata `costs_project`, which the dashboard reads as the spend's project.
+   */
+  costsProject?: string;
 };
 
 export async function provisionLiteLlmKey(input: ProvisionLiteLlmKeyInput, fetchImpl: FetchLike = fetch) {
@@ -176,7 +181,8 @@ export async function provisionLiteLlmKey(input: ProvisionLiteLlmKeyInput, fetch
       metadata: {
         rdocs_provisioner_document_id: input.provisionerDocumentId,
         rdocs_target_document_id: input.targetDocumentId,
-        rdocs_user_id: input.userId
+        rdocs_user_id: input.userId,
+        ...(input.costsProject ? { costs_project: input.costsProject } : {})
       }
     },
     fetchImpl
