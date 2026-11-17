@@ -58,6 +58,8 @@ async function startFakeProviders() {
   const requests: Recorded[] = [];
   const projects = new Map<string, Record<string, unknown>>();
   const fail = new Set<string>(); // rpc or path names that answer 500
+  const modalEnvironments = new Set<string>(); // cost projects that own a Modal environment
+  const modalApps = new Map<string, number>(); // project → apps running in its environment
   let counter = 0;
   const server = http.createServer((req, res) => {
     let raw = "";
@@ -84,6 +86,22 @@ async function startFakeProviders() {
         }
         const project = projects.get(name);
         if (!project) return send(404, { detail: `no project '${name}'` });
+        if (path.includes("/modal-environment")) {
+          if (req.method === "POST" && path.endsWith("/stop")) {
+            const stopped = modalEnvironments.has(name) ? (modalApps.get(name) ?? 0) : 0;
+            modalApps.delete(name);
+            return send(200, { project: name, stopped });
+          }
+          if (req.method === "POST") {
+            const created = !modalEnvironments.has(name);
+            modalEnvironments.add(name);
+            return send(200, { environment: name, connection: "modal (lab)", workspace: "lab", created });
+          }
+          if (req.method === "DELETE") {
+            modalEnvironments.delete(name);
+            return send(200, { project: name });
+          }
+        }
         if (req.method === "PATCH") {
           Object.assign(project, body);
           if (body && "closed" in body) project.closed_at = body.closed ? "2026-11-17T12:00:00+00:00" : null;
@@ -146,6 +164,8 @@ async function startFakeProviders() {
     requests,
     projects,
     fail,
+    modalEnvironments,
+    modalApps,
     calls: (suffix: string) => requests.filter((request) => request.path.endsWith(suffix)),
     close: () => new Promise<void>((resolve) => server.close(() => resolve()))
   };
@@ -179,6 +199,12 @@ function assertNoSecrets(text: string) {
   for (const secret of SECRETS) assert.ok(!text.includes(secret), `the tool result must not contain ${secret}`);
 }
 
+// Budgets left open by earlier runs point at fake servers that are gone; every
+// enforcement pass would ask for each of them and log an error.
+test.before(async () => {
+  await db.workspaceBudget.updateMany({ where: { closedAt: null }, data: { closedAt: new Date() } });
+});
+
 test("create_workspace with budget_usd: a cost project, minted keys with that limit, shared keys handed on", async () => {
   const fake = await startFakeProviders();
   try {
@@ -200,11 +226,12 @@ test("create_workspace with budget_usd: a cost project, minted keys with that li
       budget_usd: 1000,
       cost_project: project,
       cost_project_parent: "backlog",
-      providers: { litellm: "minted", openweights: "minted", tinker: "shared", modal: "shared" }
+      providers: { litellm: "minted", openweights: "minted", tinker: "shared", modal: "environment" }
     });
     assert.deepEqual(created.env_keys, [
       "COSTS_PROJECT",
       "LITELLM_API_KEY",
+      "MODAL_ENVIRONMENT",
       "MODAL_TOKEN_ID",
       "MODAL_TOKEN_SECRET",
       "OPENWEIGHTS_API_KEY",
@@ -229,10 +256,15 @@ test("create_workspace with budget_usd: a cost project, minted keys with that li
       spending_limit_usd: "1000"
     });
 
+    // Modal: the dashboard creates the workspace's environment with the provisioner's token
+    assert.deepEqual(fake.calls(`/${project}/modal-environment`)[0].body, { token_id: "ak-shared", token_secret: "as-shared" });
+    assert.ok(fake.modalEnvironments.has(project));
+
     // the workspace's runs get its own keys; the provisioner's runs never get the admin secrets
     assert.deepEqual(await loadDocumentEnv(created.id), {
       COSTS_PROJECT: project,
       LITELLM_API_KEY: "sk-minted-1",
+      MODAL_ENVIRONMENT: project,
       MODAL_TOKEN_ID: "ak-shared",
       MODAL_TOKEN_SECRET: "as-shared",
       OPENWEIGHTS_API_KEY: "ow_minted_2",
@@ -347,7 +379,21 @@ test("only what the provisioner has is set up; caps and missing configuration ar
     assert.equal(created.isError, false, created.text);
     assert.deepEqual(created.json().budget.providers, { tinker: "shared" });
     assert.equal(created.json().budget.cost_project_parent, null);
+    assert.equal(created.json().budget.warnings, undefined);
     assert.equal(fake.calls("/key/generate").length, 0);
+    assert.equal(fake.modalEnvironments.size, 0, "no Modal token, no Modal environment");
+
+    // a dashboard that cannot create the Modal environment: the token is shared as before, and the result says so
+    await upsertDocumentEnv(provisioner.id, "MODAL_TOKEN_ID", "ak-shared");
+    await upsertDocumentEnv(provisioner.id, "MODAL_TOKEN_SECRET", "as-shared");
+    fake.fail.add("/modal-environment");
+    const shared = await callTool(ctx, "create_workspace", { parent: provisioner.id, title: "No env", budget_usd: 5 });
+    assert.equal(shared.isError, false, shared.text);
+    assertNoSecrets(shared.text);
+    assert.deepEqual(shared.json().budget.providers, { tinker: "shared", modal: "shared" });
+    assert.match(shared.json().budget.warnings[0], /Modal: no environment of its own/);
+    assert.equal((await loadDocumentEnv(shared.json().id)).MODAL_ENVIRONMENT, undefined);
+    fake.fail.delete("/modal-environment");
 
     // half-configured OpenWeights is refused before anything is created
     delete process.env.OPENWEIGHTS_SUPABASE_URL;
@@ -421,17 +467,22 @@ test("a used-up budget stops the workspace; raising it brings it back, and the L
     await assertWorkspaceBudgetAvailable(created.id);
 
     // $61 spent of $50
+    fake.modalApps.set(created.budget.cost_project, 2);
     const first = await enforceWorkspaceBudgets();
     assert.ok(first.exhausted.includes(created.budget.cost_project), JSON.stringify(first));
+    assert.equal(first.stoppedModalApps, 2, "the apps in the workspace's Modal environment are stopped");
     assert.ok((await db.workspaceBudget.findUniqueOrThrow({ where: { documentId: created.id } })).exhaustedAt);
     assert.deepEqual(fake.calls("/key/block").at(-1)?.body, { key: "sk-minted-1" });
     assert.deepEqual(await runBudgetState(run.id), { costsProject: created.budget.cost_project, exhausted: true });
     await assert.rejects(assertWorkspaceBudgetAvailable(created.id), /budget \(\$50\) is used up/);
     const events = await db.aiRunEvent.findMany({ where: { aiRunId: run.id, role: "error" } });
     assert.match(events[0].message, /budget is used up \(\$61 spent, budget \$50\)/);
-    // a second look changes nothing
+    // a second look changes nothing, except that Modal apps started since are stopped too
     const blocks = fake.calls("/key/block").length;
-    assert.deepEqual((await enforceWorkspaceBudgets()).exhausted, []);
+    fake.modalApps.set(created.budget.cost_project, 1);
+    const second = await enforceWorkspaceBudgets();
+    assert.deepEqual(second.exhausted, []);
+    assert.equal(second.stoppedModalApps, 1);
     assert.equal(fake.calls("/key/block").length, blocks);
 
     // the provisioner raises it: the workspace runs again, the key may spend 1000 - 43
@@ -442,6 +493,11 @@ test("a used-up budget stops the workspace; raising it brings it back, and the L
     assert.deepEqual(fake.calls("/key/update").at(-1)?.body, { key: "sk-minted-1", max_budget: 957 });
     await assertWorkspaceBudgetAvailable(created.id);
     assert.equal((await runBudgetState(run.id)).exhausted, false);
+    // with budget left, nothing is stopped at Modal
+    fake.modalApps.set(created.budget.cost_project, 3);
+    const stops = fake.calls("/modal-environment/stop").length;
+    assert.equal((await enforceWorkspaceBudgets()).stoppedModalApps, 0);
+    assert.equal(fake.calls("/modal-environment/stop").length, stops);
 
     // closing: minted keys are revoked and leave the env, the project is closed, the budget no longer applies
     const closed = await callTool(ctx, "close_workspace_budget", { document: created.id });
@@ -450,8 +506,10 @@ test("a used-up budget stops the workspace; raising it brings it back, and the L
     assert.deepEqual(fake.calls("/key/delete").at(-1)?.body, { keys: ["sk-minted-1"] });
     assert.deepEqual(fake.calls("/revoke_api_token").at(-1)?.body, { token_id: "tok-2" });
     assert.equal(fake.projects.get(created.budget.cost_project)?.closed, true);
+    assert.equal(fake.modalApps.get(created.budget.cost_project), undefined, "closing stops the Modal apps");
+    assert.ok(fake.modalEnvironments.has(created.budget.cost_project), "but keeps the environment and its volumes");
     assert.deepEqual(Object.keys(await loadDocumentEnv(created.id)).sort(), [
-      "COSTS_PROJECT", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "RDOCS_BROKER_TINKER", "TINKER_API_KEY"
+      "COSTS_PROJECT", "MODAL_ENVIRONMENT", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "RDOCS_BROKER_TINKER", "TINKER_API_KEY"
     ]);
     assert.deepEqual(await runBudgetState(run.id), { costsProject: null, exhausted: false });
     assert.equal((await callTool(ctx, "close_workspace_budget", { document: created.id })).isError, true);
@@ -460,6 +518,12 @@ test("a used-up budget stops the workspace; raising it brings it back, and the L
     assert.equal(reopened.isError, false, reopened.text);
     assert.equal(reopened.json().budget.cost_project, created.budget.cost_project);
     assert.equal(fake.projects.get(created.budget.cost_project)?.closed, false);
+    // closing for good can take the Modal environment with it
+    const gone = await callTool(ctx, "close_workspace_budget", { document: created.id, delete_modal_environment: true });
+    assert.deepEqual(gone.json().warnings, []);
+    assert.equal(fake.modalEnvironments.has(created.budget.cost_project), false);
+    assert.equal((await loadDocumentEnv(created.id)).MODAL_ENVIRONMENT, undefined);
+    assert.equal((await callTool(ctx, "set_workspace_budget", { document: created.id, budget_usd: 1000 })).isError, false);
 
     // an unreachable dashboard is reported, and nobody is stopped because of it
     fake.fail.add("/spend");

@@ -164,6 +164,47 @@ export async function getCostsSpend(config: CostsConfig, name: string, fetchImpl
   return costsRequest<CostsSpend>(config, "GET", `${projectPath(name)}/spend`, undefined, fetchImpl);
 }
 
+export type CostsModalEnvironment = { environment: string; connection: string; workspace: string; created: boolean };
+
+/**
+ * Give the project its own Modal environment (created if missing, named after
+ * the project) in the Modal workspace of the given token. The dashboard then
+ * counts everything billed in that environment for the project, and
+ * `stopCostsModalApps` stops what runs there. The dashboard does this rather
+ * than r-docs because it is the one with a Modal client and the bill.
+ */
+export async function ensureCostsModalEnvironment(
+  config: CostsConfig,
+  project: string,
+  token: { tokenId: string; tokenSecret: string },
+  fetchImpl: FetchLike = fetch
+): Promise<CostsModalEnvironment> {
+  return costsRequest<CostsModalEnvironment>(
+    config,
+    "POST",
+    `${projectPath(project)}/modal-environment`,
+    { token_id: token.tokenId, token_secret: token.tokenSecret },
+    fetchImpl
+  );
+}
+
+/** Stop every app in the project's Modal environments. Returns how many were stopped. */
+export async function stopCostsModalApps(config: CostsConfig, project: string, fetchImpl: FetchLike = fetch): Promise<number> {
+  const result = await costsRequest<{ stopped: number }>(
+    config,
+    "POST",
+    `${projectPath(project)}/modal-environment/stop`,
+    {},
+    fetchImpl
+  );
+  return result.stopped;
+}
+
+/** Stop the apps and delete the environment at Modal, with its volumes and secrets. Irreversible. */
+export async function deleteCostsModalEnvironment(config: CostsConfig, project: string, fetchImpl: FetchLike = fetch) {
+  await costsRequest(config, "DELETE", `${projectPath(project)}/modal-environment?delete_environment=true`, undefined, fetchImpl);
+}
+
 /** A project name for a workspace: readable, and unique through the document id. */
 export function costsProjectName(title: string, documentId: string): string {
   const slug = title

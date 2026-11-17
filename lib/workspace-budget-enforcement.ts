@@ -15,13 +15,18 @@
 //              enforces that immediately, so LLM spend cannot run past the
 //              total even between two looks at the dashboard.
 //
+//   Modal    a workspace with its own Modal environment has every app in it
+//              stopped, on every pass while the budget is used up (nothing
+//              keeps a token from starting new ones).
+//
 // What this cannot stop: spend that does not go through the broker and is not
-// a minted key — a shared Modal token, a Tinker key used without the broker,
-// jobs already submitted to OpenWeights (its own token limit covers those).
+// a minted key — Modal apps outside the workspace's environment, a Tinker key
+// used without the broker, jobs already submitted to OpenWeights (its own
+// token limit covers those).
 // And because the dashboard lags (Tinker about an hour), a budget is overshot
 // by whatever is spent in that time.
 
-import { getCostsSpend, resolveCostsConfig, type CostsSpend } from "@/lib/costs-client";
+import { getCostsSpend, resolveCostsConfig, stopCostsModalApps, type CostsSpend } from "@/lib/costs-client";
 import { cancelAiRun } from "@/lib/agent-runner/run-registry";
 import { db } from "@/lib/db";
 import { loadProvisionerEnv } from "@/lib/document-env";
@@ -34,6 +39,8 @@ export type BudgetEnforcementResult = {
   checked: number;
   exhausted: string[];
   restored: string[];
+  /** Modal apps stopped in the environments of used-up workspaces. */
+  stoppedModalApps: number;
   errors: string[];
 };
 
@@ -76,7 +83,7 @@ async function stopRuns(documentId: string, message: string) {
 
 /** One pass over every open budget. Never throws: a budget that cannot be checked is reported in `errors`. */
 export async function enforceWorkspaceBudgets(fetchImpl: FetchLike = fetch): Promise<BudgetEnforcementResult> {
-  const result: BudgetEnforcementResult = { checked: 0, exhausted: [], restored: [], errors: [] };
+  const result: BudgetEnforcementResult = { checked: 0, exhausted: [], restored: [], stoppedModalApps: 0, errors: [] };
   const budgets = await db.workspaceBudget.findMany({ where: { closedAt: null } });
   const envs = new Map<string, Record<string, string>>();
   for (const budget of budgets) {
@@ -88,7 +95,21 @@ export async function enforceWorkspaceBudgets(fetchImpl: FetchLike = fetch): Pro
       const spend = await getCostsSpend(costs, budget.costsProject, fetchImpl);
       result.checked++;
       const usedUp = spend.remaining_usd !== null && spend.remaining_usd <= 0;
-      const hasLiteLlmKey = providersOf(budget.providers).litellm === "minted";
+      const providers = providersOf(budget.providers);
+      const hasLiteLlmKey = providers.litellm === "minted";
+      // Every pass, not only when the budget runs out: the token still works.
+      const stopModal = async () => {
+        if (providers.modal !== "environment") return;
+        try {
+          const stopped = await stopCostsModalApps(costs, budget.costsProject, fetchImpl);
+          result.stoppedModalApps += stopped;
+          if (stopped > 0) {
+            console.warn("[workspace-budget] stopped Modal apps", JSON.stringify({ documentId: budget.documentId, costsProject: budget.costsProject, stopped }));
+          }
+        } catch (error) {
+          result.errors.push(`${budget.costsProject}: Modal apps not stopped: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      };
 
       if (usedUp && !budget.exhaustedAt) {
         await db.workspaceBudget.update({ where: { id: budget.id }, data: { exhaustedAt: new Date() } });
@@ -97,6 +118,7 @@ export async function enforceWorkspaceBudgets(fetchImpl: FetchLike = fetch): Pro
           budget.documentId,
           `Stopped: this workspace's compute budget is used up ($${spend.spent_usd} spent, budget $${budget.budgetUsd}).`
         );
+        await stopModal();
         if (hasLiteLlmKey) await setLiteLlmKey(budget, { blocked: true }, fetchImpl);
         result.exhausted.push(budget.costsProject);
         console.warn(
@@ -113,6 +135,7 @@ export async function enforceWorkspaceBudgets(fetchImpl: FetchLike = fetch): Pro
         );
         continue;
       }
+      if (usedUp) await stopModal();
       if (!usedUp && budget.exhaustedAt) {
         await db.workspaceBudget.update({ where: { id: budget.id }, data: { exhaustedAt: null } });
         forgetRunBudgetStates();

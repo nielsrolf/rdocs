@@ -972,17 +972,26 @@ const BUDGET_PROVISIONER_DESCRIPTION =
 
 const BUDGET_DESCRIPTION =
   "it becomes a project with that budget in the cost dashboard, and the workspace gets its own credentials so its spend is counted there: " +
-  "a LiteLLM key and an OpenWeights token limited to the budget (where the provisioner can mint them), and the provisioner's Tinker and Modal keys. " +
-  "Each minted key is limited to the full budget on its own; Tinker and Modal have no limit of their own and only count when the agent tags its usage with the COSTS_PROJECT env var. " +
+  "a LiteLLM key and an OpenWeights token limited to the budget (where the provisioner can mint them), the provisioner's Tinker key (used through r-docs, which counts it), " +
+  "and the provisioner's Modal token together with a Modal environment of the workspace's own (MODAL_ENVIRONMENT). " +
+  "When the total is used up, the workspace's runs, LLM and Tinker calls are refused and every app in its Modal environment is stopped. " +
   "Read the spend with get_workspace_budget.";
 
-function budgetResult(budget: { costsProject: string; costsParent?: string | null; budgetUsd: number; providers: Record<string, string> }) {
+function budgetResult(budget: {
+  costsProject: string;
+  costsParent?: string | null;
+  budgetUsd: number;
+  providers: Record<string, string>;
+  warnings?: string[];
+}) {
   return {
     budget_usd: budget.budgetUsd,
     cost_project: budget.costsProject,
     ...(budget.costsParent !== undefined ? { cost_project_parent: budget.costsParent } : {}),
     // "minted": the workspace's own key, limited to the budget. "shared": the provisioner's key, no limit of its own.
-    providers: budget.providers
+    // "environment" (Modal): the provisioner's token plus the workspace's own Modal environment, counted and stoppable.
+    providers: budget.providers,
+    ...(budget.warnings?.length ? { warnings: budget.warnings } : {})
   };
 }
 
@@ -1311,7 +1320,7 @@ const setWorkspaceBudgetTool = defineTool({
         documentUrl: `${ctx.origin}/documents/${documentId}`
       })
     );
-    return { document: documentId, budget: budgetResult(budget), warnings: [] };
+    return { document: documentId, budget: budgetResult({ ...budget, warnings: undefined }), warnings: budget.warnings };
   }
 });
 
@@ -1319,15 +1328,25 @@ const closeWorkspaceBudgetTool = defineTool({
   name: "close_workspace_budget",
   description:
     "End a workspace's compute budget when its work is done: the LiteLLM key and OpenWeights token minted for it are revoked and removed from its environment, " +
-    "and its cost project is marked closed (the numbers stay). The document, its other env vars and shared keys are left alone. " +
+    "the apps in its Modal environment are stopped, and its cost project is marked closed (the numbers stay). The document, its other env vars and shared keys are left alone. " +
     "Needs edit access to the workspace and to the provisioner that gave the budget.",
-  schema: z.object({ document: documentRef }).strict(),
+  schema: z
+    .object({
+      document: documentRef,
+      delete_modal_environment: z
+        .boolean()
+        .optional()
+        .describe("Also delete the workspace's Modal environment with every volume and secret in it. Irreversible; default false (apps are stopped, data stays).")
+    })
+    .strict(),
   handler: async (args, ctx) => {
     const { documentId } = await requireAccess(args.document, ctx, "edit");
     const current = await getWorkspaceBudget(documentId).catch(() => null);
     if (!current || current.closedAt) throw new McpToolError("That workspace has no open budget.");
     await requireAccess(current.provisionerDocumentId, ctx, "edit");
-    const closed = await workspaceCall(() => closeWorkspaceBudget(documentId));
+    const closed = await workspaceCall(() =>
+      closeWorkspaceBudget(documentId, fetch, { deleteModalEnvironment: args.delete_modal_environment === true })
+    );
     return { document: documentId, cost_project: closed.costsProject, closed: true, warnings: closed.warnings };
   }
 });

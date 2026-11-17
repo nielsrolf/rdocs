@@ -11,18 +11,22 @@
 //        openweights  an API token with a lifetime spending limit = the budget
 //                     (the provisioner's OPENWEIGHTS_API_KEY, or
 //                     OPENWEIGHTS_ADMIN_KEY to keep it from its own runs)
-//        tinker       the provisioner's TINKER_API_KEY, handed on by name
-//        modal        the provisioner's MODAL_TOKEN_ID / MODAL_TOKEN_SECRET
-//   3. sets COSTS_PROJECT in the workspace env, the name agents tag shared-key
-//      spend with (Tinker session metadata `project`, Modal tag `project`,
-//      RunPod pod name prefix) — see the compute-costs skill.
+//        tinker       the provisioner's TINKER_API_KEY, handed on by name and
+//                     used through the credential broker (RDOCS_BROKER_TINKER)
+//        modal        the provisioner's MODAL_TOKEN_ID / MODAL_TOKEN_SECRET,
+//                     plus the workspace's OWN Modal environment
+//                     (MODAL_ENVIRONMENT), which the dashboard creates
+//   3. sets COSTS_PROJECT in the workspace env, the name agents tag other
+//      shared-key spend with (RunPod pod name prefix) — see the compute-costs skill.
 //
 // What is and is not enforced. LiteLLM and OpenWeights enforce the limit of
 // the minted key themselves, each up to the FULL budget (a limit per provider,
-// not a reservation). Tinker and Modal keys are the provisioner's own and have
-// no limit of their own: their spend is only visible in the dashboard, after
-// the fact and only when the agent tags it. The combined total is not enforced
-// here yet; `getWorkspaceBudget` reports it.
+// not a reservation). The combined total is enforced by
+// lib/workspace-budget-enforcement.ts: LiteLLM key, broker (Tinker), and for
+// Modal by stopping every app in the workspace's environment. A Modal token
+// has no limit and is not confined to that environment: an agent that names
+// another environment escapes both the count and the stop. Modal's own
+// per-environment budgets are a plan feature we do not have.
 //
 // Only providers the provisioner has credentials for are set up; the result
 // says which. Authorization (edit on provisioner and workspace) is the
@@ -32,10 +36,13 @@ import {
   costsProjectName,
   COSTS_ADMIN_TOKEN_ENV,
   CostsError,
+  deleteCostsModalEnvironment,
   deleteCostsProject,
+  ensureCostsModalEnvironment,
   ensureCostsProject,
   getCostsSpend,
   resolveCostsConfig,
+  stopCostsModalApps,
   updateCostsProject,
   type CostsConfig,
   type CostsSpend
@@ -62,6 +69,7 @@ import {
 export class WorkspaceBudgetError extends Error {}
 
 export const COSTS_PROJECT_ENV = "COSTS_PROJECT";
+export const MODAL_ENVIRONMENT_ENV = "MODAL_ENVIRONMENT";
 const OPENWEIGHTS_KEY_ENV = "OPENWEIGHTS_API_KEY";
 const OPENWEIGHTS_PROVIDER = "openweights";
 const MAX_BUDGET_USD = 1_000_000;
@@ -72,7 +80,12 @@ const SHARED_KEYS: Record<string, string[]> = {
 };
 
 type FetchLike = typeof fetch;
-export type BudgetProviders = Record<string, "minted" | "shared">;
+/**
+ * "minted": the workspace's own key, limited to the budget. "shared": the
+ * provisioner's key, no limit of its own. "environment" (Modal): the shared
+ * token plus the workspace's own Modal environment, counted and stoppable.
+ */
+export type BudgetProviders = Record<string, "minted" | "shared" | "environment">;
 
 function isBudgetError(error: unknown): error is Error {
   return (
@@ -139,6 +152,8 @@ export type ProvisionedWorkspaceBudget = {
   costsParent: string | null;
   budgetUsd: number;
   providers: BudgetProviders;
+  /** What could not be set up as intended (the budget itself stands). */
+  warnings: string[];
 };
 
 /**
@@ -164,6 +179,7 @@ export async function provisionWorkspaceBudget(
   const costsParent = env.COSTS_PARENT_PROJECT?.trim() || null;
 
   const providers: BudgetProviders = {};
+  const warnings: string[] = [];
   const undo: Array<() => Promise<unknown>> = [];
   try {
     await ensureCostsProject(
@@ -227,6 +243,28 @@ export async function provisionWorkspaceBudget(
       providers[provider] = "shared";
     }
 
+    // Modal: the token has no limit, so the workspace gets its own environment.
+    // What runs there is counted for the workspace and can be stopped.
+    if (providers.modal) {
+      try {
+        const modal = await ensureCostsModalEnvironment(
+          costs,
+          costsProject,
+          { tokenId: env.MODAL_TOKEN_ID.trim(), tokenSecret: env.MODAL_TOKEN_SECRET.trim() },
+          fetchImpl
+        );
+        // Only an environment this call created is ours to delete again.
+        if (modal.created) undo.push(() => deleteCostsModalEnvironment(costs, costsProject, fetchImpl));
+        await upsertDocumentEnv(input.documentId, MODAL_ENVIRONMENT_ENV, modal.environment, false);
+        providers.modal = "environment";
+      } catch (error) {
+        if (!(error instanceof CostsError)) throw error;
+        warnings.push(
+          `Modal: no environment of its own (${error.message}). The workspace shares the Modal token without a limit; its Modal spend only counts when apps are tagged project=${costsProject}.`
+        );
+      }
+    }
+
     // Tinker goes through the credential broker here: the workspace's runs get a
     // per-run virtual key, their sessions are tagged with the cost project, and
     // the broker stops forwarding once the budget is used up.
@@ -266,10 +304,11 @@ export async function provisionWorkspaceBudget(
       costsParent,
       budgetUsd: input.budgetUsd,
       providers,
+      warnings,
       userId: input.userId
     })
   );
-  return { costsProject, costsParent, budgetUsd: input.budgetUsd, providers };
+  return { costsProject, costsParent, budgetUsd: input.budgetUsd, providers, warnings };
 }
 
 async function requireBudget(documentId: string) {
@@ -338,13 +377,16 @@ export async function updateWorkspaceBudget(
 
 /**
  * End a workspace's budget: the keys minted for it are revoked (and leave its
- * env), the cost project is marked closed (its numbers stay), and the budget
- * no longer applies. Shared keys and the document itself are left alone.
+ * env), the apps in its Modal environment are stopped, the cost project is
+ * marked closed (its numbers stay), and the budget no longer applies. Shared
+ * keys and the document itself are left alone. The Modal environment stays
+ * (its volumes may hold results) unless `deleteModalEnvironment` is set.
  * Returns what could not be revoked.
  */
 export async function closeWorkspaceBudget(
   documentId: string,
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = fetch,
+  options: { deleteModalEnvironment?: boolean } = {}
 ): Promise<{ costsProject: string; warnings: string[] }> {
   const budget = await requireBudget(documentId);
   const env = await loadProvisionerEnv(budget.provisionerDocumentId);
@@ -375,6 +417,17 @@ export async function closeWorkspaceBudget(
       await revokeOpenWeightsToken(config, record.externalId, fetchImpl);
       await deleteDocumentEnv(documentId, OPENWEIGHTS_KEY_ENV);
       await db.provisionedCredential.update({ where: { id: record.id }, data: { revokedAt: new Date() } });
+    });
+  }
+  if (providers.modal === "environment") {
+    await attempt(options.deleteModalEnvironment ? "Modal environment not deleted" : "Modal apps not stopped", async () => {
+      const costs = requireCosts(env);
+      if (options.deleteModalEnvironment) {
+        await deleteCostsModalEnvironment(costs, budget.costsProject, fetchImpl);
+        await deleteDocumentEnv(documentId, MODAL_ENVIRONMENT_ENV);
+      } else {
+        await stopCostsModalApps(costs, budget.costsProject, fetchImpl);
+      }
     });
   }
   await attempt("cost project not closed", () =>

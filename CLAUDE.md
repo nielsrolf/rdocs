@@ -277,8 +277,15 @@ these it can pay for: `LITELLM_ADMIN_KEY` → a key with `max_budget` = the budg
 the provisioner's `OPENWEIGHTS_API_KEY`, or `OPENWEIGHTS_ADMIN_KEY` (the same kind of key under a name its own runs never
 see; + `OPENWEIGHTS_SUPABASE_URL` / `OPENWEIGHTS_SUPABASE_ANON_KEY`, provisioner or server env) → an OpenWeights API token with that lifetime spending limit (`ProvisionedCredential.externalId` = the token id);
 `TINKER_API_KEY`, `MODAL_TOKEN_ID`+`MODAL_TOKEN_SECRET` → handed on as they are ("shared": no limit of their own). The
-workspace also gets `COSTS_PROJECT`, the name agents tag shared-key spend with (the `compute-costs` skill says how; Modal
-needs it, Tinker is tagged by the broker — Tinker project ids are server-assigned UUIDs, so `TINKER_PROJECT_ID` cannot carry it). `COSTS_ADMIN_TOKEN` and
+workspace also gets `COSTS_PROJECT`, the name agents tag shared-key spend with (the `compute-costs` skill says how;
+Tinker is tagged by the broker — Tinker project ids are server-assigned UUIDs, so `TINKER_PROJECT_ID` cannot carry it).
+**Modal** (2026-11-17): with a Modal token the workspace also gets its OWN Modal environment, created by the dashboard
+(`ensureCostsModalEnvironment` → `POST /api/projects/<project>/modal-environment`, named after the cost project; a Modal
+workspace the dashboard does not read yet becomes a connection there) and set as `MODAL_ENVIRONMENT` in the workspace env,
+which the Modal SDK/CLI use by default. Provider state `"environment"` instead of `"shared"`. Everything billed in that
+environment is the workspace's, tags or not. If the dashboard cannot create it, the budget still stands with Modal
+`"shared"` and a `warnings` entry. `close_workspace_budget` stops the environment's apps and keeps the environment (volumes
+may hold results); `delete_modal_environment: true` deletes it at Modal, irreversibly. `COSTS_ADMIN_TOKEN` and
 `OPENWEIGHTS_ADMIN_KEY` are provisioner secrets like `LITELLM_ADMIN_KEY` (never in a run env). A failed provisioning undoes
 itself, and `create_workspace` then deletes the new document. Changing a budget needs edit on the provisioner that gave it,
 so a workspace's own run (confined to its document) cannot raise it; providers that refuse the new limit come back as
@@ -291,9 +298,13 @@ budget leaves the OpenWeights token at its old limit (reported in `warnings`) un
 budget. Used up (`remaining_usd <= 0`, own budget or one above) → `WorkspaceBudget.exhaustedAt`: the credential broker answers
 **402 `budget_exhausted`** to every request of that workspace's runs (`lib/workspace-budget-state.ts`, 20 s cache, cleared on
 change), `loadAgentEnvWithFreeFallback` refuses new runs (`assertWorkspaceBudgetAvailable`), the minted LiteLLM key is blocked,
-and RUNNING runs get an error event and are cancelled if this process owns them. Raised → cleared and unblocked. In between,
+RUNNING runs get an error event and are cancelled if this process owns them, and every app in the workspace's Modal
+environment is stopped (`stopCostsModalApps`, repeated on EVERY pass while used up, because the token can still start new
+ones). Raised → cleared and unblocked. In between,
 the LiteLLM key's `max_budget` is kept at budget minus non-LiteLLM spend (`liteLlmAllowance`), so LLM spend cannot pass the
-total between two checks. Not stoppable from here: a shared Modal token, Tinker without the broker, jobs already at
+total between two checks. Not stoppable from here: Modal apps an agent starts in ANOTHER environment (the token is the
+provisioner's and not confined; Modal's own per-environment budgets, `EnvironmentSetBudget`, answer "not enabled for this
+workspace" on our plan), Tinker without the broker, jobs already at
 OpenWeights (its token limit covers those); and the dashboard lags (Tinker ~1 h), so a budget is overshot by what is spent
 in that time. An unreachable dashboard stops nobody (reported in `errors`).
 **Tinker through the broker** (`lib/credential-broker/tinker.ts`): opt-in per deployment (`AGENT_BROKER_TINKER=1`) or per
