@@ -41,8 +41,10 @@ test("the consent page offers presets, scaffold and model, skills, keys and a bu
   );
   for (const expected of [
     "Careful Opus, $50",                      // the preset to pick
-    "My default (Codex, GPT-5.6 Terra)",      // what leaving the scaffold alone means
     ">Claude Code<", ">Codex<",               // the scaffolds
+    'for="agent-setup-model"',                // the model picker is there without choosing a scaffold first
+    "My default (GPT-5.6 Terra)",             // ...starting at the user's default
+    "GPT-6 Astra", "ChatGPT subscription",    // ...with the models of the default's scaffold (Codex here)
     "My default (Medium)",                    // thinking
     "tinker", "Reference guide for the Tinker training API", "vibes-eval",
     "Claude subscription", "GitHub token",
@@ -54,11 +56,17 @@ test("the consent page offers presets, scaffold and model, skills, keys and a bu
   // nothing is preselected that the user did not choose: no skill ticked, no budget, the model key ticked as before
   assert.equal((html.match(/type="checkbox" checked=""/g) ?? []).length, 1);
   assert.ok(!html.includes("Budget (USD)"), "budget fields appear only once a paying document is picked");
+  // the scaffold shown is the one the default model belongs to, and only its models are listed
+  assert.match(html, /<option value="codex" selected="">Codex<\/option>/);
+  assert.ok(!html.includes("Sonnet latest"));
 });
 
 test("without presets, skills or a document to pay, those parts stay out of the way", async () => {
   const html = renderToStaticMarkup(createElement(await component(), { manifestUrl: "https://x.example.com/m", credentialChoices: null }));
   assert.ok(html.includes("None yet: configure below and save one"));
+  // no account defaults known: Claude Code and its models, with "My default" on top
+  assert.match(html, /<option value="claude-code" selected="">Claude Code<\/option>/);
+  assert.ok(html.includes(">My default<") && html.includes("Opus latest") && html.includes("Sonnet 5.5"));
   assert.ok(html.includes("Skills in your library (Settings → AI) can be added here."));
   assert.ok(!html.includes("Compute budget"));
   assert.ok(!html.includes("Keys this agent may use"));

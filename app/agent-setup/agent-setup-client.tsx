@@ -107,7 +107,9 @@ export function AgentSetupClient(props: Props) {
   const [presetId, setPresetId] = useState("");
   const [saveName, setSaveName] = useState("");
   const [notice, setNotice] = useState("");
-  const scaffold = model ? agentHarnessForModel(model) : "";
+  // "" as the model means the user's default, which belongs to one of the two scaffolds.
+  const defaultScaffold = props.defaults ? agentHarnessForModel(props.defaults.model) : "claude-code";
+  const scaffold = model ? agentHarnessForModel(model) : defaultScaffold;
   const selectedPreset = presets.find((preset) => preset.id === presetId) ?? null;
 
   useEffect(() => {
@@ -297,33 +299,30 @@ export function AgentSetupClient(props: Props) {
                 id="agent-setup-scaffold"
                 value={scaffold}
                 onChange={(event) => {
-                  const next = SCAFFOLDS.find((candidate) => candidate.id === event.target.value);
-                  setModel(next ? next.groups[0].models[0].value : "");
+                  // Back on the default's scaffold the model returns to "my default"; the other scaffold starts at its first model.
+                  const next = SCAFFOLDS.find((candidate) => candidate.id === event.target.value) ?? SCAFFOLDS[0];
+                  setModel(next.id === defaultScaffold ? "" : next.groups[0].models[0].value);
                 }}
               >
-                <option value="">
-                  My default{defaults ? ` (${agentHarnessForModel(defaults.model) === "codex" ? "Codex" : "Claude Code"}, ${modelLabel(defaults.model)})` : ""}
-                </option>
                 {SCAFFOLDS.map((candidate) => (
                   <option key={candidate.id} value={candidate.id}>{candidate.label}</option>
                 ))}
               </select>
 
-              {scaffold ? (
-                <>
-                  <label htmlFor="agent-setup-model">Model</label>
-                  <select id="agent-setup-model" value={model} onChange={(event) => setModel(event.target.value)}>
-                    {!modelListed ? <option value={model}>{model}</option> : null}
-                    {groups.map((group) => (
-                      <optgroup key={group.label} label={group.label}>
-                        {group.models.map((option) => (
-                          <option key={option.value} value={option.value}>{option.label}</option>
-                        ))}
-                      </optgroup>
+              <label htmlFor="agent-setup-model">Model</label>
+              <select id="agent-setup-model" value={model} onChange={(event) => setModel(event.target.value)}>
+                {scaffold === defaultScaffold ? (
+                  <option value="">My default{defaults ? ` (${modelLabel(defaults.model)})` : ""}</option>
+                ) : null}
+                {model && !modelListed ? <option value={model}>{model}</option> : null}
+                {groups.map((group) => (
+                  <optgroup key={group.label} label={group.label}>
+                    {group.models.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
                     ))}
-                  </select>
-                </>
-              ) : null}
+                  </optgroup>
+                ))}
+              </select>
 
               <label htmlFor="agent-setup-effort">Thinking</label>
               <select id="agent-setup-effort" value={effort} onChange={(event) => setEffort(event.target.value)}>
