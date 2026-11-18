@@ -589,7 +589,8 @@ test("agent prompt includes slack context and post_slack_message guidance", () =
     instruction: "clone the repo",
     githubAuthAvailable: true
   });
-  assert.match(withGithub, /GITHUB_TOKEN and GH_TOKEN are set/);
+  assert.match(withGithub, /GitHub access: you act with the requesting user.s GitHub credentials/);
+  assert.match(withGithub, /Never put a token into a remote URL/);
   assert.match(prompt, /post_slack_message/);
   assert.match(prompt, /\[carol\]: the eval numbers look off/);
 

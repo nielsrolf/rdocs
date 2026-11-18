@@ -21,6 +21,7 @@ __pycache__
 .python-home
 tsconfig.tsbuildinfo
 .research-workspaces/
+.research-git-auth/
 .user-skills/
 .skill-catalog/
 logs/

@@ -161,7 +161,8 @@ async function resolveWorkspaceDir(
 
 function configureGithubAuth(githubToken: string | undefined) {
   const token = githubToken?.trim();
-  if (!token) return;
+  // A brokered run carries a virtual token and its own GIT_CONFIG_* routing.
+  if (!token || token.startsWith("rdocs-vk-")) return;
   try {
     // Mirrors runner/agent-entrypoint.ts: lets plain `git clone/push
     // https://github.com/...` and `gh` pick up the run's resolved token via
@@ -170,14 +171,24 @@ function configureGithubAuth(githubToken: string | undefined) {
     // this machine/container — acceptable because the whole point of
     // self-hosting is that this box is already the user's own trusted
     // infrastructure.
+    // As a header, never inside a URL: git prints remote URLs (`git remote
+    // -v`, every push), and those prints end up in the run's log in r-docs.
+    execFileSync("git", ["config", "--global", "--unset-all", "url.https://x-access-token:" + token + "@github.com/.insteadOf"], {
+      stdio: "ignore"
+    });
+  } catch {
+    // Nothing to remove: no older version of this worker configured this box.
+  }
+  try {
     execFileSync("git", [
       "config",
       "--global",
-      `url.https://x-access-token:${token}@github.com/.insteadOf`,
-      "https://github.com/"
+      "http.https://github.com/.extraheader",
+      `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`
     ]);
   } catch (error) {
-    console.error(`[self-hosted-worker] git auth config failed: ${(error as Error).message}`);
+    console.error("[self-hosted-worker] git auth config failed: git config exited unsuccessfully.");
+    void error;
   }
 }
 

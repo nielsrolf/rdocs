@@ -7,6 +7,7 @@ import {
   resolveLatestAnthropicAlias
 } from "@/agent-core";
 import { applyRunCredentialPolicy, policyAllowsGithub, type RunCredentialPolicy } from "@/lib/run-credential-policy";
+import { rememberRunSecrets } from "@/lib/secret-redaction";
 import {
   anthropicCatalogCredentialFromEnv,
   refreshLatestAnthropicModels
@@ -892,6 +893,9 @@ export async function loadAgentEnvWithFreeFallback(
   // Credential broker (opt-in via AGENT_CREDENTIAL_BROKER): swap real API keys
   // for per-run virtual keys pointing at /api/broker. No-op when disabled, when
   // no run id is available to bind the keys to, or when nothing is brokerable.
+  // Before the swap, while the env still holds the real values: remember them,
+  // so tool output that echoes one is masked before it is stored (lib/ai-runs.ts).
+  if (opts.aiRunId) rememberRunSecrets(opts.aiRunId, concrete.agentEnv);
   if (opts.aiRunId && credentialBrokerEnabled()) {
     const { agentEnv } = await brokerizeAgentEnvForRun(concrete.agentEnv, {
       aiRunId: opts.aiRunId,

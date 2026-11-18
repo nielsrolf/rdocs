@@ -773,7 +773,7 @@ Critical: you run INSIDE the service you are working on. Restarting or rebuildin
       : "";
 
     const githubBlock = input.githubAuthAvailable
-      ? `GitHub access: GITHUB_TOKEN and GH_TOKEN are set in your environment with the requesting user's credentials — the gh CLI works directly, and plain https git operations against github.com are pre-authenticated. You can clone private repos the user can access.\n\n`
+      ? `GitHub access: you act with the requesting user's GitHub credentials — the gh CLI works directly, and plain https git operations against github.com are pre-authenticated, so you can clone private repos the user can access. The credential itself is not in your environment: when GITHUB_API_URL is set, git and gh are routed through r-docs, and GITHUB_TOKEN / GH_TOKEN hold a placeholder that only works there and only during this run. For direct API calls use that base URL (e.g. curl -H \"Authorization: Bearer $GITHUB_TOKEN\" \"$GITHUB_API_URL/user\"), not https://api.github.com. Never put a token into a remote URL.\n\n`
       : "";
 
     const editMode = input.documentEditMode ?? "suggest";

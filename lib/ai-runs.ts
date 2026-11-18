@@ -4,6 +4,7 @@ import { removeRunContainers, type ContainerCleanupOptions } from "@/lib/agent-r
 import { revokeBrokerKeysForRun } from "@/lib/credential-broker";
 import { db } from "@/lib/db";
 import { estimateListPriceUsd } from "@/lib/model-pricing";
+import { knownRunSecrets, redactSecrets } from "@/lib/secret-redaction";
 
 // A RUNNING run is considered abandoned (server restart/crash) only after this
 // much *silence*: no AiRunEvent, no runner heartbeat, and startedAt at least
@@ -292,10 +293,13 @@ export async function recordAiRunEvent(input: {
   role: "system" | "user" | "agent" | "tool" | "tool_result" | "error";
   message: string;
 }) {
-  const message = input.message.trim();
-  if (!message) {
+  const raw = input.message.trim();
+  if (!raw) {
     return;
   }
+  // Tool output is whatever a command printed. Mask the secrets this run holds
+  // and well-known credential shapes before anything is stored or shown.
+  const message = redactSecrets(raw, knownRunSecrets(input.aiRunId));
 
   await db.aiRunEvent.create({
     data: {

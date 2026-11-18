@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -8,6 +9,7 @@ import { syncDocumentSkillsForRun } from "@/lib/catalog-skills";
 import { db } from "@/lib/db";
 import { resolveGithubIdentity } from "@/lib/github-access";
 import { resolveGithubAuthForDocument } from "@/lib/github-auth";
+import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
 
 export type LinkedRepository = {
   url: string | null;
@@ -129,8 +131,7 @@ const GIT_HARDENING_ARGS = [
 const SAFE_GIT_CONFIG_KEYS = new Set([
   "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates",
   "core.ignorecase", "core.precomposeunicode", "core.symlinks", "extensions.objectformat",
-  "user.name", "user.email", "remote.origin.url", "remote.origin.fetch",
-  "http.https://github.com/.extraheader"
+  "user.name", "user.email", "remote.origin.url", "remote.origin.fetch"
 ]);
 
 function isSafeGitConfigEntry(key: string, value: string) {
@@ -179,6 +180,11 @@ export async function hardenAgentGitDir(checkout: string) {
   const raw = await fs.readFile(configPath, "utf8");
   const clean = entries.every((entry) => isSafeGitConfigEntry(entry.key, entry.value));
   if (clean && !/^\s*\[include/im.test(raw)) return;
+
+  // A checkout from before 2026-11 carries its GitHub credential in this file.
+  // Move it to the host-only store (unless a newer one is already there), so a
+  // run that was in flight during the upgrade can still push its result.
+  await adoptLegacyPinnedGithubAuth(checkout, entries);
 
   const dropped = entries.filter((entry) => !isSafeGitConfigEntry(entry.key, entry.value)).map((entry) => entry.key);
   console.warn("[research-workspace] removed unexpected git config from agent-writable checkout", { checkout, dropped });
@@ -234,27 +240,105 @@ function agentWritableCheckout(candidate: string | undefined) {
 // GITHUB_TOKEN (the shared bot account) onto every git command — let any user
 // read/push every repo the bot could see by linking it to a doc. Instead,
 // ensureLinkedRepository resolves the document's GitHub auth (doc env → user
-// PAT → allowlisted host) and pins it as a repo-local http extraheader, which
-// worktrees share, so background merges/pushes keep working without a user in
-// scope.
+// PAT → allowlisted host) and remembers it PER CHECKOUT, so background
+// merges/pushes keep working without a user in scope.
+//
+// Where it is remembered matters: checkouts are bind-mounted into agent
+// containers, .git included. Until 2026-11 the token was pinned in the
+// checkout's own .git/config (base64, as an http extraheader), where any agent
+// could read it. It now lives in a host-only directory next to the app,
+// encrypted, keyed by the checkout path, and is handed to git through the
+// environment of the one command that talks to GitHub. A checkout that still
+// carries the old config key loses it the next time it is touched.
 const GITHUB_EXTRAHEADER_KEY = "http.https://github.com/.extraheader";
+const GIT_NETWORK_SUBCOMMANDS = new Set(["clone", "fetch", "pull", "push", "ls-remote"]);
 
 function githubExtraheaderValue(token: string) {
   return `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
 }
 
-async function applyWorkspaceGithubAuth(workspace: string, token: string | null) {
-  if (token) {
-    await runCommand(
-      "git",
-      ["config", GITHUB_EXTRAHEADER_KEY, githubExtraheaderValue(token)],
-      { cwd: workspace }
-    );
-  } else {
-    await runCommand("git", ["config", "--unset-all", GITHUB_EXTRAHEADER_KEY], {
-      cwd: workspace
-    }).catch(() => null);
+function gitAuthStoreDir() {
+  return process.env.RDOCS_GIT_AUTH_DIR?.trim() || path.join(process.cwd(), ".research-git-auth");
+}
+
+function gitAuthStorePath(workspace: string) {
+  const key = crypto.createHash("sha256").update(path.resolve(workspace)).digest("hex");
+  return path.join(gitAuthStoreDir(), key);
+}
+
+/** The GitHub token remembered for a checkout, or null. Host-side only. */
+export async function readWorkspaceGithubToken(workspace: string): Promise<string | null> {
+  const stored = await fs.readFile(gitAuthStorePath(workspace), "utf8").catch(() => null);
+  if (!stored) return null;
+  try {
+    return decryptSecret(stored.trim()) || null;
+  } catch {
+    return null;
   }
+}
+
+async function writeWorkspaceGithubToken(workspace: string, token: string | null) {
+  const file = gitAuthStorePath(workspace);
+  if (!token) {
+    await fs.rm(file, { force: true });
+    return;
+  }
+  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}`;
+  await fs.writeFile(temp, encryptSecret(token), { mode: 0o600 });
+  await fs.rename(temp, file);
+}
+
+/** Forget the credential of a checkout that is being deleted. */
+export async function forgetWorkspaceGithubToken(workspace: string) {
+  await fs.rm(gitAuthStorePath(workspace), { force: true }).catch(() => null);
+}
+
+/** Environment that authenticates ONE git command against github.com. */
+function githubAuthGitEnv(token: string): Record<string, string> {
+  return {
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: GITHUB_EXTRAHEADER_KEY,
+    GIT_CONFIG_VALUE_0: githubExtraheaderValue(token)
+  };
+}
+
+function tokenFromLegacyExtraheader(value: string): string | null {
+  const match = /^authorization:\s*basic\s+([A-Za-z0-9+/=]+)\s*$/i.exec(value.trim());
+  if (!match) return null;
+  const decoded = Buffer.from(match[1], "base64").toString("utf8");
+  const token = decoded.startsWith("x-access-token:") ? decoded.slice("x-access-token:".length) : "";
+  return /^[A-Za-z0-9_.-]{20,}$/.test(token) ? token : null;
+}
+
+async function adoptLegacyPinnedGithubAuth(checkout: string, entries: { key: string; value: string }[]) {
+  const legacy = entries.find((entry) => entry.key === GITHUB_EXTRAHEADER_KEY);
+  if (!legacy) return;
+  const token = tokenFromLegacyExtraheader(legacy.value);
+  if (token && !(await readWorkspaceGithubToken(checkout))) {
+    await writeWorkspaceGithubToken(checkout, token);
+  }
+}
+
+/** Drop the credential an older version pinned inside a checkout's git config. */
+async function removeLegacyPinnedGithubAuthKeepingToken(workspace: string) {
+  const value = await runCommand("git", ["config", "--local", "--get", GITHUB_EXTRAHEADER_KEY], { cwd: workspace })
+    .then((result) => result.stdout.trim())
+    .catch(() => "");
+  if (!value) return;
+  await adoptLegacyPinnedGithubAuth(workspace, [{ key: GITHUB_EXTRAHEADER_KEY, value }]);
+  await removeLegacyPinnedGithubAuth(workspace);
+}
+
+async function removeLegacyPinnedGithubAuth(workspace: string) {
+  await runCommand("git", ["config", "--local", "--unset-all", GITHUB_EXTRAHEADER_KEY], {
+    cwd: workspace
+  }).catch(() => null);
+}
+
+async function applyWorkspaceGithubAuth(workspace: string, token: string | null) {
+  await writeWorkspaceGithubToken(workspace, token);
+  await removeLegacyPinnedGithubAuth(workspace);
 }
 
 export function isReadOnlyRepoUrl(repoUrl: string | null | undefined) {
@@ -265,10 +349,10 @@ export function isReadOnlyRepoUrl(repoUrl: string | null | undefined) {
 function runCommand(
   command: string,
   args: string[],
-  options: { cwd?: string; timeoutMs?: number; trusted?: boolean } = {}
+  options: { cwd?: string; timeoutMs?: number; trusted?: boolean; githubToken?: string | null } = {}
 ): Promise<GitResult> {
   const isGit = command === "git";
-  const env = isGit ? buildGitEnv() : process.env;
+  let env = isGit ? buildGitEnv() : process.env;
   const spawnArgs = isGit ? [...GIT_HARDENING_ARGS, ...args] : args;
   return new Promise((resolve, reject) => {
     void (async () => {
@@ -279,6 +363,17 @@ function runCommand(
           [options.cwd, ...args].map(agentWritableCheckout).filter((target): target is string => Boolean(target))
         );
         for (const target of targets) await hardenAgentGitDir(target);
+      }
+      // Only a command that talks to the remote gets the credential, and only
+      // in its environment: never in argv (visible in `ps`) or in the checkout.
+      if (isGit && GIT_NETWORK_SUBCOMMANDS.has(args[0] ?? "")) {
+        const token =
+          options.githubToken !== undefined
+            ? options.githubToken
+            : options.cwd
+              ? await readWorkspaceGithubToken(options.cwd)
+              : null;
+        if (token) env = { ...env, ...githubAuthGitEnv(token) };
       }
     })().then(() => {
     const child = spawn(command, spawnArgs, {
@@ -450,7 +545,7 @@ export async function ensureLinkedRepository(
 
   // The credential all git ops on this workspace run under. Resolved fresh on
   // every ensure (doc env → runner PAT → owner PAT → allowlisted host) and
-  // pinned into the repo-local config below, so later background ops (salvage,
+  // remembered host-side for this checkout below, so later background ops (salvage,
   // reaper merges) reuse the last resolved auth. Null → anonymous git.
   const githubAuth = document.repoUrl?.startsWith("https://github.com/")
     ? // Auth follows the WORKSPACE-owning document (its env / owner PAT): the
@@ -477,12 +572,7 @@ export async function ensureLinkedRepository(
         if (document.repoBranch) {
           cloneArgs.splice(1, 0, "--branch", document.repoBranch);
         }
-        if (githubAuth) {
-          // The repo-local config doesn't exist until the clone finishes, so
-          // the clone itself carries the header inline.
-          cloneArgs.unshift("-c", `${GITHUB_EXTRAHEADER_KEY}=${githubExtraheaderValue(githubAuth.token)}`);
-        }
-        await runCommand("git", cloneArgs, { timeoutMs: 300_000 });
+        await runCommand("git", cloneArgs, { timeoutMs: 300_000, githubToken: githubAuth?.token ?? null });
       } else {
         await initLocalWorkspace(workspace);
       }
@@ -493,7 +583,7 @@ export async function ensureLinkedRepository(
       // Pin the commit identity to the account whose token backs this
       // workspace. Without a repo-local identity, commits fall through to the
       // host's global git config — the server operator's personal account.
-      // Worktrees share this config, so agent commits are covered too.
+      // Run checkouts copy this identity, so agent commits are covered too.
       await ensureWorkspaceGitIdentity(workspace, githubAuth?.token ?? null);
     }
 
@@ -606,7 +696,7 @@ export async function ensureLinkedRepositoryWorktree(
       // A clone does not inherit repo-local identity/auth. Copy only the
       // explicitly managed values from the base; never consult host-global git
       // configuration for commits or remote access.
-      for (const key of ["user.name", "user.email", GITHUB_EXTRAHEADER_KEY]) {
+      for (const key of ["user.name", "user.email"]) {
         const value = await runCommand("git", ["config", "--local", "--get", key], {
           cwd: linked.workspace
         })
@@ -616,6 +706,10 @@ export async function ensureLinkedRepositoryWorktree(
           await runCommand("git", ["config", "--local", key, value], { cwd: worktree });
         }
       }
+      // The run checkout is mounted into the agent's container, so the base's
+      // GitHub credential is remembered for it host-side, never written into it.
+      await removeLegacyPinnedGithubAuthKeepingToken(linked.workspace);
+      await writeWorkspaceGithubToken(worktree, await readWorkspaceGithubToken(linked.workspace));
 
       if (linked.url) {
         // The base clone has the fetched object, but upload-pack does not
@@ -723,6 +817,7 @@ export async function removeRunWorktree(worktree: {
       cwd: worktree.baseWorkspace
     }).catch(() => null);
   });
+  await forgetWorkspaceGithubToken(worktree.worktree);
 }
 
 // Best-effort sweep of orphaned worktrees left behind by crashed/killed runs.

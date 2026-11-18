@@ -19,6 +19,7 @@
 
 import { policyAllowsGithub, type RunCredentialPolicy } from "@/lib/run-credential-policy";
 import { stripWorkspaceGithubAuth } from "@/lib/research-workspace";
+import { knownRunSecrets, redactDirectoryInPlace } from "@/lib/secret-redaction";
 import type { AgentAccessMode, ClaudeAgentProgressEvent } from "@/agent-core";
 import { isCodexAgentModel } from "@/agent-core";
 import { createDeferredHeartbeat, recordAiRunEvent } from "@/lib/ai-runs";
@@ -198,6 +199,7 @@ export async function withAgentRunLifecycle<T>(
   fn: (ctx: AgentRunLifecycleContext) => Promise<T>
 ): Promise<AgentRunLifecycleResult<T>> {
   const { aiRunId, documentId, createdById, agentAccessMode, hostDevDir } = opts;
+  const lifecycleStartedAt = new Date(Date.now() - 60_000);
   // Durable app mode (lib/durable-apps.ts) wins over everything: the run must
   // land in the workspace's one long-lived container, or the agent cannot
   // manage the app that lives there.
@@ -295,8 +297,8 @@ export async function withAgentRunLifecycle<T>(
           message: hostDevRunNotice(hostDevDir)
         });
       }
-      // The run checkout's git config carries the GitHub token so the agent can
-      // push. A run that was not granted GitHub access must not find it there.
+      // A run that was not granted GitHub access gets no GitHub credential for
+      // its own checkout either (host-side store, lib/research-workspace.ts).
       // The base checkout keeps its auth, so the host still pushes the merged
       // result; only the run's own branch stays local.
       if (state.linkedRepo && !durable && !policyAllowsGithub(opts.credentialPolicy)) {
@@ -438,6 +440,16 @@ export async function withAgentRunLifecycle<T>(
   } finally {
     deregisterRunAbortController(aiRunId);
     heartbeat.stop();
+    // The harness CLI writes its own transcript (tool output included) into the
+    // conversation's session dir, from inside the sandbox, where nothing of
+    // ours can filter it. Mask what this run wrote, in place and in the
+    // background; a transcript another process still appends to is unharmed.
+    if (!state.handedOff) {
+      void redactDirectoryInPlace(getSessionsRootDir(documentId), {
+        since: lifecycleStartedAt,
+        knownValues: knownRunSecrets(aiRunId)
+      }).catch(() => null);
+    }
     // A handed-off run's container is STILL WORKING in that worktree (it is a
     // bind mount, not a copy) — deleting it here would corrupt the run the other
     // process is now driving.
