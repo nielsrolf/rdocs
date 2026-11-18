@@ -69,6 +69,18 @@ test("a private key block is masked, also inside JSON, also when its end was cli
 
   const clipped = redactSecrets(`${PRIVATE_KEY.slice(0, 70)}...`);
   assert.ok(!clipped.includes(KEY_BODY[0].slice(0, 20)));
+
+  // As an Edit tool result shows it: one JSON string per line, with diff markers.
+  const diff = JSON.stringify({ lines: PRIVATE_KEY.split("\n").map((line) => `+${line}`), note: "the words after the key stay readable" }, null, 2);
+  const maskedDiff = redactSecrets(diff);
+  assert.equal(maskedDiff.length, diff.length);
+  for (const line of KEY_BODY) assert.ok(!maskedDiff.includes(line));
+  const parsedDiff = JSON.parse(maskedDiff) as { lines: string[]; note: string };
+  assert.equal(parsedDiff.lines.length, 4);
+  assert.equal(parsedDiff.lines[0], "+-----BEGIN OPENSSH PRIVATE KEY-----");
+  assert.ok(/^\*+$/.test(parsedDiff.lines[1]), "a diff marker is base64 too and is masked with the line");
+  assert.equal(parsedDiff.note, "the words after the key stay readable");
+  assert.equal(redactSecrets(maskedDiff), maskedDiff);
 });
 
 test("a secret the run holds is masked even without a known shape", () => {

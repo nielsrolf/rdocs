@@ -23,8 +23,39 @@ const SHAPES: Shape[] = shapeFile.shapes.map((shape) => ({
   regex: new RegExp(`${shapeFile.boundary}${shape.pattern}`, "g"),
   prefix: shape.prefix
 }));
-const PRIVATE_KEY = new RegExp(shapeFile.privateKey.pattern, "g");
-export const PRIVATE_KEY_NAME = shapeFile.privateKey.name;
+const KEY = shapeFile.privateKey;
+const KEY_BEGIN = new RegExp(KEY.begin, "g");
+const KEY_END = new RegExp(KEY.end);
+const KEY_RUN = new RegExp(KEY.run, "g");
+const KEY_CLIPPED_RUN = new RegExp(KEY.clippedRun, "g");
+export const PRIVATE_KEY_NAME = KEY.name;
+
+/**
+ * Mask private key blocks. Between BEGIN and END everything that looks like
+ * key material is masked and whatever a tool wrapped around the lines (JSON
+ * quotes, diff markers, escaped newlines) stays, so the text keeps its
+ * structure. A block whose END was clipped off is masked more cautiously.
+ */
+function redactPrivateKeys(text: string, counts?: RedactionCounts): string {
+  if (!text.includes("PRIVATE KEY-----")) return text;
+  let out = "";
+  let cursor = 0;
+  KEY_BEGIN.lastIndex = 0;
+  for (let match = KEY_BEGIN.exec(text); match; match = KEY_BEGIN.exec(text)) {
+    const bodyStart = match.index + match[0].length;
+    if (bodyStart < cursor) continue;
+    const window = text.slice(bodyStart, bodyStart + KEY.maxBody);
+    const end = KEY_END.exec(window);
+    const body = end ? window.slice(0, end.index) : window.slice(0, KEY.clippedMax);
+    const masked = body.replace(end ? KEY_RUN : KEY_CLIPPED_RUN, (run) => "*".repeat(run.length));
+    if (masked === body) continue;
+    count(counts, PRIVATE_KEY_NAME);
+    out += text.slice(cursor, bodyStart) + masked;
+    cursor = bodyStart + body.length;
+    KEY_BEGIN.lastIndex = cursor;
+  }
+  return out + text.slice(cursor);
+}
 
 export type RedactionCounts = Record<string, number>;
 
@@ -61,13 +92,7 @@ export function redactSecrets(
       return maskKeepingPrefix(match, shape.prefix);
     });
   }
-  PRIVATE_KEY.lastIndex = 0;
-  out = out.replace(PRIVATE_KEY, (_match, begin: string, body: string) => {
-    // Keep whitespace and escaped newlines so the surrounding JSON stays valid.
-    const masked = body.replace(/\\+[rn]|[A-Za-z0-9+/=]/g, (piece) => (piece.startsWith("\\") ? piece : "*"));
-    if (masked !== body) count(counts, PRIVATE_KEY_NAME);
-    return begin + masked;
-  });
+  out = redactPrivateKeys(out, counts);
   return out;
 }
 

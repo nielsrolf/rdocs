@@ -7,7 +7,9 @@ hold the token and new events are masked before they are stored
 (lib/secret-redaction.ts). This script cleans what was stored before that.
 
 It looks at:
-  1. the database: every text column of every table;
+  1. the database: every text column of every table is scanned; the run logs
+     (tables AiRun*) are masked, anything found elsewhere is reported and only
+     masked when named with --also Table.column;
   2. conversation transcripts on disk (<workspaces>/<doc>/sessions/**);
   3. git config files of checkouts (<workspaces>/<doc>/<repo>/.git/config and
      <workspaces>/<doc>/worktrees/*/.git/config), where older versions pinned
@@ -52,15 +54,22 @@ ROOT = os.path.dirname(HERE)
 with open(os.path.join(ROOT, "lib", "secret-shapes.json"), encoding="utf-8") as fh:
     _SHAPES = json.load(fh)
 
+# (name, compiled pattern WITHOUT the left boundary, readable prefix, literal anchors)
 SHAPES = [
-    (shape["name"], re.compile(_SHAPES["boundary"] + shape["pattern"]), shape["prefix"])
+    (shape["name"], re.compile(shape["pattern"]), shape["prefix"], shape["anchors"])
     for shape in _SHAPES["shapes"]
 ]
-PRIVATE_KEY_NAME = _SHAPES["privateKey"]["name"]
-PRIVATE_KEY = re.compile(_SHAPES["privateKey"]["pattern"])
-_KEY_BODY_PIECE = re.compile(r"\\+[rn]|[A-Za-z0-9+/=]")
-# Cheap test before the regular expressions run.
-HINTS = ("gh", "eC1hY2Nlc3MtdG9rZW46", "sk-", "hf_", "xox", "AIza", "rpa_", "gdai_", "tml-", "PRIVATE KEY-----")
+_KEY = _SHAPES["privateKey"]
+PRIVATE_KEY_NAME = _KEY["name"]
+KEY_BEGIN = re.compile(_KEY["begin"])
+KEY_END = re.compile(_KEY["end"])
+KEY_RUN = re.compile(_KEY["run"])
+KEY_CLIPPED_RUN = re.compile(_KEY["clippedRun"])
+# The left boundary of lib/secret-shapes.json, checked by hand: a regular
+# expression with a lookbehind scans gigabytes several times slower than
+# str.find on the literal each shape starts with.
+WORD = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+assert _SHAPES["boundary"] == "(?<![A-Za-z0-9_-])"
 
 CREDENTIAL_COLUMN = re.compile(r"token|secret|password|passwd|credential|hash|apikey|api_key|privatekey|authjson", re.I)
 CREDENTIAL_TABLE = re.compile(r"credential|installation|apikey|brokerkey|envvar|oauth|account$|^session$|verification", re.I)
@@ -91,33 +100,64 @@ class Tally:
         )
 
 
+def _candidates(text, anchors):
+    for anchor in anchors:
+        position = text.find(anchor)
+        while position != -1:
+            yield position
+            position = text.find(anchor, position + 1)
+
+
 def redact(text, tally=None, owned_end=None):
     """Length-preserving masking; mirrors redactSecrets in lib/secret-redaction.ts.
 
     With owned_end, only matches that START before that offset are masked and
     counted (the rest belong to the next chunk of a file read in pieces).
     """
-    if not any(hint in text for hint in HINTS):
-        return text
-    for name, regex, prefix in SHAPES:
-        def mask(match, name=name, prefix=prefix):
+    found = []  # (start, end, replacement)
+    for name, regex, prefix, anchors in SHAPES:
+        for position in _candidates(text, anchors):
+            if position and text[position - 1] in WORD:
+                continue
+            if owned_end is not None and position >= owned_end:
+                continue
+            match = regex.match(text, position)
+            if not match:
+                continue
             value = match.group(0)
-            if owned_end is not None and match.start() >= owned_end:
-                return value
             if tally is not None:
                 tally.add(name, value)
-            return value[:prefix] + "*" * max(0, len(value) - prefix)
-        text = regex.sub(mask, text)
-
-    def mask_key(match):
-        if owned_end is not None and match.start() >= owned_end:
-            return match.group(0)
-        body = match.group(2)
-        masked = _KEY_BODY_PIECE.sub(lambda piece: piece.group(0) if piece.group(0).startswith("\\") else "*", body)
-        if masked != body and tally is not None:
-            tally.add(PRIVATE_KEY_NAME, body)
-        return match.group(1) + masked
-    return PRIVATE_KEY.sub(mask_key, text)
+            found.append((position, match.end(), value[:prefix] + "*" * max(0, len(value) - prefix)))
+    position = text.find("PRIVATE KEY-----")
+    cursor = 0
+    while position != -1:
+        # Step back to the BEGIN this belongs to (an END marker has none in reach).
+        begin = KEY_BEGIN.search(text, max(cursor, position - 40), position + 16)
+        if begin and not (owned_end is not None and begin.start() >= owned_end):
+            body_start = begin.end()
+            window_end = min(len(text), body_start + _KEY["maxBody"])
+            end = KEY_END.search(text, body_start, window_end)
+            body_end = end.start() if end else min(len(text), body_start + _KEY["clippedMax"])
+            body = text[body_start:body_end]
+            masked = (KEY_RUN if end else KEY_CLIPPED_RUN).sub(lambda run: "*" * len(run.group(0)), body)
+            if masked != body:
+                if tally is not None:
+                    tally.add(PRIVATE_KEY_NAME, body)
+                found.append((body_start, body_end, masked))
+                cursor = body_end
+        position = text.find("PRIVATE KEY-----", max(position + 1, cursor))
+    if not found:
+        return text
+    found.sort()
+    pieces, cursor = [], 0
+    for start, end, replacement in found:
+        if start < cursor:
+            continue  # inside an earlier match
+        pieces.append(text[cursor:start])
+        pieces.append(replacement)
+        cursor = end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
 
 
 # --- database -------------------------------------------------------------------
@@ -126,7 +166,14 @@ def is_credential_store(table, column):
     return bool(CREDENTIAL_TABLE.search(table) or CREDENTIAL_COLUMN.search(column))
 
 
-def clean_database(path, apply):
+# Tables that hold what agents and their tools produced. Everything else is
+# something a person wrote (documents, their edit history, comments): reported,
+# and only changed when named with --also, because rewriting a document's
+# history behind the editor's back is not something to do by default.
+RUN_LOG_TABLE = re.compile(r"^AiRun")
+
+
+def clean_database(path, apply, also=()):
     print(f"\n== database {path}")
     if not os.path.exists(path):
         print("   not found, skipped")
@@ -137,6 +184,12 @@ def clean_database(path, apply):
     else:
         db = sqlite3.connect(f"file:{path}?immutable=1", uri=True)
     total = Tally()
+
+    def target(table, column):
+        if is_credential_store(table, column):
+            return "credential"
+        return "mask" if RUN_LOG_TABLE.search(table) or f"{table}.{column}" in also else "content"
+
     tables = [r[0] for r in db.execute("select name from sqlite_master where type='table' and name not like 'sqlite_%'")]
     for table in tables:
         columns = [(c[1], (c[2] or "").upper()) for c in db.execute(f'pragma table_info("{table}")')]
@@ -159,14 +212,19 @@ def clean_database(path, apply):
                 masked = redact(value, tally)
                 if masked != value:
                     per_column[column].merge(tally)
-                    if not is_credential_store(table, column):
+                    if target(table, column) == "mask":
                         changes[column] = masked
             if changes:
                 updates.append((row[0], changes))
         for column, tally in per_column.items():
-            kept = is_credential_store(table, column)
-            total.merge(tally) if not kept else None
-            note = "LEFT ALONE (credential store)" if kept else ("masked" if apply else "would be masked")
+            kind = target(table, column)
+            if kind == "mask":
+                total.merge(tally)
+            note = {
+                "mask": "masked" if apply else "would be masked",
+                "credential": "LEFT ALONE (credential store)",
+                "content": f"LEFT ALONE (written by people; add --also {table}.{column} to mask it)"
+            }[kind]
             print(f"   {table}.{column}: {tally.describe()} -> {note}")
         if apply and updates:
             with db:
@@ -178,7 +236,7 @@ def clean_database(path, apply):
         db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     db.close()
     if not total:
-        print("   nothing to mask outside credential stores")
+        print("   nothing to mask in the run logs")
     if apply:
         # Old cell contents can linger in free pages or the WAL. Prove they do not.
         left = Tally()
@@ -186,7 +244,7 @@ def clean_database(path, apply):
             if os.path.exists(candidate):
                 left.merge(scan_file(candidate, apply=False))
         print("   raw re-scan of the database file after masking: "
-              + (left.describe() + "  <- includes the credential stores left alone above; if this is more than those,"
+              + (left.describe() + "  <- includes what was left alone above; if this is more than that,"
                  " run `sqlite3 <db> VACUUM` with the service stopped" if left else "clean"))
     return total
 
@@ -372,6 +430,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--apply", action="store_true", help="change things (default: dry run)")
     parser.add_argument("--only", action="append", choices=["db", "sessions", "git-config", "scratch", "logs", "backups"])
+    parser.add_argument("--also", action="append", default=[], metavar="Table.column",
+                        help="also mask this column, which is not a run log (repeatable)")
     parser.add_argument("--db", default=os.path.join(ROOT, "prisma", "dev.db"))
     parser.add_argument("--workspaces", default=os.path.join(ROOT, ".research-workspaces"))
     parser.add_argument("--scratch", default=os.path.join(ROOT, ".agent-scratch"))
@@ -383,7 +443,7 @@ def main():
 
     print("APPLYING CHANGES" if args.apply else "DRY RUN: nothing is changed. Pass --apply to mask.")
     if "db" in areas:
-        clean_database(args.db, args.apply)
+        clean_database(args.db, args.apply, set(args.also))
     if "sessions" in areas:
         clean_sessions(args.workspaces, args.apply)
     if "git-config" in areas:
