@@ -340,7 +340,7 @@ the LiteLLM key's `max_budget` is kept at budget minus non-LiteLLM spend (`liteL
 total between two checks. Not stoppable from here: Modal apps an agent starts in ANOTHER environment (the token is the
 provisioner's and not confined; Modal's own per-environment budgets, `EnvironmentSetBudget`, answer "not enabled for this
 workspace" on our plan), Tinker without the broker, jobs already at
-OpenWeights (its token limit covers those); and the dashboard lags (Tinker ~1 h), so a budget is overshot by what is spent
+OpenWeights (its token limit covers those); and the dashboard lags (Tinker's billing API 7-8 h, measured 2026-11-18), so a budget is overshot by what is spent
 in that time. An unreachable dashboard stops nobody (reported in `errors`).
 **Tinker through the broker** (`lib/credential-broker/tinker.ts`): opt-in per deployment (`AGENT_BROKER_TINKER=1`) or per
 workspace (`RDOCS_BROKER_TINKER=1` in its env, set automatically for budgeted workspaces). The run gets a virtual key
