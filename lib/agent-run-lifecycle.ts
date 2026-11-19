@@ -20,6 +20,7 @@
 import { policyAllowsGithub, type RunCredentialPolicy } from "@/lib/run-credential-policy";
 import { stripWorkspaceGithubAuth } from "@/lib/research-workspace";
 import { knownRunSecrets, redactDirectoryInPlace } from "@/lib/secret-redaction";
+import { pausedRunMessage } from "@/lib/paused-users";
 import type { AgentAccessMode, ClaudeAgentProgressEvent } from "@/agent-core";
 import { isCodexAgentModel } from "@/agent-core";
 import { createDeferredHeartbeat, recordAiRunEvent } from "@/lib/ai-runs";
@@ -199,6 +200,16 @@ export async function withAgentRunLifecycle<T>(
   fn: (ctx: AgentRunLifecycleContext) => Promise<T>
 ): Promise<AgentRunLifecycleResult<T>> {
   const { aiRunId, documentId, createdById, agentAccessMode, hostDevDir } = opts;
+  // Operator pause for single accounts (lib/paused-users.ts): fail before
+  // anything is cloned, fetched or started.
+  const pausedMessage = await pausedRunMessage(createdById).catch(() => null);
+  if (pausedMessage) {
+    await recordAiRunEvent({ aiRunId, role: "error", message: pausedMessage }).catch(() => null);
+    await db.aiRun
+      .update({ where: { id: aiRunId }, data: { status: "FAILED", error: pausedMessage, finishedAt: new Date() } })
+      .catch(() => null);
+    return { status: "FAILED", error: pausedMessage };
+  }
   const lifecycleStartedAt = new Date(Date.now() - 60_000);
   // Durable app mode (lib/durable-apps.ts) wins over everything: the run must
   // land in the workspace's one long-lived container, or the agent cannot

@@ -55,3 +55,4 @@ dev-data/
 .release-watch-failed
 .release-watch-note
 .agent-scratch/
+.agent-paused-emails
