@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p ~/.config/systemd/user
-cp rdocs-release-watch.service rdocs-release-watch.timer ~/.config/systemd/user/
+cp rdocs-release-watch.service rdocs-release-watch.timer rdocs-keepalive.service rdocs-keepalive.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now rdocs-release-watch.timer
+systemctl --user enable --now rdocs-release-watch.timer rdocs-keepalive.timer
 systemctl --user list-timers rdocs-release-watch.timer --no-pager

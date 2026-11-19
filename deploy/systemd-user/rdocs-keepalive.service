@@ -1,0 +1,11 @@
+[Unit]
+Description=r-docs: start the active instance again if it died (deploy/start-active.sh)
+
+# start-active.sh does nothing when the instance answers its health check, and
+# refuses to act while a deploy holds .deploy.lock, so running it every minute
+# is safe. Without this, a crashed server stayed down until someone noticed
+# (about 10 hours on 2026-11-19).
+[Service]
+Type=oneshot
+WorkingDirectory=%h/agents/automator/services/r-docs
+ExecStart=%h/agents/automator/services/r-docs/deploy/start-active.sh
