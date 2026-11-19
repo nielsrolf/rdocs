@@ -473,3 +473,64 @@ test("durable runner: a stored handle whose container is really gone leads to a 
     await rm(tmp, { recursive: true, force: true });
   }
 });
+
+test("durable runner: broker keys follow the container (earlier ones end when it is created, each run's are bound to it)", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "durable-test-"));
+  const sessionsRoot = path.join(tmp, "sessions");
+  const docker = fakeDurableDocker();
+  let stored: DetachedSessionHandle | null = null;
+  const calls: string[] = [];
+  const runner = new DurableContainerRunner(
+    {
+      workspaceDocumentId: "doc1",
+      containerName: "gdocs-durable-doc1",
+      hostname: "dev.example.com",
+      appPort: 3000,
+      hostPort: 16001,
+      innerDocker: false,
+      sessionsRootHostPath: sessionsRoot
+    },
+    {
+      docker: docker.ops,
+      clientFactory: (baseUrl, secret) => createAgentSessionClient({ baseUrl, secret }),
+      handleStore: {
+        async load() {
+          return stored;
+        },
+        async save(_id, handle) {
+          stored = handle;
+        }
+      },
+      brokerKeys: {
+        async bindToContainer(aiRunId, containerName) {
+          calls.push(`bind ${aiRunId} ${containerName}`);
+        },
+        async revokeForContainer(containerName) {
+          calls.push(`revoke ${containerName}`);
+        }
+      },
+      readyTimeoutMs: 5_000,
+      busyPollMs: 20
+    }
+  );
+  const previousOci = process.env.AGENT_CONTAINER_OCI_RUNTIME;
+  process.env.AGENT_CONTAINER_OCI_RUNTIME = "runc";
+  try {
+    const input = { workspacePath: path.join(tmp, "repo") } as never;
+    const options = { agentConfig: { model: "claude-sonnet-5" }, agentEnv: { ANTHROPIC_API_KEY: "sk-test" }, documentId: "doc1" };
+    await runner.run(input, { ...options, aiRunId: "run-1", sessionDirHostPath: path.join(sessionsRoot, "conv-1") } as never);
+    await runner.run(input, { ...options, aiRunId: "run-2", sessionDirHostPath: path.join(sessionsRoot, "conv-1") } as never);
+    assert.deepEqual(calls, [
+      // A new container runs nothing an earlier one started.
+      "revoke gdocs-durable-doc1",
+      "bind run-1 gdocs-durable-doc1",
+      // The container is reused: run-1's keys stay, run-2's join them.
+      "bind run-2 gdocs-durable-doc1"
+    ]);
+  } finally {
+    if (previousOci === undefined) delete process.env.AGENT_CONTAINER_OCI_RUNTIME;
+    else process.env.AGENT_CONTAINER_OCI_RUNTIME = previousOci;
+    await docker.close();
+    await rm(tmp, { recursive: true, force: true });
+  }
+});

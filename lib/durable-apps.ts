@@ -348,6 +348,9 @@ export async function resolveInnerDockerPreference(documentId: string): Promise<
 /** Force-remove the workspace's durable container (if any) and clear its handle. */
 export async function stopDurableContainer(workspaceDocumentId: string, runtime = process.env.AGENT_CONTAINER_RUNTIME || "docker") {
   await execFileAsync(runtime, ["rm", "-f", durableContainerName(workspaceDocumentId)], { timeout: 60_000 }).catch(() => null);
+  // The container is gone, and with it every process that held these keys.
+  const { revokeBrokerKeysForContainer } = await import("@/lib/credential-broker");
+  await revokeBrokerKeysForContainer(durableContainerName(workspaceDocumentId)).catch(() => 0);
   await db.durableApp
     .updateMany({
       where: { documentId: workspaceDocumentId },

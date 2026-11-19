@@ -65,6 +65,11 @@ export type DurableRunnerDeps = {
     load(workspaceDocumentId: string): Promise<DetachedSessionHandle | null>;
     save(workspaceDocumentId: string, handle: DetachedSessionHandle | null): Promise<void>;
   };
+  /** Broker keys follow the container's life (defaults to lib/credential-broker). */
+  brokerKeys?: {
+    bindToContainer(aiRunId: string, containerName: string): Promise<unknown>;
+    revokeForContainer(containerName: string): Promise<unknown>;
+  };
   now?: () => number;
   busyWaitMaxMs?: number;
   busyPollMs?: number;
@@ -225,6 +230,19 @@ export class DurableContainerRunner implements AgentRunner {
       for (;;) {
         if (options?.signal?.aborted) throw new RunCancelledError();
         const { handle, fresh, restarted } = await this.ensureContainer(docker, workspaceHostPath);
+        // Credential broker: keys follow the container, not the run. A container
+        // that was just created, or came back from a restart, runs nothing that
+        // earlier sessions started, so their keys end here; this run's keys are
+        // tied to the container and outlive the run with it.
+        const brokerKeys = this.deps.brokerKeys ?? defaultBrokerKeys;
+        if (fresh || restarted) {
+          await brokerKeys.revokeForContainer(this.target.containerName).catch(() => {});
+        }
+        if (options?.aiRunId) {
+          await brokerKeys.bindToContainer(options.aiRunId, this.target.containerName).catch((error) => {
+            console.warn(`[durable-app] could not bind broker keys of run ${options.aiRunId} to the container: ${String(error)}`);
+          });
+        }
         const client = (this.deps.clientFactory ?? defaultClientFactory)(handle.endpoint, handle.secret);
         let attemptJob = containerJob;
         if (restarted) {
@@ -455,6 +473,17 @@ export class DurableContainerRunner implements AgentRunner {
 
 export const DURABLE_CONTAINER_RESTARTED_MESSAGE =
   "The workspace's durable app container was restarted (docker or host restart): processes started by earlier sessions, inner docker images and anything outside /workspace are gone. The agent sees GDOCS_CONTAINER_RESTARTED_AT in this run's environment.";
+
+const defaultBrokerKeys = {
+  async bindToContainer(aiRunId: string, containerName: string) {
+    const { bindBrokerKeysToContainer } = await import("@/lib/credential-broker");
+    return bindBrokerKeysToContainer(aiRunId, containerName);
+  },
+  async revokeForContainer(containerName: string) {
+    const { revokeBrokerKeysForContainer } = await import("@/lib/credential-broker");
+    return revokeBrokerKeysForContainer(containerName);
+  }
+};
 
 function defaultClientFactory(baseUrl: string, secret: string): AgentSessionClient {
   return createAgentSessionClient({ baseUrl, secret });

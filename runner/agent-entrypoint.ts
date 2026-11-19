@@ -53,6 +53,7 @@ import {
 } from "./agent-core/session-protocol";
 import { createAgentSessionServer } from "./agent-core/session-server";
 import { ensureGithubBrokerBridge } from "./agent-core/github-broker-bridge";
+import { syncSandboxComputeBroker } from "./agent-core/compute-broker-sandbox";
 
 const CONTAINER_WORKSPACE = process.env.AGENT_WORKSPACE ?? "/workspace";
 
@@ -360,6 +361,10 @@ async function executeJob(
         }
       }
     }
+
+    // Compute providers behind the broker (Hugging Face, …): the same routing
+    // as the env, in the sandbox HOME, for shells that drop token variables.
+    if (process.env.HOME?.trim()) syncSandboxComputeBroker(process.env.HOME.trim(), job.agentEnv ?? {});
 
     // The agent runs against the in-container mount, not the host path.
     job.input.workspacePath = CONTAINER_WORKSPACE;

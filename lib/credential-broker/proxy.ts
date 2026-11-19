@@ -8,6 +8,21 @@ import {
   withoutTinkerJwtAuth
 } from "./tinker";
 import { createUsageCapture, type BrokerUsage } from "./usage";
+import {
+  forgetOpenweightsJwt,
+  hubUrlViaBroker,
+  huggingfaceAuthHeader,
+  HUGGINGFACE_PROVIDER,
+  isHuggingfaceLfsBatch,
+  isOpenweightsTokenExchange,
+  NOT_SPEND_PROVIDERS,
+  OPENWEIGHTS_PROVIDER,
+  openweightsExchangeToken,
+  openweightsJwt,
+  rewriteLfsBatchHrefs,
+  RUNPOD_PROVIDER,
+  runpodUpstream
+} from "./providers";
 
 // Providers whose responses carry model usage worth recording per call. Compute
 // providers (Tinker) make thousands of requests per run that are not model calls.
@@ -125,7 +140,19 @@ export async function handleBrokerProxyRequest(
     return Response.json({ error: "Not found." }, { status: 404 });
   }
 
-  const presented = extractPresentedToken(request.headers);
+  const incomingUrl = new URL(request.url);
+  let presented = extractPresentedToken(request.headers);
+  // RunPod's older clients and many curl examples pass the key as ?api_key=.
+  const queryKey = incomingUrl.searchParams.get("api_key");
+  if ((!presented || !isVirtualBrokerToken(presented)) && queryKey && isVirtualBrokerToken(queryKey)) presented = queryKey;
+  // OpenWeights' key-for-JWT swap carries the key in the body; the headers hold
+  // the project's public anon key. Read the body here, once.
+  let exchangeBody: Uint8Array<ArrayBuffer> | null = null;
+  if (isOpenweightsTokenExchange(request.method, pathSegments)) {
+    exchangeBody = new Uint8Array(await request.arrayBuffer());
+    const bodyToken = openweightsExchangeToken(exchangeBody);
+    if (bodyToken && isVirtualBrokerToken(bodyToken)) presented = bodyToken;
+  }
   const resolution = await resolveBrokerRequest(keyId, presented);
   if (!resolution.ok) {
     console.warn(
@@ -147,8 +174,8 @@ export async function handleBrokerProxyRequest(
       console.warn("[broker] budget lookup failed", { aiRunId: resolution.aiRunId, error: String(error) });
     }
   }
-  // GitHub is not spend: a run whose budget ran out must still be able to push what it has.
-  if (budget.exhausted && !isGithubKey) {
+  // GitHub and Hugging Face are not spend: a run whose budget ran out must still be able to push what it has.
+  if (budget.exhausted && !NOT_SPEND_PROVIDERS.has(resolution.provider)) {
     console.warn(`[broker] refused ${resolution.provider} for run ${resolution.aiRunId}: budget of ${budget.costsProject} is used up`);
     return Response.json(
       {
@@ -163,7 +190,44 @@ export async function handleBrokerProxyRequest(
     );
   }
 
-  const incomingUrl = new URL(request.url);
+  const isHuggingface = resolution.provider === HUGGINGFACE_PROVIDER;
+  const isOpenweights = resolution.provider === OPENWEIGHTS_PROVIDER;
+  const isRunpod = resolution.provider === RUNPOD_PROVIDER;
+  const anonKey = request.headers.get("apikey");
+
+  // OpenWeights: the sandbox never sees the key or the JWT it buys. The swap is
+  // answered here, with the virtual token standing in for the JWT.
+  let openweightsBearer: string | null = null;
+  if (isOpenweights) {
+    if (exchangeBody || presented !== anonKey) {
+      let exchanged;
+      try {
+        exchanged = await openweightsJwt({
+          keyId,
+          upstreamBaseUrl: resolution.upstreamBaseUrl,
+          apiToken: resolution.secretValue,
+          anonKey,
+          fresh: Boolean(exchangeBody),
+          fetchImpl
+        });
+      } catch (error) {
+        console.warn(`[broker] openweights token exchange failed key=${keyId}: ${error instanceof Error ? error.message : String(error)}`);
+        return Response.json({ error: "Credential broker: upstream unreachable." }, { status: 502 });
+      }
+      if (!exchanged.ok) {
+        return new Response(exchanged.body, {
+          status: exchanged.status,
+          headers: { "content-type": exchanged.contentType ?? "application/json" }
+        });
+      }
+      if (exchangeBody) {
+        console.log(`[broker] POST openweights/exchange_api_token_for_jwt -> 200 (answered by the broker) run=${resolution.aiRunId ?? "-"} key=${keyId}`);
+        return Response.json(presented);
+      }
+      openweightsBearer = exchanged.jwt;
+    }
+  }
+
   // A GitHub key fronts several hosts; the first path segment picks one.
   const isGithub = isGithubKey;
   let upstreamBase = resolution.upstreamBaseUrl;
@@ -181,9 +245,27 @@ export async function handleBrokerProxyRequest(
     upstreamSegments = pathSegments.slice(1);
     githubAuth = target.auth;
   }
+  if (isRunpod) {
+    const target = runpodUpstream(resolution.upstreamBaseUrl, pathSegments[0] ?? "");
+    if (!target) {
+      return Response.json(
+        { error: "Credential broker: unknown RunPod endpoint. Use /api, /serverless or /rest." },
+        { status: 404 }
+      );
+    }
+    upstreamBase = target;
+    upstreamSegments = pathSegments.slice(1);
+  }
+  // The real key replaces a virtual one in the query string as well.
+  let upstreamSearch = incomingUrl.search;
+  if (queryKey && isVirtualBrokerToken(queryKey)) {
+    const params = new URLSearchParams(incomingUrl.search);
+    params.set("api_key", resolution.secretValue);
+    upstreamSearch = `?${params.toString()}`;
+  }
   const upstreamUrl = `${upstreamBase}/${upstreamSegments
     .map(encodeURIComponent)
-    .join("/")}${incomingUrl.search}`;
+    .join("/")}${upstreamSearch}`;
 
   const headers = new Headers();
   request.headers.forEach((value, name) => {
@@ -200,6 +282,16 @@ export async function handleBrokerProxyRequest(
         ? `Basic ${Buffer.from(`x-access-token:${resolution.secretValue}`).toString("base64")}`
         : `Bearer ${resolution.secretValue}`
     );
+  } else if (isHuggingface) {
+    headers.set("authorization", huggingfaceAuthHeader(pathSegments, resolution.secretValue));
+    // The Hub's sizes are only right for an unencoded answer, which is why
+    // huggingface_hub asks for "identity" on HEAD: pass that wish on. Any other
+    // preference is left to fetch, which only asks for what it can decode.
+    if ((request.headers.get("accept-encoding") ?? "").trim().toLowerCase() === "identity") {
+      headers.set("accept-encoding", "identity");
+    }
+  } else if (isOpenweights) {
+    headers.set("authorization", `Bearer ${openweightsBearer ?? resolution.secretValue}`);
   } else if (resolution.authMode === "x-api-key") {
     headers.set("x-api-key", resolution.secretValue);
   } else {
@@ -214,7 +306,12 @@ export async function handleBrokerProxyRequest(
     // Responses endpoints reject that even though their JSON payload is valid.
     // Exception: git packs and release uploads can be gigabytes, and GitHub
     // accepts a streamed body, so those are passed through as they arrive.
-    const streamBody = isGithub && hasBody && pathSegments[0] !== "api" && request.body !== null;
+    // The same goes for the Hub: commits carry file content and git pushes are packs.
+    const jsonBody = (request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json");
+    const streamBody =
+      hasBody &&
+      request.body !== null &&
+      ((isGithub && pathSegments[0] !== "api") || (isHuggingface && !jsonBody));
     if (streamBody) {
       upstream = await fetchImpl(upstreamUrl, {
         method: request.method,
@@ -225,7 +322,7 @@ export async function handleBrokerProxyRequest(
         cache: "no-store"
       } as RequestInit);
     } else {
-    let body = hasBody ? new Uint8Array(await request.arrayBuffer()) : undefined;
+    let body = hasBody ? exchangeBody ?? new Uint8Array(await request.arrayBuffer()) : undefined;
     if (body && budget.costsProject && resolution.provider === TINKER_PROVIDER && isTinkerCreateSession(request.method, pathSegments)) {
       body = tagTinkerSession(body, budget.costsProject);
     }
@@ -270,6 +367,47 @@ export async function handleBrokerProxyRequest(
       );
     }
     // GitHub's session cookies have no business in an agent's client.
+    responseHeaders.delete("set-cookie");
+  }
+
+  if (isHuggingface) {
+    // An unencoded answer has a true Content-Length, and huggingface_hub needs
+    // it (file size on HEAD, progress and consistency checks on GET).
+    const length = upstream.headers.get("content-length");
+    if (length && !upstream.headers.get("content-encoding")) responseHeaders.set("content-length", length);
+    const keyPrefix = `/api/broker/${keyId}`;
+    const origin = (env.AGENT_BROKER_BASE_URL?.trim() || incomingUrl.origin).replace(/\/+$/, "");
+    const location = responseHeaders.get("location");
+    if (location) responseHeaders.set("location", hubUrlViaBroker(location, resolution.upstreamBaseUrl, keyPrefix));
+    const link = responseHeaders.get("link");
+    if (link) {
+      responseHeaders.set(
+        "link",
+        link.replace(/<([^>]+)>/g, (_match, url: string) =>
+          `<${hubUrlViaBroker(url, resolution.upstreamBaseUrl, url.startsWith("/") ? keyPrefix : `${origin}${keyPrefix}`)}>`)
+      );
+    }
+    const refreshRoute = responseHeaders.get("x-xet-refresh-route");
+    if (refreshRoute) {
+      responseHeaders.set(
+        "x-xet-refresh-route",
+        hubUrlViaBroker(refreshRoute, resolution.upstreamBaseUrl, `${origin}${keyPrefix}`)
+      );
+    }
+    responseHeaders.delete("set-cookie");
+    if (upstream.ok && isHuggingfaceLfsBatch(request.method, pathSegments)) {
+      console.log(`[broker] ${request.method} huggingface/${pathSegments.join("/")} -> ${upstream.status} run=${resolution.aiRunId ?? "-"} key=${keyId}`);
+      responseHeaders.delete("content-length");
+      return new Response(
+        rewriteLfsBatchHrefs(await upstream.text(), resolution.upstreamBaseUrl, `${origin}${keyPrefix}`),
+        { status: upstream.status, statusText: upstream.statusText, headers: responseHeaders }
+      );
+    }
+  }
+  if (isOpenweights) {
+    // The JWT ran out or was refused: forget it, so the SDK's own retry (which
+    // repeats the swap, answered above) gets a fresh one.
+    if (upstream.status === 401) forgetOpenweightsJwt(keyId);
     responseHeaders.delete("set-cookie");
   }
 

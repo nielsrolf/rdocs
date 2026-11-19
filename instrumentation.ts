@@ -47,6 +47,17 @@ export async function register() {
         error: error instanceof Error ? error.message : error
       });
     });
+    // Credential broker: keys bound to a durable container end with it, also
+    // when it disappeared without this app removing it (rm/prune by hand, a
+    // host reboot, a crash between removing it and revoking).
+    try {
+      const { reconcileContainerBoundBrokerKeys, revokeBrokerKeysOfFinishedRuns } = await import("@/lib/credential-broker");
+      await revokeBrokerKeysOfFinishedRuns();
+      const { revoked } = await reconcileContainerBoundBrokerKeys();
+      if (revoked.length > 0) console.log(`[${label}] revoked broker keys of ${revoked.length} vanished container(s): ${revoked.join(", ")}`);
+    } catch (error) {
+      console.error(`[${label}] broker key reconcile failed`, { error: error instanceof Error ? error.message : error });
+    }
     // Disk scratch (/tmp + HOME) of runs whose process died before cleaning up.
     try {
       const { listRunContainerIds, containerNameForRun } = await import("@/lib/agent-runner/container-cleanup");
