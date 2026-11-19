@@ -1,4 +1,4 @@
-import { resolveBrokerRequest } from "./index";
+import { GITHUB_PROVIDER, githubUpstream, isVirtualBrokerToken, resolveBrokerRequest } from "./index";
 import { randomUUID } from "node:crypto";
 import {
   isTinkerClientConfig,
@@ -73,11 +73,40 @@ export function isPublicBrokerRequest(headers: Headers): boolean {
 export function extractPresentedToken(headers: Headers): string | null {
   const auth = headers.get("authorization");
   if (auth) {
-    const match = /^Bearer\s+(.+)$/i.exec(auth.trim());
+    // "Bearer <t>" (most clients, git's extraheader) and "token <t>" (gh, older GitHub clients).
+    const match = /^(?:Bearer|token)\s+(.+)$/i.exec(auth.trim());
     if (match) return match[1].trim();
+    // "Basic user:pass" (curl -u, git credential helpers): whichever half is the virtual token.
+    const basic = /^Basic\s+([A-Za-z0-9+/=]+)$/i.exec(auth.trim());
+    if (basic) {
+      const decoded = Buffer.from(basic[1], "base64").toString("utf8");
+      const colon = decoded.indexOf(":");
+      const parts = colon === -1 ? [decoded] : [decoded.slice(colon + 1), decoded.slice(0, colon)];
+      const virtual = parts.find((part) => isVirtualBrokerToken(part));
+      if (virtual) return virtual;
+    }
   }
   const apiKey = headers.get("x-api-key");
   return apiKey ? apiKey.trim() : null;
+}
+
+// Set by the in-sandbox gh bridge (agent-core/github-broker-bridge.ts), whose
+// client follows absolute GitHub URLs through the bridge by itself.
+const GITHUB_FORWARDER_HEADER = "x-rdocs-github-forwarder";
+
+/**
+ * Point a GitHub URL found in a response (a redirect, a pagination link) back
+ * at this broker key, so the client's next request is authenticated too
+ * instead of going to GitHub directly with a token GitHub does not know.
+ */
+function githubUrlViaBroker(url: string, upstreamBase: string, keyPrefix: string): string {
+  for (const segment of ["api", "uploads", "raw", "git"]) {
+    const target = githubUpstream(upstreamBase, segment)!.baseUrl;
+    if (url === target || url.startsWith(`${target}/`) || url.startsWith(`${target}?`)) {
+      return `${keyPrefix}/${segment}${url.slice(target.length)}`;
+    }
+  }
+  return url;
 }
 
 export async function handleBrokerProxyRequest(
@@ -108,6 +137,7 @@ export async function handleBrokerProxyRequest(
     );
   }
 
+  const isGithubKey = resolution.provider === GITHUB_PROVIDER;
   // A run of a workspace with a budget: nothing more is spent once it is used up.
   let budget: RunBudgetState = { costsProject: null, exhausted: false };
   if (resolution.aiRunId) {
@@ -117,7 +147,8 @@ export async function handleBrokerProxyRequest(
       console.warn("[broker] budget lookup failed", { aiRunId: resolution.aiRunId, error: String(error) });
     }
   }
-  if (budget.exhausted) {
+  // GitHub is not spend: a run whose budget ran out must still be able to push what it has.
+  if (budget.exhausted && !isGithubKey) {
     console.warn(`[broker] refused ${resolution.provider} for run ${resolution.aiRunId}: budget of ${budget.costsProject} is used up`);
     return Response.json(
       {
@@ -133,7 +164,24 @@ export async function handleBrokerProxyRequest(
   }
 
   const incomingUrl = new URL(request.url);
-  const upstreamUrl = `${resolution.upstreamBaseUrl}/${pathSegments
+  // A GitHub key fronts several hosts; the first path segment picks one.
+  const isGithub = isGithubKey;
+  let upstreamBase = resolution.upstreamBaseUrl;
+  let upstreamSegments = pathSegments;
+  let githubAuth: "basic" | "bearer" = "bearer";
+  if (isGithub) {
+    const target = githubUpstream(resolution.upstreamBaseUrl, pathSegments[0] ?? "");
+    if (!target) {
+      return Response.json(
+        { error: "Credential broker: unknown GitHub endpoint. Use /git, /api, /uploads or /raw." },
+        { status: 404 }
+      );
+    }
+    upstreamBase = target.baseUrl;
+    upstreamSegments = pathSegments.slice(1);
+    githubAuth = target.auth;
+  }
+  const upstreamUrl = `${upstreamBase}/${upstreamSegments
     .map(encodeURIComponent)
     .join("/")}${incomingUrl.search}`;
 
@@ -144,7 +192,15 @@ export async function handleBrokerProxyRequest(
     if (lower.startsWith("cf-") || lower.startsWith("x-forwarded-")) return;
     headers.set(name, value);
   });
-  if (resolution.authMode === "x-api-key") {
+  if (isGithub) {
+    headers.delete(GITHUB_FORWARDER_HEADER);
+    headers.set(
+      "authorization",
+      githubAuth === "basic"
+        ? `Basic ${Buffer.from(`x-access-token:${resolution.secretValue}`).toString("base64")}`
+        : `Bearer ${resolution.secretValue}`
+    );
+  } else if (resolution.authMode === "x-api-key") {
     headers.set("x-api-key", resolution.secretValue);
   } else {
     headers.set("authorization", `Bearer ${resolution.secretValue}`);
@@ -156,6 +212,19 @@ export async function handleBrokerProxyRequest(
     // Buffer once at the trust boundary. Forwarding Next's incoming stream
     // makes undici use chunked transfer encoding; some OpenAI-compatible
     // Responses endpoints reject that even though their JSON payload is valid.
+    // Exception: git packs and release uploads can be gigabytes, and GitHub
+    // accepts a streamed body, so those are passed through as they arrive.
+    const streamBody = isGithub && hasBody && pathSegments[0] !== "api" && request.body !== null;
+    if (streamBody) {
+      upstream = await fetchImpl(upstreamUrl, {
+        method: request.method,
+        headers,
+        body: request.body,
+        duplex: "half",
+        redirect: "manual",
+        cache: "no-store"
+      } as RequestInit);
+    } else {
     let body = hasBody ? new Uint8Array(await request.arrayBuffer()) : undefined;
     if (body && budget.costsProject && resolution.provider === TINKER_PROVIDER && isTinkerCreateSession(request.method, pathSegments)) {
       body = tagTinkerSession(body, budget.costsProject);
@@ -170,6 +239,7 @@ export async function handleBrokerProxyRequest(
       redirect: "manual",
       cache: "no-store",
     });
+    }
   } catch (error) {
     console.warn(
       `[broker] upstream fetch failed key=${keyId} provider=${resolution.provider}: ${
@@ -184,6 +254,24 @@ export async function handleBrokerProxyRequest(
     if (STRIP_RESPONSE_HEADERS.has(name.toLowerCase())) return;
     responseHeaders.set(name, value);
   });
+
+  if (isGithub) {
+    // Relative, so it is right whatever address the client used to reach us.
+    const keyPrefix = `/api/broker/${keyId}`;
+    const location = responseHeaders.get("location");
+    if (location) responseHeaders.set("location", githubUrlViaBroker(location, resolution.upstreamBaseUrl, keyPrefix));
+    const link = responseHeaders.get("link");
+    if (link && !request.headers.get(GITHUB_FORWARDER_HEADER)) {
+      const origin = (env.AGENT_BROKER_BASE_URL?.trim() || incomingUrl.origin).replace(/\/+$/, "");
+      responseHeaders.set(
+        "link",
+        link.replace(/<([^>]+)>/g, (_match, url: string) =>
+          `<${githubUrlViaBroker(url, resolution.upstreamBaseUrl, `${origin}${keyPrefix}`)}>`)
+      );
+    }
+    // GitHub's session cookies have no business in an agent's client.
+    responseHeaders.delete("set-cookie");
+  }
 
   console.log(
     `[broker] ${request.method} ${resolution.provider}/${pathSegments.join("/")} -> ${upstream.status} (${

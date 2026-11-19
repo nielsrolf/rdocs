@@ -7,6 +7,7 @@ import {
   type ClaudeResearchAgentInput,
   type ClaudeResearchAgentOutput
 } from "@/agent-core";
+import { ensureGithubBrokerBridge, stopGithubBrokerBridge } from "../../agent-core/github-broker-bridge";
 import type { AgentRunner, AgentRunOptions, MergeResolveJob } from "./index";
 import {
   RunCancelledError,
@@ -64,6 +65,7 @@ export class InProcessRunner implements AgentRunner {
       onSessionId: options?.onSessionId,
       onCodexAuthRefreshed: options?.onCodexAuthRefreshed,
       agentConfig: options?.agentConfig,
+      // `gh` reaches GitHub through the credential broker (no-op without one).
       agentEnv: options?.agentEnv,
       validateSubmission,
       // Real cancellation: the signal reaches the SDK loop, which tears down
@@ -73,13 +75,19 @@ export class InProcessRunner implements AgentRunner {
       // and kernel sandbox: the whole point is operating on the deployment.
       isolatedRuntime: options?.trustedHostRun === true
     };
-    const rawPromise = harness !== "codex"
-      ? runClaudeResearchAgent(input, runOptions)
-      : import("../../agent-core/codex-agent").then(({ runCodexResearchAgent }) =>
-          runCodexResearchAgent(input, runOptions)
-        );
+    const rawPromise = ensureGithubBrokerBridge(options?.agentEnv)
+      .catch(() => ({}) as Record<string, string>)
+      .then((githubBridgeEnv) => {
+        if (options?.agentEnv) runOptions.agentEnv = { ...options.agentEnv, ...githubBridgeEnv };
+        return harness !== "codex"
+          ? runClaudeResearchAgent(input, runOptions)
+          : import("../../agent-core/codex-agent").then(({ runCodexResearchAgent }) =>
+              runCodexResearchAgent(input, runOptions)
+            );
+      });
     const runPromise = rawPromise.finally(() => {
       inputChannel?.close();
+      if (options?.agentEnv) void stopGithubBrokerBridge(options.agentEnv).catch(() => null);
       if (inputChannel && options?.aiRunId) {
         deregisterRunMessageInjector(options.aiRunId);
       }

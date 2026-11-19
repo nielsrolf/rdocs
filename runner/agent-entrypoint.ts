@@ -29,8 +29,8 @@
 // untrusted widget build) is reconstructed from the serializable spec and runs
 // HERE, in the sandbox — never on the app host.
 
-import { execFileSync, spawn } from "node:child_process";
-import { chownSync, existsSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { appendFileSync, chownSync, existsSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { spawnSync } from "node:child_process";
 
@@ -52,6 +52,7 @@ import {
   type AgentSessionFrameBody
 } from "./agent-core/session-protocol";
 import { createAgentSessionServer } from "./agent-core/session-server";
+import { ensureGithubBrokerBridge } from "./agent-core/github-broker-bridge";
 
 const CONTAINER_WORKSPACE = process.env.AGENT_WORKSPACE ?? "/workspace";
 
@@ -328,23 +329,35 @@ async function executeJob(
       return;
     }
 
-    // Per-user GitHub auth: make plain `git clone/push https://github.com/…`
-    // work with the run's resolved token (gh reads GH_TOKEN by itself). The
-    // token lands in $HOME/.gitconfig — a tmpfs private to THIS container, and
-    // the same env already carries it; no new exposure. Container-only: the
-    // in-process runner must never rewrite the host's git config.
-    const githubToken = job.agentEnv?.GITHUB_TOKEN?.trim();
-    if (githubToken) {
-      try {
-        execFileSync("git", [
-          "config",
-          "--global",
-          `url.https://x-access-token:${githubToken}@github.com/.insteadOf`,
-          "https://github.com/"
-        ]);
-      } catch {
-        // execFileSync errors include the full argv, which contains the token.
-        process.stderr.write("[agent-entrypoint] git auth config failed: git config exited unsuccessfully.\n");
+    // Per-user GitHub auth. With the credential broker the run env holds only
+    // a virtual token: git is redirected to the broker by GIT_CONFIG_* in the
+    // env, and `gh` by a bridge socket started here (github-broker-bridge.ts).
+    // The user's real token is not in this container at all.
+    const githubBridgeEnv = await ensureGithubBrokerBridge(job.agentEnv, {
+      sandboxHome: process.env.HOME?.trim() || undefined
+    }).catch((error) => {
+      process.stderr.write(`[agent-entrypoint] GitHub bridge failed to start: ${error instanceof Error ? error.message : String(error)}\n`);
+      return {} as Record<string, string>;
+    });
+    if (Object.keys(githubBridgeEnv).length > 0) {
+      job.agentEnv = { ...job.agentEnv, ...githubBridgeEnv };
+    } else {
+      // No broker (AGENT_CREDENTIAL_BROKER off): the real token is in the env.
+      // Give it to git as a header, NEVER as part of a URL: git prints URLs
+      // (`git remote -v`, every push), and those prints end up in run logs.
+      const githubToken = job.agentEnv?.GITHUB_TOKEN?.trim() || job.agentEnv?.GH_TOKEN?.trim();
+      const home = process.env.HOME?.trim();
+      if (githubToken && home && !/[\r\n]/.test(githubToken)) {
+        try {
+          const header = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${githubToken}`).toString("base64")}`;
+          const gitconfig = `${home}/.gitconfig`;
+          const current = existsSync(gitconfig) ? readFileSync(gitconfig, "utf8") : "";
+          if (!current.includes(header)) {
+            appendFileSync(gitconfig, `[http "https://github.com/"]\n\textraheader = ${header}\n`, { mode: 0o600 });
+          }
+        } catch {
+          process.stderr.write("[agent-entrypoint] git auth config failed.\n");
+        }
       }
     }
 

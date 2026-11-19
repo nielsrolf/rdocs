@@ -21,9 +21,15 @@ import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
 //     TINKER_BASE_URL and sends the key as X-API-Key. Besides hiding the key,
 //     the proxy tags every Tinker session with the workspace's cost project
 //     (lib/credential-broker/tinker.ts).
-// GITHUB_TOKEN is NOT brokered yet: the real token is already pinned into the
-// worktree's git config (http.extraheader) for git itself, so an env-only swap
-// would add confusion without confidentiality. Follow-up.
+//   - GITHUB_TOKEN / GH_TOKEN (provider "github"): ONE key fronts several
+//     GitHub hosts, chosen by the first path segment after the key
+//     (githubUpstream below): /git → github.com (git over HTTPS), /api →
+//     api.github.com, /uploads, /raw. The run env gets the virtual token in
+//     both variables, GITHUB_API_URL / GITHUB_GRAPHQL_URL, and GIT_CONFIG_*
+//     variables that rewrite https://github.com/ to the /git prefix and send
+//     the virtual token to it. `gh` is bridged inside the sandbox
+//     (agent-core/github-broker-bridge.ts). The real token never enters the
+//     sandbox: not in env, not in a git config, not in a remote URL.
 //
 // What the broker does NOT do: prevent the agent from USING an API while its
 // run is live. It prevents exfiltration-for-later (tokens die with the run),
@@ -56,6 +62,42 @@ export function isVirtualBrokerToken(token: string): boolean {
 const DEFAULT_TTL_MS = 12 * 60 * 60 * 1000;
 
 export type BrokerAuthMode = "authorization-bearer" | "x-api-key";
+
+export const GITHUB_PROVIDER = "github";
+export const GITHUB_DEFAULT_UPSTREAM = "https://github.com";
+
+/**
+ * Upstream base URL and auth scheme for one part of a GitHub broker key.
+ * `base` is https://github.com in production; anything else (GitHub
+ * Enterprise, a test double) is addressed by path on that one host.
+ */
+export function githubUpstream(
+  base: string,
+  segment: string
+): { baseUrl: string; auth: "basic" | "bearer" } | null {
+  const root = base.replace(/\/+$/, "");
+  const dotCom = root === GITHUB_DEFAULT_UPSTREAM;
+  if (segment === "git") return { baseUrl: root, auth: "basic" };
+  if (segment === "api") return { baseUrl: dotCom ? "https://api.github.com" : `${root}/api/v3`, auth: "bearer" };
+  if (segment === "uploads") return { baseUrl: dotCom ? "https://uploads.github.com" : `${root}/api/uploads`, auth: "bearer" };
+  if (segment === "raw") return { baseUrl: dotCom ? "https://raw.githubusercontent.com" : `${root}/raw`, auth: "bearer" };
+  return null;
+}
+
+/**
+ * Add git configuration to an env through GIT_CONFIG_COUNT/KEY_n/VALUE_n,
+ * after whatever the env already configures that way.
+ */
+export function appendGitConfigEnv(env: DocumentEnv, entries: [string, string][]): void {
+  const existing = Number.parseInt(env.GIT_CONFIG_COUNT ?? "0", 10);
+  let index = Number.isInteger(existing) && existing > 0 ? existing : 0;
+  for (const [key, value] of entries) {
+    env[`GIT_CONFIG_KEY_${index}`] = key;
+    env[`GIT_CONFIG_VALUE_${index}`] = value;
+    index += 1;
+  }
+  env.GIT_CONFIG_COUNT = String(index);
+}
 
 export function credentialBrokerEnabled(
   env: Record<string, string | undefined> = process.env
@@ -111,6 +153,10 @@ export type BrokerRewritePlan = {
   tokenPrefix?: string;
   /** Additional env vars pointing the client at the broker, given the per-key URL. */
   extraEnv: (brokerKeyUrl: string) => Record<string, string>;
+  /** Other env vars that carried the same real credential and get the virtual token too. */
+  aliasEnvKeys?: string[];
+  /** Git configuration (via GIT_CONFIG_*) that sends git through the broker. */
+  gitConfig?: (brokerKeyUrl: string, virtualToken: string) => [string, string][];
 };
 
 /**
@@ -206,6 +252,30 @@ export function planBrokerRewrites(
     });
   }
 
+  // GitHub: the token leaves the run env entirely. Both variable names are
+  // replaced even when only one was set or they differed — a run has ONE
+  // GitHub identity, and a real token left in the other name would defeat this.
+  const githubToken = agentEnv.GITHUB_TOKEN?.trim() || agentEnv.GH_TOKEN?.trim();
+  if (githubToken && !isVirtualBrokerToken(githubToken)) {
+    plans.push({
+      envKey: "GITHUB_TOKEN",
+      aliasEnvKeys: ["GH_TOKEN"],
+      provider: GITHUB_PROVIDER,
+      upstreamBaseUrl: hostEnv.RDOCS_GITHUB_UPSTREAM?.trim() || GITHUB_DEFAULT_UPSTREAM,
+      authMode: "authorization-bearer",
+      secretValue: githubToken,
+      extraEnv: (url) => ({
+        RDOCS_GITHUB_BROKER_URL: url,
+        GITHUB_API_URL: `${url}/api`,
+        GITHUB_GRAPHQL_URL: `${url}/api/graphql`
+      }),
+      gitConfig: (url, token) => [
+        [`url.${url}/git/.insteadOf`, "https://github.com/"],
+        [`http.${url}/.extraheader`, `Authorization: Bearer ${token}`]
+      ]
+    });
+  }
+
   return plans;
 }
 
@@ -257,7 +327,10 @@ export async function brokerizeAgentEnvForRun(
       select: { id: true }
     });
     next[plan.envKey] = token;
-    Object.assign(next, plan.extraEnv(`${base}/api/broker/${row.id}`));
+    for (const alias of plan.aliasEnvKeys ?? []) next[alias] = token;
+    const keyUrl = `${base}/api/broker/${row.id}`;
+    Object.assign(next, plan.extraEnv(keyUrl));
+    if (plan.gitConfig) appendGitConfigEnv(next, plan.gitConfig(keyUrl, token));
     minted.push(plan.provider);
   }
   console.log(
