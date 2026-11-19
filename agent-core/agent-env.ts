@@ -460,7 +460,7 @@ export function brokeredComputeNote(env: Record<string, string | undefined>): st
   }
   if (standIn("OPENWEIGHTS_API_KEY")) {
     parts.push(
-      "OPENWEIGHTS_API_KEY: the openweights SDK and the ow CLI follow SUPABASE_URL. Never run `ow env import` from here: it would store this sandbox's stand-ins as the organisation's secrets"
+      "OPENWEIGHTS_API_KEY: the openweights SDK and the ow CLI follow SUPABASE_URL. Use openweights 0.15.2 or later (`pip install -U openweights`): older versions check models against huggingface.co directly and report every model as missing here. Never run `ow env import` from here: it would store this sandbox's stand-ins as the organisation's secrets"
     );
   }
   if (standIn("TINKER_API_KEY")) parts.push("TINKER_API_KEY: the tinker SDK follows TINKER_BASE_URL");
