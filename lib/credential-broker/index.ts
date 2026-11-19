@@ -436,16 +436,115 @@ export async function brokerizeAgentEnvForRun(
   return { agentEnv: next, minted };
 }
 
-/** Revoke a run's virtual keys and wipe the stored secret material. */
+// --- lifetime ---------------------------------------------------------------------
+//
+// A virtual key lives as long as the container its run executed in:
+//   - a per-run container (the default; piped or detached) ends with its run,
+//     so the key is revoked when the run is finalized or reaped, and the
+//     per-request check below already refuses it once the run is not RUNNING;
+//   - a workspace's DURABLE container serves many runs and keeps the agent's
+//     apps and background jobs running between them. The run's keys are bound
+//     to it (bindBrokerKeysToContainer) and stay valid after the run, until
+//     the container is removed or recreated (revokeBrokerKeysForContainer) or
+//     found gone by the periodic sweep (reconcileContainerBoundBrokerKeys).
+// No key outlives its container; a workspace budget still stops spend, because
+// the proxy checks it on every request whatever the run's state.
+
+/**
+ * Revoke a finished run's virtual keys and wipe the stored secret material.
+ * Keys bound to a container that outlives the run are left to that container.
+ */
 export async function revokeBrokerKeysForRun(aiRunId: string): Promise<number> {
   const result = await db.agentBrokerKey.updateMany({
-    where: { aiRunId, revokedAt: null },
+    where: { aiRunId, revokedAt: null, containerName: null },
     data: { revokedAt: new Date(), secret: null }
   });
   if (result.count > 0) {
     console.log(`[broker] revoked ${result.count} virtual key(s) for run ${aiRunId}`);
   }
   return result.count;
+}
+
+/**
+ * The run executes in a container that outlives it: its keys now live as long
+ * as that container. The time limit goes too (an app may run for weeks); the
+ * container's removal and the sweep are what end these keys.
+ */
+export async function bindBrokerKeysToContainer(aiRunId: string, containerName: string): Promise<number> {
+  const result = await db.agentBrokerKey.updateMany({
+    where: { aiRunId, revokedAt: null },
+    data: { containerName, expiresAt: null }
+  });
+  return result.count;
+}
+
+/** The container is gone (removed, recreated, restarted from scratch): so are the keys bound to it. */
+export async function revokeBrokerKeysForContainer(containerName: string): Promise<number> {
+  const result = await db.agentBrokerKey.updateMany({
+    where: { containerName, revokedAt: null },
+    data: { revokedAt: new Date(), secret: null }
+  });
+  if (result.count > 0) {
+    console.log(`[broker] revoked ${result.count} virtual key(s) of container ${containerName}`);
+  }
+  return result.count;
+}
+
+/**
+ * Wipe the keys of runs that ended without an explicit revoke (failed or
+ * cancelled runs: the per-request check already refuses them, this removes
+ * the stored secret material as well). Keys bound to a container are not
+ * touched. Part of the periodic sweep.
+ */
+export async function revokeBrokerKeysOfFinishedRuns(): Promise<number> {
+  const result = await db.agentBrokerKey.updateMany({
+    where: {
+      revokedAt: null,
+      containerName: null,
+      aiRun: { status: { notIn: ["RUNNING", "PENDING"] } }
+    },
+    data: { revokedAt: new Date(), secret: null }
+  });
+  return result.count;
+}
+
+type RuntimeExec = (cmd: string, args: string[]) => Promise<{ code: number | null; stdout: string }>;
+
+/**
+ * Safety net for every way a container can disappear without this app doing it
+ * (docker rm or prune by hand, a host reboot, a crash between removing the
+ * container and revoking): keys bound to a container that is not running are
+ * revoked. Does nothing when the container runtime cannot be asked.
+ */
+export async function reconcileContainerBoundBrokerKeys(
+  opts: { runtime?: string; exec?: RuntimeExec } = {}
+): Promise<{ revoked: string[] }> {
+  const bound = await db.agentBrokerKey.findMany({
+    where: { revokedAt: null, containerName: { not: null } },
+    select: { containerName: true },
+    distinct: ["containerName"]
+  });
+  const names = bound.map((row) => row.containerName).filter((name): name is string => Boolean(name));
+  if (names.length === 0) return { revoked: [] };
+  const runtime = opts.runtime ?? process.env.AGENT_CONTAINER_RUNTIME ?? "docker";
+  const exec: RuntimeExec =
+    opts.exec ??
+    (async (cmd, args) => {
+      const { spawn } = await import("node:child_process");
+      return new Promise((resolve) => {
+        const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "ignore"] });
+        let stdout = "";
+        child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+        child.on("error", () => resolve({ code: -1, stdout: "" }));
+        child.on("close", (code) => resolve({ code, stdout }));
+      });
+    });
+  const { code, stdout } = await exec(runtime, ["ps", "--format", "{{.Names}}"]);
+  if (code !== 0) return { revoked: [] };
+  const running = new Set(stdout.split("\n").map((line) => line.trim()).filter(Boolean));
+  const gone = names.filter((name) => !running.has(name));
+  for (const name of gone) await revokeBrokerKeysForContainer(name);
+  return { revoked: gone };
 }
 
 export type BrokerResolution =
@@ -464,7 +563,9 @@ export type BrokerResolution =
  * Per-request validation: the presented virtual token must hash-match the key,
  * the key must be live (not revoked/expired), and the owning run must still be
  * RUNNING — so every run-termination path (success, failure, reaper) cuts
- * access even without an explicit revoke.
+ * access even without an explicit revoke. The exception is a key bound to a
+ * container that outlives the run: it stays good until it is revoked with
+ * that container (see "lifetime" above).
  */
 export async function resolveBrokerRequest(
   keyId: string,
@@ -488,7 +589,7 @@ export async function resolveBrokerRequest(
   }
   if (key.aiRunId) {
     const run = await db.aiRun.findUnique({ where: { id: key.aiRunId }, select: { status: true } });
-    if (!run || run.status !== "RUNNING") {
+    if (!run || (run.status !== "RUNNING" && !key.containerName)) {
       return { ok: false, status: 401, error: "Broker key's run is no longer active." };
     }
   }

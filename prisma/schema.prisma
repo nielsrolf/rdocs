@@ -664,9 +664,15 @@ model AgentBrokerKey {
   createdAt       DateTime  @default(now())
   expiresAt       DateTime?
   revokedAt       DateTime?
+  // Set when the run executes in a container that outlives it (a workspace's
+  // durable container): the key then lives as long as that container, so what
+  // the agent left running keeps its access, and is revoked when the container
+  // is removed, recreated or found gone (lib/credential-broker/index.ts).
+  containerName   String?
   aiRun           AiRun?    @relation(fields: [aiRunId], references: [id], onDelete: Cascade)
 
   @@index([aiRunId])
+  @@index([containerName])
 }
 
 model DocumentMembership {

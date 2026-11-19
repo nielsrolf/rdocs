@@ -440,30 +440,38 @@ export function isValidEnvKey(key: string): boolean {
 
 /**
  * What an agent has to know when a compute provider's credential in its env is
- * a per-run stand-in of the credential broker (lib/credential-broker): it
- * works through the provider's own client, which is already pointed at the
- * broker, and nowhere else.
+ * a stand-in of the credential broker (lib/credential-broker): it works
+ * through the provider's own client, which is already pointed at the broker,
+ * from inside this sandbox, and nowhere else. Each known way to trip over that
+ * is named, because the failure (a 401 from the provider) does not explain itself.
  */
 export function brokeredComputeNote(env: Record<string, string | undefined>): string {
   const standIn = (name: string) => (env[name] ?? "").includes("rdocs-vk-");
   const parts: string[] = [];
   if (standIn("HF_TOKEN")) {
     parts.push(
-      "HF_TOKEN (use huggingface_hub, the hf CLI, transformers/datasets or git, which follow HF_ENDPOINT; a request sent to https://huggingface.co directly with this token is refused, so build URLs from $HF_ENDPOINT)"
+      "HF_TOKEN: use huggingface_hub, the hf CLI, transformers/datasets or git, which follow HF_ENDPOINT. A request sent to https://huggingface.co directly with this token is refused, so build URLs from $HF_ENDPOINT. Hugging Face's inference router (router.huggingface.co, InferenceClient with a provider) cannot be routed and does not work with it"
     );
   }
   if (standIn("RUNPOD_API_KEY")) {
     parts.push(
-      "RUNPOD_API_KEY (the runpod SDK follows RUNPOD_API_BASE_URL and RUNPOD_ENDPOINT_BASE_URL; with curl use $RUNPOD_API_BASE_URL/graphql, $RUNPOD_REST_BASE_URL/… or $RUNPOD_ENDPOINT_BASE_URL/… instead of the runpod.io hosts)"
+      "RUNPOD_API_KEY: the runpod SDK follows RUNPOD_API_BASE_URL and RUNPOD_ENDPOINT_BASE_URL. curl examples that name api.runpod.io, rest.runpod.io or api.runpod.ai fail: use $RUNPOD_API_BASE_URL/graphql, $RUNPOD_REST_BASE_URL/… and $RUNPOD_ENDPOINT_BASE_URL/<endpoint id>/… instead. Load-balanced endpoints on <endpoint id>.api.runpod.ai are not reachable with it"
     );
   }
   if (standIn("OPENWEIGHTS_API_KEY")) {
-    parts.push("OPENWEIGHTS_API_KEY (the openweights SDK and the ow CLI follow SUPABASE_URL)");
+    parts.push(
+      "OPENWEIGHTS_API_KEY: the openweights SDK and the ow CLI follow SUPABASE_URL. Never run `ow env import` from here: it would store this sandbox's stand-ins as the organisation's secrets"
+    );
   }
-  if (standIn("TINKER_API_KEY")) parts.push("TINKER_API_KEY (the tinker SDK follows TINKER_BASE_URL)");
-  if (parts.length === 0) return "";
+  if (standIn("TINKER_API_KEY")) parts.push("TINKER_API_KEY: the tinker SDK follows TINKER_BASE_URL");
+  const modal = Boolean(env.MODAL_TOKEN_ID?.trim() && env.MODAL_TOKEN_SECRET?.trim());
+  if (parts.length === 0) {
+    return modal ? " MODAL_TOKEN_ID / MODAL_TOKEN_SECRET are the real Modal credential: never print it, write it to a file or pass it on." : "";
+  }
   return (
-    ` These credentials are stand-ins that only work from inside this run, through the endpoints already configured: ${parts.join("; ")}.` +
-    " They mean nothing to the provider itself, so never hand one to another machine (a job's environment, a pod, a Modal secret, `ow env import`): a remote job needs a secret stored with that provider, which the user sets up."
+    " Some of these credentials are stand-ins that work only from inside this sandbox, through the endpoints already configured, for as long as the sandbox exists. " +
+    `${parts.join(". ")}. ` +
+    "A stand-in means nothing to the provider itself, so never copy one to another machine: not into a job's or pod's environment, not into a Modal secret (`modal.Secret.from_local_environ`, `from_dict`), not into a file a remote worker reads. A remote job gets its credentials from a secret stored with that provider, which the user sets up; if one is missing, say so instead of working around it." +
+    (modal ? " MODAL_TOKEN_ID / MODAL_TOKEN_SECRET are NOT stand-ins but the real Modal credential: never print it, write it to a file or pass it on." : "")
   );
 }

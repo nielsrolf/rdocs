@@ -358,13 +358,33 @@ test("routing helpers", () => {
   assert.equal(jwtExpiryMs("not-a-jwt"), null);
 });
 
-test("the agent is told what a stand-in credential cannot do", () => {
+test("the agent is told what a stand-in credential cannot do, pitfall by pitfall", () => {
   assert.equal(brokeredComputeNote({ HF_TOKEN: REAL_HF }), "");
-  const note = brokeredComputeNote({ HF_TOKEN: "hf_rdocs-vk-abc", RUNPOD_API_KEY: "rdocs-vk-abc" });
-  assert.match(note, /HF_ENDPOINT/);
-  assert.match(note, /RUNPOD_API_BASE_URL/);
-  assert.match(note, /never hand one to another machine/);
-  assert.doesNotMatch(note, /OPENWEIGHTS/);
+  const note = brokeredComputeNote({
+    HF_TOKEN: "hf_rdocs-vk-abc",
+    RUNPOD_API_KEY: "rdocs-vk-abc",
+    OPENWEIGHTS_API_KEY: "ow_rdocs-vk-abc",
+    MODAL_TOKEN_ID: "ak-real",
+    MODAL_TOKEN_SECRET: "as-real"
+  });
+  for (const pitfall of [
+    /HF_ENDPOINT/,
+    /router\.huggingface\.co/,
+    /RUNPOD_API_BASE_URL/,
+    /curl examples that name api\.runpod\.io/,
+    /<endpoint id>\.api\.runpod\.ai/,
+    /Never run `ow env import`/,
+    /never copy one to another machine/,
+    /job's or pod's environment/,
+    /modal\.Secret\.from_local_environ/,
+    /secret stored with that provider/,
+    /NOT stand-ins but the real Modal credential/
+  ]) {
+    assert.match(note, pitfall);
+  }
+  assert.doesNotMatch(note, /TINKER/);
+  // Modal alone still gets its warning.
+  assert.match(brokeredComputeNote({ MODAL_TOKEN_ID: "ak-real", MODAL_TOKEN_SECRET: "as-real" }), /real Modal credential/);
 });
 
 test("stored output masks OpenWeights and Modal credentials by shape", () => {
