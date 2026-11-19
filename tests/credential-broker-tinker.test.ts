@@ -44,7 +44,8 @@ test("Tinker is brokered only when the deployment or the workspace opts in, and 
   const tinker = (env: Record<string, string>, host: Record<string, string> = {}) =>
     planBrokerRewrites(env, "claude-sonnet-latest", { hostEnv: host }).find((plan) => plan.provider === "tinker");
 
-  assert.equal(tinker(key), undefined, "off by default");
+  assert.ok(tinker(key), "on by default (since 2026-11-19)");
+  assert.equal(tinker(key, { AGENT_BROKER_TINKER: "0" }), undefined, "the deployment can switch it off");
   assert.equal(tinker({ TINKER_API_KEY: "eyJ.a.jwt", RDOCS_BROKER_TINKER: "1" }), undefined, "a JWT credential is left alone");
 
   const byWorkspace = tinker({ ...key, RDOCS_BROKER_TINKER: "1" });

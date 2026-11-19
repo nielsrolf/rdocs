@@ -437,3 +437,33 @@ const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export function isValidEnvKey(key: string): boolean {
   return ENV_KEY_RE.test(key);
 }
+
+/**
+ * What an agent has to know when a compute provider's credential in its env is
+ * a per-run stand-in of the credential broker (lib/credential-broker): it
+ * works through the provider's own client, which is already pointed at the
+ * broker, and nowhere else.
+ */
+export function brokeredComputeNote(env: Record<string, string | undefined>): string {
+  const standIn = (name: string) => (env[name] ?? "").includes("rdocs-vk-");
+  const parts: string[] = [];
+  if (standIn("HF_TOKEN")) {
+    parts.push(
+      "HF_TOKEN (use huggingface_hub, the hf CLI, transformers/datasets or git, which follow HF_ENDPOINT; a request sent to https://huggingface.co directly with this token is refused, so build URLs from $HF_ENDPOINT)"
+    );
+  }
+  if (standIn("RUNPOD_API_KEY")) {
+    parts.push(
+      "RUNPOD_API_KEY (the runpod SDK follows RUNPOD_API_BASE_URL and RUNPOD_ENDPOINT_BASE_URL; with curl use $RUNPOD_API_BASE_URL/graphql, $RUNPOD_REST_BASE_URL/… or $RUNPOD_ENDPOINT_BASE_URL/… instead of the runpod.io hosts)"
+    );
+  }
+  if (standIn("OPENWEIGHTS_API_KEY")) {
+    parts.push("OPENWEIGHTS_API_KEY (the openweights SDK and the ow CLI follow SUPABASE_URL)");
+  }
+  if (standIn("TINKER_API_KEY")) parts.push("TINKER_API_KEY (the tinker SDK follows TINKER_BASE_URL)");
+  if (parts.length === 0) return "";
+  return (
+    ` These credentials are stand-ins that only work from inside this run, through the endpoints already configured: ${parts.join("; ")}.` +
+    " They mean nothing to the provider itself, so never hand one to another machine (a job's environment, a pod, a Modal secret, `ow env import`): a remote job needs a secret stored with that provider, which the user sets up."
+  );
+}

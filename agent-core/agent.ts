@@ -22,6 +22,7 @@ import {
 } from "./agent-config";
 import {
   agentEnvKeysForPrompt,
+  brokeredComputeNote,
   applyAgentConfigDirEnv,
   applyLongContextEnv,
   applyProviderEnv,
@@ -1800,7 +1801,7 @@ async function runClaudeResearchAgentOnce(
   const envDisclosure =
     durableAppDisclosure +
     (promptEnvKeys.length > 0
-      ? `\n\nRun environment: these environment variables are set for this run and available in Bash and any subprocess (values hidden): ${promptEnvKeys.join(", ")}. Use them to decide which services/providers you can call — e.g. use a provider's API directly only when its key is present (OPENAI_API_KEY → OpenAI directly; LITELLM_API_KEY + LITELLM_BASE_URL → an OpenAI-compatible LiteLLM proxy serving many models; GITHUB_TOKEN → authenticated gh/git). Never print or commit their values.`
+      ? `\n\nRun environment: these environment variables are set for this run and available in Bash and any subprocess (values hidden): ${promptEnvKeys.join(", ")}. Use them to decide which services/providers you can call — e.g. use a provider's API directly only when its key is present (OPENAI_API_KEY → OpenAI directly; LITELLM_API_KEY + LITELLM_BASE_URL → an OpenAI-compatible LiteLLM proxy serving many models; GITHUB_TOKEN → authenticated gh/git). Never print or commit their values.${brokeredComputeNote(agentProcessEnv)}`
       : `\n\nRun environment: no API keys or custom environment variables are configured for this run. Do not assume provider keys (e.g. OPENAI_API_KEY) exist; scripts that need one will fail until the user adds it via the document's Env menu.`);
 
   // A delivered message ends the ALARM park: the wake-up (or a user follow-up)
